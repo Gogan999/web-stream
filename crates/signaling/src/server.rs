@@ -8,7 +8,6 @@ use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
-use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tower_http::services::ServeDir;
@@ -18,7 +17,7 @@ use crate::config::SignalingConfig;
 use crate::pairing::{CODE_TTL, ConfirmError, Pairing};
 use crate::store::DeviceStore;
 use crate::{Error, tls};
-use ws_proto::{ByeReason, ClientSignal, HostSignal};
+use ws_proto::{ByeReason, ClientSignal, HostSignal, PairConfirm, PairStart};
 
 const COOKIE: &str = "ws_device";
 const COOKIE_MAX_AGE_SECS: u64 = 365 * 24 * 3600;
@@ -287,11 +286,6 @@ async fn session_status(State(shared): State<Arc<Shared>>, headers: HeaderMap) -
     }
 }
 
-#[derive(Deserialize)]
-struct PairStart {
-    device_name: String,
-}
-
 async fn pair_start(
     State(shared): State<Arc<Shared>>,
     headers: HeaderMap,
@@ -331,12 +325,6 @@ async fn pair_start(
             )
         }
     }
-}
-
-#[derive(Deserialize)]
-struct PairConfirm {
-    pairing_id: String,
-    code: String,
 }
 
 async fn pair_confirm(

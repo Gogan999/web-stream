@@ -38,7 +38,7 @@ export class InputCapture {
     this.mode = 'relative'; // 'relative' (pointer lock) or 'absolute'
     this.heldKeys = new Set();
     this.pads = new Array(MAX_PADS).fill(null); // last sent state per slot
-    this.motion = { dx: 0, dy: 0, abs: null }; // not yet sent because input-rt was backed up
+    this.motion = { dx: 0, dy: 0, abs: null }; // not yet sent because input-motion was backed up
     this.padSentAt = new Array(MAX_PADS).fill(0);
     this.abort = new AbortController();
     this.rafId = 0;

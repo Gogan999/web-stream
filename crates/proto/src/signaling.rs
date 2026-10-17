@@ -1,61 +1,46 @@
 use serde::{Deserialize, Serialize};
 
-/// Which side of a session a signaling peer is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum PeerRole {
-    Host,
-    Client,
+/// Messages on the signaling WebSocket (`/ws`), host -> browser. The host
+/// is always the offerer; see `docs/signaling.md`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum HostSignal {
+    Welcome { ice_servers: Vec<IceServer> },
+    Offer { sdp: String },
+    Error { code: String, message: String },
+    Bye { reason: ByeReason },
 }
 
-/// JSON messages exchanged over the signaling WebSocket. The server only
-/// routes these between the host and client of a session; it never sees
-/// media.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum SignalMessage {
-    /// First message from each peer. `token` authenticates the peer for
-    /// `session`; the auth scheme is owned by the signaling thread.
-    Join {
-        session: String,
-        role: PeerRole,
-        token: String,
-    },
-    /// Server -> peer: the other side has joined.
-    PeerJoined {
-        role: PeerRole,
-    },
-    PeerLeft {
-        role: PeerRole,
-    },
-    Offer {
-        sdp: String,
-    },
+/// Messages on the signaling WebSocket, browser -> host.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ClientSignal {
     Answer {
         sdp: String,
     },
-    IceCandidate {
+    Candidate {
         candidate: String,
+        #[serde(rename = "sdpMid", default)]
         sdp_mid: Option<String>,
-        /// Spelled `sdpMLineIndex` to match `RTCIceCandidateInit`.
-        #[serde(rename = "sdpMLineIndex")]
+        #[serde(rename = "sdpMLineIndex", default)]
         sdp_mline_index: Option<u16>,
     },
-    /// Server -> peer: short-lived TURN credentials.
-    IceServers {
-        servers: Vec<IceServer>,
-    },
-    Error {
-        message: String,
-    },
+    Restart,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+/// Why the host closed the signaling session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ByeReason {
+    /// Another connection from a paired browser took over.
+    Replaced,
+    HostShutdown,
+    /// The device was unpaired.
+    Revoked,
+}
+
+/// One entry of `RTCConfiguration.iceServers`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IceServer {
     pub urls: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -69,17 +54,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn signal_json_matches_browser_shape() {
-        let msg = SignalMessage::IceCandidate {
-            candidate: "candidate:1".into(),
-            sdp_mid: Some("0".into()),
-            sdp_mline_index: Some(0),
-        };
-        let json = serde_json::to_string(&msg).unwrap();
+    fn host_messages_use_type_tag() {
+        let json = serde_json::to_string(&HostSignal::Offer { sdp: "v=0".into() }).unwrap();
+        assert_eq!(json, r#"{"type":"offer","sdp":"v=0"}"#);
+        let json = serde_json::to_string(&HostSignal::Bye {
+            reason: ByeReason::HostShutdown,
+        })
+        .unwrap();
+        assert_eq!(json, r#"{"type":"bye","reason":"host_shutdown"}"#);
+    }
+
+    #[test]
+    fn parses_browser_candidate() {
+        let msg: ClientSignal = serde_json::from_str(
+            r#"{"type":"candidate","candidate":"candidate:1 1 udp 1 1.2.3.4 5 typ host","sdpMid":"0","sdpMLineIndex":0}"#,
+        )
+        .unwrap();
         assert_eq!(
-            json,
-            r#"{"type":"iceCandidate","candidate":"candidate:1","sdpMid":"0","sdpMLineIndex":0}"#
+            msg,
+            ClientSignal::Candidate {
+                candidate: "candidate:1 1 udp 1 1.2.3.4 5 typ host".into(),
+                sdp_mid: Some("0".into()),
+                sdp_mline_index: Some(0),
+            }
         );
-        assert_eq!(serde_json::from_str::<SignalMessage>(&json).unwrap(), msg);
+        let msg: ClientSignal = serde_json::from_str(r#"{"type":"restart"}"#).unwrap();
+        assert_eq!(msg, ClientSignal::Restart);
     }
 }

@@ -1,0 +1,115 @@
+# Signaling, pairing and transport contract
+
+The host agent embeds everything the browser talks to: one HTTPS listener
+serves the web client, the pairing API and the signaling WebSocket, and the
+host itself is the WebRTC endpoint (ICE-lite), so no separate signaling or
+TURN server is needed.
+
+## Ports (defaults, all configurable)
+
+| Port      | Proto | Use                                              |
+|-----------|-------|--------------------------------------------------|
+| 8443      | TCP   | HTTPS: web client, `/api/*`, `/ws`               |
+| 8443      | UDP   | WebRTC media and data channels (all sessions)    |
+| 8444      | TCP   | ICE-TCP fallback for networks that block UDP     |
+
+For access from the internet, forward these three ports to the host. The
+host advertises its LAN address automatically and any public address or
+hostname listed in its config.
+
+## TLS
+
+The host generates a self-signed certificate on first run and prints its
+SHA-256 fingerprint; compare it once when the browser warns. A real
+certificate (for example from a DDNS name) can be configured instead.
+
+## Pairing and auth (HTTP, same origin)
+
+All `POST` bodies are JSON and must send `Content-Type: application/json`.
+The host rejects any request whose `Origin` header is not the host's own
+origin. The device credential is an `HttpOnly; Secure; SameSite=Strict`
+cookie named `ws_device`, so page script never sees it.
+
+| Request | Body | Responses |
+|---------|------|-----------|
+| `GET /api/session` | | `200 {"paired":true,"device":"<name>"}` or `401 {"paired":false}` |
+| `POST /api/pair/start` | `{"device_name":"Chrome on laptop"}` | `200 {"pairing_id":"…","expires_in":120}`; host shows a 6-digit code. `429 {"error":"rate_limited"}` |
+| `POST /api/pair/confirm` | `{"pairing_id":"…","code":"123456"}` | `200 {"paired":true}` + cookie. `403 {"error":"bad_code","attempts_left":2}`. `410 {"error":"expired"}`. `429` |
+| `POST /api/unpair` | `{}` | `200`, revokes this device and clears the cookie |
+
+A pairing code is valid for 120 seconds and 3 attempts; failed attempts are
+rate-limited globally. A paired device that is unused for 30 days is revoked.
+
+## Signaling WebSocket: `wss://<host>:8443/ws`
+
+Requires the `ws_device` cookie (sent automatically) and a same-origin
+`Origin`. Unauthenticated upgrades get HTTP 401. Only one session is live: a
+new connection replaces the old one, which receives `bye` with reason
+`replaced`.
+
+Every frame is a JSON text message with a `type` field. The Rust types are
+`HostSignal` and `ClientSignal` in `crates/proto/src/signaling.rs`, which is
+the source of truth if this page and the code ever disagree.
+
+Host to browser:
+
+```jsonc
+{"type":"welcome","ice_servers":[]}          // RTCConfiguration.iceServers; usually empty
+{"type":"offer","sdp":"v=0…"}                 // sent right after welcome, and after a restart
+{"type":"error","code":"bad_answer","message":"…"}
+{"type":"bye","reason":"replaced"}            // or "host_shutdown", "revoked"
+```
+
+Browser to host:
+
+```jsonc
+{"type":"answer","sdp":"v=0…"}
+{"type":"candidate","candidate":"candidate:…","sdpMid":"0","sdpMLineIndex":0}
+{"type":"restart"}                            // ask for a fresh offer (for example after ICE failure)
+```
+
+The host puts all of its candidates in the offer, so it never trickles.
+Browser candidates are optional (the host learns the browser's address from
+its connectivity checks) but harmless to send.
+
+## What the offer contains
+
+The host is always the offerer.
+
+- **Video** (`sendonly` from the host): H.264 (packetization-mode 1), with
+  NACK, PLI and transport-cc feedback, plus the `playout-delay` header
+  extension set to 0/0 so Chromium renders each frame as soon as it decodes.
+  The browser should also set `receiver.jitterBufferTarget = 0`.
+- **Audio** (`sendrecv`): Opus 48 kHz, game audio from the host. For the
+  microphone, before `createAnswer` find this transceiver and call
+  `transceiver.sender.replaceTrack(micTrack)` and set
+  `transceiver.direction = "sendrecv"`; otherwise leave it `recvonly`.
+- **Data channels**, opened by the host (handle them in `ondatachannel` by
+  label):
+
+| Label          | Ordered | Reliability          | Use                                   |
+|----------------|---------|----------------------|---------------------------------------|
+| `control`      | yes     | reliable             | display list/switch, stats, settings  |
+| `input`        | yes     | reliable             | key and button presses                |
+| `input-motion` | no      | `maxRetransmits: 0`  | mouse motion, gamepad axes            |
+| `file`         | yes     | reliable             | host to client file transfer          |
+
+Message formats on these channels belong to the components that use them.
+
+## Frame dropping
+
+Video is never queued behind old data. The host answers a retransmission
+request (NACK) only for packets sent within the last 50 ms, so on a slow path
+a lost packet is not resent late; the browser asks for a refresh (PLI) and the
+encoder sends an intra refresh instead. If the encoder hands the transport a
+new frame before the previous one went out, the older one is discarded and a
+refresh is requested, since later frames would reference it.
+
+## TURN
+
+The host is itself the media endpoint, so a TURN relay built into the host
+would add nothing: any browser that can reach the relay can reach the host's
+UDP port directly. Networks that block UDP are covered by ICE-TCP on port
+8444 instead. A separate TURN server (for example coturn on a VPS, with
+`use-auth-secret`) can still be configured; the host then hands the browser
+short-lived credentials for it in `welcome`.

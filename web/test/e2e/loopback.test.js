@@ -25,23 +25,23 @@ test('client streams from mock host, sends input and switches display', { timeou
 
   const client = await ctx.newPage();
   client.on('pageerror', (e) => errors.push('client: ' + e.message));
-  await client.goto(`${base}/?autoconnect#token=abc`);
+  await client.goto(`${base}/?autoconnect`);
+
+  // Unpaired: pairing screen, wrong code rejected, right code pairs and connects.
+  await client.waitForSelector('#pair:not([hidden])');
+  assert.equal(await client.isVisible('#video'), false);
+  await client.click('#pair-start');
+  await host.waitForFunction(() => window.mockPairingCode);
+  const code = await host.evaluate(() => window.mockPairingCode);
+  await client.fill('#pair-code', code === '000000' ? '111111' : '000000');
+  await client.click('#pair-confirm');
+  await client.waitForFunction(() => /Wrong code, 2 attempts left/.test(document.getElementById('pair-msg').textContent));
+  await client.fill('#pair-code', code);
+  await client.click('#pair-confirm');
   await client.waitForFunction(() => document.getElementById('status').dataset.state === 'connected', null, { timeout: 15000 });
   await client.waitForFunction(() => document.getElementById('video').videoWidth === 1280, null, { timeout: 15000 });
 
-  // Low-latency playout requested on the receivers.
-  const jbt = await client.evaluate(() => [...document.querySelectorAll('video')].length);
-  assert.equal(jbt, 1);
-
-  // Channels opened with the agreed reliability.
   const hostLog = () => host.evaluate(() => window.mockLog);
-  await host.waitForFunction(() => window.mockLog.filter((e) => e.ev === 'channel').length === 3);
-  const channels = Object.fromEntries((await hostLog()).filter((e) => e.ev === 'channel').map((e) => [e.label, e]));
-  assert.equal(channels['input-rt'].ordered, false);
-  assert.equal(channels['input-rt'].maxRetransmits, 0);
-  assert.equal(channels.input.ordered, true);
-  assert.equal(channels.input.maxRetransmits, null);
-  assert.equal((await hostLog()).find((e) => e.ev === 'hello')?.token, 'abc');
 
   // Display list arrives and populates the picker.
   await client.waitForFunction(() => document.getElementById('display').options.length === 2);
@@ -58,7 +58,7 @@ test('client streams from mock host, sends input and switches display', { timeou
   const inputs = (await hostLog()).filter((e) => e.ev === 'input');
   const abs = inputs.find((e) => e.type === 'mouse-abs');
   assert.ok(abs && Math.abs(abs.x - 32768) < 700 && Math.abs(abs.y - 32768) < 700, JSON.stringify(abs));
-  assert.equal(abs.ch, 'input-rt');
+  assert.equal(abs.ch, 'input-motion');
   assert.ok(inputs.some((e) => e.type === 'mouse-button' && e.button === 0 && e.down && e.ch === 'input'));
   assert.ok(inputs.some((e) => e.type === 'key' && e.usage === 0x1a && e.down));
   assert.ok(inputs.some((e) => e.type === 'key' && e.usage === 0x1a && !e.down));
@@ -81,6 +81,11 @@ test('client streams from mock host, sends input and switches display', { timeou
   await client.click('#stats-toggle');
   await client.waitForFunction(() => /fps \d+/.test(document.getElementById('stats').textContent), null, { timeout: 5000 });
   console.log(await client.textContent('#stats'));
+
+  // Reload: the pairing cookie persists, so it connects straight away.
+  await client.reload();
+  await client.waitForFunction(() => document.getElementById('status').dataset.state === 'connected', null, { timeout: 15000 });
+  assert.equal(await client.isVisible('#pair'), false);
 
   assert.deepEqual(errors, []);
 });

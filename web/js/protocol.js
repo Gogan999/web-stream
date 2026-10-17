@@ -1,4 +1,4 @@
-// Binary input messages sent on the "input" and "input-rt" data channels.
+// Binary input messages sent on the "input" and "input-motion" data channels.
 // Little-endian, first byte is the message type. See docs/protocol.md.
 
 export const MSG = Object.freeze({

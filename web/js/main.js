@@ -2,19 +2,18 @@ import { Session } from './session.js';
 import { defaultSignalUrl } from './signaling.js';
 import { InputCapture } from './input.js';
 import { snapshot, compute, format, FrameTimer } from './stats.js';
+import * as pairing from './pairing.js';
 
 const $ = (id) => document.getElementById(id);
 const ui = {
   connect: $('connect'), status: $('status'), display: $('display'), mouseMode: $('mouse-mode'),
   fullscreen: $('fullscreen'), statsToggle: $('stats-toggle'), stage: $('stage'), video: $('video'), stats: $('stats'),
+  unpair: $('unpair'), pair: $('pair'), deviceName: $('device-name'), pairStart: $('pair-start'),
+  pairCode: $('pair-code'), pairConfirm: $('pair-confirm'), pairMsg: $('pair-msg'),
 };
 
-// Optional overrides: ?signal=ws://host:port/signal for development, #token=... for auth
-// (fragment so it never reaches server logs).
 const params = new URLSearchParams(location.search);
-const hash = new URLSearchParams(location.hash.slice(1));
-const signalUrl = params.get('signal') || defaultSignalUrl();
-const token = hash.get('token') || undefined;
+const signalUrl = defaultSignalUrl();
 
 let session = null;
 let input = null;
@@ -29,13 +28,15 @@ function setStatus(text, state) {
 
 async function connect() {
   disconnect();
-  session = new Session({ signalUrl, token, video: ui.video });
+  session = new Session({ signalUrl, video: ui.video });
   session.addEventListener('status', (e) => setStatus(e.detail.text, e.detail.state));
   session.addEventListener('control', (e) => onControl(e.detail));
   session.addEventListener('closed', () => {
     ui.connect.textContent = 'Connect';
     ui.display.disabled = true;
   });
+  // The host sends "bye" with reason "revoked" when this browser is unpaired.
+  session.addEventListener('status', (e) => { if (/unpaired/.test(e.detail.text)) checkPairing(); });
   input = new InputCapture({ session, video: ui.video, stage: ui.stage, onHotkey });
   input.setMode(ui.mouseMode.value);
   input.start();
@@ -45,6 +46,8 @@ async function connect() {
     await session.start();
   } catch (err) {
     session.fail(err.message);
+    // A refused upgrade usually means the pairing was revoked; show the pairing screen if so.
+    checkPairing();
   }
 }
 
@@ -154,4 +157,67 @@ ui.statsToggle.addEventListener('click', toggleStats);
 // Toolbar controls keep focus otherwise, and Space/Enter would re-trigger them.
 for (const el of [ui.connect, ui.fullscreen, ui.statsToggle]) el.addEventListener('mouseup', () => el.blur());
 
-if (params.has('autoconnect')) connect();
+// Pairing: the host sets an HttpOnly cookie once the code shown on the host is confirmed.
+let pairingId = null;
+
+function showPairing(paired) {
+  document.body.classList.toggle('unpaired', !paired);
+  ui.pair.hidden = paired;
+  ui.unpair.hidden = !paired;
+  if (!paired) {
+    disconnect();
+    setStatus('Not paired', 'idle');
+    if (!ui.deviceName.value) ui.deviceName.value = pairing.defaultDeviceName();
+  }
+}
+
+async function checkPairing() {
+  try {
+    const s = await pairing.getSession();
+    showPairing(s.paired);
+    return s.paired;
+  } catch {
+    setStatus('Host unreachable', 'failed');
+    return false;
+  }
+}
+
+ui.pairStart.addEventListener('click', async () => {
+  ui.pairMsg.textContent = '';
+  try {
+    const r = await pairing.startPairing(ui.deviceName.value.trim() || pairing.defaultDeviceName());
+    pairingId = r.pairingId;
+    ui.pairCode.disabled = false;
+    ui.pairConfirm.disabled = false;
+    ui.pairCode.value = '';
+    ui.pairCode.focus();
+    ui.pairMsg.textContent = `Enter the code shown on the host (valid ${r.expiresIn ?? 120} s).`;
+  } catch (err) {
+    ui.pairMsg.textContent = err.message;
+  }
+});
+
+ui.pair.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  if (!pairingId) return;
+  try {
+    await pairing.confirmPairing(pairingId, ui.pairCode.value.trim());
+    pairingId = null;
+    ui.pairCode.disabled = true;
+    ui.pairConfirm.disabled = true;
+    ui.pairMsg.textContent = '';
+    showPairing(true);
+    connect();
+  } catch (err) {
+    ui.pairMsg.textContent = err.message;
+  }
+});
+
+ui.unpair.addEventListener('click', async () => {
+  if (!confirm('Unpair this browser? You will need a new code from the host to connect again.')) return;
+  disconnect();
+  await pairing.unpair().catch(() => {});
+  showPairing(false);
+});
+
+checkPairing().then((paired) => { if (paired && params.has('autoconnect')) connect(); });

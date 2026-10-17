@@ -17,3 +17,9 @@ test('wheel converts to WHEEL_DELTA with Windows sign', () => {
   assert.deepEqual(wheelToDelta({ deltaMode: 0, deltaX: 0, deltaY: 100 }), { dx: 0, dy: -120 });
   assert.deepEqual(wheelToDelta({ deltaMode: 1, deltaX: 3, deltaY: -3 }), { dx: 120, dy: 120 });
 });
+
+import { defaultDeviceName } from '../../js/pairing.js';
+test('device name from user agent', () => {
+  assert.equal(defaultDeviceName('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0 Safari/537.36'), 'Chrome on Windows');
+  assert.equal(defaultDeviceName('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/141.0 Safari/537.36 Edg/141.0'), 'Edge on macOS');
+});

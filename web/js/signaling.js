@@ -1,22 +1,23 @@
-// WebSocket signaling client. JSON text frames; see docs/protocol.md.
+// WebSocket signaling client. JSON text frames; see docs/signaling.md.
+// Auth is the HttpOnly pairing cookie, which the browser sends on the upgrade by itself.
 
 export class Signaling extends EventTarget {
-  constructor(url, token) {
+  constructor(url) {
     super();
     this.url = url;
-    this.token = token;
     this.ws = null;
+  }
+
+  get isOpen() {
+    return this.ws?.readyState === WebSocket.OPEN;
   }
 
   open() {
     return new Promise((resolve, reject) => {
       const ws = new WebSocket(this.url);
       this.ws = ws;
-      ws.onopen = () => {
-        if (this.token) this.send({ type: 'hello', token: this.token });
-        resolve();
-      };
-      ws.onerror = () => reject(new Error('signaling connection failed'));
+      ws.onopen = () => resolve();
+      ws.onerror = () => reject(new Error('Could not reach host (or not paired)'));
       ws.onclose = (e) => this.dispatchEvent(new CustomEvent('close', { detail: e }));
       ws.onmessage = (e) => {
         let msg;
@@ -29,7 +30,7 @@ export class Signaling extends EventTarget {
   }
 
   send(msg) {
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(msg));
+    if (this.isOpen) this.ws.send(JSON.stringify(msg));
   }
 
   close() {
@@ -38,8 +39,8 @@ export class Signaling extends EventTarget {
   }
 }
 
-// Default endpoint: same origin as the page, /signal.
+// Same origin as the page, /ws.
 export function defaultSignalUrl(loc = location) {
   const scheme = loc.protocol === 'https:' ? 'wss:' : 'ws:';
-  return `${scheme}//${loc.host}/signal`;
+  return `${scheme}//${loc.host}/ws`;
 }

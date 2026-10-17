@@ -21,8 +21,18 @@
   </label>
   <button id="fullscreen" type="button">Fullscreen</button>
   <button id="stats-toggle" type="button" aria-pressed="false">Stats</button>
+  <button id="unpair" type="button" hidden>Unpair</button>
   <span class="hint">Ctrl+Alt+Shift: 1–9 display · S stats · F fullscreen · M mouse mode · Q release mouse</span>
 </header>
+<form id="pair" hidden>
+  <h1>Pair this browser</h1>
+  <p>This browser isn't paired with the host yet. Request a code, then type the 6-digit code shown on the host.</p>
+  <label>Device name <input id="device-name" maxlength="64" required></label>
+  <button id="pair-start" type="button">Request code</button>
+  <label>Code <input id="pair-code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" disabled></label>
+  <button id="pair-confirm" type="submit" disabled>Pair</button>
+  <p id="pair-msg" role="status"></p>
+</form>
 <main id="stage" tabindex="-1">
   <video id="video" autoplay playsinline disablepictureinpicture disableremoteplayback></video>
   <pre id="stats" hidden></pre>

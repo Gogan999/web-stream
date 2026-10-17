@@ -1,14 +1,12 @@
 //! Shared interface types for web-stream.
 //!
 //! Everything that crosses a crate boundary (host pipeline stages) or the
-//! network (pairing, signaling, WebRTC data channels) is defined here so that
-//! every component agrees on one shape. Types that travel to the browser are
-//! JSON objects tagged by `type` (input events by `t`). Signaling and pairing
-//! follow `docs/signaling.md` (snake_case); data channel messages are
-//! camelCase.
+//! network (signaling, WebRTC data channels) is defined here so that every
+//! component agrees on one shape. Types that travel to the browser derive
+//! serde with `camelCase`/tagged representations so the web client can
+//! consume them as plain JSON.
 
 pub mod audio;
-pub mod channels;
 pub mod control;
 pub mod display;
 pub mod input;

@@ -22,6 +22,21 @@ pub struct VideoConfig {
     pub bitrate_kbps: u32,
 }
 
+impl VideoConfig {
+    /// Clamps a client-supplied config to values the host will run: even
+    /// sizes from 320x180 to 7680x4320, 1..=240 fps, 500..=200000 kbps.
+    pub fn clamped(&self) -> Self {
+        let even = |v: u32, lo: u32, hi: u32| v.clamp(lo, hi) & !1;
+        Self {
+            codec: self.codec,
+            width: even(self.width, 320, 7680),
+            height: even(self.height, 180, 4320),
+            fps: self.fps.clamp(1, 240),
+            bitrate_kbps: self.bitrate_kbps.clamp(500, 200_000),
+        }
+    }
+}
+
 impl Default for VideoConfig {
     fn default() -> Self {
         Self {
@@ -38,8 +53,11 @@ impl Default for VideoConfig {
 /// by the transport crate.
 ///
 /// `data` is Annex-B for H.264/H.265 and a temporal unit (OBU stream) for AV1.
-/// The transport is expected to drop frames rather than queue them when it
-/// falls behind; `keyframe` lets it resume cleanly after a drop.
+/// Nothing queues frames. If the transport's channel is full when a frame
+/// finishes encoding, the capture side drops that frame, keeps
+/// `frame_index` advancing (so the drop shows as a gap) and makes the next
+/// frame a keyframe. If the transport itself falls behind it skips to the
+/// newest frame and asks for a keyframe.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncodedFrame {
     pub display: DisplayId,
@@ -55,4 +73,32 @@ pub struct EncodedFrame {
     pub width: u32,
     pub height: u32,
     pub data: Bytes,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clamps_hostile_config() {
+        let c = VideoConfig {
+            codec: VideoCodec::H264,
+            width: 99_999,
+            height: 1,
+            fps: 0,
+            bitrate_kbps: u32::MAX,
+        }
+        .clamped();
+        assert_eq!(
+            (c.width, c.height, c.fps, c.bitrate_kbps),
+            (7680, 180, 1, 200_000)
+        );
+        let odd = VideoConfig {
+            width: 1921,
+            height: 1081,
+            ..Default::default()
+        }
+        .clamped();
+        assert_eq!((odd.width, odd.height), (1920, 1080));
+    }
 }

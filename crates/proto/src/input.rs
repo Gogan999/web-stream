@@ -13,9 +13,9 @@ pub enum MouseButton {
 
 /// Input from the browser, injected on the host by the input crate.
 ///
-/// Motion goes on the unordered [`crate::channels::INPUT_MOTION`] channel,
-/// buttons and keys on the reliable [`crate::channels::INPUT`] one (the input
-/// work owns the final wire encoding).
+/// Sent on the unordered/unreliable `input` data channel for motion and the
+/// reliable one for buttons and keys (the input thread owns that split and
+/// the final wire encoding).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum InputEvent {

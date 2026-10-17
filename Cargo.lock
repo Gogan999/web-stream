@@ -450,6 +450,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ws-signaling"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "ws-proto",
+]
+
+[[package]]
 name = "ws-transport"
 version = "0.1.0"
 dependencies = [

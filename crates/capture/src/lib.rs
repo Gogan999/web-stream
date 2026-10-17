@@ -2,8 +2,9 @@
 //!
 //! Windows path: DXGI Desktop Duplication -> GPU texture -> NVENC (then AMF,
 //! QSV). Frames leave this crate as [`ws_proto::EncodedFrame`] on a bounded
-//! channel; when the consumer falls behind the pipeline drops frames before
-//! encode instead of building latency.
+//! channel with `try_send`. Nothing queues: if the channel is full the
+//! encoded frame is dropped, `frame_index` keeps advancing so the gap is
+//! visible, and the next frame is forced to be a keyframe.
 
 use thiserror::Error;
 use tokio::sync::mpsc;
@@ -35,7 +36,8 @@ pub struct VideoPipeline {
 
 impl VideoPipeline {
     /// Starts capturing `display` and encoding with `config`. Encoded frames
-    /// are delivered with `try_send`; a full channel counts as a drop.
+    /// are delivered with `try_send`; a full channel drops the frame and
+    /// forces the next one to be a keyframe.
     pub fn start(
         display: DisplayId,
         config: VideoConfig,

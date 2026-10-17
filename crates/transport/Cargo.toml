@@ -1,0 +1,15 @@
+[package]
+name = "ws-transport"
+description = "WebRTC transport: media tracks and data channels to the browser"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+ws-proto.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

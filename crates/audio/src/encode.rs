@@ -108,6 +108,8 @@ mod tests {
     #[test]
     fn emits_one_packet_per_10ms_with_running_timestamps() {
         let mut enc = OpusFrameEncoder::new(DEFAULT_BITRATE).unwrap();
+        // Pin the clock's epoch before `start`; another test may set it first.
+        let _ = micros_mono(Instant::now());
         let start = Instant::now();
         let mut frames = vec![];
         // 25 ms arriving as 7 ms + 18 ms chunks.

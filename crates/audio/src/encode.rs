@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use opus::{Application, Bitrate, Channels, Encoder};
-use ws_proto::{AudioDirection, AudioPacket, micros_mono};
+use ws_proto::{AudioDirection, AudioPacket, MicrosMono};
 
 use crate::AudioError;
 use crate::convert::{CHANNELS, SAMPLE_RATE};
@@ -13,6 +13,15 @@ use crate::convert::{CHANNELS, SAMPLE_RATE};
 pub const FRAME_SAMPLES: usize = 480;
 pub const FRAME_DURATION: Duration = Duration::from_millis(10);
 pub const DEFAULT_BITRATE: u32 = 128_000;
+
+/// Converts an [`Instant`] to [`MicrosMono`]. The epoch is the first call in
+/// the process.
+// TODO: move to ws-proto once the capture crate needs the same clock.
+pub fn micros_mono(at: Instant) -> MicrosMono {
+    static EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    let epoch = *EPOCH.get_or_init(|| at);
+    at.saturating_duration_since(epoch).as_micros() as MicrosMono
+}
 
 pub struct OpusFrameEncoder {
     encoder: Encoder,

@@ -23,3 +23,10 @@ test('device name from user agent', () => {
   assert.equal(defaultDeviceName('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0 Safari/537.36'), 'Chrome on Windows');
   assert.equal(defaultDeviceName('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/141.0 Safari/537.36 Edg/141.0'), 'Edge on macOS');
 });
+
+import { pairingError } from '../../js/pairing.js';
+test('pairing error messages', () => {
+  assert.match(pairingError(403, { error: 'pairing_closed' }), /Open pairing on the host/);
+  assert.match(pairingError(423, { error: 'locked' }), /Reopen pairing/);
+  assert.match(pairingError(500), /Pairing failed \(500\)/);
+});

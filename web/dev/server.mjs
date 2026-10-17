@@ -23,7 +23,7 @@ const pairings = new Map(); // pairing_id -> { code, name, expires, attempts }
 let host = null;
 let client = null;
 
-const cookieToken = (req) => /(?:^|;\s*)ws_device=([^;]+)/.exec(req.headers.cookie || '')?.[1];
+const cookieToken = (req) => /(?:^|;\s*)__Host-ws_device=([^;]+)/.exec(req.headers.cookie || '')?.[1];
 const paired = (req) => devices.has(cookieToken(req));
 const json = (res, status, body, headers = {}) => {
   res.writeHead(status, { 'content-type': 'application/json', ...headers });
@@ -61,11 +61,11 @@ async function api(req, res, url) {
     pairings.delete(body.pairing_id);
     const token = crypto.randomBytes(24).toString('base64url');
     devices.set(token, p.name);
-    return json(res, 200, { paired: true }, { 'set-cookie': `ws_device=${token}; HttpOnly; SameSite=Strict; Path=/` });
+    return json(res, 200, { paired: true }, { 'set-cookie': `__Host-ws_device=${token}; HttpOnly; Secure; SameSite=Strict; Path=/` });
   }
   if (url.pathname === '/api/unpair') {
     devices.delete(cookieToken(req));
-    return json(res, 200, {}, { 'set-cookie': 'ws_device=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0' });
+    return json(res, 200, {}, { 'set-cookie': '__Host-ws_device=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0' });
   }
   return json(res, 404, { error: 'not_found' });
 }

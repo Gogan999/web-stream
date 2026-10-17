@@ -20,16 +20,22 @@ export async function getSession() {
 export async function startPairing(deviceName) {
   const { status, data } = await call('POST', '/api/pair/start', { device_name: deviceName });
   if (status === 200) return { pairingId: data.pairing_id, expiresIn: data.expires_in };
-  throw new Error(status === 429 ? 'Too many attempts, wait a minute and try again' : `Pairing failed (${status})`);
+  throw new Error(pairingError(status, data));
 }
 
 export async function confirmPairing(pairingId, code) {
   const { status, data } = await call('POST', '/api/pair/confirm', { pairing_id: pairingId, code });
   if (status === 200) return true;
-  if (status === 403) throw new Error(`Wrong code, ${data.attempts_left ?? 0} attempts left`);
-  if (status === 410) throw new Error('Code expired, request a new one');
-  if (status === 429) throw new Error('Too many attempts, wait a minute and try again');
-  throw new Error(`Pairing failed (${status})`);
+  if (status === 403 && data.error === 'bad_code') throw new Error(`Wrong code, ${data.attempts_left ?? 0} attempts left`);
+  throw new Error(pairingError(status, data));
+}
+
+export function pairingError(status, data = {}) {
+  if (status === 403 && data.error === 'pairing_closed') return 'Pairing is closed. Open pairing on the host first, then request a code.';
+  if (status === 423) return 'Too many wrong codes. Reopen pairing on the host, then request a new code.';
+  if (status === 410) return 'Code expired, request a new one';
+  if (status === 429) return 'Too many attempts, wait a minute and try again';
+  return `Pairing failed (${status})`;
 }
 
 export async function unpair() {

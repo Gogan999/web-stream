@@ -8,8 +8,18 @@ license.workspace = true
 
 [dependencies]
 ws-proto.workspace = true
-tokio.workspace = true
+bytes.workspace = true
+local-ip-address = "0.6"
+str0m = { version = "0.24", default-features = false, features = ["rust-crypto"] }
+thiserror.workspace = true
+tokio = { workspace = true, features = ["io-util"] }
 tracing.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+rav1e = { version = "0.8.1", default-features = false }
+tokio = { workspace = true, features = ["full"] }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+ws-signaling = { path = "../signaling" }

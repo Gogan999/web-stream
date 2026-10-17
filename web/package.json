@@ -1,0 +1,15 @@
+{
+  "name": "web-stream-client",
+  "private": true,
+  "type": "module",
+  "description": "Browser client for web-stream. Plain ES modules, no build step; this file only holds dev tooling.",
+  "scripts": {
+    "dev": "node dev/server.mjs",
+    "test": "node --test test/unit/*.test.js",
+    "test:e2e": "node --test test/e2e/*.test.js"
+  },
+  "devDependencies": {
+    "playwright": "1.56.1",
+    "ws": "8.18.3"
+  }
+}

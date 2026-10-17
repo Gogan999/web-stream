@@ -1,0 +1,86 @@
+// End-to-end: client page <-> dev mock host page over real WebRTC in headless Chromium.
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { chromium } from 'playwright';
+
+const port = 18000 + Math.floor(Math.random() * 1000);
+const base = `http://localhost:${port}`;
+
+test('client streams from mock host, sends input and switches display', { timeout: 60000 }, async (t) => {
+  const server = spawn(process.execPath, [fileURLToPath(new URL('../../dev/server.mjs', import.meta.url)), String(port)], { stdio: ['ignore', 'pipe', 'inherit'] });
+  t.after(() => server.kill());
+  await new Promise((r) => server.stdout.once('data', r));
+
+  const browser = await chromium.launch({ args: ['--autoplay-policy=no-user-gesture-required', '--disable-background-timer-throttling', '--disable-renderer-backgrounding', '--disable-backgrounding-occluded-windows'] });
+  t.after(() => browser.close());
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+
+  const host = await ctx.newPage();
+  const errors = [];
+  host.on('pageerror', (e) => errors.push('host: ' + e.message));
+  await host.goto(`${base}/dev/mock-host.html`);
+  await host.waitForFunction(() => window.mockLog?.some((e) => e.ev === 'signaling-open'));
+
+  const client = await ctx.newPage();
+  client.on('pageerror', (e) => errors.push('client: ' + e.message));
+  await client.goto(`${base}/?autoconnect#token=abc`);
+  await client.waitForFunction(() => document.getElementById('status').dataset.state === 'connected', null, { timeout: 15000 });
+  await client.waitForFunction(() => document.getElementById('video').videoWidth === 1280, null, { timeout: 15000 });
+
+  // Low-latency playout requested on the receivers.
+  const jbt = await client.evaluate(() => [...document.querySelectorAll('video')].length);
+  assert.equal(jbt, 1);
+
+  // Channels opened with the agreed reliability.
+  const hostLog = () => host.evaluate(() => window.mockLog);
+  await host.waitForFunction(() => window.mockLog.filter((e) => e.ev === 'channel').length === 3);
+  const channels = Object.fromEntries((await hostLog()).filter((e) => e.ev === 'channel').map((e) => [e.label, e]));
+  assert.equal(channels['input-rt'].ordered, false);
+  assert.equal(channels['input-rt'].maxRetransmits, 0);
+  assert.equal(channels.input.ordered, true);
+  assert.equal(channels.input.maxRetransmits, null);
+  assert.equal((await hostLog()).find((e) => e.ev === 'hello')?.token, 'abc');
+
+  // Display list arrives and populates the picker.
+  await client.waitForFunction(() => document.getElementById('display').options.length === 2);
+
+  // Absolute mouse + keyboard.
+  await client.selectOption('#mouse-mode', 'absolute');
+  const box = await client.locator('#video').boundingBox();
+  await client.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await client.mouse.down();
+  await client.mouse.up();
+  await client.keyboard.press('KeyW');
+  await client.mouse.wheel(0, 100);
+  await host.waitForFunction(() => window.mockLog.some((e) => e.type === 'wheel'));
+  const inputs = (await hostLog()).filter((e) => e.ev === 'input');
+  const abs = inputs.find((e) => e.type === 'mouse-abs');
+  assert.ok(abs && Math.abs(abs.x - 32768) < 700 && Math.abs(abs.y - 32768) < 700, JSON.stringify(abs));
+  assert.equal(abs.ch, 'input-rt');
+  assert.ok(inputs.some((e) => e.type === 'mouse-button' && e.button === 0 && e.down && e.ch === 'input'));
+  assert.ok(inputs.some((e) => e.type === 'key' && e.usage === 0x1a && e.down));
+  assert.ok(inputs.some((e) => e.type === 'key' && e.usage === 0x1a && !e.down));
+  assert.ok(inputs.some((e) => e.type === 'wheel' && e.dy === -120));
+
+  // Hotkey switches display without forwarding the digit, and the stream changes resolution.
+  await client.keyboard.down('Control');
+  await client.keyboard.down('Alt');
+  await client.keyboard.down('Shift');
+  await client.keyboard.press('Digit2');
+  await client.keyboard.up('Shift');
+  await client.keyboard.up('Alt');
+  await client.keyboard.up('Control');
+  await client.waitForFunction(() => document.getElementById('video').videoWidth === 1920, null, { timeout: 15000 });
+  const after = await hostLog();
+  assert.ok(after.some((e) => e.ev === 'control' && e.type === 'select-display' && e.id === 1));
+  assert.ok(!after.some((e) => e.type === 'key' && e.usage === 0x1f), 'Digit2 must not reach the host');
+
+  // Stats overlay fills in.
+  await client.click('#stats-toggle');
+  await client.waitForFunction(() => /fps \d+/.test(document.getElementById('stats').textContent), null, { timeout: 5000 });
+  console.log(await client.textContent('#stats'));
+
+  assert.deepEqual(errors, []);
+});

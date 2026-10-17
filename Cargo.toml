@@ -6,7 +6,6 @@ members = [
     "crates/transport",
     "crates/input",
     "crates/audio",
-    "crates/signaling",
     "crates/host",
 ]
 

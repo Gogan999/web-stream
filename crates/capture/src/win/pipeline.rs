@@ -17,7 +17,7 @@ use super::display::{self, Output};
 use super::duplication::{Acquired, Duplicator};
 use super::nvenc::NvEncoder;
 use super::{Gpu, init_process};
-use crate::pacing::Pacer;
+use crate::pacing::{EncodeJob, Scheduler};
 use crate::{CaptureError, Result};
 
 enum Command {
@@ -38,6 +38,8 @@ impl PipelineHandle {
         frames: mpsc::Sender<EncodedFrame>,
     ) -> Result<Self> {
         init_process();
+        // Fix the shared clock's epoch before any frame timestamps exist.
+        let _ = mono_now();
         let (cmd_tx, cmd_rx) = std_mpsc::channel();
         let (ready_tx, ready_rx) = std_mpsc::channel();
         let thread = std::thread::Builder::new()
@@ -142,13 +144,11 @@ struct Session {
     display: DisplayId,
     config: VideoConfig,
     frames: mpsc::Sender<EncodedFrame>,
-    pacer: Pacer,
+    sched: Scheduler,
     frame_index: u64,
-    force_idr: bool,
-    /// The converter's output holds a desktop image.
-    has_image: bool,
-    /// When the image waiting to be encoded was captured.
-    pending: Option<Instant>,
+    /// Recent GPU/encoder rebuilds, to give up on a persistently broken
+    /// device instead of looping.
+    recoveries: Vec<Instant>,
     stats: Stats,
 }
 
@@ -166,13 +166,11 @@ impl Session {
             dup: Some(dup),
             enc,
             display: id,
-            pacer: Pacer::new(config.fps),
+            sched: Scheduler::new(config.fps),
             config,
             frames,
             frame_index: 0,
-            force_idr: true,
-            has_image: false,
-            pending: None,
+            recoveries: Vec::new(),
             stats: Stats::default(),
         })
     }
@@ -186,47 +184,64 @@ impl Session {
                     Err(std_mpsc::TryRecvError::Disconnected) => return Ok(()),
                 }
             }
-
-            let now = Instant::now();
-            if self.has_image {
-                let due = match self.pending {
-                    Some(_) => self.pacer.ready(now),
-                    None => self.pacer.idle_repeat_due(now),
-                };
-                if due || self.force_idr {
-                    if !self.encode(now)? {
-                        return Ok(());
-                    }
-                    continue;
-                }
-            }
-
-            let Some(dup) = self.dup.as_mut() else {
-                self.reacquire(commands)?;
-                continue;
-            };
-            let wait = self.pacer.wait(now, self.pending.is_some());
-            match dup.acquire(wait.as_millis() as u32)? {
-                Acquired::Frame(texture) => {
-                    let captured = Instant::now();
-                    let result = self.enc.converter.convert(&self.enc.gpu, &texture);
-                    dup.release();
-                    result?;
-                    self.has_image = true;
-                    self.pending = Some(captured);
-                }
-                Acquired::Nothing => {}
-                Acquired::Lost => {
-                    tracing::debug!("desktop duplication lost, reopening");
-                    self.dup = None;
-                }
+            match self.step(commands) {
+                Ok(true) => {}
+                Ok(false) => return Ok(()),
+                Err(e @ CaptureError::NoEncoder(_)) => return Err(e),
+                Err(e) => self.recover(e)?,
             }
         }
     }
 
+    /// One iteration: encode if due, otherwise wait for a desktop update.
+    /// Returns false once the consumer or the handle has gone away.
+    fn step(&mut self, commands: &std_mpsc::Receiver<Command>) -> Result<bool> {
+        let now = Instant::now();
+        if let Some(job) = self.sched.poll(now) {
+            return self.encode(now, job);
+        }
+        let Some(dup) = self.dup.as_mut() else {
+            return self.reacquire(commands);
+        };
+        // Round up so a sub-millisecond wait doesn't become a busy poll.
+        let wait_ms = self.sched.wait(now).as_micros().div_ceil(1000) as u32;
+        match dup.acquire(wait_ms)? {
+            Acquired::Frame(texture) => {
+                let captured = Instant::now();
+                let result = self.enc.converter.convert(&self.enc.gpu, &texture);
+                dup.release();
+                result?;
+                self.sched.new_image(captured);
+            }
+            Acquired::Nothing => {}
+            Acquired::Lost => {
+                tracing::debug!("desktop duplication lost, reopening");
+                self.dup = None;
+            }
+        }
+        Ok(true)
+    }
+
+    /// Rebuilds the device, converter and encoder after a GPU or encoder
+    /// error (driver reset, device removed). Gives up after repeated
+    /// failures in a short window.
+    fn recover(&mut self, error: CaptureError) -> Result<()> {
+        let now = Instant::now();
+        self.recoveries
+            .retain(|t| now.duration_since(*t) < Duration::from_secs(30));
+        if self.recoveries.len() >= 3 {
+            return Err(error);
+        }
+        self.recoveries.push(now);
+        tracing::warn!("capture error, rebuilding the encoder: {error}");
+        // Let a driver reset settle before touching the GPU again.
+        std::thread::sleep(Duration::from_millis(250));
+        self.switch_to(self.display, true)
+    }
+
     fn handle(&mut self, cmd: Command) {
         match cmd {
-            Command::Keyframe => self.force_idr = true,
+            Command::Keyframe => self.sched.request_keyframe(),
             Command::Bitrate(kbps) => {
                 if let Err(e) = self.enc.encoder.set_bitrate(kbps) {
                     tracing::warn!("bitrate change to {kbps} kbps failed: {e}");
@@ -235,7 +250,11 @@ impl Session {
                 }
             }
             Command::Select(id, reply) => {
-                let result = self.switch_to(id);
+                let result = if id == self.display && self.dup.is_some() {
+                    Ok(())
+                } else {
+                    self.switch_to(id, false)
+                };
                 if let Err(e) = &result {
                     tracing::warn!(display = id.0, "display switch failed: {e}");
                 }
@@ -244,37 +263,37 @@ impl Session {
         }
     }
 
-    /// Points capture at `id`, rebuilding the encoder only if the display
-    /// is on a different adapter. On failure the current capture continues.
-    fn switch_to(&mut self, id: DisplayId) -> Result<()> {
+    /// Points capture at `id`. The encoder is rebuilt when the display is on
+    /// another adapter or `rebuild` is set; otherwise only the duplication is
+    /// replaced (the old one is released first, since DXGI may refuse a
+    /// second duplication of the same output).
+    fn switch_to(&mut self, id: DisplayId, rebuild: bool) -> Result<()> {
         let output = display::find(id)?;
-        if !same_luid(output.adapter_luid, self.enc.luid) {
+        if rebuild || !same_luid(output.adapter_luid, self.enc.luid) {
             let enc = Encode::open(&output, &self.config)?;
             let dup = Duplicator::new(&output.output, &enc.gpu)?;
             self.dup = None;
             self.enc = enc;
             self.dup = Some(dup);
         } else {
-            let dup = Duplicator::new(&output.output, &self.enc.gpu)?;
-            self.dup = Some(dup);
+            self.dup = None;
+            self.dup = Some(Duplicator::new(&output.output, &self.enc.gpu)?);
         }
         tracing::info!(display = id.0, name = %output.info.name, "capturing");
         self.display = id;
-        self.has_image = false;
-        self.pending = None;
-        self.force_idr = true;
+        self.sched.reset();
         Ok(())
     }
 
     /// Reopens duplication after it was lost, retrying while the desktop is
     /// unavailable (mode change, UAC prompt). If the display disappeared,
-    /// falls back to the primary display.
-    fn reacquire(&mut self, commands: &std_mpsc::Receiver<Command>) -> Result<()> {
+    /// falls back to the primary display. Returns false on shutdown.
+    fn reacquire(&mut self, commands: &std_mpsc::Receiver<Command>) -> Result<bool> {
         let started = Instant::now();
         let mut logged = false;
         loop {
-            match self.switch_to(self.display) {
-                Ok(()) => return Ok(()),
+            match self.switch_to(self.display, false) {
+                Ok(()) => return Ok(true),
                 Err(CaptureError::DisplayNotFound(_))
                     if started.elapsed() > Duration::from_secs(3) =>
                 {
@@ -289,7 +308,7 @@ impl Session {
                     );
                     self.display = primary.info.id;
                 }
-                Err(CaptureError::NoEncoder(e)) => return Err(CaptureError::NoEncoder(e)),
+                Err(e @ CaptureError::NoEncoder(_)) => return Err(e),
                 Err(e) => {
                     if !logged && started.elapsed() > Duration::from_secs(2) {
                         tracing::warn!("desktop unavailable, still retrying: {e}");
@@ -301,36 +320,30 @@ impl Session {
             match commands.recv_timeout(Duration::from_millis(100)) {
                 Ok(cmd) => self.handle(cmd),
                 Err(std_mpsc::RecvTimeoutError::Timeout) => {}
-                Err(std_mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
+                Err(std_mpsc::RecvTimeoutError::Disconnected) => return Ok(false),
             }
             if self.dup.is_some() {
-                return Ok(());
+                return Ok(true);
             }
         }
     }
 
     /// Encodes the converter's current image and hands it off. Returns false
     /// once the consumer has gone away.
-    fn encode(&mut self, now: Instant) -> Result<bool> {
-        // A repeat of an unchanged image represents the desktop as of now.
-        let captured = self.pending.take().unwrap_or(now);
+    fn encode(&mut self, now: Instant, job: EncodeJob) -> Result<bool> {
         let start = Instant::now();
         let bits = self
             .enc
             .encoder
-            .encode(mono_micros(captured), self.force_idr)?;
+            .encode(mono_micros(job.captured), job.idr)?;
         let done = Instant::now();
-        self.pacer.encoded(now);
-        if bits.keyframe {
-            self.force_idr = false;
-        }
 
         let frame = EncodedFrame {
             display: self.display,
             codec: self.config.codec,
             frame_index: self.frame_index,
             keyframe: bits.keyframe,
-            capture_time: mono_micros(captured),
+            capture_time: mono_micros(job.captured),
             encode_done_time: mono_now(),
             width: self.config.width,
             height: self.config.height,
@@ -340,16 +353,21 @@ impl Session {
 
         let stats = &mut self.stats;
         stats.encode_time += done - start;
-        match self.frames.try_send(frame) {
-            Ok(()) => stats.encoded += 1,
+        let delivered = match self.frames.try_send(frame) {
+            Ok(()) => {
+                stats.encoded += 1;
+                true
+            }
             Err(TrySendError::Full(_)) => {
-                // The receiver will see a gap in frame_index; give it a
-                // clean point to resume from.
+                // The receiver sees a gap in frame_index; the next paced
+                // frame is an IDR so it can resume.
                 stats.dropped += 1;
-                self.force_idr = true;
+                false
             }
             Err(TrySendError::Closed(_)) => return Ok(false),
-        }
+        };
+        self.sched.encoded(now, job, delivered);
+
         let since = *stats.since.get_or_insert(done);
         if done - since >= Duration::from_secs(5) {
             let n = (stats.encoded + stats.dropped).max(1);

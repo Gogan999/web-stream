@@ -8,8 +8,17 @@
 //! Frames leave this crate as [`ws_proto::EncodedFrame`] on a bounded
 //! channel. The pipeline never queues: it encodes the newest desktop image
 //! when a frame slot comes up, and if the channel is full the encoded frame
-//! is dropped and the next one is forced to be a keyframe so the decoder can
-//! resume.
+//! is dropped (`frame_index` still advances) and the next paced frame is a
+//! keyframe so the decoder can resume.
+//!
+//! The mouse cursor is not drawn into the video. DXGI excludes it, and the
+//! plan is to send its shape and position over the control channel so the
+//! browser draws it locally with no encode latency. That is a follow-up;
+//! until then the stream shows no pointer.
+//!
+//! [`VideoPipeline::start`] and [`VideoPipeline::select_display`] block
+//! while the GPU objects are created (tens of milliseconds). From async code
+//! call them inside `tokio::task::spawn_blocking`.
 
 #[cfg_attr(not(windows), allow(dead_code))]
 mod layout;
@@ -20,7 +29,20 @@ mod win;
 
 use thiserror::Error;
 use tokio::sync::mpsc;
-use ws_proto::{DisplayId, DisplayInfo, EncodedFrame, VideoConfig};
+use ws_proto::{DisplayId, DisplayInfo, EncodedFrame, VideoCodec, VideoConfig};
+
+/// SDP `a=fmtp` parameters describing what the encoder produces, for the
+/// transport's offer. H.264 is Constrained High (no B-frames) at level 5.2,
+/// HEVC Main at level 5.1 main tier, AV1 Main at level 5.1 main tier.
+pub fn sdp_fmtp(codec: VideoCodec) -> &'static str {
+    match codec {
+        VideoCodec::H264 => {
+            "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640c34"
+        }
+        VideoCodec::H265 => "profile-id=1;tier-flag=0;level-id=153",
+        VideoCodec::Av1 => "profile=0;level-idx=13;tier=0",
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum CaptureError {

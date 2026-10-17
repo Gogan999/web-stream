@@ -202,7 +202,17 @@ impl NvEncoder {
         let mut config = preset.presetCfg;
         config.gopLength = nv::NVENC_INFINITE_GOPLENGTH;
         config.frameIntervalP = 1;
+        config.profileGUID = match cfg.codec {
+            VideoCodec::H264 => nv::NV_ENC_H264_PROFILE_HIGH_GUID,
+            VideoCodec::H265 => nv::NV_ENC_HEVC_PROFILE_MAIN_GUID,
+            VideoCodec::Av1 => nv::NV_ENC_AV1_PROFILE_MAIN_GUID,
+        };
         apply_rate(&mut config, cfg.bitrate_kbps, cfg.fps);
+        // The preset already implies these for ultra-low latency; set them
+        // so a driver default change can't add frames of delay.
+        config.rcParams.set_enableLookahead(0);
+        config.rcParams.lookaheadDepth = 0;
+        config.rcParams.multiPass = nv::NV_ENC_MULTI_PASS::NV_ENC_MULTI_PASS_DISABLED;
         // SAFETY: the union member matches the codec GUID chosen above.
         unsafe {
             let codec = &mut config.encodeCodecConfig;
@@ -210,18 +220,23 @@ impl NvEncoder {
                 VideoCodec::H264 => {
                     let h = &mut codec.h264Config;
                     h.idrPeriod = nv::NVENC_INFINITE_GOPLENGTH;
+                    h.level = nv::NV_ENC_LEVEL::NV_ENC_LEVEL_H264_52.0;
                     h.set_repeatSPSPPS(1);
                     set_vui_bt709(&mut h.h264VUIParameters);
                 }
                 VideoCodec::H265 => {
                     let h = &mut codec.hevcConfig;
                     h.idrPeriod = nv::NVENC_INFINITE_GOPLENGTH;
+                    h.level = nv::NV_ENC_LEVEL::NV_ENC_LEVEL_HEVC_51.0;
+                    h.tier = nv::NV_ENC_LEVEL::NV_ENC_TIER_HEVC_MAIN.0;
                     h.set_repeatSPSPPS(1);
                     set_vui_bt709(&mut h.hevcVUIParameters);
                 }
                 VideoCodec::Av1 => {
                     let a = &mut codec.av1Config;
                     a.idrPeriod = nv::NVENC_INFINITE_GOPLENGTH;
+                    a.level = nv::NV_ENC_LEVEL::NV_ENC_LEVEL_AV1_51.0;
+                    a.tier = 0;
                     a.set_repeatSeqHdr(1);
                     // Low-overhead OBU stream, as the WebRTC AV1 payload expects.
                     a.set_outputAnnexBFormat(0);
@@ -365,6 +380,7 @@ impl NvEncoder {
 
     /// Changes the bitrate in place; takes effect on the next frame.
     pub(crate) fn set_bitrate(&mut self, kbps: u32) -> Result<()> {
+        let previous = self.config.rcParams;
         apply_rate(&mut self.config, kbps, self.fps);
         let mut params = nv::NV_ENC_RECONFIGURE_PARAMS {
             version: nv::NV_ENC_RECONFIGURE_PARAMS_VER,
@@ -372,7 +388,12 @@ impl NvEncoder {
             ..Default::default()
         };
         let status = unsafe { call!(self.api, nvEncReconfigureEncoder(self.encoder, &mut params)) };
-        self.check(status, "nvEncReconfigureEncoder")
+        let result = self.check(status, "nvEncReconfigureEncoder");
+        if result.is_err() {
+            // Keep our copy in sync with what the encoder is still running.
+            self.config.rcParams = previous;
+        }
+        result
     }
 
     fn check(&self, status: nv::NVENCSTATUS, what: &str) -> Result<()> {

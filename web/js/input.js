@@ -38,6 +38,7 @@ export class InputCapture {
     this.mode = 'relative'; // 'relative' (pointer lock) or 'absolute'
     this.heldKeys = new Set();
     this.pads = new Array(MAX_PADS).fill(null); // last sent state per slot
+    this.motion = { dx: 0, dy: 0, abs: null }; // not yet sent because input-rt was backed up
     this.padSentAt = new Array(MAX_PADS).fill(0);
     this.abort = new AbortController();
     this.rafId = 0;
@@ -52,7 +53,6 @@ export class InputCapture {
     return this.locked || (this.mode === 'absolute' && this.stageFocused);
   }
 
-  rt(buf) { this.session.sendInput(CHANNELS.INPUT_RT, buf); }
   rel(buf) { this.session.sendInput(CHANNELS.INPUT, buf); }
 
   start() {
@@ -87,7 +87,7 @@ export class InputCapture {
       }
     }, opt);
     this.session.addEventListener('control', (e) => this.onControl(e.detail), opt);
-    const poll = () => { this.pollGamepads(); this.rafId = requestAnimationFrame(poll); };
+    const poll = () => { this.flushMotion(); this.pollGamepads(); this.rafId = requestAnimationFrame(poll); };
     this.rafId = requestAnimationFrame(poll);
   }
 
@@ -133,11 +133,28 @@ export class InputCapture {
 
   onMouseMove(e) {
     if (this.locked) {
-      if (e.movementX || e.movementY) this.rt(P.mouseRel(e.movementX, e.movementY));
+      this.motion.dx += e.movementX;
+      this.motion.dy += e.movementY;
     } else if (this.mode === 'absolute') {
       const p = videoPoint(e.clientX, e.clientY, this.video.getBoundingClientRect(),
         this.video.videoWidth, this.video.videoHeight);
-      if (p) this.rt(P.mouseAbs(p.x, p.y));
+      if (p) this.motion.abs = p;
+    }
+    this.flushMotion();
+  }
+
+  // Sends pending motion if the channel has room. When it is backed up, relative deltas
+  // keep accumulating and absolute keeps only the latest point; the next flush (next
+  // event or next animation frame) sends the sum, so no movement is lost or delayed in a queue.
+  flushMotion() {
+    const m = this.motion;
+    if (m.abs && this.session.sendInput(CHANNELS.INPUT_RT, P.mouseAbs(m.abs.x, m.abs.y))) m.abs = null;
+    while ((m.dx || m.dy) && this.session.canSend(CHANNELS.INPUT_RT)) {
+      const dx = Math.max(-32768, Math.min(32767, m.dx));
+      const dy = Math.max(-32768, Math.min(32767, m.dy));
+      this.session.sendInput(CHANNELS.INPUT_RT, P.mouseRel(dx, dy));
+      m.dx -= dx;
+      m.dy -= dy;
     }
   }
 
@@ -167,6 +184,7 @@ export class InputCapture {
 
   releaseAll() {
     this.heldKeys.clear();
+    this.motion = { dx: 0, dy: 0, abs: null };
     this.rel(P.releaseAll());
   }
 
@@ -177,10 +195,10 @@ export class InputCapture {
       if (!pad || !pad.connected || pad.index >= MAX_PADS) continue;
       const i = pad.index;
       const s = toXInput(pad);
-      if (!sameState(s, this.pads[i]) || now - this.padSentAt[i] >= GAMEPAD_KEEPALIVE_MS) {
+      if ((!sameState(s, this.pads[i]) || now - this.padSentAt[i] >= GAMEPAD_KEEPALIVE_MS) &&
+          this.session.sendInput(CHANNELS.INPUT_RT, P.gamepad(i, s))) {
         this.pads[i] = s;
         this.padSentAt[i] = now;
-        this.rt(P.gamepad(i, s));
       }
     }
   }

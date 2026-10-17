@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 
 const port = 18000 + Math.floor(Math.random() * 1000);
-const base = `http://localhost:${port}`;
+const base = `http://127.0.0.1:${port}`;
 
 test('client streams from mock host, sends input and switches display', { timeout: 60000 }, async (t) => {
   const server = spawn(process.execPath, [fileURLToPath(new URL('../../dev/server.mjs', import.meta.url)), String(port)], { stdio: ['ignore', 'pipe', 'inherit'] });
@@ -25,6 +25,13 @@ test('client streams from mock host, sends input and switches display', { timeou
 
   const client = await ctx.newPage();
   client.on('pageerror', (e) => errors.push('client: ' + e.message));
+  // Keep a handle on the client's peer connections so the test can inspect them.
+  await client.addInitScript(() => {
+    const Orig = window.RTCPeerConnection;
+    window.__pcs = [];
+    window.RTCPeerConnection = function (...a) { const pc = new Orig(...a); window.__pcs.push(pc); return pc; };
+    window.RTCPeerConnection.prototype = Orig.prototype;
+  });
   await client.goto(`${base}/?autoconnect`);
 
   // Unpaired: pairing screen, wrong code rejected, right code pairs and connects.
@@ -43,6 +50,26 @@ test('client streams from mock host, sends input and switches display', { timeou
 
   const hostLog = () => host.evaluate(() => window.mockLog);
 
+  // Low-latency playout on every receiver; audio is sendrecv so the mic needs no renegotiation.
+  const pcInfo = await client.evaluate(() => {
+    const pc = window.__pcs.at(-1);
+    return {
+      jbt: pc.getReceivers().map((r) => r.jitterBufferTarget),
+      audioDir: pc.getTransceivers().find((t) => t.receiver.track.kind === 'audio').direction,
+    };
+  });
+  assert.deepEqual(pcInfo.jbt, [0, 0]);
+  assert.equal(pcInfo.audioDir, 'sendrecv');
+
+  // Browser-created channels with the agreed reliability.
+  await host.waitForFunction(() => window.mockLog.filter((e) => e.ev === 'channel').length === 4);
+  const channels = Object.fromEntries((await hostLog()).filter((e) => e.ev === 'channel').map((e) => [e.label, e]));
+  assert.deepEqual(Object.keys(channels).sort(), ['control', 'file', 'input', 'input-rt']);
+  assert.equal(channels['input-rt'].ordered, false);
+  assert.equal(channels['input-rt'].maxRetransmits, 0);
+  assert.equal(channels.input.ordered, true);
+  assert.equal(channels.input.maxRetransmits, null);
+
   // Display list arrives and populates the picker.
   await client.waitForFunction(() => document.getElementById('display').options.length === 2);
 
@@ -58,7 +85,7 @@ test('client streams from mock host, sends input and switches display', { timeou
   const inputs = (await hostLog()).filter((e) => e.ev === 'input');
   const abs = inputs.find((e) => e.type === 'mouse-abs');
   assert.ok(abs && Math.abs(abs.x - 32768) < 700 && Math.abs(abs.y - 32768) < 700, JSON.stringify(abs));
-  assert.equal(abs.ch, 'input-motion');
+  assert.equal(abs.ch, 'input-rt');
   assert.ok(inputs.some((e) => e.type === 'mouse-button' && e.button === 0 && e.down && e.ch === 'input'));
   assert.ok(inputs.some((e) => e.type === 'key' && e.usage === 0x1a && e.down));
   assert.ok(inputs.some((e) => e.type === 'key' && e.usage === 0x1a && !e.down));
@@ -74,7 +101,7 @@ test('client streams from mock host, sends input and switches display', { timeou
   await client.keyboard.up('Control');
   await client.waitForFunction(() => document.getElementById('video').videoWidth === 1920, null, { timeout: 15000 });
   const after = await hostLog();
-  assert.ok(after.some((e) => e.ev === 'control' && e.type === 'select-display' && e.id === 1));
+  assert.ok(after.some((e) => e.ev === 'control' && e.type === 'selectDisplay' && e.id === 1));
   assert.ok(!after.some((e) => e.type === 'key' && e.usage === 0x1f), 'Digit2 must not reach the host');
 
   // Stats overlay fills in.

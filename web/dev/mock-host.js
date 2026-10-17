@@ -5,8 +5,8 @@
 import { decode } from '../js/protocol.js';
 
 const DISPLAYS = [
-  { id: 0, name: 'Mock 720p', width: 1280, height: 720, refresh: 60, primary: true, color: '#246' },
-  { id: 1, name: 'Mock 1080p', width: 1920, height: 1080, refresh: 60, primary: false, color: '#642' },
+  { id: 0, name: 'Mock 720p', x: 0, y: 0, width: 1280, height: 720, refreshMhz: 60000, primary: true, color: '#246' },
+  { id: 1, name: 'Mock 1080p', x: 1280, y: 0, width: 1920, height: 1080, refreshMhz: 59940, primary: false, color: '#642' },
 ];
 
 const canvas = document.getElementById('screen');
@@ -53,7 +53,7 @@ osc.connect(gain).connect(dest);
 osc.start();
 const audioTrack = dest.stream.getAudioTracks()[0];
 
-const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws?role=host`);
+const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/signal?role=host`);
 let pc = null;
 const send = (m) => ws.send(JSON.stringify(m));
 ws.onopen = () => write({ ev: 'signaling-open' });
@@ -67,18 +67,12 @@ ws.onmessage = async (e) => {
       break;
     case 'dev-client-connected':
       write({ ev: 'client-connected' });
-      send({ type: 'welcome', ice_servers: [] });
-      await offer();
+      send({ type: 'iceServers', servers: [] });
       break;
-    case 'restart':
-      write({ ev: 'restart' });
-      await offer();
+    case 'offer':
+      await answer(msg.sdp);
       break;
-    case 'answer':
-      write({ ev: 'answer' });
-      await pc.setRemoteDescription({ type: 'answer', sdp: msg.sdp });
-      break;
-    case 'candidate':
+    case 'iceCandidate':
       if (pc) await pc.addIceCandidate({ candidate: msg.candidate, sdpMid: msg.sdpMid, sdpMLineIndex: msg.sdpMLineIndex }).catch(() => {});
       break;
     case 'dev-client-disconnected':
@@ -88,13 +82,25 @@ ws.onmessage = async (e) => {
   }
 };
 
-// Mirrors the real host: host offers video sendonly + audio sendrecv and opens the channels.
-async function offer() {
-  pc?.close();
-  pc = new RTCPeerConnection();
-  pc.onconnectionstatechange = () => write({ ev: 'pc', state: pc.connectionState });
-  pc.addTransceiver(videoTrack, { direction: 'sendonly' });
-  pc.addTransceiver(audioTrack, { direction: 'sendrecv' });
+async function answer(sdp) {
+  if (pc && pc.signalingState === 'stable' && pc.connectionState !== 'closed') {
+    // ICE restart: same peer connection, new offer.
+    write({ ev: 'reoffer' });
+  } else {
+    pc?.close();
+    pc = new RTCPeerConnection();
+    pc.onicecandidate = (e) => e.candidate && send({ type: 'iceCandidate', candidate: e.candidate.candidate, sdpMid: e.candidate.sdpMid, sdpMLineIndex: e.candidate.sdpMLineIndex });
+    pc.onconnectionstatechange = () => write({ ev: 'pc', state: pc.connectionState });
+    pc.ondatachannel = ({ channel }) => onChannel(channel);
+  }
+  await pc.setRemoteDescription({ type: 'offer', sdp });
+  for (const t of pc.getTransceivers()) {
+    const kind = t.receiver.track.kind;
+    write({ ev: 'transceiver', kind, offered: t.direction });
+    if (t.sender.track) continue;
+    await t.sender.replaceTrack(kind === 'video' ? videoTrack : audioTrack);
+    t.direction = kind === 'audio' ? 'sendrecv' : 'sendonly';
+  }
   // Keep the "display" resolution fixed, as the real host's encoder does, so the client sees it change on a switch.
   for (const s of pc.getSenders()) {
     if (s.track?.kind !== 'video') continue;
@@ -102,36 +108,27 @@ async function offer() {
     p.degradationPreference = 'maintain-resolution';
     await s.setParameters(p).catch(() => {});
   }
-  const channels = [
-    pc.createDataChannel('control'),
-    pc.createDataChannel('input'),
-    pc.createDataChannel('input-motion', { ordered: false, maxRetransmits: 0 }),
-    pc.createDataChannel('file'),
-  ];
-  for (const channel of channels) {
-    channel.binaryType = 'arraybuffer';
-    channel.onmessage = (m) => {
-      if (channel.label === 'control') {
-        const c = JSON.parse(m.data);
-        write({ ev: 'control', ...c });
-        if (c.type === 'select-display') {
-          setDisplay(c.id);
-          sendDisplays(channel);
-        }
-      } else {
-        write({ ev: 'input', ch: channel.label, ...decode(m.data) });
+  await pc.setLocalDescription(await pc.createAnswer());
+  send({ type: 'answer', sdp: pc.localDescription.sdp });
+}
+
+function onChannel(channel) {
+  channel.binaryType = 'arraybuffer';
+  write({ ev: 'channel', label: channel.label, ordered: channel.ordered, maxRetransmits: channel.maxRetransmits });
+  channel.onmessage = (m) => {
+    if (channel.label === 'control') {
+      const c = JSON.parse(m.data);
+      write({ ev: 'control', ...c });
+      if (c.type === 'listDisplays') sendDisplays(channel);
+      if (c.type === 'selectDisplay') {
+        setDisplay(c.id);
+        const { width, height } = active;
+        channel.send(JSON.stringify({ type: 'displayChanged', id: active.id, config: { codec: 'h264', width, height, fps: 60, bitrateKbps: 20000 } }));
       }
-    };
-  }
-  channels[0].onopen = () => sendDisplays(channels[0]);
-  await pc.setLocalDescription(await pc.createOffer());
-  // Like the real host: all candidates go in the offer, no trickle. Host candidates come
-  // within milliseconds; don't wait for slow interfaces to finish.
-  await new Promise((r) => {
-    pc.addEventListener('icegatheringstatechange', () => pc.iceGatheringState === 'complete' && r());
-    setTimeout(r, 500);
-  });
-  send({ type: 'offer', sdp: pc.localDescription.sdp });
+    } else {
+      write({ ev: 'input', ch: channel.label, ...decode(m.data) });
+    }
+  };
 }
 
 function sendDisplays(channel) {

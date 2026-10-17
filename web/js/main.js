@@ -31,6 +31,7 @@ async function connect() {
   session = new Session({ signalUrl, video: ui.video });
   session.addEventListener('status', (e) => setStatus(e.detail.text, e.detail.state));
   session.addEventListener('control', (e) => onControl(e.detail));
+  session.addEventListener('control-open', () => session.sendControl({ type: 'listDisplays' }));
   session.addEventListener('closed', () => {
     ui.connect.textContent = 'Connect';
     ui.display.disabled = true;
@@ -66,24 +67,22 @@ function onControl(msg) {
     ui.display.replaceChildren(...msg.displays.map((d, i) => {
       const o = document.createElement('option');
       o.value = String(d.id);
-      const mode = d.width && d.height ? ` ${d.width}x${d.height}${d.refresh ? '@' + Math.round(d.refresh) : ''}` : '';
+      const hz = d.refreshMhz ? '@' + Math.round(d.refreshMhz / 1000) : '';
+      const mode = d.width && d.height ? ` ${d.width}x${d.height}${hz}` : '';
       o.textContent = `${i + 1}: ${d.name || d.id}${mode}${d.primary ? ' (primary)' : ''}`;
       return o;
     }));
     if (msg.active != null) ui.display.value = String(msg.active);
     ui.display.disabled = msg.displays.length < 2;
+  } else if (msg.type === 'displayChanged' && msg.id != null) {
+    ui.display.value = String(msg.id);
   }
 }
 
 function selectDisplay(id) {
   if (!session) return;
   ui.display.value = id;
-  session.sendControl({ type: 'select-display', id: displayIdOf(id) });
-}
-
-// Keep the host's id type (number or string) when echoing it back.
-function displayIdOf(value) {
-  return /^\d+$/.test(value) ? Number(value) : value;
+  session.sendControl({ type: 'selectDisplay', id: Number(id) });
 }
 
 async function toggleFullscreen() {

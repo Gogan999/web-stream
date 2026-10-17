@@ -55,6 +55,11 @@ fn axis(v: i16) -> u8 {
     ((v as i32 + 32768) >> 8) as u8
 }
 
+/// Y axes flip: XInput is up-positive, DS4 is down-positive. Rest maps to 128.
+fn axis_inverted(v: i16) -> u8 {
+    ((32768 - v as i32).min(65535) >> 8) as u8
+}
+
 fn hat(buttons: u16) -> u16 {
     use xbutton::*;
     let up = buttons & DPAD_UP != 0;
@@ -104,10 +109,9 @@ impl From<&GamepadState> for Ds4Report {
         }
         Ds4Report {
             thumb_lx: axis(s.lx),
-            // XInput Y is up-positive, DS4 Y is down-positive.
-            thumb_ly: 255 - axis(s.ly),
+            thumb_ly: axis_inverted(s.ly),
             thumb_rx: axis(s.rx),
-            thumb_ry: 255 - axis(s.ry),
+            thumb_ry: axis_inverted(s.ry),
             buttons,
             special: if s.buttons & xbutton::GUIDE != 0 {
                 ds4button::SPECIAL_PS
@@ -129,7 +133,7 @@ mod tests {
         let r = Ds4Report::from(&GamepadState::default());
         assert_eq!(
             (r.thumb_lx, r.thumb_ly, r.thumb_rx, r.thumb_ry),
-            (128, 127, 128, 127)
+            (128, 128, 128, 128)
         );
         assert_eq!(r.buttons, 8);
         assert_eq!(r.special, 0);
@@ -145,6 +149,11 @@ mod tests {
         let r = Ds4Report::from(&s);
         assert_eq!(r.thumb_lx, 0);
         assert_eq!(r.thumb_ly, 0, "stick pushed up reads as DS4 top");
+        let down = GamepadState {
+            ly: i16::MIN,
+            ..Default::default()
+        };
+        assert_eq!(Ds4Report::from(&down).thumb_ly, 255);
     }
 
     #[test]

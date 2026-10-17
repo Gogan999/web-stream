@@ -49,6 +49,11 @@ pub enum HandleError {
 /// means the client is gone and a held stick must not keep the game moving.
 pub const GAMEPAD_STALE_AFTER: Duration = Duration::from_millis(500);
 
+/// After a disconnect, gamepad state still in flight on the unordered channel
+/// is ignored for this long so it cannot plug the pad back in. A failed
+/// plug-in waits this long before the next attempt.
+pub const GAMEPAD_HOLDOFF: Duration = Duration::from_secs(1);
+
 #[derive(Debug, Clone, Copy)]
 struct PadSlot {
     last_seen: Instant,
@@ -61,6 +66,8 @@ pub struct InputHandler<S: InputSink> {
     keys: HashSet<KeyTarget>,
     buttons: HashSet<MouseButton>,
     pads: [Option<PadSlot>; MAX_GAMEPADS as usize],
+    /// Per index: ignore gamepad state until this instant.
+    holdoff: [Option<Instant>; MAX_GAMEPADS as usize],
 }
 
 impl<S: InputSink> InputHandler<S> {
@@ -71,6 +78,7 @@ impl<S: InputSink> InputHandler<S> {
             keys: HashSet::new(),
             buttons: HashSet::new(),
             pads: [None; MAX_GAMEPADS as usize],
+            holdoff: [None; MAX_GAMEPADS as usize],
         }
     }
 
@@ -120,9 +128,16 @@ impl<S: InputSink> InputHandler<S> {
                 self.sink.key(key, down)?;
             }
             InputEvent::Gamepad { index, state } => {
-                let slot = &mut self.pads[index as usize];
+                let i = index as usize;
+                if self.holdoff[i].is_some_and(|until| now < until) {
+                    return Ok(());
+                }
+                let slot = &mut self.pads[i];
                 if slot.is_none() {
-                    self.sink.gamepad_connect(index, self.gamepad_kind)?;
+                    if let Err(e) = self.sink.gamepad_connect(index, self.gamepad_kind) {
+                        self.holdoff[i] = Some(now + GAMEPAD_HOLDOFF);
+                        return Err(e.into());
+                    }
                 }
                 let neutral = state == GamepadState::default();
                 // Keepalives repeat the same state; only changes reach the driver,
@@ -133,10 +148,17 @@ impl<S: InputSink> InputHandler<S> {
                     neutral,
                 });
                 if changed {
-                    self.sink.gamepad_update(index, &state)?;
+                    if let Err(e) = self.sink.gamepad_update(index, &state) {
+                        // Plug-in failed or the pad vanished: forget it and
+                        // try plugging in again after the hold-off.
+                        self.pads[i] = None;
+                        self.holdoff[i] = Some(now + GAMEPAD_HOLDOFF);
+                        return Err(e.into());
+                    }
                 }
             }
             InputEvent::GamepadDisconnect { index } => {
+                self.holdoff[index as usize] = Some(now + GAMEPAD_HOLDOFF);
                 if self.pads[index as usize].take().is_some() {
                     self.sink.gamepad_disconnect(index)?;
                 }
@@ -400,6 +422,82 @@ mod tests {
                 Call::Disconnect(2),
             ]
         );
+    }
+
+    #[derive(Default)]
+    struct NoVigem(u32);
+
+    impl InputSink for NoVigem {
+        fn key(&mut self, _: KeyTarget, _: bool) -> Result<(), SinkError> {
+            Ok(())
+        }
+        fn mouse_move(&mut self, _: i32, _: i32) -> Result<(), SinkError> {
+            Ok(())
+        }
+        fn mouse_move_abs(&mut self, _: u16, _: u16) -> Result<(), SinkError> {
+            Ok(())
+        }
+        fn mouse_button(&mut self, _: MouseButton, _: bool) -> Result<(), SinkError> {
+            Ok(())
+        }
+        fn mouse_wheel(&mut self, _: i32, _: i32) -> Result<(), SinkError> {
+            Ok(())
+        }
+        fn gamepad_connect(&mut self, _: u8, _: GamepadKind) -> Result<(), SinkError> {
+            self.0 += 1;
+            Err(SinkError("no driver".into()))
+        }
+        fn gamepad_update(&mut self, _: u8, _: &GamepadState) -> Result<(), SinkError> {
+            Ok(())
+        }
+        fn gamepad_disconnect(&mut self, _: u8) -> Result<(), SinkError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn late_state_after_disconnect_does_not_replug() {
+        let mut h = InputHandler::new(Recorder::default());
+        let t0 = Instant::now();
+        let state = InputEvent::Gamepad {
+            index: 0,
+            state: pad(0x1000),
+        };
+        h.apply(state.clone(), t0).unwrap();
+        h.apply(InputEvent::GamepadDisconnect { index: 0 }, t0)
+            .unwrap();
+        take(&mut h);
+        // Reordered on the unordered channel: arrives after the disconnect.
+        h.apply(state.clone(), t0 + Duration::from_millis(5))
+            .unwrap();
+        assert!(take(&mut h).is_empty());
+        // A pad that really reconnects later is plugged back in.
+        h.apply(state, t0 + GAMEPAD_HOLDOFF).unwrap();
+        assert_eq!(
+            take(&mut h),
+            [
+                Call::Connect(0, GamepadKind::Xbox360),
+                Call::Update(0, pad(0x1000))
+            ]
+        );
+    }
+
+    #[test]
+    fn failed_plug_in_is_not_retried_on_every_keepalive() {
+        let mut h = InputHandler::new(NoVigem::default());
+        let t0 = Instant::now();
+        let state = InputEvent::Gamepad {
+            index: 1,
+            state: pad(0),
+        };
+        assert!(h.apply(state.clone(), t0).is_err());
+        for ms in [100, 200, 900] {
+            h.apply(state.clone(), t0 + Duration::from_millis(ms))
+                .unwrap();
+        }
+        assert_eq!(h.sink().0, 1);
+        assert!(h.apply(state, t0 + GAMEPAD_HOLDOFF).is_err());
+        assert_eq!(h.sink().0, 2);
     }
 
     #[test]

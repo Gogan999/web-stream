@@ -157,6 +157,18 @@ mod tests {
     }
 
     #[test]
+    fn exactly_the_e0_keys_are_extended() {
+        // PrintScreen, Insert..ArrowUp, NumpadDivide, NumpadEnter, ContextMenu,
+        // right Ctrl/Alt and both Windows keys.
+        let mut extended: Vec<u16> = vec![0x46, 0x54, 0x58, 0x65, 0xe3, 0xe4, 0xe6, 0xe7];
+        extended.extend(0x49..=0x52);
+        for u in 0..=0xffu16 {
+            let is_ext = matches!(lookup(u), Some(KeyTarget::Scan { extended: true, .. }));
+            assert_eq!(is_ext, extended.contains(&u), "usage 0x{u:02x}");
+        }
+    }
+
+    #[test]
     fn power_and_unknown_usages_are_refused() {
         assert_eq!(lookup(0x66), None);
         assert_eq!(lookup(0x00), None);

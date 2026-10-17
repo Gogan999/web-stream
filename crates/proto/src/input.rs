@@ -329,6 +329,33 @@ mod tests {
     }
 
     #[test]
+    fn every_type_and_length_decodes_or_errors_without_panicking() {
+        let sizes = [
+            (0x01, 5),
+            (0x02, 5),
+            (0x03, 3),
+            (0x04, 5),
+            (0x05, 4),
+            (0x06, 14),
+            (0x07, 2),
+            (0x08, 1),
+        ];
+        for kind in 0..=255u8 {
+            for len in 1..=20usize {
+                let mut msg = vec![0u8; len];
+                msg[0] = kind;
+                let result = InputEvent::decode(&msg);
+                let expected = sizes.iter().find(|(k, _)| *k == kind).map(|(_, n)| *n);
+                match expected {
+                    Some(n) if n == len => assert!(result.is_ok(), "0x{kind:02x} len {len}"),
+                    Some(_) => assert!(matches!(result, Err(InputDecodeError::Length { .. }))),
+                    None => assert_eq!(result, Err(InputDecodeError::UnknownType(kind))),
+                }
+            }
+        }
+    }
+
+    #[test]
     fn rejects_malformed_messages() {
         use InputDecodeError::*;
         assert_eq!(InputEvent::decode(&[]), Err(Empty));

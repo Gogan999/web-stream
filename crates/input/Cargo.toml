@@ -16,6 +16,7 @@ vigem-client = { version = "0.1.4", features = ["unstable_ds4", "unstable_xtarge
 windows = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_HiDpi",
     "Win32_UI_WindowsAndMessaging",
 ] }
 

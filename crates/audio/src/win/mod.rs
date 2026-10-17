@@ -233,6 +233,9 @@ fn parse_format(raw: &[u8]) -> Result<InputFormat> {
         base.nBlockAlign as usize,
         base.nSamplesPerSec,
     );
+    if rate == 0 {
+        return Err(AudioError::UnsupportedFormat("sample rate 0".into()));
+    }
     if channels == 0 || block_align != channels * format.bytes() {
         return Err(AudioError::UnsupportedFormat(format!(
             "{channels} channels with block align {block_align}"

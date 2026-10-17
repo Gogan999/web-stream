@@ -28,6 +28,8 @@ const BUFFER_HNS: i64 = 200_000;
 /// With nothing playing, loopback delivers no packets at all. After this long
 /// without data the encoder is fed silence so packets keep flowing at 10 ms.
 const SILENCE_AFTER: Duration = Duration::from_millis(30);
+/// At most 100 ms of silence per fill.
+const MAX_SILENCE_FRAMES: usize = 10;
 const DEFAULT_DEVICE_CHECK: Duration = Duration::from_secs(1);
 
 /// Captures what the host is playing and sends it as 10 ms Opus packets.
@@ -272,7 +274,13 @@ fn capture(
                 stream
                     .capture
                     .GetBuffer(&mut data, &mut frames, &mut flags, None, None)?;
-                let bytes = std::slice::from_raw_parts(data, frames as usize * frame_bytes);
+                // A null buffer with frames > 0 is treated as silence.
+                let bytes: &[u8] = if data.is_null() {
+                    flags |= AUDCLNT_BUFFERFLAGS_SILENT.0 as u32;
+                    &[]
+                } else {
+                    std::slice::from_raw_parts(data, frames as usize * frame_bytes)
+                };
                 (frames, flags, bytes)
             };
             samples.clear();
@@ -294,14 +302,21 @@ fn capture(
 
         let now = Instant::now();
         if !got_data && now.duration_since(audio_end) >= SILENCE_AFTER {
-            // Fill the gap up to one frame behind now, in whole frames.
+            // Fill the gap up to one frame behind now, in whole frames. After a
+            // stall or sleep, send at most MAX_SILENCE and resync to now
+            // rather than replaying minutes of silence.
             let gap = now.duration_since(audio_end) - FRAME_DURATION;
             let frames = (gap.as_micros() / FRAME_DURATION.as_micros()) as usize;
-            if frames > 0 {
+            let capped = frames.min(MAX_SILENCE_FRAMES);
+            if capped > 0 {
                 samples.clear();
-                samples.resize(frames * FRAME_SAMPLES * 2, 0.0);
+                samples.resize(capped * FRAME_SAMPLES * 2, 0.0);
                 encoder.push(&samples, audio_end, &mut *send)?;
-                audio_end += FRAME_DURATION * frames as u32;
+                audio_end = if capped < frames {
+                    now
+                } else {
+                    audio_end + FRAME_DURATION * capped as u32
+                };
             }
         }
 

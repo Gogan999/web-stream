@@ -39,7 +39,18 @@ pub struct JitterStats {
     pub overflow_dropped: u64,
     pub concealed: u64,
     pub underruns: u64,
+    /// Restarts after a run of late packets (the sender jumped backwards).
+    pub resets: u64,
+    /// Packets dropped to stop the client's clock drifting ahead of ours.
+    pub drift_dropped: u64,
 }
+
+/// This many late packets in a row means the sequence jumped backwards
+/// (sender restarted), not ordinary reordering.
+const RESET_AFTER_LATE: u32 = 8;
+/// Pulls in a row with the backlog above target before one packet is dropped:
+/// about a second of 20 ms packets.
+const DRIFT_PULLS: u32 = 50;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Pull {
@@ -57,6 +68,8 @@ pub struct JitterBuffer {
     next: Option<u64>,
     highest: Option<u64>,
     playing: bool,
+    consecutive_late: u32,
+    over_target_pulls: u32,
     stats: JitterStats,
 }
 
@@ -68,6 +81,8 @@ impl JitterBuffer {
             next: None,
             highest: None,
             playing: false,
+            consecutive_late: 0,
+            over_target_pulls: 0,
             stats: Default::default(),
         }
     }
@@ -84,11 +99,17 @@ impl JitterBuffer {
 
     pub fn push(&mut self, seq: u16, payload: Vec<u8>) {
         self.stats.received += 1;
-        let ext = self.extend(seq);
+        let mut ext = self.extend(seq);
         if self.next.is_some_and(|next| ext < next) {
             self.stats.late += 1;
-            return;
+            self.consecutive_late += 1;
+            if self.consecutive_late < RESET_AFTER_LATE {
+                return;
+            }
+            self.reset();
+            ext = self.extend(seq);
         }
+        self.consecutive_late = 0;
         if self.packets.insert(ext, payload).is_some() {
             self.stats.duplicate += 1;
         }
@@ -98,6 +119,16 @@ impl JitterBuffer {
             self.stats.overflow_dropped += 1;
             self.next = self.packets.keys().next().copied();
         }
+    }
+
+    fn reset(&mut self) {
+        self.packets.clear();
+        self.next = None;
+        self.highest = None;
+        self.playing = false;
+        self.consecutive_late = 0;
+        self.over_target_pulls = 0;
+        self.stats.resets += 1;
     }
 
     pub fn pull(&mut self) -> Pull {
@@ -122,7 +153,22 @@ impl JitterBuffer {
             next
         };
         self.next = Some(next + 1);
-        match self.packets.remove(&next) {
+        let pulled = self.packets.remove(&next);
+        // The client's clock runs slightly fast or slow against the render
+        // device; a backlog that stays above target is drift, so shed a packet.
+        if self.packets.len() > self.config.target_packets {
+            self.over_target_pulls += 1;
+            if self.over_target_pulls >= DRIFT_PULLS {
+                self.over_target_pulls = 0;
+                if let Some((dropped, _)) = self.packets.pop_first() {
+                    self.stats.drift_dropped += 1;
+                    self.next = Some(dropped + 1);
+                }
+            }
+        } else {
+            self.over_target_pulls = 0;
+        }
+        match pulled {
             Some(p) => Pull::Packet(p),
             None => {
                 self.stats.concealed += 1;
@@ -144,10 +190,8 @@ pub struct MicReceiver {
 
 impl MicReceiver {
     pub fn push(&self, rtp_seq: u16, opus_payload: &[u8]) {
-        self.jitter
-            .lock()
-            .unwrap()
-            .push(rtp_seq, opus_payload.to_vec());
+        let payload = opus_payload.to_vec();
+        self.jitter.lock().unwrap().push(rtp_seq, payload);
     }
 
     pub fn stats(&self) -> JitterStats {
@@ -269,6 +313,43 @@ mod tests {
         }
         assert_eq!(j.stats().overflow_dropped, 3);
         assert_eq!(j.pull(), Pull::Packet(p(3)));
+    }
+
+    #[test]
+    fn backwards_jump_resets_after_a_run_of_late_packets() {
+        let mut j = jb();
+        for s in 1000..1003u16 {
+            j.push(s, p(0));
+        }
+        while j.pull() != Pull::Empty {}
+        // Sender restarted at 10: the first few look like reordering and are
+        // dropped, then the buffer restarts on the new numbering.
+        for s in 10..10 + RESET_AFTER_LATE as u16 + 2 {
+            j.push(s, p(s as u8));
+        }
+        assert_eq!(j.stats().resets, 1);
+        assert_eq!(j.pull(), Pull::Packet(p(10 + RESET_AFTER_LATE as u8 - 1)));
+    }
+
+    #[test]
+    fn sustained_backlog_sheds_packets() {
+        let mut j = JitterBuffer::new(JitterConfig {
+            target_packets: 2,
+            max_packets: 8,
+        });
+        let mut seq = 0u16;
+        for _ in 0..4 {
+            j.push(seq, p(0));
+            seq += 1;
+        }
+        // One in, one out, but 4 deep instead of 2.
+        for _ in 0..DRIFT_PULLS {
+            assert!(matches!(j.pull(), Pull::Packet(_)));
+            j.push(seq, p(0));
+            seq += 1;
+        }
+        assert_eq!(j.stats().drift_dropped, 1);
+        assert_eq!(j.stats().concealed, 0);
     }
 
     #[test]

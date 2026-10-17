@@ -1,11 +1,16 @@
 //! Windows injection: `SendInput` for keyboard and mouse, ViGEmBus for
 //! virtual Xbox 360 and DualShock 4 controllers.
 
-use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::{Arc, Once};
+use std::time::{Duration, Instant};
 
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use vigem_client::{
     Client, DS4Report, DualShock4Wired, TargetId, XButtons, XGamepad, Xbox360Wired,
+};
+use windows::Win32::UI::HiDpi::{
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBD_EVENT_FLAGS, KEYBDINPUT,
@@ -25,16 +30,7 @@ use ws_proto::{GamepadState, HostControl, MAX_GAMEPADS, MouseButton};
 use crate::gamepad::Ds4Report;
 use crate::handler::{GamepadKind, InputSink, SinkError};
 use crate::keymap::KeyTarget;
-
-/// A display's position in virtual-desktop pixels, as DXGI reports it in
-/// `DXGI_OUTPUT_DESC::DesktopCoordinates`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DisplayRect {
-    pub left: i32,
-    pub top: i32,
-    pub width: i32,
-    pub height: i32,
-}
+use crate::mouse::{DisplayRect, to_virtual_desk};
 
 impl DisplayRect {
     pub fn primary() -> Self {
@@ -48,19 +44,59 @@ impl DisplayRect {
             height,
         }
     }
+
+    fn virtual_desktop() -> Self {
+        // SAFETY: GetSystemMetrics has no preconditions.
+        unsafe {
+            Self {
+                left: GetSystemMetrics(SM_XVIRTUALSCREEN),
+                top: GetSystemMetrics(SM_YVIRTUALSCREEN),
+                width: GetSystemMetrics(SM_CXVIRTUALSCREEN),
+                height: GetSystemMetrics(SM_CYVIRTUALSCREEN),
+            }
+        }
+    }
+}
+
+/// Makes the process per-monitor DPI aware (v2), so system metrics are in
+/// the same physical pixels as DXGI's display coordinates. Fails harmlessly
+/// when awareness was already set, e.g. by the manifest or another crate.
+fn ensure_dpi_aware() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        // SAFETY: no pointer arguments.
+        if let Err(e) =
+            unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) }
+        {
+            debug!("DPI awareness not changed: {e}");
+        }
+    });
 }
 
 type RumbleFn = Arc<dyn Fn(HostControl) + Send + Sync>;
+
+/// How long a failed ViGEmBus open is remembered before trying again.
+const VIGEM_RETRY: Duration = Duration::from_secs(30);
 
 enum Pad {
     X360(Xbox360Wired<Arc<Client>>),
     Ds4(DualShock4Wired<Arc<Client>>),
 }
 
+enum Slot {
+    /// Plug-in runs on its own thread because `wait_ready` blocks. Updates
+    /// before it is ready are dropped; the client resends state every 100 ms.
+    Pending {
+        ready: Receiver<Result<Pad, SinkError>>,
+    },
+    Ready(Pad),
+}
+
 pub struct WindowsInput {
     display: DisplayRect,
     vigem: Option<Arc<Client>>,
-    pads: [Option<Pad>; MAX_GAMEPADS as usize],
+    vigem_error: Option<(Instant, String)>,
+    pads: [Option<Slot>; MAX_GAMEPADS as usize],
     rumble: RumbleFn,
 }
 
@@ -109,36 +145,16 @@ fn keyboard(vk: u16, scan: u16, flags: KEYBD_EVENT_FLAGS) -> INPUT {
     }
 }
 
-/// Maps 0..=65535 across `display` to SendInput's 0..=65535 across the
-/// whole virtual desktop.
-fn to_virtual_desk(x: u16, y: u16, display: DisplayRect) -> (i32, i32) {
-    // SAFETY: GetSystemMetrics has no preconditions.
-    let (vx, vy, vw, vh) = unsafe {
-        (
-            GetSystemMetrics(SM_XVIRTUALSCREEN),
-            GetSystemMetrics(SM_YVIRTUALSCREEN),
-            GetSystemMetrics(SM_CXVIRTUALSCREEN).max(2),
-            GetSystemMetrics(SM_CYVIRTUALSCREEN).max(2),
-        )
-    };
-    let scale = |n: u16, origin: i32, size: i32, v_origin: i32, v_size: i32| {
-        let px = origin as i64 + (n as i64 * (size.max(1) as i64 - 1)) / 65535;
-        ((px - v_origin as i64) * 65535 / (v_size as i64 - 1)).clamp(0, 65535) as i32
-    };
-    (
-        scale(x, display.left, display.width, vx, vw),
-        scale(y, display.top, display.height, vy, vh),
-    )
-}
-
 impl WindowsInput {
     /// `rumble` is called from a ViGEm notification thread whenever a game
     /// sets an Xbox controller's motors, with a [`HostControl::Rumble`] to
     /// send on the `control` channel.
     pub fn new(rumble: impl Fn(HostControl) + Send + Sync + 'static) -> Self {
+        ensure_dpi_aware();
         Self {
             display: DisplayRect::primary(),
             vigem: None,
+            vigem_error: None,
             pads: Default::default(),
             rumble: Arc::new(rumble),
         }
@@ -154,18 +170,95 @@ impl WindowsInput {
         if let Some(c) = &self.vigem {
             return Ok(c.clone());
         }
-        let client = Client::connect().map_err(|e| {
-            SinkError(match e {
-                vigem_client::Error::BusNotFound => {
-                    "ViGEmBus driver is not installed, gamepads are unavailable (see docs/host-setup.md)".into()
-                }
-                e => format!("cannot open ViGEmBus: {e}"),
-            })
-        })?;
-        let client = Arc::new(client);
-        self.vigem = Some(client.clone());
-        Ok(client)
+        if let Some((at, msg)) = &self.vigem_error {
+            if at.elapsed() < VIGEM_RETRY {
+                return Err(SinkError(msg.clone()));
+            }
+        }
+        match Client::connect() {
+            Ok(client) => {
+                let client = Arc::new(client);
+                self.vigem = Some(client.clone());
+                self.vigem_error = None;
+                Ok(client)
+            }
+            Err(e) => {
+                let msg = match e {
+                    vigem_client::Error::BusNotFound => "ViGEmBus driver is not installed, gamepads are unavailable (see docs/host-setup.md)".to_string(),
+                    e => format!("cannot open ViGEmBus: {e}"),
+                };
+                warn!("{msg}");
+                self.vigem_error = Some((Instant::now(), msg.clone()));
+                Err(SinkError(msg))
+            }
+        }
     }
+}
+
+fn plug_in(
+    client: Arc<Client>,
+    index: u8,
+    kind: GamepadKind,
+    rumble: RumbleFn,
+) -> Result<Pad, SinkError> {
+    let err = |e: vigem_client::Error| SinkError(format!("gamepad {index}: {e}"));
+    let pad = match kind {
+        GamepadKind::Xbox360 => {
+            let mut t = Xbox360Wired::new(client, TargetId::XBOX360_WIRED);
+            t.plugin().map_err(err)?;
+            t.wait_ready().map_err(err)?;
+            match t.request_notification() {
+                Ok(req) => {
+                    // The thread ends by itself when the target is unplugged.
+                    req.spawn_thread(move |_, n| {
+                        rumble(HostControl::Rumble {
+                            index,
+                            strong: n.large_motor as f32 / 255.0,
+                            weak: n.small_motor as f32 / 255.0,
+                        })
+                    });
+                }
+                Err(e) => warn!(index, "no rumble for this gamepad: {e}"),
+            }
+            Pad::X360(t)
+        }
+        GamepadKind::DualShock4 => {
+            let mut t = DualShock4Wired::new(client, TargetId::DUALSHOCK4_WIRED);
+            t.plugin().map_err(err)?;
+            t.wait_ready().map_err(err)?;
+            Pad::Ds4(t)
+        }
+    };
+    info!(index, ?kind, "virtual gamepad plugged in");
+    Ok(pad)
+}
+
+fn update_pad(pad: &mut Pad, index: u8, s: &GamepadState) -> Result<(), SinkError> {
+    let result = match pad {
+        Pad::X360(t) => t.update(&XGamepad {
+            buttons: XButtons(s.buttons),
+            left_trigger: s.lt,
+            right_trigger: s.rt,
+            thumb_lx: s.lx,
+            thumb_ly: s.ly,
+            thumb_rx: s.rx,
+            thumb_ry: s.ry,
+        }),
+        Pad::Ds4(t) => {
+            let r = Ds4Report::from(s);
+            t.update(&DS4Report {
+                thumb_lx: r.thumb_lx,
+                thumb_ly: r.thumb_ly,
+                thumb_rx: r.thumb_rx,
+                thumb_ry: r.thumb_ry,
+                buttons: r.buttons,
+                special: r.special,
+                trigger_l: r.trigger_l,
+                trigger_r: r.trigger_r,
+            })
+        }
+    };
+    result.map_err(|e| SinkError(format!("gamepad {index}: {e}")))
 }
 
 impl InputSink for WindowsInput {
@@ -204,7 +297,7 @@ impl InputSink for WindowsInput {
     }
 
     fn mouse_move_abs(&mut self, x: u16, y: u16) -> Result<(), SinkError> {
-        let (nx, ny) = to_virtual_desk(x, y, self.display);
+        let (nx, ny) = to_virtual_desk(x, y, self.display, DisplayRect::virtual_desktop());
         send(&[mouse(
             nx,
             ny,
@@ -245,76 +338,47 @@ impl InputSink for WindowsInput {
 
     fn gamepad_connect(&mut self, index: u8, kind: GamepadKind) -> Result<(), SinkError> {
         let client = self.vigem()?;
-        let err = |e: vigem_client::Error| SinkError(format!("gamepad {index}: {e}"));
-        let pad = match kind {
-            GamepadKind::Xbox360 => {
-                let mut t = Xbox360Wired::new(client, TargetId::XBOX360_WIRED);
-                t.plugin().map_err(err)?;
-                t.wait_ready().map_err(err)?;
-                match t.request_notification() {
-                    Ok(req) => {
-                        let rumble = self.rumble.clone();
-                        // The thread ends by itself when the target is unplugged.
-                        req.spawn_thread(move |_, n| {
-                            rumble(HostControl::Rumble {
-                                index,
-                                strong: n.large_motor as f32 / 255.0,
-                                weak: n.small_motor as f32 / 255.0,
-                            })
-                        });
-                    }
-                    Err(e) => warn!(index, "no rumble for this gamepad: {e}"),
-                }
-                Pad::X360(t)
-            }
-            GamepadKind::DualShock4 => {
-                let mut t = DualShock4Wired::new(client, TargetId::DUALSHOCK4_WIRED);
-                t.plugin().map_err(err)?;
-                t.wait_ready().map_err(err)?;
-                Pad::Ds4(t)
-            }
-        };
-        info!(index, ?kind, "virtual gamepad plugged in");
-        self.pads[index as usize] = Some(pad);
+        let rumble = self.rumble.clone();
+        let (tx, ready) = mpsc::channel();
+        std::thread::Builder::new()
+            .name(format!("ws-input-pad{index}"))
+            .spawn(move || {
+                // If the slot was dropped meanwhile, the returned pad is dropped
+                // here, which unplugs it.
+                let _ = tx.send(plug_in(client, index, kind, rumble));
+            })
+            .map_err(|e| SinkError(format!("gamepad {index}: {e}")))?;
+        self.pads[index as usize] = Some(Slot::Pending { ready });
         Ok(())
     }
 
     fn gamepad_update(&mut self, index: u8, s: &GamepadState) -> Result<(), SinkError> {
-        let Some(pad) = self.pads[index as usize].as_mut() else {
-            return Ok(());
-        };
-        let result = match pad {
-            Pad::X360(t) => t.update(&XGamepad {
-                buttons: XButtons(s.buttons),
-                left_trigger: s.lt,
-                right_trigger: s.rt,
-                thumb_lx: s.lx,
-                thumb_ly: s.ly,
-                thumb_rx: s.rx,
-                thumb_ry: s.ry,
-            }),
-            Pad::Ds4(t) => {
-                let r = Ds4Report::from(s);
-                t.update(&DS4Report {
-                    thumb_lx: r.thumb_lx,
-                    thumb_ly: r.thumb_ly,
-                    thumb_rx: r.thumb_rx,
-                    thumb_ry: r.thumb_ry,
-                    buttons: r.buttons,
-                    special: r.special,
-                    trigger_l: r.trigger_l,
-                    trigger_r: r.trigger_r,
-                })
+        let slot = &mut self.pads[index as usize];
+        if let Some(Slot::Pending { ready }) = slot {
+            match ready.try_recv() {
+                Err(TryRecvError::Empty) => return Ok(()),
+                Ok(Ok(pad)) => *slot = Some(Slot::Ready(pad)),
+                Ok(Err(e)) => {
+                    *slot = None;
+                    return Err(e);
+                }
+                Err(TryRecvError::Disconnected) => {
+                    *slot = None;
+                    return Err(SinkError(format!("gamepad {index}: plug-in thread died")));
+                }
             }
-        };
-        result.map_err(|e| SinkError(format!("gamepad {index}: {e}")))
+        }
+        match slot {
+            Some(Slot::Ready(pad)) => update_pad(pad, index, s),
+            _ => Err(SinkError(format!("gamepad {index} is not plugged in"))),
+        }
     }
 
     fn gamepad_disconnect(&mut self, index: u8) -> Result<(), SinkError> {
         let result = match self.pads[index as usize].take() {
-            None => return Ok(()),
-            Some(Pad::X360(mut t)) => t.unplug(),
-            Some(Pad::Ds4(mut t)) => t.unplug(),
+            None | Some(Slot::Pending { .. }) => return Ok(()),
+            Some(Slot::Ready(Pad::X360(mut t))) => t.unplug(),
+            Some(Slot::Ready(Pad::Ds4(mut t))) => t.unplug(),
         };
         info!(index, "virtual gamepad unplugged");
         result.map_err(|e| SinkError(format!("gamepad {index}: {e}")))

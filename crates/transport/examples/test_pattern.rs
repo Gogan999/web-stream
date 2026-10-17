@@ -42,6 +42,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut config = SignalingConfig::new(([127, 0, 0, 1], port).into(), data_dir);
     config.web_root = Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/e2e"));
     let (server, mut events) = SignalingServer::new(config)?;
+    // Stands in for the host user choosing "pair a browser" in the tray.
+    server.handle().open_pairing_for(Duration::from_secs(600)).await?;
     tokio::spawn(server.serve());
 
     let (transport, mut transport_events) = Transport::start(TransportConfig {

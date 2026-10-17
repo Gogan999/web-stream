@@ -3,7 +3,9 @@
 //! WebSocket. Messages are [`ws_proto::HostSignal`] and
 //! [`ws_proto::ClientSignal`]; the full contract is in `docs/signaling.md`.
 
+mod acl;
 pub mod config;
+mod listen;
 mod pairing;
 mod server;
 mod store;

@@ -1,18 +1,27 @@
 //! One-time pairing codes shown on the host and typed into the browser.
+//!
+//! Pairing is closed unless the host user opens it (tray or console action)
+//! for a short window, so nobody on the internet can start one or guess at
+//! an unattended host. Too many wrong codes lock pairing until the host user
+//! opens it again, and that lockout survives restarts.
 
 use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 
 use crate::Error;
 
 pub const CODE_TTL: Duration = Duration::from_secs(120);
+pub const DEFAULT_WINDOW: Duration = Duration::from_secs(120);
 const ATTEMPTS_PER_CODE: u8 = 3;
+/// Wrong codes in total (across codes and restarts) before pairing locks.
+const MAX_FAILURES: u32 = 5;
 const MAX_STARTS: usize = 5;
 const STARTS_WINDOW: Duration = Duration::from_secs(60);
-const MAX_FAILURES: usize = 5;
-const FAILURES_WINDOW: Duration = Duration::from_secs(3600);
+const STATE_FILE: &str = "pairing.json";
 
 #[derive(Debug)]
 struct Pending {
@@ -32,29 +41,98 @@ pub struct Started {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ConfirmError {
-    BadCode { attempts_left: u8 },
-    Expired,
+pub enum StartError {
+    /// The host user has not opened pairing.
+    Closed,
+    /// Too many wrong codes; the host user must open pairing again.
+    Locked,
     RateLimited,
 }
 
-/// Only one pairing is in flight at a time; starting another replaces it.
-/// Failed guesses are limited across all pairings, so restarting does not
-/// buy an attacker more attempts.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfirmError {
+    BadCode {
+        attempts_left: u8,
+    },
+    Expired,
+    /// This wrong code was the last one allowed; pairing is now locked.
+    Locked,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct Persisted {
+    failures: u32,
+    locked: bool,
+}
+
+#[derive(Debug)]
 pub struct Pairing {
+    path: PathBuf,
+    state: Persisted,
+    open_until: Option<Instant>,
     pending: Option<Pending>,
     starts: VecDeque<Instant>,
-    failures: VecDeque<Instant>,
 }
 
 impl Pairing {
-    /// `None` when rate-limited.
-    pub fn start(&mut self, device_name: &str, now: Instant) -> Result<Option<Started>, Error> {
-        prune(&mut self.starts, now, STARTS_WINDOW);
-        prune(&mut self.failures, now, FAILURES_WINDOW);
-        if self.starts.len() >= MAX_STARTS || self.failures.len() >= MAX_FAILURES {
-            return Ok(None);
+    pub fn load(data_dir: &Path) -> Result<Self, Error> {
+        let path = data_dir.join(STATE_FILE);
+        let state = match std::fs::read(&path) {
+            Ok(b) => serde_json::from_slice(&b)
+                .map_err(|e| Error::Store(format!("{}: {e}", path.display())))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Persisted::default(),
+            Err(e) => return Err(e.into()),
+        };
+        Ok(Self {
+            path,
+            state,
+            open_until: None,
+            pending: None,
+            starts: VecDeque::new(),
+        })
+    }
+
+    /// Host-side action: accept pairing requests for `window`. Also clears a
+    /// lockout, since the host user is evidently present.
+    pub fn open(&mut self, now: Instant, window: Duration) -> Result<(), Error> {
+        self.open_until = Some(now + window);
+        if self.state.failures != 0 || self.state.locked {
+            self.state = Persisted::default();
+            self.save()?;
+        }
+        Ok(())
+    }
+
+    pub fn close(&mut self) {
+        self.open_until = None;
+        self.pending = None;
+    }
+
+    pub fn is_locked(&self) -> bool {
+        self.state.locked
+    }
+
+    /// Starting again replaces the pending code.
+    pub fn start(
+        &mut self,
+        device_name: &str,
+        now: Instant,
+    ) -> Result<Result<Started, StartError>, Error> {
+        if self.state.locked {
+            return Ok(Err(StartError::Locked));
+        }
+        if !self.open_until.is_some_and(|t| now < t) {
+            return Ok(Err(StartError::Closed));
+        }
+        while self
+            .starts
+            .front()
+            .is_some_and(|t| now.duration_since(*t) >= STARTS_WINDOW)
+        {
+            self.starts.pop_front();
+        }
+        if self.starts.len() >= MAX_STARTS {
+            return Ok(Err(StartError::RateLimited));
         }
         self.starts.push_back(now);
         let started = Started {
@@ -69,53 +147,61 @@ impl Pairing {
             expires: now + CODE_TTL,
             attempts_left: ATTEMPTS_PER_CODE,
         });
-        Ok(Some(started))
+        Ok(Ok(started))
     }
 
-    /// On success returns the device name and consumes the pairing.
+    /// On success returns the device name, consumes the code and closes
+    /// pairing.
     pub fn confirm(
         &mut self,
         pairing_id: &str,
         code: &str,
         now: Instant,
-    ) -> Result<String, ConfirmError> {
-        prune(&mut self.failures, now, FAILURES_WINDOW);
-        if self.failures.len() >= MAX_FAILURES {
-            return Err(ConfirmError::RateLimited);
+    ) -> Result<Result<String, ConfirmError>, Error> {
+        if self.state.locked {
+            return Ok(Err(ConfirmError::Locked));
         }
         let pending = match &mut self.pending {
             Some(p) if p.id.as_bytes().ct_eq(pairing_id.as_bytes()).into() => p,
-            _ => return Err(ConfirmError::Expired),
+            _ => return Ok(Err(ConfirmError::Expired)),
         };
         if now >= pending.expires {
             self.pending = None;
-            return Err(ConfirmError::Expired);
+            return Ok(Err(ConfirmError::Expired));
         }
         if bool::from(pending.code.as_bytes().ct_eq(code.trim().as_bytes())) {
             let name = pending.device_name.clone();
-            self.pending = None;
-            return Ok(name);
+            self.close();
+            if self.state.failures != 0 {
+                self.state.failures = 0;
+                self.save()?;
+            }
+            return Ok(Ok(name));
         }
-        self.failures.push_back(now);
         pending.attempts_left -= 1;
         let attempts_left = pending.attempts_left;
         if attempts_left == 0 {
             self.pending = None;
         }
-        Err(ConfirmError::BadCode { attempts_left })
+        self.state.failures += 1;
+        let locked = self.state.failures >= MAX_FAILURES;
+        if locked {
+            self.state.locked = true;
+            self.close();
+        }
+        self.save()?;
+        Ok(Err(if locked {
+            ConfirmError::Locked
+        } else {
+            ConfirmError::BadCode { attempts_left }
+        }))
     }
 
-    pub fn cancel(&mut self) {
-        self.pending = None;
-    }
-}
-
-fn prune(times: &mut VecDeque<Instant>, now: Instant, window: Duration) {
-    while times
-        .front()
-        .is_some_and(|t| now.duration_since(*t) >= window)
-    {
-        times.pop_front();
+    fn save(&self) -> Result<(), Error> {
+        crate::store::write_private(
+            &self.path,
+            &serde_json::to_vec(&self.state).expect("state serializes"),
+        )
     }
 }
 
@@ -147,97 +233,113 @@ fn clean_name(name: &str) -> String {
 mod tests {
     use super::*;
 
+    fn wrong(code: &str) -> &'static str {
+        if code == "000000" { "111111" } else { "000000" }
+    }
+
+    fn open(dir: &Path, now: Instant) -> Pairing {
+        let mut p = Pairing::load(dir).unwrap();
+        p.open(now, DEFAULT_WINDOW).unwrap();
+        p
+    }
+
     #[test]
-    fn right_code_pairs_once() {
-        let mut p = Pairing::default();
+    fn closed_until_the_host_opens_it() {
+        let dir = tempfile::tempdir().unwrap();
         let now = Instant::now();
-        let s = p.start("Chrome\n on laptop", now).unwrap().unwrap();
-        assert_eq!(s.code.len(), 6);
-        assert_eq!(s.device_name, "Chrome on laptop");
+        let mut p = Pairing::load(dir.path()).unwrap();
+        assert_eq!(p.start("x", now).unwrap(), Err(StartError::Closed));
+        p.open(now, DEFAULT_WINDOW).unwrap();
+        assert!(p.start("x", now).unwrap().is_ok());
         assert_eq!(
-            p.confirm(&s.pairing_id, &s.code, now),
-            Ok("Chrome on laptop".into())
-        );
-        assert_eq!(
-            p.confirm(&s.pairing_id, &s.code, now),
-            Err(ConfirmError::Expired)
+            p.start("x", now + DEFAULT_WINDOW).unwrap(),
+            Err(StartError::Closed)
         );
     }
 
     #[test]
-    fn code_expires() {
-        let mut p = Pairing::default();
+    fn right_code_pairs_once_and_closes_pairing() {
+        let dir = tempfile::tempdir().unwrap();
         let now = Instant::now();
+        let mut p = open(dir.path(), now);
+        let s = p.start("Chrome\n on laptop", now).unwrap().unwrap();
+        assert_eq!(s.code.len(), 6);
+        assert_eq!(s.device_name, "Chrome on laptop");
+        assert_eq!(
+            p.confirm(&s.pairing_id, &s.code, now).unwrap(),
+            Ok("Chrome on laptop".into())
+        );
+        assert_eq!(
+            p.confirm(&s.pairing_id, &s.code, now).unwrap(),
+            Err(ConfirmError::Expired)
+        );
+        assert_eq!(p.start("x", now).unwrap(), Err(StartError::Closed));
+    }
+
+    #[test]
+    fn code_expires() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = Instant::now();
+        let mut p = open(dir.path(), now);
         let s = p.start("x", now).unwrap().unwrap();
         assert_eq!(
-            p.confirm(&s.pairing_id, &s.code, now + CODE_TTL),
+            p.confirm(&s.pairing_id, &s.code, now + CODE_TTL).unwrap(),
             Err(ConfirmError::Expired)
         );
     }
 
     #[test]
     fn three_wrong_guesses_burn_the_code() {
-        let mut p = Pairing::default();
+        let dir = tempfile::tempdir().unwrap();
         let now = Instant::now();
+        let mut p = open(dir.path(), now);
         let s = p.start("x", now).unwrap().unwrap();
-        let wrong = if s.code == "000000" {
-            "111111"
-        } else {
-            "000000"
-        };
+        for left in [2, 1, 0] {
+            assert_eq!(
+                p.confirm(&s.pairing_id, wrong(&s.code), now).unwrap(),
+                Err(ConfirmError::BadCode {
+                    attempts_left: left
+                })
+            );
+        }
         assert_eq!(
-            p.confirm(&s.pairing_id, wrong, now),
-            Err(ConfirmError::BadCode { attempts_left: 2 })
-        );
-        assert_eq!(
-            p.confirm(&s.pairing_id, wrong, now),
-            Err(ConfirmError::BadCode { attempts_left: 1 })
-        );
-        assert_eq!(
-            p.confirm(&s.pairing_id, wrong, now),
-            Err(ConfirmError::BadCode { attempts_left: 0 })
-        );
-        assert_eq!(
-            p.confirm(&s.pairing_id, &s.code, now),
+            p.confirm(&s.pairing_id, &s.code, now).unwrap(),
             Err(ConfirmError::Expired)
         );
     }
 
     #[test]
-    fn failures_are_limited_across_restarts() {
-        let mut p = Pairing::default();
-        let mut now = Instant::now();
-        let mut failures = 0;
-        while failures < MAX_FAILURES {
-            now += STARTS_WINDOW; // stay clear of the start limit
+    fn lockout_persists_until_the_host_reopens() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = Instant::now();
+        let mut p = open(dir.path(), now);
+        let mut last = None;
+        for _ in 0..MAX_FAILURES {
             let s = p.start("x", now).unwrap().unwrap();
-            let wrong = if s.code == "000000" {
-                "111111"
-            } else {
-                "000000"
-            };
-            assert!(matches!(
-                p.confirm(&s.pairing_id, wrong, now),
-                Err(ConfirmError::BadCode { .. })
-            ));
-            failures += 1;
+            last = Some(p.confirm(&s.pairing_id, wrong(&s.code), now).unwrap());
+            p.starts.clear(); // stay clear of the start rate limit
         }
-        assert_eq!(p.start("x", now).unwrap(), None);
-        assert_eq!(
-            p.confirm("any", "000000", now),
-            Err(ConfirmError::RateLimited)
-        );
-        // The window slides.
-        assert!(p.start("x", now + FAILURES_WINDOW).unwrap().is_some());
+        assert_eq!(last, Some(Err(ConfirmError::Locked)));
+        assert_eq!(p.start("x", now).unwrap(), Err(StartError::Locked));
+
+        // A restart does not clear it.
+        let mut p = Pairing::load(dir.path()).unwrap();
+        assert!(p.is_locked());
+        assert_eq!(p.start("x", now).unwrap(), Err(StartError::Locked));
+        // The host user opening pairing does.
+        p.open(now, DEFAULT_WINDOW).unwrap();
+        assert!(p.start("x", now).unwrap().is_ok());
+        assert!(!Pairing::load(dir.path()).unwrap().is_locked());
     }
 
     #[test]
     fn starts_are_rate_limited() {
-        let mut p = Pairing::default();
+        let dir = tempfile::tempdir().unwrap();
         let now = Instant::now();
+        let mut p = open(dir.path(), now);
         for _ in 0..MAX_STARTS {
-            assert!(p.start("x", now).unwrap().is_some());
+            assert!(p.start("x", now).unwrap().is_ok());
         }
-        assert_eq!(p.start("x", now).unwrap(), None);
+        assert_eq!(p.start("x", now).unwrap(), Err(StartError::RateLimited));
     }
 }

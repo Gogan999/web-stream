@@ -49,10 +49,20 @@ pub enum TlsSource {
 
 /// A TURN server using the shared-secret REST credential scheme (coturn
 /// `use-auth-secret`).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TurnServer {
     pub urls: Vec<String>,
     pub shared_secret: String,
     /// How long issued credentials stay valid.
     pub ttl: Duration,
+}
+
+impl std::fmt::Debug for TurnServer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TurnServer")
+            .field("urls", &self.urls)
+            .field("shared_secret", &"<redacted>")
+            .field("ttl", &self.ttl)
+            .finish()
+    }
 }

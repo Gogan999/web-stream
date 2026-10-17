@@ -11,6 +11,9 @@ use crate::config::TlsSource;
 
 const CERT_FILE: &str = "tls-cert.pem";
 const KEY_FILE: &str = "tls-key.pem";
+const META_FILE: &str = "tls-cert.json";
+const VALIDITY: time::Duration = time::Duration::days(825);
+const RENEW_BEFORE: time::Duration = time::Duration::days(30);
 
 pub struct LoadedTls {
     pub config: Arc<ServerConfig>,
@@ -47,23 +50,53 @@ pub fn load(source: &TlsSource, data_dir: &Path) -> Result<LoadedTls, Error> {
     })
 }
 
-/// Reuse the stored self-signed certificate, or make one on first run.
+/// Reuse the stored self-signed certificate, or make a new one on first run,
+/// when the host names change, or when it is within 30 days of expiry.
 fn self_signed(data_dir: &Path, hostnames: &[String]) -> Result<(Vec<u8>, Vec<u8>), Error> {
     let cert_path = data_dir.join(CERT_FILE);
     let key_path = data_dir.join(KEY_FILE);
-    if cert_path.exists() && key_path.exists() {
-        return Ok((std::fs::read(cert_path)?, std::fs::read(key_path)?));
-    }
+    let meta_path = data_dir.join(META_FILE);
     let mut names = vec!["localhost".to_string(), "127.0.0.1".to_string()];
     names.extend(hostnames.iter().cloned());
-    let generated =
-        rcgen::generate_simple_self_signed(names).map_err(|e| Error::Tls(e.to_string()))?;
-    let cert = generated.cert.pem();
-    let key = generated.signing_key.serialize_pem();
+    let now = time::OffsetDateTime::now_utc();
+
+    let stored: Option<CertMeta> = std::fs::read(&meta_path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok());
+    let current = stored
+        .is_some_and(|m| m.names == names && m.not_after > (now + RENEW_BEFORE).unix_timestamp());
+    if current && cert_path.exists() && key_path.exists() {
+        return Ok((std::fs::read(cert_path)?, std::fs::read(key_path)?));
+    }
+
+    let mut params =
+        rcgen::CertificateParams::new(names.clone()).map_err(|e| Error::Tls(e.to_string()))?;
+    params.not_before = now - time::Duration::days(1);
+    params.not_after = now + VALIDITY;
+    let key = rcgen::KeyPair::generate().map_err(|e| Error::Tls(e.to_string()))?;
+    let cert = params
+        .self_signed(&key)
+        .map_err(|e| Error::Tls(e.to_string()))?;
+    let (cert, key) = (cert.pem(), key.serialize_pem());
     std::fs::create_dir_all(data_dir)?;
     crate::store::write_private(&key_path, key.as_bytes())?;
     std::fs::write(&cert_path, cert.as_bytes())?;
+    let meta = CertMeta {
+        names,
+        not_after: params.not_after.unix_timestamp(),
+    };
+    std::fs::write(
+        &meta_path,
+        serde_json::to_vec(&meta).expect("meta serializes"),
+    )?;
+    tracing::info!("generated a new self-signed TLS certificate");
     Ok((cert.into_bytes(), key.into_bytes()))
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CertMeta {
+    names: Vec<String>,
+    not_after: i64,
 }
 
 fn fingerprint(cert: &CertificateDer<'_>) -> String {
@@ -89,5 +122,13 @@ mod tests {
         let second = load(&source, dir.path()).unwrap();
         assert_eq!(first.fingerprint, second.fingerprint);
         assert_eq!(first.fingerprint.len(), 32 * 3 - 1);
+
+        let renamed = TlsSource::SelfSigned {
+            hostnames: vec!["host.example".into()],
+        };
+        assert_ne!(
+            load(&renamed, dir.path()).unwrap().fingerprint,
+            first.fingerprint
+        );
     }
 }

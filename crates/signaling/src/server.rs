@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use axum::Router;
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
@@ -12,17 +12,27 @@ use serde_json::json;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tower_http::services::ServeDir;
 use tower_http::set_header::SetResponseHeaderLayer;
+use tower_http::timeout::TimeoutLayer;
 
 use crate::config::SignalingConfig;
-use crate::pairing::{CODE_TTL, ConfirmError, Pairing};
+use crate::pairing::{CODE_TTL, ConfirmError, DEFAULT_WINDOW, Pairing, StartError};
 use crate::store::DeviceStore;
 use crate::{Error, tls};
 use ws_proto::{ByeReason, ClientSignal, HostSignal, PairConfirm, PairStart};
 
-const COOKIE: &str = "ws_device";
+/// `__Host-` makes the browser refuse the cookie unless it is Secure, has
+/// `Path=/` and no `Domain`, so a sibling subdomain cannot plant one.
+const COOKIE: &str = "__Host-ws_device";
 const COOKIE_MAX_AGE_SECS: u64 = 365 * 24 * 3600;
 const MAX_WS_MESSAGE: usize = 64 * 1024;
 const MAX_API_BODY: usize = 4 * 1024;
+/// Every HTTP request, including the `/ws` upgrade, must finish in this time.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+/// Server pings keep NATs open; a socket silent for `WS_IDLE` is dropped.
+const WS_PING_EVERY: Duration = Duration::from_secs(15);
+const WS_IDLE: Duration = Duration::from_secs(45);
+/// A browser that stops reading must not stall the session loop.
+const WS_SEND_TIMEOUT: Duration = Duration::from_secs(5);
 const CSP: &str = "default-src 'self'; connect-src 'self'; img-src 'self' data: blob:; \
                    media-src 'self' blob:; style-src 'self' 'unsafe-inline'; object-src 'none'; \
                    base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
@@ -42,6 +52,9 @@ pub enum Notice {
     PairingFailed {
         attempts_left: u8,
     },
+    /// Too many wrong codes. Pairing stays locked, across restarts, until
+    /// the host user opens it again with [`SignalingHandle::open_pairing`].
+    PairingLocked,
     SessionStarted {
         device_name: String,
     },
@@ -129,8 +142,25 @@ impl SignalingHandle {
         Ok(())
     }
 
-    pub async fn cancel_pairing(&self) {
-        self.shared.pairing.lock().await.cancel();
+    /// Host-side action (tray or console): accept one pairing for the next
+    /// two minutes. Pairing is otherwise closed, and this is also the only
+    /// way to clear a lockout after repeated wrong codes.
+    pub async fn open_pairing(&self) -> Result<(), Error> {
+        self.open_pairing_for(DEFAULT_WINDOW).await
+    }
+
+    pub async fn open_pairing_for(&self, window: Duration) -> Result<(), Error> {
+        self.shared
+            .pairing
+            .lock()
+            .await
+            .open(Instant::now(), window)?;
+        tracing::info!(secs = window.as_secs(), "pairing open");
+        Ok(())
+    }
+
+    pub async fn close_pairing(&self) {
+        self.shared.pairing.lock().await.close();
     }
 }
 
@@ -142,6 +172,13 @@ pub struct SignalingServer {
 impl SignalingServer {
     pub fn new(config: SignalingConfig) -> Result<(Self, SignalingEvents), Error> {
         std::fs::create_dir_all(&config.data_dir)?;
+        crate::acl::restrict_to_owner(&config.data_dir)?;
+        let pairing = Pairing::load(&config.data_dir)?;
+        if pairing.is_locked() {
+            tracing::warn!(
+                "pairing is locked after repeated wrong codes; open pairing on the host to unlock"
+            );
+        }
         let tls = tls::load(&config.tls, &config.data_dir)?;
         let store = DeviceStore::open(&config.data_dir, config.device_idle_expiry)?;
         let (sessions_tx, sessions) = mpsc::channel(4);
@@ -149,7 +186,7 @@ impl SignalingServer {
         let shared = Arc::new(Shared {
             config,
             store: Mutex::new(store),
-            pairing: Mutex::new(Pairing::default()),
+            pairing: Mutex::new(pairing),
             current: Mutex::new(None),
             next_id: AtomicU64::new(1),
             sessions: sessions_tx,
@@ -178,12 +215,8 @@ impl SignalingServer {
     pub async fn serve(self) -> Result<(), Error> {
         let addr = self.shared.config.bind;
         let app = router(self.shared.clone());
-        let rustls = axum_server::tls_rustls::RustlsConfig::from_config(self.tls.config.clone());
         tracing::info!(%addr, fingerprint = %self.tls.fingerprint, "signaling listening");
-        axum_server::bind_rustls(addr, rustls)
-            .serve(app.into_make_service())
-            .await?;
-        Ok(())
+        crate::listen::serve(addr, self.tls.config.clone(), app).await
     }
 }
 
@@ -217,6 +250,10 @@ fn router(shared: Arc<Shared>) -> Router {
     .layer(SetResponseHeaderLayer::overriding(
         header::CACHE_CONTROL,
         HeaderValue::from_static("no-store"),
+    ))
+    .layer(TimeoutLayer::with_status_code(
+        StatusCode::REQUEST_TIMEOUT,
+        REQUEST_TIMEOUT,
     ))
 }
 
@@ -303,8 +340,9 @@ async fn pair_start(
         .await
         .start(&req.device_name, Instant::now());
     match started {
-        Ok(Some(s)) => {
-            tracing::warn!(device = %s.device_name, code = %s.code, "pairing requested; show this code to the host user");
+        Ok(Ok(s)) => {
+            // The code goes only to the host UI, never to the log.
+            tracing::info!(device = %s.device_name, "pairing requested");
             shared.notify(Notice::PairingCode {
                 code: s.code,
                 device_name: s.device_name,
@@ -313,7 +351,11 @@ async fn pair_start(
             axum::Json(json!({"pairing_id": s.pairing_id, "expires_in": CODE_TTL.as_secs()}))
                 .into_response()
         }
-        Ok(None) => err(
+        Ok(Err(StartError::Closed)) => {
+            err(StatusCode::FORBIDDEN, json!({"error": "pairing_closed"}))
+        }
+        Ok(Err(StartError::Locked)) => err(StatusCode::LOCKED, json!({"error": "locked"})),
+        Ok(Err(StartError::RateLimited)) => err(
             StatusCode::TOO_MANY_REQUESTS,
             json!({"error": "rate_limited"}),
         ),
@@ -343,6 +385,16 @@ async fn pair_confirm(
         .lock()
         .await
         .confirm(&req.pairing_id, &req.code, Instant::now());
+    let result = match result {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!("pairing state: {e}");
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                json!({"error": "internal"}),
+            );
+        }
+    };
     match result {
         Ok(device_name) => {
             let token = match shared
@@ -377,12 +429,10 @@ async fn pair_confirm(
             )
         }
         Err(ConfirmError::Expired) => err(StatusCode::GONE, json!({"error": "expired"})),
-        Err(ConfirmError::RateLimited) => {
+        Err(ConfirmError::Locked) => {
             tracing::warn!("pairing locked after repeated wrong codes");
-            err(
-                StatusCode::TOO_MANY_REQUESTS,
-                json!({"error": "rate_limited"}),
-            )
+            shared.notify(Notice::PairingLocked);
+            err(StatusCode::LOCKED, json!({"error": "locked"}))
         }
     }
 }
@@ -443,6 +493,7 @@ async fn ws_upgrade(
         }
     };
     ws.max_message_size(MAX_WS_MESSAGE)
+        .max_frame_size(MAX_WS_MESSAGE)
         .on_upgrade(move |socket| run_socket(shared, socket, token, device.name))
 }
 
@@ -454,12 +505,36 @@ async fn run_socket(
 ) {
     let id = shared.next_id.fetch_add(1, Ordering::Relaxed);
     let (kick_tx, mut kick_rx) = oneshot::channel();
-    if let Some(old) = shared.current.lock().await.replace(Current {
-        id,
-        token,
-        kick: kick_tx,
-    }) {
-        let _ = old.kick.send(ByeReason::Replaced);
+    {
+        // Re-check the token while holding `current`: a revoke that landed
+        // after `ws_upgrade` checked it would otherwise miss this socket.
+        // Revokers update the store first and then take `current`, so either
+        // they see this session or this check sees the revocation.
+        let mut current = shared.current.lock().await;
+        if shared
+            .store
+            .lock()
+            .await
+            .check(&token, SystemTime::now())
+            .is_none()
+        {
+            drop(current);
+            let _ = send_json(
+                &mut socket,
+                &HostSignal::Bye {
+                    reason: ByeReason::Revoked,
+                },
+            )
+            .await;
+            return;
+        }
+        if let Some(old) = current.replace(Current {
+            id,
+            token,
+            kick: kick_tx,
+        }) {
+            let _ = old.kick.send(ByeReason::Replaced);
+        }
     }
 
     let (in_tx, in_rx) = mpsc::channel(32);
@@ -476,7 +551,8 @@ async fn run_socket(
         incoming: in_rx,
         outgoing: out_tx,
     };
-    if shared.sessions.send(session).await.is_err() {
+    if shared.sessions.try_send(session).is_err() {
+        tracing::warn!("host is not accepting sessions");
         clear_current(&shared, id).await;
         return;
     }
@@ -485,13 +561,25 @@ async fn run_socket(
         device_name: device_name.clone(),
     });
 
+    let mut ping = tokio::time::interval(WS_PING_EVERY);
+    ping.tick().await;
+    let mut last_heard = Instant::now();
     loop {
         tokio::select! {
+            _ = ping.tick() => {
+                if last_heard.elapsed() >= WS_IDLE {
+                    tracing::info!(device = %device_name, "signaling socket idle");
+                    break;
+                }
+                if send(&mut socket, Message::Ping(Default::default())).await.is_err() {
+                    break;
+                }
+            }
             reason = &mut kick_rx => {
                 if let Ok(reason) = reason {
                     let _ = send_json(&mut socket, &HostSignal::Bye { reason }).await;
                 }
-                let _ = socket.send(Message::Close(Some(CloseFrame { code: 1000, reason: "bye".into() }))).await;
+                let _ = send(&mut socket, Message::Close(Some(CloseFrame { code: 1000, reason: "bye".into() }))).await;
                 break;
             }
             out = out_rx.recv() => {
@@ -502,10 +590,13 @@ async fn run_socket(
                 }
             }
             incoming = socket.recv() => {
+                last_heard = Instant::now();
                 match incoming {
                     Some(Ok(Message::Text(text))) => match serde_json::from_str::<ClientSignal>(&text) {
                         Ok(msg) => {
-                            if in_tx.send(msg).await.is_err() {
+                            // A host that stops reading must not block kicks
+                            // and pings; a browser flooding it gets dropped.
+                            if in_tx.try_send(msg).is_err() {
                                 break;
                             }
                         }
@@ -535,7 +626,14 @@ async fn clear_current(shared: &Shared, id: u64) {
     }
 }
 
-async fn send_json(socket: &mut WebSocket, msg: &HostSignal) -> Result<(), axum::Error> {
+async fn send_json(socket: &mut WebSocket, msg: &HostSignal) -> Result<(), ()> {
     let text = serde_json::to_string(msg).expect("host messages serialize");
-    socket.send(Message::Text(text.into())).await
+    send(socket, Message::Text(text.into())).await
+}
+
+async fn send(socket: &mut WebSocket, msg: Message) -> Result<(), ()> {
+    match tokio::time::timeout(WS_SEND_TIMEOUT, socket.send(msg)).await {
+        Ok(Ok(())) => Ok(()),
+        _ => Err(()),
+    }
 }

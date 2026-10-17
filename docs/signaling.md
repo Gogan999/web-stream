@@ -25,24 +25,39 @@ certificate (for example from a DDNS name) can be configured instead.
 
 ## Pairing and auth (HTTP, same origin)
 
+Pairing is closed by default. The host user opens it from the host (tray or
+console, `SignalingHandle::open_pairing`) for two minutes; only then does
+`/api/pair/start` work, and a successful pairing closes it again. Nobody on
+the network can start a pairing or guess codes at an unattended host.
+
 All `POST` bodies are JSON and must send `Content-Type: application/json`.
 The host rejects any request whose `Origin` header is not the host's own
 origin. The device credential is an `HttpOnly; Secure; SameSite=Strict`
-cookie named `ws_device`, so page script never sees it.
+cookie named `__Host-ws_device`, so page script never sees it and no
+sibling subdomain can set it.
 
 | Request | Body | Responses |
 |---------|------|-----------|
 | `GET /api/session` | | `200 {"paired":true,"device":"<name>"}` or `401 {"paired":false}` |
-| `POST /api/pair/start` | `{"device_name":"Chrome on laptop"}` | `200 {"pairing_id":"…","expires_in":120}`; host shows a 6-digit code. `429 {"error":"rate_limited"}` |
-| `POST /api/pair/confirm` | `{"pairing_id":"…","code":"123456"}` | `200 {"paired":true}` + cookie. `403 {"error":"bad_code","attempts_left":2}`. `410 {"error":"expired"}`. `429` |
+| `POST /api/pair/start` | `{"device_name":"Chrome on laptop"}` | `200 {"pairing_id":"…","expires_in":120}`; host shows a 6-digit code. `403 {"error":"pairing_closed"}` until the host user opens pairing. `423 {"error":"locked"}`. `429 {"error":"rate_limited"}` |
+| `POST /api/pair/confirm` | `{"pairing_id":"…","code":"123456"}` | `200 {"paired":true}` + cookie. `403 {"error":"bad_code","attempts_left":2}`. `410 {"error":"expired"}`. `423 {"error":"locked"}` |
 | `POST /api/unpair` | `{}` | `200`, revokes this device and clears the cookie |
 
-A pairing code is valid for 120 seconds and 3 attempts; failed attempts are
-rate-limited globally. A paired device that is unused for 30 days is revoked.
+A code is valid for 120 seconds and 3 attempts. After 5 wrong codes in
+total, pairing locks (also across restarts) until the host user opens it
+again. A paired device that is unused for 30 days is revoked.
+
+## Limits
+
+At most 64 connections at once and 8 per source IP. TLS handshakes must
+finish in 10 s, request headers in 10 s (which also closes idle keep-alive
+connections), and whole requests in 10 s. HTTP/1.1 only. API bodies are
+capped at 4 KiB and WebSocket messages and frames at 64 KiB. The host pings
+the signaling socket every 15 s and drops it after 45 s of silence.
 
 ## Signaling WebSocket: `wss://<host>:8443/ws`
 
-Requires the `ws_device` cookie (sent automatically) and a same-origin
+Requires the `__Host-ws_device` cookie (sent automatically) and a same-origin
 `Origin`. Unauthenticated upgrades get HTTP 401. Only one session is live: a
 new connection replaces the old one, which receives `bye` with reason
 `replaced`.

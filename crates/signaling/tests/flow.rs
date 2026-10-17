@@ -93,6 +93,7 @@ async fn pair_then_signal() {
     let config = SignalingConfig::new("127.0.0.1:0".parse().unwrap(), dir.path().to_path_buf());
     let (server, mut events) = SignalingServer::new(config).unwrap();
     let router = server.router();
+    let handle = server.handle();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
@@ -103,7 +104,10 @@ async fn pair_then_signal() {
     let r = request(addr, "GET", "/api/session", None, None, "").await;
     assert_eq!(r.status, 401);
     assert!(r.headers.to_lowercase().contains("content-security-policy"));
-    assert_eq!(ws_connect(addr, "ws_device=nope").await.err(), Some(401));
+    assert_eq!(
+        ws_connect(addr, "__Host-ws_device=nope").await.err(),
+        Some(401)
+    );
 
     // Cross-origin pairing is refused.
     let r = request(
@@ -116,6 +120,20 @@ async fn pair_then_signal() {
     )
     .await;
     assert_eq!(r.status, 403);
+
+    // Pairing is closed until the host user opens it.
+    let r = request(
+        addr,
+        "POST",
+        "/api/pair/start",
+        origin,
+        None,
+        r#"{"device_name":"x"}"#,
+    )
+    .await;
+    assert_eq!(r.status, 403);
+    assert_eq!(body_json(&r)["error"], "pairing_closed");
+    handle.open_pairing().await.unwrap();
 
     let r = request(
         addr,
@@ -172,13 +190,13 @@ async fn pair_then_signal() {
             && set_cookie.contains("Secure")
     );
     let token = set_cookie
-        .split("ws_device=")
+        .split("__Host-ws_device=")
         .nth(1)
         .unwrap()
         .split(';')
         .next()
         .unwrap();
-    let cookie = format!("ws_device={token}");
+    let cookie = format!("__Host-ws_device={token}");
     let r2 = request(addr, "GET", "/api/session", None, Some(&cookie), "").await;
     assert_eq!(r2.status, 200);
     assert_eq!(body_json(&r2)["device"], "Test browser");

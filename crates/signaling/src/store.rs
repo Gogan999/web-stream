@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 use crate::Error;
 
 const DEVICES_FILE: &str = "devices.json";
+const TOUCH_INTERVAL_SECS: u64 = 3600;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Device {
@@ -74,15 +75,21 @@ impl DeviceStore {
         let before = self.devices.len();
         self.devices.retain(|d| d.last_used >= cutoff);
         let h = hash(token);
+        let mut touched = false;
         let found = self
             .devices
             .iter_mut()
             .find(|d| d.token_sha256 == h)
             .map(|d| {
-                d.last_used = secs;
+                // The idle timer counts in days, so an hourly refresh is
+                // plenty and keeps disk writes off most connects.
+                if secs.saturating_sub(d.last_used) >= TOUCH_INTERVAL_SECS {
+                    d.last_used = secs;
+                    touched = true;
+                }
                 d.clone()
             });
-        if found.is_some() || self.devices.len() != before {
+        if touched || self.devices.len() != before {
             self.save()?;
         }
         Ok(found)
@@ -117,21 +124,29 @@ impl DeviceStore {
 
 /// Write a file readable only by the current user, replacing it atomically.
 pub(crate) fn write_private(path: &Path, contents: &[u8]) -> Result<(), Error> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let tmp = path.with_extension("tmp");
-    {
+    let dir = path.parent().unwrap_or(Path::new("."));
+    std::fs::create_dir_all(dir)?;
+    // A fresh random name with `create_new`, so a pre-planted file or link
+    // at a predictable temp path is never written through.
+    let mut suffix = [0u8; 8];
+    getrandom::fill(&mut suffix).map_err(|e| Error::Random(e.to_string()))?;
+    let tmp = dir.join(format!(".{}.tmp", URL_SAFE_NO_PAD.encode(suffix)));
+    let written = (|| {
         let mut options = std::fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true);
+        options.write(true).create_new(true);
         #[cfg(unix)]
         std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
         let mut file = options.open(&tmp)?;
+        crate::acl::restrict_to_owner(&tmp)?;
         std::io::Write::write_all(&mut file, contents)?;
         file.sync_all()?;
+        drop(file);
+        std::fs::rename(&tmp, path)
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
     }
-    std::fs::rename(&tmp, path)?;
-    Ok(())
+    Ok(written?)
 }
 
 pub(crate) fn random_token() -> Result<String, Error> {

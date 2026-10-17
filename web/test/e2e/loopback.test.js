@@ -50,7 +50,7 @@ test('client streams from mock host, sends input and switches display', { timeou
 
   const hostLog = () => host.evaluate(() => window.mockLog);
 
-  // Low-latency playout on every receiver; audio is sendrecv so the mic needs no renegotiation.
+  // Low-latency playout on every receiver; mic is not wired up yet, so audio is answered recvonly.
   const pcInfo = await client.evaluate(() => {
     const pc = window.__pcs.at(-1);
     return {
@@ -59,14 +59,14 @@ test('client streams from mock host, sends input and switches display', { timeou
     };
   });
   assert.deepEqual(pcInfo.jbt, [0, 0]);
-  assert.equal(pcInfo.audioDir, 'sendrecv');
+  assert.equal(pcInfo.audioDir, 'recvonly');
 
-  // Browser-created channels with the agreed reliability.
+  // Host-opened channels with the agreed reliability.
   await host.waitForFunction(() => window.mockLog.filter((e) => e.ev === 'channel').length === 4);
   const channels = Object.fromEntries((await hostLog()).filter((e) => e.ev === 'channel').map((e) => [e.label, e]));
-  assert.deepEqual(Object.keys(channels).sort(), ['control', 'file', 'input', 'input-rt']);
-  assert.equal(channels['input-rt'].ordered, false);
-  assert.equal(channels['input-rt'].maxRetransmits, 0);
+  assert.deepEqual(Object.keys(channels).sort(), ['control', 'file', 'input', 'input-motion']);
+  assert.equal(channels['input-motion'].ordered, false);
+  assert.equal(channels['input-motion'].maxRetransmits, 0);
   assert.equal(channels.input.ordered, true);
   assert.equal(channels.input.maxRetransmits, null);
 
@@ -85,7 +85,7 @@ test('client streams from mock host, sends input and switches display', { timeou
   const inputs = (await hostLog()).filter((e) => e.ev === 'input');
   const abs = inputs.find((e) => e.type === 'mouse-abs');
   assert.ok(abs && Math.abs(abs.x - 32768) < 700 && Math.abs(abs.y - 32768) < 700, JSON.stringify(abs));
-  assert.equal(abs.ch, 'input-rt');
+  assert.equal(abs.ch, 'input-motion');
   assert.ok(inputs.some((e) => e.type === 'mouse-button' && e.button === 0 && e.down && e.ch === 'input'));
   assert.ok(inputs.some((e) => e.type === 'key' && e.usage === 0x1a && e.down));
   assert.ok(inputs.some((e) => e.type === 'key' && e.usage === 0x1a && !e.down));

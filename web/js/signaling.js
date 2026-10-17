@@ -1,4 +1,4 @@
-// WebSocket signaling client. JSON text frames; see docs/protocol.md.
+// WebSocket signaling client. JSON text frames; see docs/signaling.md.
 // Auth is the HttpOnly pairing cookie, which the browser sends on the upgrade by itself.
 
 export class Signaling extends EventTarget {
@@ -39,8 +39,8 @@ export class Signaling extends EventTarget {
   }
 }
 
-// Same origin as the page, /signal.
+// Same origin as the page, /ws.
 export function defaultSignalUrl(loc = location) {
   const scheme = loc.protocol === 'https:' ? 'wss:' : 'ws:';
-  return `${scheme}//${loc.host}/signal`;
+  return `${scheme}//${loc.host}/ws`;
 }

@@ -1,6 +1,6 @@
 // Development server standing in for the host's built-in HTTPS listener: serves web/,
-// implements the pairing API (docs/signaling.md) in memory, and relays /signal between one
-// mock host page (/signal?role=host) and one paired client. Not for production.
+// implements the pairing API (docs/signaling.md) in memory, and relays /ws between one
+// mock host page (/ws?role=host) and one paired client. Not for production.
 //
 //   node dev/server.mjs [port]     then open http://localhost:8080/dev/mock-host.html
 //                                  and http://localhost:8080/
@@ -92,7 +92,7 @@ const wss = new WebSocketServer({ noServer: true });
 server.on('upgrade', (req, socket, head) => {
   const url = new URL(req.url, 'http://x');
   const isHost = url.searchParams.get('role') === 'host';
-  if (url.pathname !== '/signal' || (!isHost && !paired(req))) {
+  if (url.pathname !== '/ws' || (!isHost && !paired(req))) {
     socket.end('HTTP/1.1 401 Unauthorized\r\n\r\n');
     return;
   }

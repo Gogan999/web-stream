@@ -8,7 +8,7 @@ function fakeSession() {
   const sent = [];
   return {
     sent, blocked: false,
-    canSend(label) { return label !== 'input-rt' || !this.blocked; },
+    canSend(label) { return label !== 'input-motion' || !this.blocked; },
     sendInput(label, buf) { if (!this.canSend(label)) return false; sent.push({ label, ...decode(buf) }); return true; },
   };
 }
@@ -22,7 +22,7 @@ test('relative motion accumulates while backed up and is sent as one sum', () =>
   assert.equal(session.sent.length, 0);
   session.blocked = false;
   ic.flushMotion();
-  assert.deepEqual(session.sent, [{ label: 'input-rt', type: 'mouse-rel', dx: 12, dy: -5 }]);
+  assert.deepEqual(session.sent, [{ label: 'input-motion', type: 'mouse-rel', dx: 12, dy: -5 }]);
 });
 
 test('large sums split into i16-sized messages', () => {

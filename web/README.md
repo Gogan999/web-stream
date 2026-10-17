@@ -2,7 +2,7 @@
 
 Plain HTML, CSS and ES modules. No framework, no build step: the host program serves this folder as-is. Chromium-based browsers are the target (Keyboard Lock and raw pointer lock are Chromium-only).
 
-Wire protocol (pairing, signaling, channels, input and control messages): [`docs/protocol.md`](../docs/protocol.md).
+Pairing and signaling: `docs/signaling.md` (transport). Data channel messages: [`docs/protocol.md`](../docs/protocol.md).
 
 ## Files
 
@@ -18,7 +18,7 @@ Wire protocol (pairing, signaling, channels, input and control messages): [`docs
 | `js/keymap.js` | `KeyboardEvent.code` → USB HID usage |
 | `js/gamepad.js` | Gamepad API standard mapping → XInput state |
 | `js/stats.js` | Stats overlay numbers from `getStats()` and `requestVideoFrameCallback` |
-| `dev/` | Dev server (pairing API + `/signal` relay) and a mock host page (canvas + tone over real WebRTC) |
+| `dev/` | Dev server (pairing API + `/ws` relay) and a mock host page (canvas + tone over real WebRTC) |
 
 ## Using it
 

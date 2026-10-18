@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/proto",
+    "crates/nvenc-sys",
     "crates/capture",
     "crates/transport",
     "crates/input",
@@ -23,6 +24,7 @@ ws-capture = { path = "crates/capture" }
 ws-transport = { path = "crates/transport" }
 ws-input = { path = "crates/input" }
 ws-audio = { path = "crates/audio" }
+ws-nvenc-sys = { path = "crates/nvenc-sys" }
 
 anyhow = "1"
 bytes = { version = "1", features = ["serde"] }

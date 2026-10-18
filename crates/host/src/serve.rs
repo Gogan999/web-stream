@@ -20,6 +20,8 @@ commands: pair (let a browser pair for two minutes), unpair-all, drop (end the s
 pub async fn serve(opts: ServeOptions) -> anyhow::Result<()> {
     let mut config = SignalingConfig::new(opts.bind(), opts.data_dir.clone());
     config.web_root = opts.web_root.clone();
+    config.device_idle_expiry = opts.device_idle_expiry;
+    config.extra_origins = opts.extra_origins.clone();
     config.tls = match &opts.cert {
         Some((cert, key)) => TlsSource::Files {
             cert: cert.clone(),

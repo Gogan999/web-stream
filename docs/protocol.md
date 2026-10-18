@@ -16,7 +16,7 @@ Defined by the WebRTC transport thread in `docs/signaling.md`, which is authorit
 | `input` | ordered, reliable | keys, mouse buttons, wheel, gamepad disconnect, release-all |
 | `control` | ordered, reliable, JSON text | `ClientControl` / `HostControl` |
 
-The client sets `jitterBufferTarget = 0` on every receiver. It answers audio `recvonly` until the microphone is added; adding the mic is `replaceTrack` on that transceiver.
+The client sets `jitterBufferTarget = 0` on video receivers. It always answers audio `sendrecv`; the mic comes and goes with `replaceTrack` on that transceiver (no track: nothing is sent), alongside `{"type":"setMicEnabled","enabled":true|false}` on `control`, which the host refuses with an `error` when it runs with `--no-mic`.
 
 ## Input messages (`input`, `input-motion`)
 

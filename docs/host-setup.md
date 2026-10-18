@@ -32,7 +32,10 @@ code to type in the browser is printed here), `drop` ends the session,
 `unpair-all` forgets every paired browser, `quit` exits. `--pair` opens
 pairing at startup. `ws-host --help` lists the options: ports, public IPs for
 port forwarding, a real certificate, the starting display and stream
-settings, and turning the mic or game audio off.
+settings, and turning the mic or game audio off. A paired browser that hasn't
+connected for 30 days is unpaired (`--forget-after DAYS`). Behind a reverse
+proxy that rewrites the Host header, pass its address with `--allow-origin
+https://name` or the browser's requests are refused as cross-site.
 
 ## Connecting from outside your network
 
@@ -101,16 +104,19 @@ does not allow redistribution without permission).
    default output; game audio capture follows the default output, and making
    the cable the default would loop the mic back to the client.
 3. In each game or chat app, pick **CABLE Output** as the microphone.
+4. In the browser, tick **Mic**.
 
-Another cable works too: set `MicConfig::device` to part of its playback
-device name. If no device matches, the error lists the playback devices the
-host can see.
+Another cable works too: pass `--mic-device` with part of its playback
+device name (`ws-host audio-devices` lists them). If no device matches, the
+browser shows an error listing the playback devices the host can see.
+`--no-mic` turns the mic off on the host whatever the browser asks.
 
 ## Game audio
 
 Loopback capture follows the default output device, including when it changes
-mid-session. Any device format is accepted; it is converted to 48 kHz stereo
-and sent as 10 ms Opus packets at 128 kb/s.
+mid-session; `--audio-device NAME` captures a named output instead. Any device
+format is accepted; it is converted to 48 kHz stereo and sent as 10 ms Opus
+packets at 128 kb/s (`--audio-kbps` changes that, 32 to 510).
 
 ## Elevated windows and the secure desktop
 

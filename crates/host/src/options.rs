@@ -2,6 +2,7 @@
 
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::{Context, bail};
 use ws_proto::{DisplayId, VideoCodec, VideoConfig, VideoQuality};
@@ -9,6 +10,7 @@ use ws_proto::{DisplayId, VideoCodec, VideoConfig, VideoQuality};
 pub const USAGE: &str = "\
 ws-host [serve] [options]      run the host (the default)
 ws-host displays               list capturable displays
+ws-host audio-devices          list playback devices (for --mic-device, --audio-device)
 ws-host capture-test [...]     encode a display to a file, see --help there
 
 serve options:
@@ -20,6 +22,9 @@ serve options:
   --hostname NAME      extra name or IP for the self-signed certificate (repeatable)
   --cert FILE --key FILE   PEM certificate instead of a self-signed one
   --data-dir DIR       certificate and paired devices
+  --forget-after DAYS  unpair a browser unused for this long, default 30
+  --allow-origin URL   extra origin allowed to use the API, e.g. a reverse
+                       proxy's https://name (repeatable)
   --web-root DIR       web client to serve, default <exe dir>/web
   --display N          display to stream first, default the primary
   --codec h264|h265|av1  --size WxH  --fps F  --kbps K   stream settings
@@ -27,6 +32,9 @@ serve options:
   --mic-device NAME    playback device the browser mic plays into, default \"CABLE Input\"
   --no-mic             don't play the browser mic
   --no-audio           don't send game audio
+  --audio-device NAME  output device to capture game audio from, default the
+                       Windows default output (follows it when it changes)
+  --audio-kbps K       game audio Opus bitrate, 32-510, default 128
   --allow-resolution-change  let the browser change the streamed display's
                        resolution to match its screen (undone on disconnect)
   --pair               open pairing for two minutes at startup
@@ -41,6 +49,10 @@ pub struct ServeOptions {
     pub hostnames: Vec<String>,
     pub cert: Option<(PathBuf, PathBuf)>,
     pub data_dir: PathBuf,
+    /// A paired browser unused for this long is unpaired.
+    pub device_idle_expiry: Duration,
+    /// Origins besides the host's own allowed to call the API.
+    pub extra_origins: Vec<String>,
     pub web_root: Option<PathBuf>,
     pub media: MediaOptions,
     pub pair_at_start: bool,
@@ -54,6 +66,10 @@ pub struct MediaOptions {
     /// `None` disables the mic.
     pub mic_device: Option<String>,
     pub game_audio: bool,
+    /// Substring of the output device game audio is captured from; `None`
+    /// follows the default output.
+    pub audio_device: Option<String>,
+    pub audio_kbps: u32,
     /// The browser may change the host display's resolution.
     pub allow_resolution_change: bool,
 }
@@ -73,11 +89,15 @@ impl ServeOptions {
         let (mut cert, mut key) = (None, None);
         let mut data_dir = None;
         let mut web_root = None;
+        let mut forget_after_days = 30u32;
+        let mut extra_origins = Vec::new();
         let mut media = MediaOptions {
             display: None,
             video: VideoConfig::default(),
             mic_device: Some("CABLE Input".into()),
             game_audio: true,
+            audio_device: None,
+            audio_kbps: DEFAULT_AUDIO_KBPS,
             allow_resolution_change: false,
         };
         let mut no_mic = false;
@@ -99,6 +119,10 @@ impl ServeOptions {
                 "--key" => key = Some(PathBuf::from(value()?)),
                 "--data-dir" => data_dir = Some(PathBuf::from(value()?)),
                 "--web-root" => web_root = Some(PathBuf::from(value()?)),
+                "--forget-after" => {
+                    forget_after_days = value()?.parse().context("--forget-after")?
+                }
+                "--allow-origin" => extra_origins.push(parse_origin(value()?)?),
                 "--display" => {
                     media.display = Some(DisplayId(value()?.parse().context("--display")?))
                 }
@@ -114,6 +138,8 @@ impl ServeOptions {
                 "--mic-device" => media.mic_device = Some(value()?.clone()),
                 "--no-mic" => no_mic = true,
                 "--no-audio" => media.game_audio = false,
+                "--audio-device" => media.audio_device = Some(value()?.clone()),
+                "--audio-kbps" => media.audio_kbps = value()?.parse().context("--audio-kbps")?,
                 "--allow-resolution-change" => media.allow_resolution_change = true,
                 "--pair" => pair_at_start = true,
                 f => bail!("unknown flag {f}\n\n{USAGE}"),
@@ -137,6 +163,12 @@ impl ServeOptions {
                     .context("--port too high for ICE-TCP on port+1")?,
             })
         };
+        if !(32..=510).contains(&media.audio_kbps) {
+            bail!("--audio-kbps is 32 to 510");
+        }
+        if !(1..=3650).contains(&forget_after_days) {
+            bail!("--forget-after is 1 to 3650 days");
+        }
         let clamped = media.video.clamped();
         if clamped != media.video {
             bail!(
@@ -152,11 +184,28 @@ impl ServeOptions {
             hostnames,
             cert,
             data_dir: data_dir.unwrap_or_else(default_data_dir),
+            device_idle_expiry: Duration::from_secs(u64::from(forget_after_days) * 24 * 3600),
+            extra_origins,
             web_root: web_root.or_else(default_web_root),
             media,
             pair_at_start,
         })
     }
+}
+
+/// Opus bitrate for game audio, as `ws_audio::DEFAULT_BITRATE`.
+pub const DEFAULT_AUDIO_KBPS: u32 = 128;
+
+/// An origin as browsers send it: `https://name[:port]`, no path.
+fn parse_origin(s: &str) -> anyhow::Result<String> {
+    let s = s.trim_end_matches('/');
+    let Some(rest) = s.strip_prefix("https://") else {
+        bail!("--allow-origin {s:?}: must start with https://");
+    };
+    if rest.is_empty() || rest.contains(['/', '?', '#', '@', ' ']) {
+        bail!("--allow-origin {s:?}: give just https://name[:port]");
+    }
+    Ok(s.to_ascii_lowercase())
 }
 
 pub fn parse_codec(s: &str) -> anyhow::Result<VideoCodec> {
@@ -218,6 +267,10 @@ mod tests {
         assert!(o.media.game_audio && !o.pair_at_start);
         assert!(!o.media.allow_resolution_change);
         assert_eq!(o.media.video, VideoConfig::default());
+        assert_eq!(o.media.audio_device, None);
+        assert_eq!(o.media.audio_kbps * 1000, ws_audio::DEFAULT_BITRATE);
+        assert_eq!(o.device_idle_expiry, Duration::from_secs(30 * 24 * 3600));
+        assert!(o.extra_origins.is_empty());
     }
 
     #[test]
@@ -238,8 +291,20 @@ mod tests {
             "--allow-resolution-change",
             "--quality",
             "speed",
+            "--audio-device",
+            "Speakers",
+            "--audio-kbps",
+            "256",
+            "--forget-after",
+            "7",
+            "--allow-origin",
+            "https://Stream.example.net/",
         ])
         .unwrap();
+        assert_eq!(o.media.audio_device.as_deref(), Some("Speakers"));
+        assert_eq!(o.media.audio_kbps, 256);
+        assert_eq!(o.device_idle_expiry, Duration::from_secs(7 * 24 * 3600));
+        assert_eq!(o.extra_origins, vec!["https://stream.example.net"]);
         assert!(o.media.allow_resolution_change);
         assert_eq!(o.media.video.quality, VideoQuality::Speed);
         assert_eq!((o.port, o.ice_tcp_port), (9000, Some(9001)));
@@ -259,5 +324,9 @@ mod tests {
         assert!(parse(&["--port", "65535"]).is_err());
         assert!(parse(&["--bogus"]).is_err());
         assert!(parse(&["--quality", "max"]).is_err());
+        assert!(parse(&["--audio-kbps", "8"]).is_err());
+        assert!(parse(&["--forget-after", "0"]).is_err());
+        assert!(parse(&["--allow-origin", "http://x.example"]).is_err());
+        assert!(parse(&["--allow-origin", "https://x.example/path"]).is_err());
     }
 }

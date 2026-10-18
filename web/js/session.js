@@ -48,6 +48,7 @@ export class Session extends EventTarget {
     this.channels = {};
     this.closed = false;
     this.restarts = 0;
+    this.micTrack = null; // sent on the audio transceiver while set
   }
 
   status(text, state) {
@@ -116,12 +117,23 @@ export class Session extends EventTarget {
     await pc.setRemoteDescription({ type: 'offer', sdp });
     for (const t of pc.getTransceivers()) {
       minimizePlayout(t.receiver);
-      // Mic is not wired up yet; receive game audio only.
-      if (t.receiver.track.kind === 'audio') t.direction = 'recvonly';
+      // Audio is always answered sendrecv so the mic can come and go with replaceTrack, without a new
+      // offer; with no track the browser sends nothing.
+      if (t.receiver.track.kind === 'audio') {
+        t.direction = 'sendrecv';
+        await t.sender.replaceTrack(this.micTrack);
+      }
     }
     const answer = await pc.createAnswer();
     await pc.setLocalDescription({ type: 'answer', sdp: withStereoOpus(answer.sdp) });
     this.signal.send({ type: 'answer', sdp: pc.localDescription.sdp });
+  }
+
+  // Sends `track` (or nothing, for null) as the mic, now and on any later peer connection.
+  async setMicTrack(track) {
+    this.micTrack = track;
+    const t = this.pc?.getTransceivers().find((x) => x.receiver.track.kind === 'audio');
+    if (t) await t.sender.replaceTrack(track).catch(() => {}); // a closed connection gets it on the next one
   }
 
   restart() {

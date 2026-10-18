@@ -13,7 +13,7 @@ test('client streams from mock host, sends input and switches display', { timeou
   t.after(() => server.kill());
   await new Promise((r) => server.stdout.once('data', r));
 
-  const browser = await chromium.launch({ args: ['--autoplay-policy=no-user-gesture-required', '--disable-background-timer-throttling', '--disable-renderer-backgrounding', '--disable-backgrounding-occluded-windows'] });
+  const browser = await chromium.launch({ args: ['--autoplay-policy=no-user-gesture-required', '--disable-background-timer-throttling', '--disable-renderer-backgrounding', '--disable-backgrounding-occluded-windows', '--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream'] });
   t.after(() => browser.close());
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 } });
 
@@ -50,7 +50,7 @@ test('client streams from mock host, sends input and switches display', { timeou
 
   const hostLog = () => host.evaluate(() => window.mockLog);
 
-  // Low-latency playout on every receiver; mic is not wired up yet, so audio is answered recvonly.
+  // Low-latency playout on every receiver; audio is answered sendrecv so the mic can be added later.
   const pcInfo = await client.evaluate(() => {
     const pc = window.__pcs.at(-1);
     return {
@@ -63,7 +63,7 @@ test('client streams from mock host, sends input and switches display', { timeou
   assert.equal(pcInfo.jbt.video, 0);
   assert.equal(pcInfo.jbt.audio, null);
   assert.ok(pcInfo.stereo);
-  assert.equal(pcInfo.audioDir, 'recvonly');
+  assert.equal(pcInfo.audioDir, 'sendrecv');
 
   // Host-opened channels with the agreed reliability.
   await host.waitForFunction(() => window.mockLog.filter((e) => e.ev === 'channel').length === 4);
@@ -94,6 +94,16 @@ test('client streams from mock host, sends input and switches display', { timeou
   await host.waitForFunction(() => window.mockLog.some((e) => e.type === 'setHostResolution'));
   await client.waitForFunction(() => /allow-resolution-change/.test(document.getElementById('status').textContent));
   await client.uncheck('#match-host');
+
+  // Mic: off by default (the host is told so), on sends audio and tells the host.
+  await host.waitForFunction(() => window.mockLog.some((e) => e.type === 'setMicEnabled' && e.enabled === false));
+  assert.equal(await host.evaluate(() => window.mockMicPackets()), 0);
+  await client.check('#mic');
+  await host.waitForFunction(() => window.mockLog.some((e) => e.type === 'setMicEnabled' && e.enabled === true));
+  await host.waitForFunction(async () => (await window.mockMicPackets()) > 10, null, { timeout: 10000, polling: 250 });
+  await client.uncheck('#mic');
+  await host.waitForFunction(() => window.mockLog.filter((e) => e.type === 'setMicEnabled' && e.enabled === false).length === 2);
+  assert.equal(await client.evaluate(() => window.__pcs.at(-1).getSenders().find((x) => x.track)?.track ?? null), null);
 
   // Absolute mouse + keyboard.
   await client.selectOption('#mouse-mode', 'absolute');

@@ -9,7 +9,7 @@ export const FRAME_RATES = Object.freeze([30, 60, 90, 120, 144]);
 export const RESOLUTIONS = Object.freeze(['screen', 'native', '2160', '1440', '1080', '720']);
 
 export const DEFAULTS = Object.freeze({
-  bitrate: 'auto', resolution: 'screen', fps: 60, quality: 'balanced', matchHost: false,
+  bitrate: 'auto', resolution: 'screen', fps: 60, quality: 'balanced', matchHost: false, mic: false,
 });
 
 const STORAGE_KEY = 'ws-stream-settings';
@@ -73,6 +73,7 @@ export function sanitize(saved) {
     fps: FRAME_RATES.includes(Number(v.fps)) ? Number(v.fps) : DEFAULTS.fps,
     quality: QUALITIES.includes(v.quality) ? v.quality : DEFAULTS.quality,
     matchHost: v.matchHost === true,
+    mic: v.mic === true,
   };
 }
 

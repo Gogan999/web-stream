@@ -1,5 +1,19 @@
 # Host setup (Windows)
 
+`scripts\install.ps1` installs the build dependencies (Visual Studio Build
+Tools with the C++ tools and Windows SDK, CMake, Rust) through winget and
+builds the host; add `-GamepadDriver` for ViGEmBus:
+
+```
+powershell -ExecutionPolicy Bypass -File scripts\install.ps1
+```
+
+On a PC without the repository it clones it into `%USERPROFILE%\web-stream`:
+
+```
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Gogan999/web-stream/main/scripts/install.ps1)))
+```
+
 ## Running the host
 
 ```

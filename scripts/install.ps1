@@ -1,0 +1,189 @@
+<#
+.SYNOPSIS
+    Installs what web-stream needs to build on Windows, then builds ws-host.
+
+.DESCRIPTION
+    Installs, through winget and only when missing:
+      - Visual Studio 2022 Build Tools with the C++ tools and a Windows SDK
+        (the MSVC linker and the C compiler for the bundled C libraries)
+      - CMake (builds libopus and aws-lc)
+      - Rust through rustup (stable, msvc)
+      - Git, only when the repository has to be cloned
+      - ViGEmBus, the gamepad driver, with -GamepadDriver
+    Then runs `cargo build --release -p ws-host`.
+
+    Run it from a checkout:
+        powershell -ExecutionPolicy Bypass -File scripts\install.ps1
+    or on a PC without the repository, which clones it into -Dir:
+        & ([scriptblock]::Create((irm https://raw.githubusercontent.com/Gogan999/web-stream/main/scripts/install.ps1)))
+    Options go at the end of either line, e.g. -GamepadDriver.
+
+    Installing the Build Tools asks for administrator rights once (UAC).
+    Running the script again is safe; anything already present is skipped.
+
+.PARAMETER Dir
+    Where to clone the repository when the script is not run from a checkout.
+
+.PARAMETER GamepadDriver
+    Also install the ViGEmBus driver for virtual gamepads.
+
+.PARAMETER Run
+    Start the host with pairing open after the build.
+#>
+[CmdletBinding()]
+param(
+    [string]$Dir = (Join-Path $HOME 'web-stream'),
+    [switch]$GamepadDriver,
+    [switch]$Run
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+$RepoUrl = 'https://github.com/Gogan999/web-stream.git'
+# winget's "already installed" result.
+$WingetAlreadyInstalled = -1978335189
+$VcComponent = 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64'
+$SdkComponent = 'Microsoft.VisualStudio.Component.Windows11SDK.22621'
+$VsWhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+$VsSetup = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\setup.exe'
+
+function Write-Step([string]$Message) {
+    Write-Host "==> $Message" -ForegroundColor Cyan
+}
+
+function Update-SessionPath {
+    $machine = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+    $user = [Environment]::GetEnvironmentVariable('Path', 'User')
+    $env:Path = "$machine;$user;$(Join-Path $HOME '.cargo\bin')"
+}
+
+function Test-Command([string]$Name) {
+    [bool](Get-Command $Name -ErrorAction SilentlyContinue)
+}
+
+function Install-WingetPackage([string]$Id, [string[]]$Extra = @()) {
+    Write-Step "Installing $Id"
+    $wingetArgs = @('install', '--exact', '--id', $Id, '--source', 'winget',
+        '--accept-package-agreements', '--accept-source-agreements') + $Extra
+    # Out-Host keeps winget's output off the pipeline of the calling function.
+    & winget @wingetArgs | Out-Host
+    if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne $WingetAlreadyInstalled) {
+        throw "winget could not install $Id (exit code $LASTEXITCODE)."
+    }
+    Update-SessionPath
+}
+
+function Get-VsWithCpp {
+    if (-not (Test-Path $VsWhere)) { return $null }
+    & $VsWhere -latest -products * -requires $VcComponent -property installationPath
+}
+
+function Test-WindowsSdk {
+    $kits = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\Lib'
+    [bool](Get-ChildItem -Path $kits -Filter kernel32.lib -Recurse -ErrorAction SilentlyContinue |
+        Where-Object { $_.FullName -match '[\\/]um[\\/]x64[\\/]' } | Select-Object -First 1)
+}
+
+function Install-BuildTools {
+    if ((Get-VsWithCpp) -and (Test-WindowsSdk)) {
+        Write-Step 'Visual Studio C++ tools and Windows SDK found'
+        return
+    }
+
+    $existing = $null
+    if (Test-Path $VsWhere) {
+        $existing = & $VsWhere -latest -products * -property installationPath
+    }
+    if ($existing) {
+        # Visual Studio is there but lacks the C++ tools or the SDK: add them.
+        Write-Step "Adding the C++ tools and Windows SDK to $existing"
+        $p = Start-Process -FilePath $VsSetup -Wait -PassThru -Verb RunAs -ArgumentList @(
+            'modify', '--installPath', "`"$existing`"",
+            '--add', $VcComponent, '--add', $SdkComponent,
+            '--passive', '--norestart')
+        if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) {
+            throw "The Visual Studio installer failed (exit code $($p.ExitCode))."
+        }
+    } else {
+        Install-WingetPackage 'Microsoft.VisualStudio.2022.BuildTools' @('--override',
+            '--wait --passive --norestart --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended')
+    }
+
+    if (-not ((Get-VsWithCpp) -and (Test-WindowsSdk))) {
+        throw 'The C++ Build Tools or Windows SDK are still missing. Reboot and run this script again.'
+    }
+}
+
+function Install-CMake {
+    if (Test-Command cmake) {
+        Write-Step 'CMake found'
+        return
+    }
+    Install-WingetPackage 'Kitware.CMake' @('--silent')
+    if (-not (Test-Command cmake)) {
+        # The installer adds CMake to the machine PATH; fall back to its default folder.
+        $env:Path += ";$(Join-Path $env:ProgramFiles 'CMake\bin')"
+    }
+    if (-not (Test-Command cmake)) { throw 'CMake was installed but is not on PATH.' }
+}
+
+function Install-Rust {
+    if (-not (Test-Command rustup)) {
+        Install-WingetPackage 'Rustlang.Rustup' @('--silent')
+    }
+    if (-not (Test-Command rustup)) { throw 'rustup was installed but is not on PATH.' }
+    Write-Step 'Installing the stable Rust toolchain'
+    & rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+    if ($LASTEXITCODE -ne 0) { throw 'rustup could not install the stable toolchain.' }
+}
+
+function Get-RepoRoot {
+    if ($PSScriptRoot) {
+        $root = Split-Path -Parent $PSScriptRoot
+        if (Test-Path (Join-Path $root 'Cargo.toml')) { return $root }
+    }
+    if (Test-Path (Join-Path $Dir 'Cargo.toml')) { return $Dir }
+
+    if (-not (Test-Command git)) { Install-WingetPackage 'Git.Git' @('--silent') }
+    Write-Step "Cloning $RepoUrl into $Dir"
+    & git clone $RepoUrl $Dir | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw 'git clone failed.' }
+    return $Dir
+}
+
+if (-not (Test-Command winget)) {
+    throw 'winget is missing. Install "App Installer" from the Microsoft Store, then run this script again.'
+}
+
+Update-SessionPath
+$repo = Get-RepoRoot
+Install-BuildTools
+Install-CMake
+Install-Rust
+if ($GamepadDriver) { Install-WingetPackage 'ViGEm.ViGEmBus' @('--silent') }
+
+Write-Step 'Building ws-host (release)'
+Push-Location $repo
+try {
+    & cargo build --release -p ws-host
+    if ($LASTEXITCODE -ne 0) { throw 'cargo build failed.' }
+} finally {
+    Pop-Location
+}
+
+$exe = Join-Path $repo 'target\release\ws-host.exe'
+Write-Host ''
+Write-Host "Built $exe" -ForegroundColor Green
+Write-Host 'Start the host from the repository folder with:'
+Write-Host "    cd `"$repo`""
+Write-Host '    target\release\ws-host.exe --pair --web-root web'
+if (-not $GamepadDriver) {
+    Write-Host 'Gamepads need ViGEmBus: run this script again with -GamepadDriver.'
+}
+Write-Host 'The browser mic needs VB-CABLE (https://vb-audio.com/Cable/); see docs\host-setup.md.'
+
+if ($Run) {
+    Push-Location $repo
+    try { & $exe --pair --web-root web } finally { Pop-Location }
+}

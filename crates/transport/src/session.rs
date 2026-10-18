@@ -397,6 +397,7 @@ impl Session {
     /// Drain everything str0m has to say until it only has a timeout left.
     pub fn poll(&mut self, out: &mut Vec<Step>) -> Instant {
         let mut early = 0;
+        let mut fed: Option<Instant> = None;
         loop {
             match self.rtc.poll_output() {
                 Ok(Output::Timeout(t)) => {
@@ -406,11 +407,18 @@ impl Session {
                     // about one per tick: some 10 Mb/s. Run timeouts that
                     // are almost due now instead.
                     let now = Instant::now();
-                    if t > now + TIMER_SLACK || early == MAX_EARLY_TIMEOUTS {
+                    // Not past a time already fed: str0m's clock can't go
+                    // back, so feeding it again would change nothing.
+                    if t > now + TIMER_SLACK
+                        || early == MAX_EARLY_TIMEOUTS
+                        || fed.is_some_and(|f| t <= f)
+                    {
                         return t;
                     }
                     early += 1;
-                    if let Err(e) = self.rtc.handle_input(Input::Timeout(t.max(now))) {
+                    let at = t.max(now);
+                    fed = Some(at);
+                    if let Err(e) = self.rtc.handle_input(Input::Timeout(at)) {
                         tracing::debug!("rtc timeout: {e}");
                         return t;
                     }

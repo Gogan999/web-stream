@@ -289,8 +289,16 @@ async fn offer_advertises_public_addresses() {
     );
 }
 
-/// Ceiling for the timed tests whose peer reads one datagram per wakeup.
-const PEER_MAX_BPS: u64 = 12_000_000;
+/// The browser's bitrate setting in the timed tests, which also caps the
+/// encoder there. The str0m peer only NACKs a packet while it is within 100
+/// packets of the newest (Chrome: 1000), so at higher rates a lost resend
+/// falls out of its window before it asks again, and every frame after it
+/// is held for good (a browser would ask for a keyframe). Those tests are
+/// about the send queue and resends, not throughput.
+const PEER_VIDEO_BPS: u64 = 8_000_000;
+/// The transport's ceiling for [`PEER_VIDEO_BPS`], as the host sets it
+/// (media.rs set_ceiling: the setting over the headroom, plus audio).
+const PEER_MAX_BPS: u64 = PEER_VIDEO_BPS * 100 / 75 + 500_000;
 
 /// A frame of `bytes` total (Annex B, H.264 slice) for the load test.
 fn sized_frame(index: u64, keyframe: bool, bytes: usize) -> EncodedFrame {
@@ -332,8 +340,6 @@ async fn full_frames_at_the_target_bitrate_need_almost_no_keyframes() {
         ips: vec![[127, 0, 0, 1].into()],
         udp_port: 0,
         tcp_port: None,
-        // This peer reads one datagram per wakeup, which tops out not far
-        // above this; past it the peer, not the transport, loses packets.
         max_bitrate_bps: PEER_MAX_BPS,
         ..Default::default()
     })
@@ -388,7 +394,7 @@ async fn full_frames_at_the_target_bitrate_need_almost_no_keyframes() {
                 TransportEvent::TargetBitrate(bps) => {
                     // As the host (media.rs worth_changing): follow the
                     // estimate down in steps of at least 2%, up in 10%.
-                    let target = bps * HEADROOM_PCT / 100;
+                    let target = (bps * HEADROOM_PCT / 100).min(PEER_VIDEO_BPS);
                     let step = if target < encoder_bps { 50 } else { 10 };
                     if target.abs_diff(encoder_bps) * step >= encoder_bps {
                         encoder_bps = target;
@@ -460,8 +466,6 @@ async fn lost_packets_are_resent_not_keyframed() {
         ips: vec![[127, 0, 0, 1].into()],
         udp_port: 0,
         tcp_port: None,
-        // This peer reads one datagram per wakeup, which tops out not far
-        // above this; past it the peer, not the transport, loses packets.
         max_bitrate_bps: PEER_MAX_BPS,
         ..Default::default()
     })
@@ -526,7 +530,7 @@ async fn lost_packets_are_resent_not_keyframed() {
                 TransportEvent::TargetBitrate(bps) => {
                     // As the host (media.rs worth_changing): follow the
                     // estimate down in steps of at least 2%, up in 10%.
-                    let target = bps * HEADROOM_PCT / 100;
+                    let target = (bps * HEADROOM_PCT / 100).min(PEER_VIDEO_BPS);
                     let step = if target < encoder_bps { 50 } else { 10 };
                     if target.abs_diff(encoder_bps) * step >= encoder_bps {
                         encoder_bps = target;

@@ -19,11 +19,13 @@
 mod net;
 mod session;
 
-use std::net::IpAddr;
+use std::collections::HashSet;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use str0m::net::Protocol;
 use tokio::sync::{Notify, mpsc, oneshot};
 use ws_proto::{AudioPacket, EncodedFrame};
 
@@ -224,6 +226,7 @@ impl Transport {
             config,
             net,
             filter,
+            confirmed: HashSet::new(),
             candidates,
             session: None,
             shared: shared.clone(),
@@ -326,6 +329,8 @@ struct Driver {
     net: Net,
     candidates: Vec<str0m::Candidate>,
     filter: SharedFilter,
+    /// UDP destinations already reported to `filter` as confirmed.
+    confirmed: HashSet<SocketAddr>,
     session: Option<Session>,
     shared: Arc<Shared>,
     steps: Vec<Step>,
@@ -395,6 +400,12 @@ impl Driver {
                     destination,
                     data,
                 } => {
+                    if proto == Protocol::Udp && self.confirmed.insert(destination) {
+                        self.filter
+                            .lock()
+                            .expect("filter lock")
+                            .confirm(destination);
+                    }
                     self.net.send(proto, source, destination, &data);
                 }
                 Step::Event(ev) => match ev {
@@ -429,6 +440,7 @@ impl Driver {
         }
         self.shared.connected.store(false, Ordering::Relaxed);
         self.filter.lock().expect("filter lock").reset(None);
+        self.confirmed.clear();
     }
 
     fn command(&mut self, cmd: Cmd) {

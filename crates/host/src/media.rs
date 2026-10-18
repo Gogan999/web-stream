@@ -27,6 +27,7 @@ use crate::input::InputThread;
 use crate::options::MediaOptions;
 use crate::platform;
 use crate::serve::Event;
+use crate::uploads::{self, UploadMsg, UploadSession};
 
 /// Encoded frames waiting for the transport. The transport keeps only the
 /// newest frame anyway; a full channel makes the encoder drop and send a
@@ -258,6 +259,7 @@ struct Live {
     input: Option<InputThread>,
     _cursor: CursorSession,
     files: FileSession,
+    uploads: UploadSession,
     video: Option<Video>,
     /// Held only to keep game audio capture running.
     audio: Option<platform::Loopback>,
@@ -292,6 +294,11 @@ impl Media {
                 data,
             } => match channel {
                 channels::CONTROL if !binary => self.control(&data),
+                channels::FILE if binary => {
+                    if let Some(live) = &self.live {
+                        live.uploads.send(UploadMsg::Data(data));
+                    }
+                }
                 channels::INPUT | channels::INPUT_MOTION => {
                     if let Some(input) = self.live.as_ref().and_then(|l| l.input.as_ref()) {
                         input.send(&data);
@@ -314,6 +321,10 @@ impl Media {
                 tracing::debug!(channel = c, "channel open");
                 if c == channels::CONTROL {
                     self.control_open = true;
+                    self.reply(HostControl::Uploads {
+                        enabled: self.opts.upload_dir.is_some(),
+                        max_size: uploads::MAX_SIZE,
+                    });
                     for msg in std::mem::take(&mut self.unsent) {
                         self.reply(msg);
                     }
@@ -380,10 +391,16 @@ impl Media {
             self.control_tx.clone(),
             self.host_events.clone(),
         );
+        let uploads = UploadSession::start(
+            self.opts.upload_dir.clone(),
+            self.control_tx.clone(),
+            self.host_events.clone(),
+        );
         self.live = Some(Live {
             input,
             _cursor: cursor,
             files,
+            uploads,
             video: None,
             audio,
             mic: None,
@@ -635,6 +652,10 @@ impl Media {
             ClientControl::RequestFile { id } => self.to_files(FileMsg::Request(id)),
             ClientControl::FileAck { id, received } => self.to_files(FileMsg::Ack { id, received }),
             ClientControl::CancelFile { id } => self.to_files(FileMsg::Cancel(id)),
+            ClientControl::UploadFile { id, name, size } => {
+                self.to_uploads(UploadMsg::Offer { id, name, size })
+            }
+            ClientControl::CancelUpload { id } => self.to_uploads(UploadMsg::Cancel(id)),
             ClientControl::SetCursorPositions { enabled } => {
                 self.cursor_target.send_if_modified(|t| {
                     let changed = t.positions != enabled;
@@ -651,6 +672,12 @@ impl Media {
     fn to_files(&self, msg: FileMsg) {
         if let Some(live) = &self.live {
             live.files.send(msg);
+        }
+    }
+
+    fn to_uploads(&self, msg: UploadMsg) {
+        if let Some(live) = &self.live {
+            live.uploads.send(msg);
         }
     }
 

@@ -84,4 +84,20 @@ The host opens each file when it is shared and reads only that handle, so renami
 
 The browser saves with Chrome's save dialog, writing to disk as the bytes arrive. Without that API (Chrome on Android) it collects the file in memory, up to 512 MiB, and hands it to the browser's downloads.
 
+### Browser to host
+
+Off unless the host runs with `--allow-upload` (the tray app's "let the browser send files to this PC"). Files go to `--upload-dir`, by default `Downloads\web-stream` in the host user's profile.
+
+| Direction | Message |
+|---|---|
+| host → browser | `{"type":"uploads","enabled":true,"maxSize":4294967296}` when the control channel opens. The browser shows **Send files…** and takes dropped files only when enabled. |
+| browser → host | `{"type":"uploadFile","id":1,"name":"save.dat","size":123456}`. `id` is the browser's own, new for each file. One file at a time: the next is offered after this one is saved or failed. |
+| host → browser | `{"type":"uploadAccepted","id":1}`, then the browser sends the bytes on `file` as above (same header), at most 1 MiB past the host's last ack. |
+| host → browser | `{"type":"uploadAck","id":1,"received":262144}` every 256 KiB written, and at the end. |
+| host → browser | `{"type":"uploadSaved","id":1,"name":"save (2).dat"}`: the name it was saved under. |
+| host → browser | `{"type":"uploadFailed","id":1,"message":"…"}`: refused (off, too big, another file still coming) or broken off. Nothing is kept. |
+| browser → host | `{"type":"cancelUpload","id":1}` stops it; the host deletes what it has. |
+
+The browser's name is only a suggestion. The host keeps the bare name, replaces what Windows would read as a path, a stream (`:`) or a wildcard, prefixes device names (`CON`, `COM1`…), drops trailing dots and spaces, and never overwrites: a taken name becomes `name (2).ext`. Bytes go to `name.part`, renamed when complete; a cancel, a gap in the offsets, too many bytes, a write error or a disconnect deletes it. On Windows the saved file gets a Mark of the Web (`Zone.Identifier`, internet zone), so SmartScreen and Office treat it as a download. The host never opens what it receives.
+
 The video carries no pointer. In absolute mouse mode the browser sets the video's CSS `cursor` from `cursorShape` (its own cursor for standard kinds, the host image for `custom`), so it moves with no added latency. In relative mode pointer lock hides the browser's pointer, so it draws the host image over the video at `cursorPosition`.

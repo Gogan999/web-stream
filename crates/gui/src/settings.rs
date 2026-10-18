@@ -38,6 +38,10 @@ pub struct Settings {
     pub mic: bool,
     pub mic_device: String,
     pub allow_resolution_change: bool,
+    /// Let the browser send files to this PC.
+    pub allow_upload: bool,
+    /// Where they go; empty: `Downloads\web-stream`.
+    pub upload_dir: String,
     /// More `ws-host` options, for what the window has no field for.
     pub extra_args: String,
     /// Start hosting as soon as the app opens.
@@ -64,6 +68,8 @@ impl Default for Settings {
             mic: true,
             mic_device: "auto".into(),
             allow_resolution_change: false,
+            allow_upload: false,
+            upload_dir: String::new(),
             extra_args: String::new(),
             start_hosting: true,
         }
@@ -137,6 +143,13 @@ impl Settings {
         }
         if self.allow_resolution_change {
             args.push("--allow-resolution-change".into());
+        }
+        if self.allow_upload {
+            args.push("--allow-upload".into());
+            let dir = self.upload_dir.trim();
+            if !dir.is_empty() {
+                args.extend(["--upload-dir".into(), dir.into()]);
+            }
         }
         args.extend(split_args(&self.extra_args)?);
         Ok(args)
@@ -217,6 +230,8 @@ mod tests {
             mic: false,
             game_audio: false,
             allow_resolution_change: true,
+            allow_upload: true,
+            upload_dir: "D:\\Received files".into(),
             audio_kbps: 256,
             audio_frame_ms: 20,
             extra_args: r#"--hostname home.example.net --data-dir "C:\some dir""#.into(),
@@ -228,6 +243,10 @@ mod tests {
         assert_eq!(o.media.display.map(|d| d.0), Some(2));
         assert_eq!(o.media.mic_device, None);
         assert!(!o.media.game_audio && o.media.allow_resolution_change);
+        assert_eq!(
+            o.media.upload_dir,
+            Some(std::path::PathBuf::from("D:\\Received files"))
+        );
         assert_eq!((o.media.audio_kbps, o.media.audio_frame_ms), (256, 20));
         assert_eq!(o.hostnames, vec!["home.example.net".to_string()]);
         assert_eq!(o.data_dir, std::path::PathBuf::from(r"C:\some dir"));

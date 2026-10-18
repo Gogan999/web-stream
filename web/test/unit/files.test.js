@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { Files, parseChunk, safeName, formatSize, ACK_EVERY, HEADER, BLOB_MAX } from '../../js/files.js';
+import { Files, Uploads, parseChunk, safeName, formatSize, ACK_EVERY, HEADER, BLOB_MAX, WINDOW, CHUNK } from '../../js/files.js';
 
 function chunk(id, offset, bytes) {
   const buf = new ArrayBuffer(HEADER + bytes.length);
@@ -117,4 +117,54 @@ test('closing the save dialog does nothing', async () => {
   await files.save(4);
   assert.equal(sent.length, 0);
   assert.equal(files.files.get(4).state, 'offered');
+});
+
+function uploadSetup() {
+  const sent = [];
+  const chunks = [];
+  let buffered = 0;
+  const u = new Uploads({
+    sendControl: (m) => sent.push(m),
+    sendFile: (b) => { chunks.push(parseChunk(b)); return true; },
+    fileBuffered: () => buffered,
+    sleep: () => new Promise((r) => setTimeout(r, 1)),
+  });
+  return { u, sent, chunks, setBuffered: (n) => { buffered = n; } };
+}
+
+const until = async (f) => { for (let i = 0; i < 500 && !f(); i++) await new Promise((r) => setTimeout(r, 2)); assert.ok(f()); };
+
+test('uploads wait for the host to allow them, then go one at a time within the window', async () => {
+  const { u, sent, chunks } = uploadSetup();
+  const big = new Blob([new Uint8Array(WINDOW + 3 * CHUNK).fill(7)]);
+  u.add([Object.assign(big, { name: 'x' })]);
+  assert.equal(u.list().length, 0, 'nothing until the host takes files');
+  u.onControl({ type: 'uploads', enabled: true, maxSize: 10 * WINDOW });
+  const a = new File([big], 'C:\\dir\\a.bin');
+  const b = new File(['hi'], 'b.txt');
+  u.add([a, b]);
+  assert.deepEqual(sent, [{ type: 'uploadFile', id: 1, name: 'a.bin', size: a.size }]);
+  u.onControl({ type: 'uploadAccepted', id: 1 });
+  await until(() => chunks.length === WINDOW / CHUNK);
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(chunks.length, WINDOW / CHUNK, 'stops at the window');
+  assert.ok(chunks.every((c, i) => c.id === 1 && c.offset === i * CHUNK));
+  u.onControl({ type: 'uploadAck', id: 1, received: WINDOW });
+  await until(() => chunks.length === WINDOW / CHUNK + 3);
+  u.onControl({ type: 'uploadSaved', id: 1, name: 'a (2).bin' });
+  assert.equal(u.items.get(1).savedAs, 'a (2).bin');
+  assert.deepEqual(sent.at(-1), { type: 'uploadFile', id: 2, name: 'b.txt', size: 2 });
+  u.onControl({ type: 'uploadFailed', id: 2, message: 'disk full' });
+  assert.equal(u.items.get(2).error, 'disk full');
+});
+
+test('uploads over the host limit fail at once; cancel tells the host', async () => {
+  const { u, sent } = uploadSetup();
+  u.onControl({ type: 'uploads', enabled: true, maxSize: 1 });
+  u.add([new File(['too big'], 'big.txt'), new File(['x'], 'ok.txt')]);
+  assert.equal(u.items.get(1).state, 'failed');
+  assert.equal(sent.at(-1).name, 'ok.txt');
+  u.cancel(2);
+  assert.deepEqual(sent.at(-1), { type: 'cancelUpload', id: 2 });
+  assert.equal(u.items.get(2).state, 'failed');
 });

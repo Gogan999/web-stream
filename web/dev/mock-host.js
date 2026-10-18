@@ -136,11 +136,12 @@ async function offer() {
           channel.send(JSON.stringify({ type: 'micUnavailable', message: 'the host has the mic turned off (--no-mic)' }));
         }
         if (c.type === 'requestFile') sendFile(c.id);
+        if (c.type === 'uploadFile') receiving.set(c.id, { name: c.name, size: c.size, parts: [], received: 0 }), channel.send(JSON.stringify({ type: 'uploadAccepted', id: c.id }));
         if (c.type === 'setHostResolution') {
           channel.send(JSON.stringify({ type: 'error', message: "the host doesn't allow changing its resolution; start it with --allow-resolution-change" }));
         }
       } else {
-        if (channel.label === 'file') return;
+        if (channel.label === 'file') { receive(m.data); return; }
         write({ ev: 'input', ch: channel.label, ...decode(m.data) });
       }
     };
@@ -211,5 +212,24 @@ function sendFile(id) {
     v.setBigUint64(8, BigInt(offset));
     msg.set(part, 16);
     window.__file.send(msg.buffer);
+  }
+}
+
+// Files from the client, when a test turns uploads on: { name: text } once complete.
+const receiving = new Map();
+window.mockUploaded = {};
+function receive(buf) {
+  const v = new DataView(buf);
+  const id = Number(v.getBigUint64(0));
+  const offset = Number(v.getBigUint64(8));
+  const up = receiving.get(id);
+  if (!up || offset !== up.received) return;
+  up.parts.push(new Uint8Array(buf, 16));
+  up.received += buf.byteLength - 16;
+  if (up.received === up.size) {
+    receiving.delete(id);
+    window.mockUploaded[up.name] = new TextDecoder().decode(new Uint8Array(up.parts.flatMap((p) => [...p])));
+    window.__control.send(JSON.stringify({ type: 'uploadAck', id, received: up.size }));
+    window.__control.send(JSON.stringify({ type: 'uploadSaved', id, name: up.name }));
   }
 }

@@ -32,7 +32,9 @@ The window shows:
   files to it (or drop files on the window). The browser shows them under
   **Files** and saves one when you click **Save** there. Shared files are
   listed with their progress and **Stop sharing**, and forgotten when the
-  browser disconnects;
+  browser disconnects. With "let the browser send files to this PC" on in
+  Settings, the browser can send files the other way; they land in
+  `Downloads\web-stream` (or the folder set there), linked from here;
 - **Pair a browser**, which opens pairing for two minutes. The code to type
   in the browser appears here in large digits, and the window comes forward
   by itself when a browser asks for one. **Forget paired browsers** removes
@@ -84,7 +86,8 @@ at the same time; they use the same ports.
 The console takes a few commands: `pair` opens pairing for two minutes (the
 code to type in the browser is printed here), `drop` ends the session,
 `unpair-all` forgets every paired browser, `send <path>` offers a file to
-the connected browser, `quit` exits. `--pair` opens
+the connected browser, `quit` exits. `--allow-upload` lets the browser send
+files to `--upload-dir` (default `Downloads\web-stream`). `--pair` opens
 pairing at startup. `ws-host --help` lists the options: ports, public IPs for
 port forwarding, a real certificate, the starting display and stream
 settings, and turning the mic or game audio off. The tray app's settings

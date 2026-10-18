@@ -18,9 +18,15 @@
   <button id="fullscreen" type="button">Fullscreen</button>
   <button id="files-toggle" type="button" aria-expanded="false" aria-controls="files" aria-haspopup="true" hidden>Files</button>
   <div id="files" class="panel" role="group" aria-label="Files from the host">
-    <section>
+    <section id="from-host">
       <h2>Files from the host</h2>
-      <ul id="file-list"></ul>
+      <ul id="file-list" class="file-list"></ul>
+    </section>
+    <section id="to-host" hidden>
+      <h2>Send to the host</h2>
+      <button id="upload-pick" type="button" title="The host saves them in its folder for received files. You can also drop files on the stream.">Send files…</button>
+      <input id="upload-input" type="file" multiple hidden>
+      <ul id="upload-list" class="file-list"></ul>
     </section>
   </div>
   <button id="more-toggle" type="button" aria-expanded="false" aria-controls="more" aria-haspopup="true">Settings ▾</button>

@@ -73,6 +73,12 @@ pub enum FileEvent {
     Withdrawn { id: FileId, name: String },
     /// The browser left: nothing is on offer any more.
     Cleared,
+    /// The browser is sending a file, saved as `name` (see `uploads.rs`).
+    Receiving { name: String, size: u64 },
+    /// A file from the browser is complete.
+    Received { name: String, path: PathBuf },
+    /// A file from the browser was refused or broke off; nothing was kept.
+    ReceiveFailed { name: String, message: String },
 }
 
 /// What the host user asks for.

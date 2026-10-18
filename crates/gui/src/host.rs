@@ -177,6 +177,13 @@ impl State {
             }
             FileEvent::Withdrawn { id, .. } => self.shared.retain(|f| f.id != id),
             FileEvent::Cleared => self.shared.clear(),
+            FileEvent::Receiving { name, .. } => {
+                self.log(format!("receiving {name:?} from the browser"))
+            }
+            FileEvent::Received { path, .. } => self.log(format!("received {}", path.display())),
+            FileEvent::ReceiveFailed { name, message } => {
+                self.log(format!("receiving {name:?} failed: {message}"))
+            }
         }
     }
 

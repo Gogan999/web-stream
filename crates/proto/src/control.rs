@@ -98,6 +98,21 @@ pub enum ClientControl {
     CancelFile {
         id: FileId,
     },
+    /// Send the host a file, if it accepts them
+    /// ([`HostControl::Uploads`]). `id` is the browser's own, new for each
+    /// file; `name` is only a suggestion, which the host cleans. After
+    /// [`HostControl::UploadAccepted`] the bytes go on the `file` channel as
+    /// [`file_chunk`]s from offset 0, at most [`FILE_WINDOW`] past the
+    /// host's last [`HostControl::UploadAck`]. One file at a time.
+    UploadFile {
+        id: FileId,
+        name: String,
+        size: u64,
+    },
+    /// Stop sending a file to the host; it deletes what it has.
+    CancelUpload {
+        id: FileId,
+    },
     /// Whether to send [`HostControl::CursorPosition`]: the browser draws
     /// the host pointer itself in relative mouse mode, while in absolute
     /// mode its own pointer is already where the host's is. Off until asked.
@@ -143,6 +158,33 @@ pub enum HostControl {
     /// Sending a requested file failed (it couldn't be read, or the id is
     /// not on offer). It may be requested again if still on offer.
     FileFailed {
+        id: FileId,
+        message: String,
+    },
+    /// Whether the host accepts files from the browser, and how big. Sent
+    /// when the `control` channel opens.
+    Uploads {
+        enabled: bool,
+        max_size: u64,
+    },
+    /// Send the bytes of [`ClientControl::UploadFile`] `id`.
+    UploadAccepted {
+        id: FileId,
+    },
+    /// The host has written the first `received` bytes of the upload.
+    UploadAck {
+        id: FileId,
+        received: u64,
+    },
+    /// The whole file is on the host, saved as `name` in its folder for
+    /// received files.
+    UploadSaved {
+        id: FileId,
+        name: String,
+    },
+    /// The host refused the file or stopped receiving it, and deleted what
+    /// it had.
+    UploadFailed {
         id: FileId,
         message: String,
     },
@@ -254,6 +296,37 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&HostControl::FileWithdrawn { id: FileId(7) }).unwrap(),
             r#"{"type":"fileWithdrawn","id":7}"#
+        );
+    }
+
+    #[test]
+    fn upload_messages_shape() {
+        let up: ClientControl =
+            serde_json::from_str(r#"{"type":"uploadFile","id":1,"name":"a.txt","size":5}"#)
+                .unwrap();
+        assert_eq!(
+            up,
+            ClientControl::UploadFile {
+                id: FileId(1),
+                name: "a.txt".into(),
+                size: 5
+            }
+        );
+        assert_eq!(
+            serde_json::to_string(&HostControl::Uploads {
+                enabled: true,
+                max_size: 10
+            })
+            .unwrap(),
+            r#"{"type":"uploads","enabled":true,"maxSize":10}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&HostControl::UploadAck {
+                id: FileId(1),
+                received: 5
+            })
+            .unwrap(),
+            r#"{"type":"uploadAck","id":1,"received":5}"#
         );
     }
 

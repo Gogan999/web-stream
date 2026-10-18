@@ -113,7 +113,7 @@ The host is always the offerer.
 | `control`      | yes     | reliable             | display list/switch, stats, settings  |
 | `input`        | yes     | reliable             | key and button presses                |
 | `input-motion` | no      | `maxRetransmits: 0`  | mouse motion, gamepad axes            |
-| `file`         | yes     | reliable             | host to client file transfer (see `docs/protocol.md`) |
+| `file`         | yes     | reliable             | file transfer both ways (see `docs/protocol.md`) |
 
 Message formats on these channels belong to the components that use them.
 

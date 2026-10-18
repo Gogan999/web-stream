@@ -87,6 +87,13 @@ fn print_file(f: FileEvent) {
         FileEvent::Failed { name, message, .. } => println!("sending {name:?} failed: {message}"),
         FileEvent::Withdrawn { name, .. } => println!("stopped sharing {name:?}"),
         FileEvent::Cleared => {}
+        FileEvent::Receiving { name, size } => {
+            println!("receiving {name:?} ({size} bytes) from the browser")
+        }
+        FileEvent::Received { path, .. } => println!("received {}", path.display()),
+        FileEvent::ReceiveFailed { name, message } => {
+            println!("receiving {name:?} failed: {message}")
+        }
     }
 }
 

@@ -201,6 +201,147 @@ export class Files extends EventTarget {
   }
 }
 
+export const CHUNK = 16 * 1024;
+export const WINDOW = 1024 * 1024;
+// Bytes the page keeps queued on the file channel; more waits.
+const BUFFERED_MAX = 256 * 1024;
+const READ_BLOCK = 256 * 1024;
+const POLL_MS = 10;
+
+export function makeChunk(id, offset, bytes) {
+  const out = new Uint8Array(HEADER + bytes.byteLength);
+  const v = new DataView(out.buffer);
+  v.setBigUint64(0, BigInt(id));
+  v.setBigUint64(8, BigInt(offset));
+  out.set(bytes, HEADER);
+  return out.buffer;
+}
+
+// Files this browser sends to the host, when the host allows it ("uploads" on connect). One at a
+// time: offered, accepted, sent in chunks within the host's ack window, then saved.
+// Items by id: { id, name, size, file, state, sent, acked, savedAs, error }; state is
+// 'queued' | 'waiting' (for the host to accept) | 'sending' | 'saved' | 'failed'. Fires 'change'.
+export class Uploads extends EventTarget {
+  constructor({ sendControl, sendFile, fileBuffered, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) }) {
+    super();
+    this.sendControl = sendControl;
+    this.sendFile = sendFile;
+    this.fileBuffered = fileBuffered;
+    this.sleep = sleep;
+    this.enabled = false;
+    this.maxSize = 0;
+    this.items = new Map();
+    this.nextId = 1;
+    this.generation = 0;
+  }
+
+  list() { return [...this.items.values()]; }
+
+  changed() { this.dispatchEvent(new Event('change')); }
+
+  add(fileList) {
+    if (!this.enabled) return;
+    for (const file of fileList) {
+      const item = { id: this.nextId++, name: safeName(file.name), size: file.size, file, state: 'queued', sent: 0, acked: 0, savedAs: null, error: null };
+      if (file.size > this.maxSize) Object.assign(item, { state: 'failed', error: `too big for the host (over ${formatSize(this.maxSize)})` });
+      this.items.set(item.id, item);
+    }
+    this.next();
+    this.changed();
+  }
+
+  busy() { return this.list().some((i) => i.state === 'waiting' || i.state === 'sending'); }
+
+  next() {
+    if (this.busy()) return;
+    const item = this.list().find((i) => i.state === 'queued');
+    if (!item) return;
+    item.state = 'waiting';
+    this.sendControl({ type: 'uploadFile', id: item.id, name: item.name, size: item.size });
+  }
+
+  onControl(msg) {
+    const item = this.items.get(msg.id);
+    switch (msg.type) {
+      case 'uploads':
+        this.enabled = !!msg.enabled;
+        this.maxSize = Number.isSafeInteger(msg.maxSize) ? msg.maxSize : 0;
+        this.changed();
+        return true;
+      case 'uploadAccepted':
+        if (item?.state === 'waiting') {
+          Object.assign(item, { state: 'sending', startedAt: performance.now() });
+          this.send(item);
+          this.changed();
+        }
+        return true;
+      case 'uploadAck':
+        if (item && Number.isSafeInteger(msg.received)) item.acked = Math.max(item.acked, msg.received);
+        this.changed();
+        return true;
+      case 'uploadSaved':
+        if (item) {
+          Object.assign(item, { state: 'saved', file: null, savedAs: String(msg.name ?? item.name) });
+          this.next();
+          this.changed();
+        }
+        return true;
+      case 'uploadFailed':
+        if (item && item.state !== 'saved') {
+          Object.assign(item, { state: 'failed', file: null, error: String(msg.message ?? 'failed') });
+          this.next();
+          this.changed();
+        }
+        return true;
+    }
+    return false;
+  }
+
+  // Reads the file in blocks and sends it in chunks, never more than the host's window past its
+  // last ack, nor more than a little queued on the channel.
+  async send(item) {
+    const gen = this.generation;
+    const live = () => gen === this.generation && item.state === 'sending';
+    try {
+      while (item.sent < item.size && live()) {
+        const block = new Uint8Array(await item.file.slice(item.sent, item.sent + READ_BLOCK).arrayBuffer());
+        for (let at = 0; at < block.byteLength && live();) {
+          const buffered = this.fileBuffered();
+          if (buffered === null) return;
+          if (item.sent - item.acked >= WINDOW || buffered > BUFFERED_MAX) { await this.sleep(POLL_MS); continue; }
+          const part = block.subarray(at, at + CHUNK);
+          if (!this.sendFile(makeChunk(item.id, item.sent, part))) return;
+          item.sent += part.byteLength;
+          at += part.byteLength;
+        }
+        this.changed();
+      }
+    } catch (err) {
+      if (!live()) return;
+      this.sendControl({ type: 'cancelUpload', id: item.id });
+      Object.assign(item, { state: 'failed', file: null, error: `could not read the file: ${err.message}` });
+      this.next();
+      this.changed();
+    }
+  }
+
+  cancel(id) {
+    const item = this.items.get(id);
+    if (!item || item.state === 'saved' || item.state === 'failed') return;
+    if (item.state !== 'queued') this.sendControl({ type: 'cancelUpload', id });
+    Object.assign(item, { state: 'failed', file: null, error: 'cancelled' });
+    this.next();
+    this.changed();
+  }
+
+  clear() {
+    this.generation++;
+    this.items.clear();
+    this.enabled = false;
+    this.changed();
+  }
+}
+
 // Chrome's save dialog, writing as the file arrives; null where there is none (then the file is
 // collected in memory).
 function defaultPicker() {

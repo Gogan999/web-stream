@@ -182,6 +182,19 @@ export class Session extends EventTarget {
     return true;
   }
 
+  // Bytes waiting on the file channel, or null when it isn't open.
+  fileBuffered() {
+    const ch = this.channels[CHANNELS.FILE];
+    return ch?.readyState === 'open' ? ch.bufferedAmount : null;
+  }
+
+  sendFile(buf) {
+    const ch = this.channels[CHANNELS.FILE];
+    if (ch?.readyState !== 'open') return false;
+    ch.send(buf);
+    return true;
+  }
+
   sendControl(msg) {
     const ch = this.channels[CHANNELS.CONTROL];
     if (ch && ch.readyState === 'open') ch.send(JSON.stringify(msg));

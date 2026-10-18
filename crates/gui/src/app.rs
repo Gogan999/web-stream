@@ -309,6 +309,18 @@ impl App {
             }
             ui.weak("or drop files on this window");
         });
+        if self.settings.allow_upload {
+            ui.horizontal(|ui| {
+                ui.label("Files from the browser go to");
+                let dir = match self.settings.upload_dir.trim() {
+                    "" => ws_host::options::default_upload_dir(),
+                    d => PathBuf::from(d),
+                };
+                if ui.link(dir.display().to_string()).clicked() {
+                    open_folder(&dir);
+                }
+            });
+        }
         let shared = self.host.state().shared.clone();
         if shared.is_empty() {
             return;
@@ -459,6 +471,20 @@ impl App {
                     &mut d.allow_resolution_change,
                     "let the browser change this PC's resolution",
                 );
+                ui.end_row();
+                ui.label("Files");
+                ui.vertical(|ui| {
+                    ui.checkbox(&mut d.allow_upload, "let the browser send files to this PC")
+                        .on_hover_text(
+                            "They are saved in this folder, marked as downloaded from the \
+                             internet, and never opened by the host",
+                        );
+                    ui.add_enabled(
+                        d.allow_upload,
+                        egui::TextEdit::singleline(&mut d.upload_dir)
+                            .hint_text("Downloads\\web-stream"),
+                    );
+                });
                 ui.end_row();
                 ui.label("More options");
                 ui.add(

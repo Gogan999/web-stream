@@ -7,5 +7,5 @@ pub const CONTROL: &str = "control";
 pub const INPUT: &str = "input";
 /// Unordered, `maxRetransmits: 0`: mouse motion, gamepad axes.
 pub const INPUT_MOTION: &str = "input-motion";
-/// Ordered, reliable: host to client file transfer.
+/// Ordered, reliable: file transfer, both ways.
 pub const FILE: &str = "file";

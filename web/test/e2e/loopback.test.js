@@ -222,6 +222,17 @@ test('client streams from mock host, sends input and switches display', { timeou
   await sendHost({ type: 'fileWithdrawn', id: 4242 });
   await client.waitForSelector('#files-toggle', { state: 'hidden' });
 
+  // A host that takes files: Send files… sends one, and the row says where it went.
+  await sendHost({ type: 'uploads', enabled: true, maxSize: 1 << 30 });
+  await client.waitForSelector('#files-toggle:has-text("Files")');
+  await client.click('#files-toggle');
+  const upText = 'from the browser\n'.repeat(3000); // 51 KB: four chunks
+  await client.setInputFiles('#upload-input', { name: 'up.txt', mimeType: 'text/plain', buffer: Buffer.from(upText) });
+  await host.waitForFunction(() => window.mockUploaded['up.txt'], null, { timeout: 10000 });
+  assert.equal(await host.evaluate(() => window.mockUploaded['up.txt']), upText);
+  await client.waitForSelector('#upload-list li:has-text("On the host as up.txt")');
+  await client.keyboard.press('Escape');
+
   // Reload: the pairing cookie persists, so it connects straight away.
   await client.reload();
   await client.waitForFunction(() => document.getElementById('status').dataset.state === 'connected', null, { timeout: 15000 });

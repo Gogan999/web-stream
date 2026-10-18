@@ -312,6 +312,10 @@ impl Transport {
             .expect("video slot lock")
             .replace(frame);
         if let Some(old) = replaced {
+            tracing::debug!(
+                index = old.frame_index,
+                "video frame replaced before it was sent"
+            );
             if self.shared.connected.load(Ordering::Relaxed) {
                 if old.keyframe && !keyframe {
                     self.shared.keyframe_lost();

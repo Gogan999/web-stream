@@ -301,10 +301,16 @@ fn sized_frame(index: u64, keyframe: bool, bytes: usize) -> EncodedFrame {
 // transport's sends.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn full_frames_at_the_target_bitrate_need_almost_no_keyframes() {
+    // On failure, the transport's debug log says why each keyframe was asked for.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("ws_transport=debug")
+        .with_test_writer()
+        .try_init();
     const FPS: u64 = 60;
     // The host's BWE_HEADROOM. At 90 this forced 20-50 keyframes here.
     const HEADROOM_PCT: u64 = 75;
     const MAX_KEYFRAMES: u32 = 2;
+    const FRAME: Duration = Duration::from_micros(1_000_000 / FPS);
     let (transport, mut events) = Transport::start(TransportConfig {
         ips: vec![[127, 0, 0, 1].into()],
         udp_port: 0,
@@ -379,8 +385,13 @@ async fn full_frames_at_the_target_bitrate_need_almost_no_keyframes() {
         if started.elapsed() > Duration::from_secs(4) {
             break;
         }
-        if Instant::now() >= next_frame {
-            next_frame += Duration::from_micros(1_000_000 / FPS);
+        let now = Instant::now();
+        if now >= next_frame {
+            // Like a capture clock, never two frames back to back after a
+            // late wake (Windows timers are coarse): the transport keeps only
+            // the newest unsent frame, so the first would be replaced and a
+            // keyframe forced. That is a test artefact, not the pacing.
+            next_frame = (next_frame + FRAME).max(now + FRAME / 2);
             let budget = (encoder_bps / FPS / 8) as usize;
             // Constant bitrate with fast motion fills every frame; a
             // keyframe overshoots the one-frame VBV to about twice it.
@@ -395,7 +406,7 @@ async fn full_frames_at_the_target_bitrate_need_almost_no_keyframes() {
     assert!(got_video > 0, "no video reached the peer");
     assert!(
         keyframe_requests <= MAX_KEYFRAMES,
-        "steady full frames forced {keyframe_requests} keyframes in 3.5 s"
+        "steady full frames forced {keyframe_requests} keyframes in 3.5 s (encoder at {encoder_bps} b/s)"
     );
 }
 

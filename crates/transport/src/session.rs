@@ -287,12 +287,20 @@ impl Session {
         // tell one went missing (RTP sequence numbers stay continuous), so
         // after any gap only a keyframe may go out.
         if !follows(self.next_index, frame) {
+            tracing::debug!(
+                index = frame.frame_index,
+                "video frame after a gap; dropped"
+            );
             return VideoWrite::Broken;
         }
         // Drop rather than queue: a frame that would wait behind older ones
         // arrives late, and every frame after it would too.
-        if !frame.keyframe && self.video_backlog(now) > self.max_send_delay {
-            return VideoWrite::Late;
+        if !frame.keyframe {
+            let backlog = self.video_backlog(now);
+            if backlog > self.max_send_delay {
+                tracing::debug!(?backlog, "video frame late; dropped");
+                return VideoWrite::Late;
+            }
         }
         let Some(writer) = self.rtc.writer(self.video) else {
             return VideoWrite::Skipped;
@@ -426,7 +434,10 @@ impl Session {
                 }
                 TransportEvent::Disconnected
             }
-            Event::KeyframeRequest(req) if req.mid == self.video => TransportEvent::KeyframeNeeded,
+            Event::KeyframeRequest(req) if req.mid == self.video => {
+                tracing::debug!(kind = ?req.kind, "browser asked for a keyframe");
+                TransportEvent::KeyframeNeeded
+            }
             Event::EgressBitrateEstimate(BweKind::Twcc { estimate, .. })
             | Event::EgressBitrateEstimate(BweKind::Remb { estimate, .. }) => {
                 TransportEvent::TargetBitrate(estimate.as_u64())

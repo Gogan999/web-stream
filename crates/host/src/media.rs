@@ -64,11 +64,21 @@ const MIN_RESTART_GAP: Duration = Duration::from_secs(1);
 /// Video codecs the browser's answer accepted; `None` until known.
 pub type AcceptedCodecs = watch::Receiver<Option<Vec<VideoCodec>>>;
 
+/// How many peer connections signaling has set up. A count rather than an
+/// event, so a busy loop can't miss one.
+pub type PeerCount = watch::Receiver<u64>;
+
+/// What signaling tells media about the current peer connection.
+pub struct Signaled {
+    pub codecs: AcceptedCodecs,
+    pub peers: PeerCount,
+}
+
 pub async fn run(
     transport: Transport,
     mut events: mpsc::Receiver<TransportEvent>,
     opts: MediaOptions,
-    mut codecs: AcceptedCodecs,
+    signaled: Signaled,
     mut file_commands: mpsc::Receiver<FileCommand>,
     host_events: mpsc::UnboundedSender<Event>,
     mut shutdown: oneshot::Receiver<()>,
@@ -77,6 +87,7 @@ pub async fn run(
     let (stopped_tx, mut stopped_rx) = mpsc::channel(4);
     let (later_tx, mut later_rx) = mpsc::channel(8);
     let (cursor_target, _) = watch::channel(CursorTarget::default());
+    let Signaled { codecs, mut peers } = signaled;
     let mut media = Media {
         transport,
         config: opts.video.clone(),
@@ -97,10 +108,11 @@ pub async fn run(
         generation: 0,
         last_bwe: None,
         last_restart: None,
-        codecs: codecs.clone(),
+        codecs,
         live: None,
         transfers: None,
         peer: 0,
+        peers: peers.clone(),
         sent: Arc::default(),
         keyframe_requests: 0,
         changed_modes: ChangedModes::default(),
@@ -113,6 +125,8 @@ pub async fn run(
         tokio::select! {
             ev = events.recv() => match ev {
                 Some(ev) => {
+                    // A new peer's events must not reach the old one's transfers.
+                    media.sync_peer();
                     let down = matches!(ev, TransportEvent::Disconnected);
                     media.event(ev);
                     if down {
@@ -127,12 +141,7 @@ pub async fn run(
             Some(generation) = stopped_rx.recv() => media.video_stopped(generation),
             Some(later) = later_rx.recv() => media.later(later),
             Some(cmd) = file_commands.recv() => media.file_command(cmd),
-            // Signaling resets the codecs for every new peer connection.
-            Ok(()) = codecs.changed() => {
-                if codecs.borrow_and_update().is_none() {
-                    media.new_peer();
-                }
-            }
+            Ok(()) = peers.changed() => media.sync_peer(),
             _ = &mut shutdown => break,
         }
     }
@@ -267,8 +276,9 @@ struct Media {
     /// From when the `control` channel opens until the peer connection is
     /// replaced (or stays down for [`TRANSFER_GRACE`]).
     transfers: Option<Transfers>,
-    /// Bumped for every peer connection.
+    /// The peer connection `transfers` belong to.
     peer: u64,
+    peers: PeerCount,
 }
 
 #[derive(Debug, Default)]
@@ -472,11 +482,14 @@ impl Media {
         }
     }
 
-    /// Signaling is setting up a new peer connection: the old one's file
+    /// When signaling has set up a new peer connection, the old one's file
     /// transfers end.
-    fn new_peer(&mut self) {
-        self.peer += 1;
-        self.transfers = None;
+    fn sync_peer(&mut self) {
+        let peer = *self.peers.borrow();
+        if peer != self.peer {
+            self.peer = peer;
+            self.transfers = None;
+        }
     }
 
     fn start_mic(&mut self) {

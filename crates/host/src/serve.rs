@@ -101,12 +101,13 @@ pub async fn serve(
     let mut server_task = tokio::spawn(server.serve());
     let (media_stop, media_stop_rx) = oneshot::channel();
     let (codecs_tx, codecs) = watch::channel(None);
+    let (peers_tx, peers) = watch::channel(0);
     let (files, files_rx) = mpsc::channel(8);
     let media_task = tokio::spawn(media::run(
         transport.clone(),
         transport_events,
         opts.media.clone(),
-        codecs,
+        media::Signaled { codecs, peers },
         files_rx,
         events.clone(),
         media_stop_rx,
@@ -116,6 +117,7 @@ pub async fn serve(
         signaling_events.sessions,
         transport.clone(),
         codecs_tx,
+        peers_tx,
     ));
 
     let _ = events.send(Event::Started {
@@ -210,6 +212,7 @@ async fn run_signaling(
     mut sessions: mpsc::Receiver<SignalingSession>,
     transport: Transport,
     codecs: watch::Sender<Option<Vec<VideoCodec>>>,
+    peers: watch::Sender<u64>,
 ) {
     let mut current: Option<SignalingSession> = None;
     loop {
@@ -220,6 +223,7 @@ async fn run_signaling(
                 current = Some(s);
                 // Until this browser answers, its codecs are unknown.
                 codecs.send_replace(None);
+                peers.send_modify(|n| *n += 1);
                 if !send_offer(&transport, current.as_ref()).await {
                     current = None;
                 }
@@ -250,6 +254,7 @@ async fn run_signaling(
             }
             Some(ClientSignal::Restart) => {
                 codecs.send_replace(None);
+                peers.send_modify(|n| *n += 1);
                 if !send_offer(&transport, current.as_ref()).await {
                     current = None;
                     transport.close();

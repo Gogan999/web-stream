@@ -72,7 +72,9 @@ pub async fn serve(
             hostnames: opts.hostnames.clone(),
         },
     };
-    let (server, signaling_events) = SignalingServer::new(config).context("signaling server")?;
+    let (server, signaling_events) = SignalingServer::new(config)
+        .map_err(|e| data_dir_error(e, &opts.data_dir))
+        .context("signaling server")?;
     let signaling = server.handle();
     let fingerprint = server.fingerprint().to_string();
 
@@ -146,6 +148,22 @@ pub async fn serve(
     let _ = media_stop.send(());
     let _ = media_task.await;
     result
+}
+
+/// Access denied on the data dir usually means the host once ran as
+/// administrator, which left files this user can't open; say how to fix it.
+fn data_dir_error(e: ws_signaling::Error, data_dir: &std::path::Path) -> anyhow::Error {
+    let denied = matches!(&e, ws_signaling::Error::Io(io)
+        if io.kind() == std::io::ErrorKind::PermissionDenied);
+    if !denied {
+        return e.into();
+    }
+    anyhow::Error::new(e).context(format!(
+        "cannot use the data folder {}: it was probably created by the host running as \
+         administrator. Run the host as administrator once to repair it, or delete the \
+         folder (paired browsers will have to pair again)",
+        data_dir.display()
+    ))
 }
 
 async fn open_pairing(signaling: &SignalingHandle, events: &mpsc::UnboundedSender<Event>) {
@@ -329,6 +347,16 @@ fn answer_video_codecs(sdp: &str) -> Vec<VideoCodec> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn access_denied_on_the_data_dir_says_how_to_fix_it() {
+        let dir = std::path::Path::new("data");
+        let denied = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        let e = data_dir_error(ws_signaling::Error::Io(denied), dir);
+        assert!(format!("{e:#}").contains("as administrator once"));
+        let other = ws_signaling::Error::Tls("bad".into());
+        assert!(!format!("{:#}", data_dir_error(other, dir)).contains("administrator"));
+    }
 
     #[test]
     fn reads_video_codecs_from_answer() {

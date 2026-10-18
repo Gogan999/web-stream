@@ -56,7 +56,7 @@ impl Default for Settings {
             quality: "balanced".into(),
             game_audio: true,
             mic: true,
-            mic_device: "CABLE Input".into(),
+            mic_device: "auto".into(),
             allow_resolution_change: false,
             extra_args: String::new(),
             start_hosting: true,

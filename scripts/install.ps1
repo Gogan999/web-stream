@@ -10,6 +10,8 @@
       - Rust through rustup (stable, msvc)
       - Git, only when the repository has to be cloned
       - ViGEmBus, the gamepad driver, with -GamepadDriver
+      - Steam's Streaming Microphone driver, from Steam's own folder, with
+        -MicDriver (needs Steam; nothing is downloaded)
     Then builds the host (the ws-host-gui tray app and the ws-host console
     program), copies the web client next to them and adds a "web-stream host"
     shortcut to the Start menu.
@@ -29,6 +31,11 @@
 .PARAMETER GamepadDriver
     Also install the ViGEmBus driver for virtual gamepads.
 
+.PARAMETER MicDriver
+    Also install the Steam Streaming Microphone driver that Steam keeps in
+    its folder, so the browser mic shows up in Windows without VB-CABLE.
+    Skipped when VB-CABLE or the Steam microphone is already installed.
+
 .PARAMETER Run
     Start the tray app after the build.
 #>
@@ -36,6 +43,7 @@
 param(
     [string]$Dir = (Join-Path $HOME 'web-stream'),
     [switch]$GamepadDriver,
+    [switch]$MicDriver,
     [switch]$Run
 )
 
@@ -140,6 +148,46 @@ function Install-Rust {
     if ($LASTEXITCODE -ne 0) { throw 'rustup could not install the stable toolchain.' }
 }
 
+function Test-MicCable {
+    [bool](Get-PnpDevice -Class MEDIA -ErrorAction SilentlyContinue | Where-Object {
+        $_.FriendlyName -match 'VB-Audio Virtual Cable|Steam Streaming Microphone'
+    })
+}
+
+# Installs Steam's signed virtual microphone the way Sunshine installs Steam
+# Streaming Speakers: DiInstallDriverW on the INF in Steam's drivers folder.
+function Install-SteamMic {
+    if (Test-MicCable) {
+        Write-Step 'A virtual mic (VB-CABLE or Steam Streaming Microphone) is already installed'
+        return $true
+    }
+    $inf = Join-Path ${env:CommonProgramFiles(x86)} 'Steam\drivers\Windows10\x64\SteamStreamingMicrophone.inf'
+    if (-not (Test-Path $inf)) {
+        Write-Host "Steam's microphone driver is not on this PC ($inf). Install Steam, or VB-CABLE." -ForegroundColor Yellow
+        return $false
+    }
+    Write-Step 'Installing the Steam Streaming Microphone driver'
+    $code = @'
+Add-Type -Namespace WebStream -Name NewDev -MemberDefinition '[DllImport("newdev.dll", CharSet = CharSet.Unicode, SetLastError = true)] public static extern bool DiInstallDriverW(IntPtr parent, string inf, uint flags, out bool reboot);'
+$reboot = $false
+if (-not [WebStream.NewDev]::DiInstallDriverW([IntPtr]::Zero, 'INF_PATH', 0, [ref]$reboot)) {
+    exit [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+}
+'@
+    # An elevated process does not inherit this one's environment, so the path
+    # goes into the script itself, as a single-quoted string.
+    $code = $code.Replace('INF_PATH', $inf.Replace("'", "''"))
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($code))
+    $p = Start-Process -FilePath powershell -Wait -PassThru -Verb RunAs -WindowStyle Hidden `
+        -ArgumentList @('-NoProfile', '-EncodedCommand', $encoded)
+    if ($p.ExitCode -ne 0) {
+        Write-Host "Installing Steam's microphone driver failed (Windows error $($p.ExitCode))." -ForegroundColor Yellow
+        return $false
+    }
+    Write-Host 'Installed. Check that your speakers or headphones are still the default output.'
+    return $true
+}
+
 function Get-RepoRoot {
     if ($PSScriptRoot) {
         $root = Split-Path -Parent $PSScriptRoot
@@ -164,6 +212,7 @@ Install-BuildTools
 Install-CMake
 Install-Rust
 if ($GamepadDriver) { Install-WingetPackage 'ViGEm.ViGEmBus' @('--silent') }
+$micReady = if ($MicDriver) { Install-SteamMic } else { Test-MicCable }
 
 if (Get-Process -Name ws-host-gui, ws-host -ErrorAction SilentlyContinue) {
     throw 'The host is running. Quit it (tray icon, Quit) and run this script again.'
@@ -208,7 +257,10 @@ Write-Host "The console version still works: `"$(Join-Path $bin 'ws-host.exe')`"
 if (-not $GamepadDriver) {
     Write-Host 'Gamepads need ViGEmBus: run this script again with -GamepadDriver.'
 }
-Write-Host 'The browser mic needs VB-CABLE (https://vb-audio.com/Cable/); see docs\host-setup.md.'
+if (-not $micReady) {
+    Write-Host 'The browser mic needs a virtual mic: run this script again with -MicDriver'
+    Write-Host 'if Steam is installed, or install VB-CABLE; see docs\host-setup.md.'
+}
 
 if ($Run) {
     Start-Process -FilePath $gui -WorkingDirectory $bin

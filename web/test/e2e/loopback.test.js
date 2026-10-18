@@ -106,6 +106,12 @@ test('client streams from mock host, sends input and switches display', { timeou
   await client.uncheck('#mic');
   await host.waitForFunction(() => window.mockLog.filter((e) => e.type === 'setMicEnabled' && e.enabled === false).length === 2);
   assert.equal(await client.evaluate(() => window.__pcs.at(-1).getSenders().find((x) => x.track)?.track ?? null), null);
+  // Audio quality: the host's own setting at first, then what is picked.
+  assert.ok((await hostLog()).some((e) => e.type === 'setAudioConfig' && e.bitrateKbps === null && e.frameMs === null));
+  await client.selectOption('#audio-kbps', '256');
+  await client.selectOption('#audio-frame', '20');
+  await host.waitForFunction(() => window.mockLog.some((e) => e.type === 'setAudioConfig' && e.bitrateKbps === 256 && e.frameMs === 20));
+
   // A host that refuses the mic stops it: the box unticks and nothing is sent.
   await host.evaluate(() => { window.mockNoMic = true; });
   await client.check('#mic');

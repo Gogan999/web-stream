@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { autoKbps, fitToDisplay, streamSize, videoConfig, sameConfig, load, save, DEFAULTS } from '../../js/settings.js';
+import { autoKbps, fitToDisplay, streamSize, videoConfig, sameConfig, audioConfig, load, save, DEFAULTS } from '../../js/settings.js';
 
 test('auto bitrate is 20 Mb/s at 1080p60 and grows with pixel rate', () => {
   assert.equal(autoKbps(1920, 1080, 60), 20000);
@@ -80,4 +80,11 @@ test('junk in storage falls back field by field', () => {
   assert.deepEqual(load(mem), { ...DEFAULTS });
   const c = videoConfig({ bitrate: 'abc', resolution: 'foo', fps: 59.5 }, { screen: { width: 1920, height: 1080 }, display: { width: 1920, height: 1080 } });
   assert.deepEqual([c.width, c.height, c.fps, c.bitrateKbps], [1920, 1080, 60, 20000]);
+});
+
+test('audio settings become setAudioConfig; host keeps its own by default', () => {
+  assert.deepEqual(audioConfig({ ...DEFAULTS }), { type: 'setAudioConfig', bitrateKbps: null, frameMs: null });
+  assert.deepEqual(audioConfig({ ...DEFAULTS, audioKbps: '256', audioFrame: '20' }), { type: 'setAudioConfig', bitrateKbps: 256, frameMs: 20 });
+  // Junk falls back to the host's setting.
+  assert.deepEqual(audioConfig({ audioKbps: '9999', audioFrame: '15' }), { type: 'setAudioConfig', bitrateKbps: null, frameMs: null });
 });

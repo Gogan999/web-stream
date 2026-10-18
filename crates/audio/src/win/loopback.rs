@@ -33,11 +33,12 @@ const SILENCE_AFTER: Duration = Duration::from_millis(30);
 const MAX_SILENCE_FRAMES: usize = 10;
 const DEFAULT_DEVICE_CHECK: Duration = Duration::from_secs(1);
 
-/// Captures what the host is playing and sends it as 10 ms Opus packets.
+/// Captures what the host is playing and sends it as 10 or 20 ms Opus packets.
 /// Dropping it stops the capture thread.
 pub struct LoopbackCapture {
     stop: Arc<AtomicBool>,
     bitrate: Arc<AtomicU32>,
+    frame_ms: Arc<AtomicU32>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -49,18 +50,24 @@ impl LoopbackCapture {
     pub fn start(config: LoopbackConfig, packets: mpsc::Sender<AudioPacket>) -> Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         let bitrate = Arc::new(AtomicU32::new(config.bitrate));
+        let frame_ms = Arc::new(AtomicU32::new(config.frame_ms));
         let (ready_tx, ready_rx) = std_mpsc::sync_channel(1);
         let thread = {
-            let (stop, bitrate) = (stop.clone(), bitrate.clone());
+            let tuning = Tuning {
+                bitrate: bitrate.clone(),
+                frame_ms: frame_ms.clone(),
+            };
+            let stop = stop.clone();
             std::thread::Builder::new()
                 .name("ws-audio-loopback".into())
-                .spawn(move || run(config, packets, stop, bitrate, ready_tx))
+                .spawn(move || run(config, packets, stop, tuning, ready_tx))
                 .map_err(|e| AudioError::Platform(e.to_string()))?
         };
         match ready_rx.recv() {
             Ok(Ok(())) => Ok(Self {
                 stop,
                 bitrate,
+                frame_ms,
                 thread: Some(thread),
             }),
             Ok(Err(e)) => {
@@ -77,6 +84,18 @@ impl LoopbackCapture {
     pub fn set_bitrate(&self, bits_per_second: u32) {
         self.bitrate.store(bits_per_second, Ordering::Relaxed);
     }
+
+    /// Changes the Opus frame length (one of [`crate::FRAME_MS`]) from the
+    /// next frame on.
+    pub fn set_frame_ms(&self, ms: u32) {
+        self.frame_ms.store(ms, Ordering::Relaxed);
+    }
+}
+
+/// Encoder settings the capture thread picks up while it runs.
+struct Tuning {
+    bitrate: Arc<AtomicU32>,
+    frame_ms: Arc<AtomicU32>,
 }
 
 impl Drop for LoopbackCapture {
@@ -190,11 +209,14 @@ fn run(
     config: LoopbackConfig,
     packets: mpsc::Sender<AudioPacket>,
     stop: Arc<AtomicBool>,
-    bitrate: Arc<AtomicU32>,
+    tuning: Tuning,
     ready: std_mpsc::SyncSender<Result<()>>,
 ) {
-    let setup = AudioThread::enter()
-        .and_then(|t| Ok((t, OpusFrameEncoder::new(bitrate.load(Ordering::Relaxed))?)));
+    let setup = AudioThread::enter().and_then(|t| {
+        let mut encoder = OpusFrameEncoder::new(tuning.bitrate.load(Ordering::Relaxed))?;
+        encoder.set_frame_ms(tuning.frame_ms.load(Ordering::Relaxed))?;
+        Ok((t, encoder))
+    });
     let (_thread, mut encoder) = match setup {
         Ok(v) => v,
         Err(e) => {
@@ -229,7 +251,7 @@ fn run(
         if let Some(r) = ready.take() {
             let _ = r.send(Ok(()));
         }
-        match capture(stream, &config, &mut encoder, &stop, &bitrate, &mut send) {
+        match capture(stream, &config, &mut encoder, &stop, &tuning, &mut send) {
             Ok(End::Stopped) => break,
             Ok(End::Reopen) => info!("audio output changed, reopening loopback"),
             Err(e) => {
@@ -245,13 +267,14 @@ fn capture(
     config: &LoopbackConfig,
     encoder: &mut OpusFrameEncoder,
     stop: &AtomicBool,
-    bitrate: &AtomicU32,
+    tuning: &Tuning,
     send: &mut impl FnMut(AudioPacket),
 ) -> Result<End> {
     let frame_bytes = stream.converter.input().frame_bytes();
     let rate = stream.converter.input().rate as f64;
     let mut samples = Vec::with_capacity(SAMPLE_RATE as usize / 50 * 2);
-    let mut current_bitrate = bitrate.load(Ordering::Relaxed);
+    let mut current_bitrate = tuning.bitrate.load(Ordering::Relaxed);
+    let mut current_frame_ms = tuning.frame_ms.load(Ordering::Relaxed);
     // End of the audio handed to the encoder so far, on the wall clock.
     let mut audio_end = Instant::now();
     let mut last_default_check = Instant::now();
@@ -260,10 +283,15 @@ fn capture(
         // SAFETY: valid event handle owned by `stream`.
         unsafe { WaitForSingleObject(stream.event.0, 5) };
 
-        let wanted = bitrate.load(Ordering::Relaxed);
+        let wanted = tuning.bitrate.load(Ordering::Relaxed);
         if wanted != current_bitrate {
             encoder.set_bitrate(wanted)?;
             current_bitrate = wanted;
+        }
+        let wanted = tuning.frame_ms.load(Ordering::Relaxed);
+        if wanted != current_frame_ms {
+            encoder.set_frame_ms(wanted)?;
+            current_frame_ms = wanted;
         }
 
         let mut got_data = false;

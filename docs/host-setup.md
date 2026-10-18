@@ -198,7 +198,10 @@ asks.
 Loopback capture follows the default output device, including when it changes
 mid-session; `--audio-device NAME` captures a named output instead. Any device
 format is accepted; it is converted to 48 kHz stereo and sent as 10 ms Opus
-packets at 128 kb/s (`--audio-kbps` changes that, 32 to 510).
+packets at 128 kb/s. `--audio-kbps` (32 to 510) and `--audio-frame-ms 20`
+change that on the host (Audio quality in the tray app's settings window);
+Audio in the browser's Settings overrides both for that browser. 20 ms frames sound noticeably better at the same bitrate and
+reach the browser 10 ms later.
 
 ## Elevated windows and the secure desktop
 

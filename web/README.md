@@ -38,6 +38,7 @@ Pairing and signaling: `docs/signaling.md` (transport). Data channel messages: [
   - **Bitrate**: *Auto* picks from resolution and fps (20 Mb/s at 1080p60). It is a ceiling: the host follows the network's estimate below it.
   - **FPS**, and **Quality**: *Speed* (fastest encode, softest), *Balanced*, *Clarity* (slowest encode the frame rate allows, more room for fast motion).
   - **Match host resolution** switches the host display to the largest resolution that fits this screen. Off by default; the host must also be started with `--allow-resolution-change`, and it is undone on disconnect.
+  - **Audio bitrate** and **Frame**: game audio quality. *Host setting* keeps what the host was started with (128 kb/s, 10 ms unless changed). 20 ms frames sound better at the same bitrate and arrive 10 ms later. Changes apply straight away.
   - **Mic** sends this browser's microphone to the host, which plays it into its virtual cable (see `docs/host-setup.md`). Off by default; the browser asks for mic permission the first time. Turning it on or off doesn't reconnect.
   - **Auto-tune (test)** tries bitrates from 10 to 150 Mb/s, then Clarity and Balanced, about 7 s each, and keeps the best that streams without freezes, drops, loss, or slow encode/decode, minus 15% headroom. Run it while something moves on screen. Click again to stop.
 - The stats overlay's last two lines are the host's side: encoder bitrate / ceiling, bandwidth estimate, encode time and keyframe requests.

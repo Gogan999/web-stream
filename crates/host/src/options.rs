@@ -36,6 +36,7 @@ serve options:
   --audio-device NAME  output device to capture game audio from, default the
                        Windows default output (follows it when it changes)
   --audio-kbps K       game audio Opus bitrate, 32-510, default 128
+  --audio-frame-ms 10|20  game audio Opus frame; 20 sounds better, 10 ms sooner
   --allow-resolution-change  let the browser change the streamed display's
                        resolution to match its screen (undone on disconnect)
   --pair               open pairing for two minutes at startup
@@ -71,6 +72,8 @@ pub struct MediaOptions {
     /// follows the default output.
     pub audio_device: Option<String>,
     pub audio_kbps: u32,
+    /// Opus frame length, one of `ws_audio::FRAME_MS`.
+    pub audio_frame_ms: u32,
     /// The browser may change the host display's resolution.
     pub allow_resolution_change: bool,
 }
@@ -99,6 +102,7 @@ impl ServeOptions {
             game_audio: true,
             audio_device: None,
             audio_kbps: DEFAULT_AUDIO_KBPS,
+            audio_frame_ms: 10,
             allow_resolution_change: false,
         };
         let mut no_mic = false;
@@ -141,6 +145,9 @@ impl ServeOptions {
                 "--no-audio" => media.game_audio = false,
                 "--audio-device" => media.audio_device = Some(value()?.clone()),
                 "--audio-kbps" => media.audio_kbps = value()?.parse().context("--audio-kbps")?,
+                "--audio-frame-ms" => {
+                    media.audio_frame_ms = value()?.parse().context("--audio-frame-ms")?
+                }
                 "--allow-resolution-change" => media.allow_resolution_change = true,
                 "--pair" => pair_at_start = true,
                 f => bail!("unknown flag {f}\n\n{USAGE}"),
@@ -166,6 +173,9 @@ impl ServeOptions {
         };
         if !(32..=510).contains(&media.audio_kbps) {
             bail!("--audio-kbps is 32 to 510");
+        }
+        if !ws_audio::FRAME_MS.contains(&media.audio_frame_ms) {
+            bail!("--audio-frame-ms is 10 or 20");
         }
         if !(1..=3650).contains(&forget_after_days) {
             bail!("--forget-after is 1 to 3650 days");
@@ -270,6 +280,15 @@ mod tests {
         assert_eq!(o.media.video, VideoConfig::default());
         assert_eq!(o.media.audio_device, None);
         assert_eq!(o.media.audio_kbps * 1000, ws_audio::DEFAULT_BITRATE);
+        assert_eq!(o.media.audio_frame_ms, 10);
+        assert_eq!(
+            parse(&["--audio-frame-ms", "20"])
+                .unwrap()
+                .media
+                .audio_frame_ms,
+            20
+        );
+        assert!(parse(&["--audio-frame-ms", "5"]).is_err());
         assert_eq!(o.device_idle_expiry, Duration::from_secs(30 * 24 * 3600));
         assert!(o.extra_origins.is_empty());
     }

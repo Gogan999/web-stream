@@ -21,7 +21,7 @@ pub mod mic;
 #[cfg(windows)]
 mod win;
 
-pub use encode::{DEFAULT_BITRATE, FRAME_SAMPLES};
+pub use encode::{DEFAULT_BITRATE, FRAME_MS, FRAME_SAMPLES};
 pub use mic::{JitterConfig, JitterStats, MicReceiver};
 
 #[cfg(windows)]
@@ -50,6 +50,8 @@ pub struct LoopbackConfig {
     /// output device, including when the user switches it mid-session.
     pub device: Option<String>,
     pub bitrate: u32,
+    /// Opus frame length, one of [`FRAME_MS`].
+    pub frame_ms: u32,
 }
 
 impl Default for LoopbackConfig {
@@ -57,6 +59,7 @@ impl Default for LoopbackConfig {
         Self {
             device: None,
             bitrate: DEFAULT_BITRATE,
+            frame_ms: 10,
         }
     }
 }

@@ -103,6 +103,11 @@ pub enum HostControl {
         x: i32,
         y: i32,
     },
+    /// The mic the browser turned on can't play on the host (`--no-mic`, or
+    /// no such device). The browser should stop sending it.
+    MicUnavailable {
+        message: String,
+    },
     Error {
         message: String,
     },

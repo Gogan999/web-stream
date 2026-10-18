@@ -40,6 +40,10 @@ mod imp {
         let mut reader = ws_input::cursor::CursorReader::new();
         Some(move || reader.read())
     }
+
+    pub fn audio_devices() -> ws_audio::Result<Vec<String>> {
+        ws_audio::list_render_devices()
+    }
 }
 
 #[cfg(not(windows))]
@@ -108,6 +112,10 @@ mod imp {
 
     pub fn cursor_reader() -> Option<impl FnMut() -> Option<CursorState>> {
         None::<fn() -> Option<CursorState>>
+    }
+
+    pub fn audio_devices() -> ws_audio::Result<Vec<String>> {
+        Err(unsupported())
     }
 
     fn unsupported() -> ws_audio::AudioError {

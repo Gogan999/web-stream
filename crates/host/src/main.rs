@@ -4,8 +4,10 @@
 //! ws-host [serve] [options]   run the host: web client, pairing, signaling,
 //!                             WebRTC, capture, audio and input (see --help)
 //! ws-host displays
+//! ws-host audio-devices
 //! ws-host capture-test [--display N] [--seconds S] [--fps F] [--kbps K]
-//!                      [--size WxH] [--codec h264|h265|av1] [--out FILE]
+//!                      [--size WxH] [--codec h264|h265|av1]
+//!                      [--quality speed|balanced|clarity] [--out FILE]
 //! ```
 //!
 //! `capture-test` writes the raw bitstream (play it with `ffplay FILE`) and
@@ -20,7 +22,17 @@ use anyhow::{Context, bail};
 use tokio::sync::mpsc;
 use ws_proto::{DisplayId, VideoCodec, VideoConfig, mono_now};
 
-use ws_host::options::{self, ServeOptions, parse_codec, parse_size};
+use ws_host::options::{self, ServeOptions, parse_codec, parse_quality, parse_size};
+
+const CAPTURE_TEST_USAGE: &str = "\
+ws-host capture-test [options]   encode a display to a file and print fps,
+                                 drops and latency once a second
+  --display N          display to capture, default the primary
+  --seconds S          how long, default 10
+  --codec h264|h265|av1  --size WxH  --fps F  --kbps K
+  --quality speed|balanced|clarity
+  --out FILE           default capture-test.<codec>; play it with ffplay FILE
+";
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -33,6 +45,7 @@ fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("displays") => list_displays(),
+        Some("audio-devices") => list_audio_devices(),
         Some("capture-test") => capture_test(&args[1..]),
         Some("serve") => run_serve(&args[1..]),
         Some(flag) if flag.starts_with('-') => run_serve(&args),
@@ -70,7 +83,18 @@ fn list_displays() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn list_audio_devices() -> anyhow::Result<()> {
+    for name in ws_host::audio_devices()? {
+        println!("{name}");
+    }
+    Ok(())
+}
+
 fn capture_test(args: &[String]) -> anyhow::Result<()> {
+    if args.iter().any(|a| a == "-h" || a == "--help") {
+        print!("{CAPTURE_TEST_USAGE}");
+        return Ok(());
+    }
     let mut display = None;
     let mut seconds = 10u64;
     let mut out = None;
@@ -86,7 +110,8 @@ fn capture_test(args: &[String]) -> anyhow::Result<()> {
             "--out" => out = Some(value()?.clone()),
             "--size" => (config.width, config.height) = parse_size(value()?)?,
             "--codec" => config.codec = parse_codec(value()?)?,
-            f => bail!("unknown flag {f}"),
+            "--quality" => config.quality = parse_quality(value()?)?,
+            f => bail!("unknown flag {f}\n\n{CAPTURE_TEST_USAGE}"),
         }
     }
     let display = match display {

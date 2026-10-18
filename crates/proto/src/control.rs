@@ -141,6 +141,20 @@ pub struct VideoStats {
     pub keyframe_requests: u32,
     /// Fraction of packets the browser reports lost, 0..=1.
     pub loss: Option<f32>,
+    /// Of the keyframe requests, those from the browser: it lost a packet
+    /// that no resend repaired.
+    #[serde(default)]
+    pub browser_keyframe_requests: u32,
+    /// Frames dropped because the network send queue was too far behind.
+    #[serde(default)]
+    pub late_frames: u32,
+    /// Frames dropped for another reason (the encoder got too far ahead, or
+    /// they built on a dropped frame).
+    #[serde(default)]
+    pub lost_frames: u32,
+    /// Packets the host's socket refused because its buffer was full.
+    #[serde(default)]
+    pub send_drops: u32,
 }
 
 #[cfg(test)]

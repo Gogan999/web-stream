@@ -541,6 +541,10 @@ impl Media {
             },
             keyframe_requests,
             loss: s.egress_loss,
+            browser_keyframe_requests: s.trouble.browser_keyframe_requests,
+            late_frames: s.trouble.late_frames,
+            lost_frames: s.trouble.lost_frames,
+            send_drops: s.trouble.send_drops,
         }));
     }
 

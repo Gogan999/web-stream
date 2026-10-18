@@ -28,6 +28,9 @@ const FILE_MAX_BUFFERED: usize = 64 * 1024;
 const KEYFRAME_DRAIN_MAX: Duration = Duration::from_millis(250);
 /// When the file channel drains below this, [`TransportEvent::ChannelLow`].
 const FILE_LOW: usize = 16 * 1024;
+/// Sent video packets kept for resends: [`TransportConfig::max_resend_age`]
+/// of video at 150 Mb/s.
+const RTX_CACHE_PACKETS: usize = 4096;
 
 /// What happened to a frame handed to [`Session::write_video`].
 #[derive(Debug, PartialEq, Eq)]
@@ -159,7 +162,7 @@ impl Session {
         // Answer a NACK only while the packet is fresh enough for the resend
         // to still be useful; older losses are repaired by a keyframe.
         if let Some(tx) = self.rtc.direct_api().stream_tx_by_mid(self.video, None) {
-            tx.set_rtx_cache(2048, self.max_resend_age, Some(0.15));
+            tx.set_rtx_cache(RTX_CACHE_PACKETS, self.max_resend_age, Some(0.15));
         }
         // Probe up towards what the encoder can use, not just the start rate.
         self.set_max_bitrate(self.max_bitrate_bps);
@@ -471,6 +474,7 @@ impl Session {
                 egress_loss: s.egress_loss_fraction,
                 bwe: s.bwe_tx.map(|b| b.as_u64()),
                 bytes_tx: s.bytes_tx,
+                trouble: Default::default(),
             }),
             _ => return None,
         })

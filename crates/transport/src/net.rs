@@ -35,6 +35,10 @@ const TCP_IDLE: Duration = Duration::from_secs(30);
 /// kernel buffer, so a backed-up TCP path drops instead of adding latency.
 const TCP_WRITE_QUEUE: usize = 16;
 const TCP_SNDBUF: usize = 128 * 1024;
+/// UDP send buffer. The pacer hands over a few milliseconds of video at a
+/// time; Windows' default 64 KiB fills at high bitrates, and every packet it
+/// refuses is lost to the browser.
+const UDP_SNDBUF: usize = 1024 * 1024;
 /// Peers admitted at once (a browser uses a few candidate pairs).
 const MAX_PEERS: usize = 16;
 /// Per-source packet budget. Far above what a browser sends (feedback,
@@ -218,6 +222,9 @@ impl Net {
         };
         for ip in ips {
             let socket = Arc::new(UdpSocket::bind(SocketAddr::new(*ip, udp_port)).await?);
+            if let Err(e) = socket2::SockRef::from(&*socket).set_send_buffer_size(UDP_SNDBUF) {
+                tracing::debug!("udp send buffer: {e}");
+            }
             let local = socket.local_addr()?;
             net.udp_addrs.push(local);
             net.udp.push((local, socket.clone()));
@@ -239,27 +246,41 @@ impl Net {
     }
 
     /// Send without waiting. A full socket buffer drops the packet, which is
-    /// what we want for media: never queue behind old data.
-    pub fn send(&self, proto: Protocol, source: SocketAddr, destination: SocketAddr, data: &[u8]) {
+    /// what we want for media: never queue behind old data. Returns false
+    /// when a full buffer dropped it.
+    pub fn send(
+        &self,
+        proto: Protocol,
+        source: SocketAddr,
+        destination: SocketAddr,
+        data: &[u8],
+    ) -> bool {
         match proto {
             Protocol::Udp => {
                 let Some((_, sock)) = self.udp.iter().find(|(a, _)| *a == source) else {
                     tracing::debug!(%source, "no UDP socket for source");
-                    return;
+                    return true;
                 };
-                if let Err(e) = sock.try_send_to(data, destination) {
-                    if e.kind() != io::ErrorKind::WouldBlock {
+                match sock.try_send_to(data, destination) {
+                    Ok(_) => true,
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => false,
+                    Err(e) => {
                         tracing::debug!(%destination, "udp send: {e}");
+                        true
                     }
                 }
             }
             Protocol::Tcp => {
                 let writers = self.tcp_writers.lock().expect("tcp writers lock");
-                if let Some(tx) = writers.get(&(source, destination)) {
-                    let _ = tx.try_send(data.to_vec());
+                match writers.get(&(source, destination)) {
+                    Some(tx) => tx.try_send(data.to_vec()).is_ok(),
+                    None => true,
                 }
             }
-            other => tracing::debug!(?other, "unsupported transmit protocol"),
+            other => {
+                tracing::debug!(?other, "unsupported transmit protocol");
+                true
+            }
         }
     }
 }

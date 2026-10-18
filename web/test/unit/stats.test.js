@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { snapshot, compute, format } from '../../js/stats.js';
+import { snapshot, compute, format, formatHost } from '../../js/stats.js';
 
 const report = (video, rtt = 0.012) => new Map([
   ['v', { type: 'inbound-rtp', kind: 'video', codecId: 'c', ...video }],
@@ -24,6 +24,22 @@ test('compute deltas over the interval', () => {
   assert.equal(s.relayed, true);
   assert.equal(s.codec, 'H264');
   assert.match(format(s, 8), /latency est 14\.0 ms/);
+});
+
+test('resends and keyframe requests are counted per interval', () => {
+  const a = snapshot(report({ nackCount: 4, retransmittedPacketsReceived: 10, pliCount: 1, firCount: 0 }), 0);
+  const b = snapshot(report({ nackCount: 9, retransmittedPacketsReceived: 16, pliCount: 2, firCount: 1 }), 1000);
+  const s = compute(a, b);
+  assert.equal(s.nackDelta, 5);
+  assert.equal(s.rtxDelta, 6);
+  assert.equal(s.pliDelta, 2);
+  assert.match(format(s, null), /resends asked \+5 got \+6  keyframes asked \+2/);
+});
+
+test('host line names why keyframes happened', () => {
+  const line = formatHost({ keyframeRequests: 3, browserKeyframeRequests: 1, lateFrames: 2, lostFrames: 0, sendDrops: 7 });
+  assert.match(line, /host keyframes: browser 1  late 2  dropped 0  send drops 7/);
+  assert.match(formatHost({ keyframeRequests: 1 }), /browser –/);
 });
 
 test('first sample has no rates', () => {

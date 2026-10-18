@@ -34,6 +34,9 @@ export function compute(prev, cur) {
     dropped: v?.framesDropped ?? 0, droppedDelta: 0,
     lost: v?.packetsLost ?? 0, lostDelta: 0,
     freezes: v?.freezeCount ?? 0,
+    // Repairs: resends asked for and received, and keyframes asked for when
+    // a resend didn't come in time.
+    nackDelta: 0, rtxDelta: 0, pliDelta: 0,
     decoder: v?.decoderImplementation ?? null,
   };
   if (!v || !pv || dt <= 0) return out;
@@ -45,6 +48,9 @@ export function compute(prev, cur) {
   if (emitted > 0) out.jitterMs = (d(v, pv, 'jitterBufferDelay') / emitted) * 1000;
   out.droppedDelta = d(v, pv, 'framesDropped');
   out.lostDelta = d(v, pv, 'packetsLost');
+  out.nackDelta = d(v, pv, 'nackCount');
+  out.rtxDelta = d(v, pv, 'retransmittedPacketsReceived');
+  out.pliDelta = d(v, pv, 'pliCount') + d(v, pv, 'firCount');
   return out;
 }
 
@@ -95,6 +101,7 @@ export function format(s, recvToDisplayMs) {
     `recv→display ${f(recvToDisplayMs, 1)} ms`,
     `latency est ${f(est, 1)} ms (rtt/2 + client; excludes host)`,
     `dropped ${s.dropped} (+${s.droppedDelta})  lost ${s.lost} (+${s.lostDelta})  freezes ${s.freezes}`,
+    `resends asked +${s.nackDelta} got +${s.rtxDelta}  keyframes asked +${s.pliDelta}`,
   ].join('\n');
 }
 
@@ -105,5 +112,9 @@ export function formatHost(h) {
   return [
     `host enc ${mb(h.encoderKbps)}/${mb(h.maxKbps)} Mb/s  bwe ${mb(h.bweKbps)}  sent ${mb(h.sentKbps)}`,
     `host fps ${f(h.fps)}  encode ${f(h.encodeMs, 1)} ms  keyframes ${h.keyframeRequests ?? '–'}  loss ${h.loss == null ? '–' : (h.loss * 100).toFixed(1) + '%'}`,
+    // Why: the browser lost a packet no resend repaired, the host's send
+    // queue fell behind, frames were dropped another way, or the host's
+    // socket refused packets.
+    `host keyframes: browser ${h.browserKeyframeRequests ?? '–'}  late ${h.lateFrames ?? '–'}  dropped ${h.lostFrames ?? '–'}  send drops ${h.sendDrops ?? '–'}`,
   ].join('\n');
 }

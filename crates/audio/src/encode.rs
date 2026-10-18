@@ -18,8 +18,8 @@ pub const DEFAULT_BITRATE: u32 = 128_000;
 /// at the same bitrate; 10 ms is 10 ms sooner.
 pub const FRAME_MS: [u32; 2] = [10, 20];
 /// Packet timestamps follow the sample count, not the jittery time each
-/// buffer was read; they are put back on the wall clock only when the two
-/// drift this far apart (a stall, a reopened device).
+/// buffer was read; they jump forward to the wall clock only when it gets
+/// this far ahead (a stall, a reopened device), never back.
 const RESYNC_MICROS: u64 = 80_000;
 
 /// Converts an [`Instant`] to [`MicrosMono`]. The epoch is the first call in
@@ -84,7 +84,10 @@ impl OpusFrameEncoder {
     /// right after the previous packet, unless that has drifted too far.
     fn stamp(&mut self, wall: MicrosMono, samples: usize) -> MicrosMono {
         let at = match self.next_capture {
-            Some(t) if t.abs_diff(wall) <= RESYNC_MICROS => t,
+            // Only forward: a device clock running a little fast puts the
+            // sample clock ahead of the wall clock, and jumping back would
+            // overlap packets already sent.
+            Some(t) if wall <= t + RESYNC_MICROS => t,
             _ => wall,
         };
         self.next_capture = Some(at + samples as u64 * 1_000_000 / u64::from(SAMPLE_RATE));
@@ -232,6 +235,14 @@ mod tests {
         })
         .unwrap();
         assert_eq!(frames.last().unwrap().capture_time, micros_mono(late));
+
+        // Audio arriving early (a fast device clock) never steps back.
+        let before = frames.last().unwrap().capture_time;
+        enc.push(&vec![0.1f32; FRAME_SAMPLES * CHANNELS], start, |f| {
+            frames.push(f)
+        })
+        .unwrap();
+        assert_eq!(frames.last().unwrap().capture_time, before + 10_000);
     }
 
     #[test]

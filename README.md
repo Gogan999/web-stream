@@ -31,4 +31,7 @@ cargo build --workspace
 cargo test --workspace
 ```
 
-The host crates build on any OS but only capture/encode on Windows.
+The host crates build on any OS but only capture/encode on Windows. To run
+the host see `docs/host-setup.md`; elsewhere `ws-host` still serves the web
+client, pairing, signaling and data channels (input is logged, not
+injected), which is handy for testing the browser side.

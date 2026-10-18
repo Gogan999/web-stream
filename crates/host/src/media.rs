@@ -1,0 +1,512 @@
+//! Runs the media side of a connection: starts capture, game audio, the mic
+//! and input when the transport connects, stops them when it disconnects,
+//! and answers the browser's `control` messages.
+//!
+//! Everything here reacts to [`TransportEvent`]s on one task. Starting and
+//! switching the capture pipeline blocks for tens of milliseconds, which is
+//! done in place (`block_in_place`); events queue in the transport meanwhile.
+
+use std::time::Duration;
+
+use tokio::sync::{mpsc, oneshot};
+use tokio::task::block_in_place;
+use ws_audio::{LoopbackConfig, MicConfig, MicReceiver};
+use ws_capture::VideoPipeline;
+use ws_input::DisplayRect;
+use ws_proto::{
+    ClientControl, DisplayId, DisplayInfo, EncodedFrame, HostControl, VideoConfig, channels,
+};
+use ws_transport::{Transport, TransportEvent};
+
+use crate::input::InputThread;
+use crate::options::MediaOptions;
+use crate::platform;
+
+/// Encoded frames waiting for the transport. The transport keeps only the
+/// newest frame anyway; a full channel makes the encoder drop and send a
+/// keyframe next.
+const FRAME_QUEUE: usize = 2;
+/// About 40 ms of 10 ms Opus packets.
+const AUDIO_QUEUE: usize = 4;
+const CONTROL_QUEUE: usize = 64;
+/// A pipeline that stopped by itself is restarted after this pause.
+const VIDEO_RESTART_DELAY: Duration = Duration::from_secs(1);
+/// Encode below the bandwidth estimate to leave room for audio, data and
+/// estimate error.
+const BWE_HEADROOM: f64 = 0.9;
+/// Bitrate changes smaller than this fraction are not passed to the encoder.
+const BITRATE_STEP: f64 = 0.1;
+const MIN_KBPS: u32 = 500;
+/// Replies kept while the `control` channel is not open yet.
+const UNSENT_MAX: usize = 16;
+
+pub async fn run(
+    transport: Transport,
+    mut events: mpsc::Receiver<TransportEvent>,
+    opts: MediaOptions,
+    mut shutdown: oneshot::Receiver<()>,
+) {
+    let (control_tx, mut control_rx) = mpsc::channel(CONTROL_QUEUE);
+    let (stopped_tx, mut stopped_rx) = mpsc::channel(4);
+    let mut media = Media {
+        transport,
+        config: opts.video.clone(),
+        display: opts.display,
+        mic_enabled: opts.mic_device.is_some(),
+        opts,
+        control_tx,
+        control_open: false,
+        unsent: Vec::new(),
+        stopped_tx,
+        generation: 0,
+        live: None,
+    };
+    loop {
+        tokio::select! {
+            ev = events.recv() => match ev {
+                Some(ev) => media.event(ev),
+                None => break,
+            },
+            Some(msg) = control_rx.recv() => media.send_control(msg).await,
+            Some(generation) = stopped_rx.recv() => media.video_stopped(generation),
+            _ = &mut shutdown => break,
+        }
+    }
+    media.stop();
+}
+
+struct Media {
+    transport: Transport,
+    opts: MediaOptions,
+    /// What the browser chose; kept across reconnects.
+    config: VideoConfig,
+    display: Option<DisplayId>,
+    mic_enabled: bool,
+    control_tx: mpsc::Sender<HostControl>,
+    /// Replies made before the `control` channel opened (an error while
+    /// starting media, say) wait here.
+    control_open: bool,
+    unsent: Vec<HostControl>,
+    stopped_tx: mpsc::Sender<u64>,
+    /// Bumped for every pipeline started, so a stale "stopped" is ignored.
+    generation: u64,
+    live: Option<Live>,
+}
+
+/// What runs while a browser is connected. Fields drop in order: input is
+/// released first.
+struct Live {
+    input: Option<InputThread>,
+    video: Option<Video>,
+    /// Held only to keep game audio capture running.
+    _audio: Option<platform::Loopback>,
+    mic: Option<(platform::Mic, MicReceiver)>,
+    bitrate_kbps: u32,
+}
+
+struct Video {
+    pipeline: VideoPipeline,
+    generation: u64,
+}
+
+impl Media {
+    fn event(&mut self, ev: TransportEvent) {
+        match ev {
+            TransportEvent::Connected => self.start(),
+            TransportEvent::Disconnected => self.stop(),
+            TransportEvent::KeyframeNeeded => {
+                if let Some(v) = self.live.as_ref().and_then(|l| l.video.as_ref()) {
+                    v.pipeline.request_keyframe();
+                }
+            }
+            TransportEvent::TargetBitrate(bps) => self.target_bitrate(bps),
+            TransportEvent::Data {
+                channel,
+                binary,
+                data,
+            } => match channel {
+                channels::CONTROL if !binary => self.control(&data),
+                channels::INPUT | channels::INPUT_MOTION => {
+                    if let Some(input) = self.live.as_ref().and_then(|l| l.input.as_ref()) {
+                        input.send(data);
+                    }
+                }
+                other => tracing::debug!(channel = other, binary, "ignoring data channel message"),
+            },
+            TransportEvent::MicAudio(packet) => {
+                if let Some((_, rx)) = self.live.as_ref().and_then(|l| l.mic.as_ref()) {
+                    // The transport extends RTP sequence numbers; the jitter
+                    // buffer wants the wire value back.
+                    rx.push(packet.sequence as u16, &packet.data);
+                }
+            }
+            TransportEvent::Stats(s) => tracing::debug!(?s, "transport stats"),
+            TransportEvent::ChannelOpen(c) => {
+                tracing::debug!(channel = c, "channel open");
+                if c == channels::CONTROL {
+                    self.control_open = true;
+                    for msg in std::mem::take(&mut self.unsent) {
+                        self.reply(msg);
+                    }
+                }
+            }
+            TransportEvent::ChannelClosed(c) => {
+                tracing::debug!(channel = c, "channel closed");
+                if c == channels::CONTROL {
+                    self.control_open = false;
+                }
+            }
+            TransportEvent::ChannelLow(_) => {}
+        }
+    }
+
+    fn start(&mut self) {
+        if self.live.is_some() {
+            // Re-established without a reported drop; just resync the decoder.
+            if let Some(v) = self.live.as_ref().and_then(|l| l.video.as_ref()) {
+                v.pipeline.request_keyframe();
+            }
+            return;
+        }
+        tracing::info!("browser connected; starting media");
+        let rumble = {
+            let tx = self.control_tx.clone();
+            move |msg| {
+                let _ = tx.try_send(msg);
+            }
+        };
+        let display_rect = self.chosen_display().map(|d| rect(&d));
+        let input = InputThread::start(display_rect, rumble)
+            .inspect_err(|e| tracing::error!("input thread: {e}"))
+            .ok();
+
+        let audio = if self.opts.game_audio {
+            let (tx, rx) = mpsc::channel(AUDIO_QUEUE);
+            match block_in_place(|| platform::start_loopback(LoopbackConfig::default(), tx)) {
+                Ok(capture) => {
+                    tokio::spawn(forward_audio(rx, self.transport.clone()));
+                    Some(capture)
+                }
+                Err(e) => {
+                    tracing::warn!("game audio off: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        self.live = Some(Live {
+            input,
+            video: None,
+            _audio: audio,
+            mic: None,
+            bitrate_kbps: self.config.bitrate_kbps,
+        });
+        if self.mic_enabled {
+            self.start_mic();
+        }
+        if let Err(e) = self.start_video() {
+            tracing::error!("video: {e}");
+            self.error(format!("video is not available: {e}"));
+        }
+    }
+
+    fn stop(&mut self) {
+        self.control_open = false;
+        self.unsent.clear();
+        if self.live.take().is_some() {
+            tracing::info!("browser disconnected; media stopped");
+        }
+    }
+
+    fn start_mic(&mut self) {
+        let Some(device) = self.opts.mic_device.clone() else {
+            return;
+        };
+        let Some(live) = &mut self.live else { return };
+        if live.mic.is_some() {
+            return;
+        }
+        let config = MicConfig {
+            device,
+            ..Default::default()
+        };
+        match block_in_place(|| platform::start_mic(config)) {
+            Ok(mic) => live.mic = Some(mic),
+            Err(e) => tracing::warn!("browser mic off: {e}"),
+        }
+    }
+
+    /// The display to stream: the client's or configured choice if it still
+    /// exists, else the primary.
+    fn chosen_display(&self) -> Option<DisplayInfo> {
+        let displays = ws_capture::list_displays().ok()?;
+        pick_display(&displays, self.display).cloned()
+    }
+
+    /// (Re)starts capture with the current config. Any running pipeline is
+    /// stopped first: two on one GPU output can fail.
+    fn start_video(&mut self) -> anyhow::Result<()> {
+        let Some(live) = &mut self.live else {
+            return Ok(());
+        };
+        live.video = None;
+        let displays = ws_capture::list_displays()?;
+        let info = pick_display(&displays, self.display)
+            .ok_or_else(|| anyhow::anyhow!("no display to capture"))?
+            .clone();
+        let (tx, rx) = mpsc::channel(FRAME_QUEUE);
+        let config = self.config.clone();
+        let pipeline = block_in_place(|| VideoPipeline::start(info.id, config, tx))?;
+        self.generation += 1;
+        tokio::spawn(forward_video(
+            rx,
+            self.transport.clone(),
+            self.stopped_tx.clone(),
+            self.generation,
+        ));
+        live.video = Some(Video {
+            pipeline,
+            generation: self.generation,
+        });
+        live.bitrate_kbps = self.config.bitrate_kbps;
+        if let Some(input) = &live.input {
+            input.set_display(rect(&info));
+        }
+        self.display = Some(info.id);
+        tracing::info!(display = info.id.0, config = ?self.config, "streaming");
+        Ok(())
+    }
+
+    fn video_stopped(&mut self, generation: u64) {
+        let current = self
+            .live
+            .as_ref()
+            .and_then(|l| l.video.as_ref())
+            .is_some_and(|v| v.generation == generation);
+        if !current {
+            return;
+        }
+        tracing::warn!("capture pipeline stopped; restarting it");
+        if let Err(e) = self.start_video() {
+            tracing::error!("video: {e}");
+            self.error(format!("video stopped: {e}"));
+        }
+    }
+
+    fn target_bitrate(&mut self, bps: u64) {
+        let Some(live) = &mut self.live else { return };
+        let Some(video) = &live.video else { return };
+        let kbps = target_kbps(bps, self.config.bitrate_kbps);
+        let step = f64::from(live.bitrate_kbps) * BITRATE_STEP;
+        if f64::from(kbps.abs_diff(live.bitrate_kbps)) >= step {
+            tracing::debug!(kbps, "encoder bitrate");
+            video.pipeline.set_bitrate(kbps);
+            live.bitrate_kbps = kbps;
+        }
+    }
+
+    fn control(&mut self, data: &[u8]) {
+        let msg: ClientControl = match serde_json::from_slice(data) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::debug!("bad control message: {e}");
+                return;
+            }
+        };
+        tracing::debug!(?msg, "control");
+        match msg {
+            ClientControl::ListDisplays => {
+                let displays = ws_capture::list_displays().unwrap_or_else(|e| {
+                    tracing::debug!("list displays: {e}");
+                    Vec::new()
+                });
+                let active = pick_display(&displays, self.display).map(|d| d.id);
+                self.reply(HostControl::Displays { displays, active });
+            }
+            ClientControl::SelectDisplay { id } => self.select_display(id),
+            ClientControl::RequestKeyframe => {
+                if let Some(v) = self.live.as_ref().and_then(|l| l.video.as_ref()) {
+                    v.pipeline.request_keyframe();
+                }
+            }
+            ClientControl::SetVideoConfig { config } => {
+                self.config = config.clamped();
+                if self.live.is_some() {
+                    if let Err(e) = self.start_video() {
+                        tracing::error!("video: {e}");
+                        self.error(format!("could not apply video settings: {e}"));
+                        return;
+                    }
+                }
+                self.display_changed();
+            }
+            ClientControl::SetMicEnabled { enabled } => {
+                self.mic_enabled = enabled;
+                if enabled {
+                    self.start_mic();
+                } else if let Some(live) = &mut self.live {
+                    live.mic = None;
+                }
+            }
+            ClientControl::RequestFile { .. } => {
+                self.error("file transfer is not available yet".into());
+            }
+            ClientControl::Ping { client_time_ms } => {
+                self.reply(HostControl::Pong { client_time_ms });
+            }
+        }
+    }
+
+    fn select_display(&mut self, id: DisplayId) {
+        let displays = ws_capture::list_displays().unwrap_or_default();
+        let Some(info) = displays.iter().find(|d| d.id == id) else {
+            self.error(format!("display {} not found", id.0));
+            return;
+        };
+        if let Some(live) = &self.live {
+            if let Some(video) = &live.video {
+                if let Err(e) = block_in_place(|| video.pipeline.select_display(id)) {
+                    tracing::error!("select display {}: {e}", id.0);
+                    self.error(format!("could not switch display: {e}"));
+                    return;
+                }
+            }
+            if let Some(input) = &live.input {
+                input.set_display(rect(info));
+            }
+        }
+        self.display = Some(id);
+        tracing::info!(display = id.0, "display selected");
+        self.display_changed();
+    }
+
+    fn display_changed(&self) {
+        if let Some(id) = self.display {
+            self.reply(HostControl::DisplayChanged {
+                id,
+                config: self.config.clone(),
+            });
+        }
+    }
+
+    fn error(&self, message: String) {
+        self.reply(HostControl::Error { message });
+    }
+
+    fn reply(&self, msg: HostControl) {
+        if self.control_tx.try_send(msg).is_err() {
+            tracing::warn!("control queue full; dropping reply");
+        }
+    }
+
+    async fn send_control(&mut self, msg: HostControl) {
+        if !self.control_open {
+            if self.unsent.len() < UNSENT_MAX {
+                self.unsent.push(msg);
+            }
+            return;
+        }
+        let json = match serde_json::to_vec(&msg) {
+            Ok(j) => j,
+            Err(e) => {
+                tracing::error!("encode control message: {e}");
+                return;
+            }
+        };
+        match self
+            .transport
+            .send_data(channels::CONTROL, false, json)
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => tracing::warn!("control channel full; dropped {msg:?}"),
+            Err(e) => tracing::debug!("control message not sent: {e}"),
+        }
+    }
+}
+
+async fn forward_video(
+    mut frames: mpsc::Receiver<EncodedFrame>,
+    transport: Transport,
+    stopped: mpsc::Sender<u64>,
+    generation: u64,
+) {
+    while let Some(frame) = frames.recv().await {
+        transport.send_video(frame);
+    }
+    // The pipeline is gone: dropped on purpose (the generation is then stale)
+    // or stopped on an error.
+    tokio::time::sleep(VIDEO_RESTART_DELAY).await;
+    let _ = stopped.send(generation).await;
+}
+
+async fn forward_audio(mut packets: mpsc::Receiver<ws_proto::AudioPacket>, transport: Transport) {
+    while let Some(packet) = packets.recv().await {
+        transport.send_audio(packet);
+    }
+}
+
+fn pick_display(displays: &[DisplayInfo], wanted: Option<DisplayId>) -> Option<&DisplayInfo> {
+    wanted
+        .and_then(|id| displays.iter().find(|d| d.id == id))
+        .or_else(|| displays.iter().find(|d| d.primary))
+        .or_else(|| displays.first())
+}
+
+fn rect(d: &DisplayInfo) -> DisplayRect {
+    DisplayRect {
+        left: d.x,
+        top: d.y,
+        width: d.width as i32,
+        height: d.height as i32,
+    }
+}
+
+/// Encoder bitrate for a bandwidth estimate, capped by the configured rate.
+fn target_kbps(bwe_bps: u64, max_kbps: u32) -> u32 {
+    let kbps = (bwe_bps as f64 * BWE_HEADROOM / 1000.0) as u64;
+    (kbps.min(u64::from(max_kbps)) as u32).max(MIN_KBPS)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn display(id: u32, primary: bool) -> DisplayInfo {
+        DisplayInfo {
+            id: DisplayId(id),
+            name: format!("D{id}"),
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+            refresh_mhz: 60_000,
+            primary,
+        }
+    }
+
+    #[test]
+    fn picks_chosen_then_primary_then_first() {
+        let ds = [display(0, false), display(1, true), display(2, false)];
+        assert_eq!(
+            pick_display(&ds, Some(DisplayId(2))).unwrap().id,
+            DisplayId(2)
+        );
+        assert_eq!(
+            pick_display(&ds, Some(DisplayId(9))).unwrap().id,
+            DisplayId(1)
+        );
+        assert_eq!(pick_display(&ds, None).unwrap().id, DisplayId(1));
+        assert_eq!(pick_display(&ds[..1], None).unwrap().id, DisplayId(0));
+        assert!(pick_display(&[], None).is_none());
+    }
+
+    #[test]
+    fn bitrate_follows_estimate_under_cap() {
+        assert_eq!(target_kbps(10_000_000, 20_000), 9_000);
+        assert_eq!(target_kbps(100_000_000, 20_000), 20_000);
+        assert_eq!(target_kbps(100_000, 20_000), MIN_KBPS);
+    }
+}

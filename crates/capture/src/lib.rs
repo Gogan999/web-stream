@@ -24,6 +24,8 @@
 mod layout;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod pacing;
+#[cfg_attr(not(windows), allow(dead_code))]
+mod tuning;
 #[cfg(windows)]
 mod win;
 

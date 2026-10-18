@@ -1,6 +1,6 @@
 //! NVENC encoder session on a D3D11 device, configured for interactive
-//! streaming: P1 preset with ultra-low-latency tuning, CBR with a one-frame
-//! VBV, no B-frames, an infinite GOP (keyframes only on demand), and
+//! streaming: ultra-low-latency tuning at the preset [`crate::tuning`] picks
+//! for the config's quality, CBR with a VBV of about one frame, no B-frames, an infinite GOP (keyframes only on demand), and
 //! parameter sets repeated on every IDR so a decoder can join at any
 //! keyframe.
 //!
@@ -110,6 +110,7 @@ pub(crate) struct NvEncoder {
     init: Box<nv::NV_ENC_INITIALIZE_PARAMS>,
     config: Box<nv::NV_ENC_CONFIG>,
     fps: u32,
+    vbv_frames: f64,
     input: nv::NV_ENC_REGISTERED_PTR,
     bitstream: nv::NV_ENC_OUTPUT_PTR,
 }
@@ -143,6 +144,7 @@ impl NvEncoder {
             init: Box::default(),
             config: Box::default(),
             fps: cfg.fps,
+            vbv_frames: 1.0,
             input: ptr::null_mut(),
             bitstream: ptr::null_mut(),
         };
@@ -158,7 +160,7 @@ impl NvEncoder {
             "nvEncCreateBitstreamBuffer",
         )?;
         this.bitstream = bs.bitstreamBuffer;
-        tracing::info!(codec = ?cfg.codec, cfg.width, cfg.height, cfg.fps, cfg.bitrate_kbps, "NVENC ready");
+        tracing::info!(codec = ?cfg.codec, cfg.width, cfg.height, cfg.fps, cfg.bitrate_kbps, quality = ?cfg.quality, "NVENC ready");
         Ok(this)
     }
 
@@ -168,7 +170,17 @@ impl NvEncoder {
             VideoCodec::H265 => nv::NV_ENC_CODEC_HEVC_GUID,
             VideoCodec::Av1 => nv::NV_ENC_CODEC_AV1_GUID,
         };
-        let preset_guid = nv::NV_ENC_PRESET_P1_GUID;
+        let effort = crate::tuning::tuning(cfg);
+        self.vbv_frames = effort.vbv_frames;
+        let preset_guid = match effort.preset {
+            1 => nv::NV_ENC_PRESET_P1_GUID,
+            2 => nv::NV_ENC_PRESET_P2_GUID,
+            3 => nv::NV_ENC_PRESET_P3_GUID,
+            4 => nv::NV_ENC_PRESET_P4_GUID,
+            5 => nv::NV_ENC_PRESET_P5_GUID,
+            6 => nv::NV_ENC_PRESET_P6_GUID,
+            _ => nv::NV_ENC_PRESET_P7_GUID,
+        };
         let tuning = nv::NV_ENC_TUNING_INFO::NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY;
 
         let mut preset = nv::NV_ENC_PRESET_CONFIG {
@@ -207,7 +219,7 @@ impl NvEncoder {
             VideoCodec::H265 => nv::NV_ENC_HEVC_PROFILE_MAIN_GUID,
             VideoCodec::Av1 => nv::NV_ENC_AV1_PROFILE_MAIN_GUID,
         };
-        apply_rate(&mut config, cfg.bitrate_kbps, cfg.fps);
+        apply_rate(&mut config, cfg.bitrate_kbps, cfg.fps, self.vbv_frames);
         // The preset already implies these for ultra-low latency; set them
         // so a driver default change can't add frames of delay.
         config.rcParams.set_enableLookahead(0);
@@ -381,7 +393,7 @@ impl NvEncoder {
     /// Changes the bitrate in place; takes effect on the next frame.
     pub(crate) fn set_bitrate(&mut self, kbps: u32) -> Result<()> {
         let previous = self.config.rcParams;
-        apply_rate(&mut self.config, kbps, self.fps);
+        apply_rate(&mut self.config, kbps, self.fps, self.vbv_frames);
         let mut params = nv::NV_ENC_RECONFIGURE_PARAMS {
             version: nv::NV_ENC_RECONFIGURE_PARAMS_VER,
             reInitEncodeParams: *self.init,
@@ -440,15 +452,16 @@ impl Drop for NvEncoder {
     }
 }
 
-/// CBR at `kbps` with a one-frame VBV: every frame fits in one frame time on
-/// the wire, so the network never has to buffer a burst.
-fn apply_rate(config: &mut nv::NV_ENC_CONFIG, kbps: u32, fps: u32) {
+/// CBR at `kbps` with a VBV of `vbv_frames` frames: every frame fits in
+/// about one frame time on the wire, so the network never has to buffer a
+/// long burst.
+fn apply_rate(config: &mut nv::NV_ENC_CONFIG, kbps: u32, fps: u32, vbv_frames: f64) {
     let bps = kbps.saturating_mul(1000);
     let rc = &mut config.rcParams;
     rc.rateControlMode = nv::NV_ENC_PARAMS_RC_MODE::NV_ENC_PARAMS_RC_CBR;
     rc.averageBitRate = bps;
     rc.maxBitRate = bps;
-    rc.vbvBufferSize = bps / fps.max(1);
+    rc.vbvBufferSize = (f64::from(bps) / f64::from(fps.max(1)) * vbv_frames) as u32;
     rc.vbvInitialDelay = rc.vbvBufferSize;
 }
 

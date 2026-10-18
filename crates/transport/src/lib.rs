@@ -9,7 +9,9 @@
 //! Late frames are dropped, never queued: if the send side is behind (a
 //! newer frame arrived before the last was sent, or the pacer queue is older
 //! than [`TransportConfig::max_send_delay`]) it skips to the newest frame and
-//! asks the encoder for a keyframe. NACKs are answered only for packets
+//! asks the encoder for a keyframe. Until that keyframe goes out, frames
+//! that build on the skipped one are dropped too, so the browser never
+//! decodes against a picture it doesn't have. NACKs are answered only for packets
 //! younger than [`TransportConfig::max_resend_age`].
 //!
 //! The host is ICE-lite and reachable directly: one UDP port (and optionally
@@ -132,6 +134,7 @@ enum Cmd {
     Answer(String, oneshot::Sender<Result<(), Error>>),
     Candidate(String),
     Close,
+    MaxBitrate(u64),
     Data {
         channel: String,
         binary: bool,
@@ -303,6 +306,14 @@ impl Transport {
         self.shared.notify.notify_one();
     }
 
+    /// Change the most the bandwidth estimate probes up to (see
+    /// [`TransportConfig::max_bitrate_bps`]), for this and later sessions.
+    pub fn set_max_bitrate(&self, bps: u64) {
+        if self.cmds.try_send(Cmd::MaxBitrate(bps)).is_err() {
+            tracing::debug!("transport busy; dropping bitrate ceiling change");
+        }
+    }
+
     /// Queue one Opus packet of game audio. Dropped if the queue is full.
     pub fn send_audio(&self, packet: AudioPacket) {
         let _ = self.audio.try_send(packet);
@@ -372,7 +383,7 @@ impl Driver {
                     if let (Some(frame), Some(s)) = (frame, &mut self.session) {
                         match s.write_video(&frame, Instant::now()) {
                             VideoWrite::Sent if frame.keyframe => shared.keyframe_sent(),
-                            VideoWrite::Late => shared.keyframe_needed(),
+                            VideoWrite::Late | VideoWrite::Broken => shared.keyframe_needed(),
                             _ => {}
                         }
                     }
@@ -496,6 +507,12 @@ impl Driver {
                 }
             }
             Cmd::Close => self.end_session(),
+            Cmd::MaxBitrate(bps) => {
+                self.config.max_bitrate_bps = bps;
+                if let Some(s) = &mut self.session {
+                    s.set_max_bitrate(bps);
+                }
+            }
             Cmd::Data {
                 channel,
                 binary,

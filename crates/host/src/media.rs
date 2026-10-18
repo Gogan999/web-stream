@@ -7,6 +7,7 @@
 //! done in place (`block_in_place`), as are the thread joins when a pipeline
 //! stops; events queue in the transport meanwhile.
 
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, oneshot, watch};
@@ -16,9 +17,9 @@ use ws_capture::VideoPipeline;
 use ws_input::DisplayRect;
 use ws_proto::{
     ClientControl, DisplayId, DisplayInfo, EncodedFrame, HostControl, VideoCodec, VideoConfig,
-    channels,
+    VideoStats, channels,
 };
-use ws_transport::{Transport, TransportConfig, TransportEvent};
+use ws_transport::{Transport, TransportConfig, TransportEvent, TransportStats};
 
 use crate::input::InputThread;
 use crate::options::MediaOptions;
@@ -39,6 +40,9 @@ const BWE_HEADROOM: f64 = 0.9;
 /// Bitrate changes smaller than this fraction are not passed to the encoder.
 const BITRATE_STEP: f64 = 0.1;
 const MIN_KBPS: u32 = 500;
+/// Room above the video ceiling the bandwidth estimate may probe for, for
+/// game audio and data channels.
+const NON_VIDEO_BPS: u64 = 500_000;
 /// Replies kept while the `control` channel is not open yet.
 const UNSENT_MAX: usize = 16;
 /// A `setVideoConfig` that needs a new pipeline is refused if the last one
@@ -72,7 +76,10 @@ pub async fn run(
         last_restart: None,
         codecs,
         live: None,
+        sent: Arc::default(),
+        keyframe_requests: 0,
     };
+    media.set_ceiling();
     loop {
         tokio::select! {
             ev = events.recv() => match ev {
@@ -112,6 +119,17 @@ struct Media {
     last_restart: Option<Instant>,
     codecs: AcceptedCodecs,
     live: Option<Live>,
+    /// Frames handed to the transport since the last stats report.
+    sent: Arc<Mutex<SentFrames>>,
+    keyframe_requests: u32,
+}
+
+#[derive(Debug, Default)]
+struct SentFrames {
+    frames: u32,
+    bytes: u64,
+    /// Sum of capture-to-encoded times.
+    encode_micros: u64,
 }
 
 /// What runs while a browser is connected. Fields drop in order: input is
@@ -137,6 +155,7 @@ impl Media {
             TransportEvent::Disconnected => self.stop(),
             TransportEvent::KeyframeNeeded => {
                 if let Some(v) = self.live.as_ref().and_then(|l| l.video.as_ref()) {
+                    self.keyframe_requests += 1;
                     v.pipeline.request_keyframe();
                 }
             }
@@ -161,7 +180,10 @@ impl Media {
                     rx.push(packet.sequence as u16, &packet.data);
                 }
             }
-            TransportEvent::Stats(s) => tracing::debug!(?s, "transport stats"),
+            TransportEvent::Stats(s) => {
+                tracing::debug!(?s, "transport stats");
+                self.report_stats(&s);
+            }
             TransportEvent::ChannelOpen(c) => {
                 tracing::debug!(channel = c, "channel open");
                 if c == channels::CONTROL {
@@ -237,6 +259,8 @@ impl Media {
         self.control_open = false;
         self.unsent.clear();
         self.last_bwe = None;
+        self.keyframe_requests = 0;
+        *self.sent.lock().expect("sent stats lock") = SentFrames::default();
         if let Some(live) = self.live.take() {
             drop_blocking(live);
             tracing::info!("browser disconnected; media stopped");
@@ -308,6 +332,7 @@ impl Media {
         tokio::spawn(forward_video(
             rx,
             self.transport.clone(),
+            self.sent.clone(),
             self.stopped_tx.clone(),
             self.generation,
         ));
@@ -348,6 +373,38 @@ impl Media {
             .last_bwe
             .unwrap_or_else(|| TransportConfig::default().initial_bitrate_bps);
         target_kbps(bwe, self.config.bitrate_kbps)
+    }
+
+    /// Lets the bandwidth estimate probe up to the browser's bitrate
+    /// setting (plus room for audio), and no further.
+    fn set_ceiling(&self) {
+        let video = (f64::from(self.config.bitrate_kbps) * 1000.0 / BWE_HEADROOM) as u64;
+        self.transport.set_max_bitrate(video + NON_VIDEO_BPS);
+    }
+
+    /// Tells the browser how the host side of the stream is doing.
+    fn report_stats(&mut self, s: &TransportStats) {
+        let Some(live) = &self.live else { return };
+        if live.video.is_none() {
+            return;
+        }
+        let sent = std::mem::take(&mut *self.sent.lock().expect("sent stats lock"));
+        let keyframe_requests = std::mem::take(&mut self.keyframe_requests);
+        // Transport stats arrive once a second.
+        self.reply(HostControl::VideoStats(VideoStats {
+            encoder_kbps: live.bitrate_kbps,
+            max_kbps: self.config.bitrate_kbps,
+            bwe_kbps: s.bwe.map(|b| (b / 1000) as u32),
+            fps: sent.frames as f32,
+            sent_kbps: (sent.bytes * 8 / 1000) as u32,
+            encode_ms: if sent.frames == 0 {
+                0.0
+            } else {
+                sent.encode_micros as f32 / sent.frames as f32 / 1000.0
+            },
+            keyframe_requests,
+            loss: s.egress_loss,
+        }));
     }
 
     fn target_bitrate(&mut self, bps: u64) {
@@ -423,6 +480,7 @@ impl Media {
             let bitrate_changed = config.bitrate_kbps != self.config.bitrate_kbps;
             self.config = config;
             if bitrate_changed {
+                self.set_ceiling();
                 self.apply_bitrate(true);
             }
             self.display_changed();
@@ -436,6 +494,7 @@ impl Media {
             return;
         }
         self.config = config;
+        self.set_ceiling();
         if let Err(e) = self.start_video() {
             tracing::error!("video: {e}");
             self.error(format!("could not apply video settings: {e}"));
@@ -520,10 +579,17 @@ impl Media {
 async fn forward_video(
     mut frames: mpsc::Receiver<EncodedFrame>,
     transport: Transport,
+    sent: Arc<Mutex<SentFrames>>,
     stopped: mpsc::Sender<u64>,
     generation: u64,
 ) {
     while let Some(frame) = frames.recv().await {
+        {
+            let mut sent = sent.lock().expect("sent stats lock");
+            sent.frames += 1;
+            sent.bytes += frame.data.len() as u64;
+            sent.encode_micros += frame.encode_done_time.saturating_sub(frame.capture_time);
+        }
         transport.send_video(frame);
     }
     // The pipeline is gone: dropped on purpose (the generation is then stale)

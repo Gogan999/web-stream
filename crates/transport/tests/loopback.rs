@@ -282,3 +282,151 @@ async fn offer_advertises_public_addresses() {
         2
     );
 }
+
+/// A frame of `bytes` total (Annex B, H.264 slice) for the load test.
+fn sized_frame(index: u64, keyframe: bool, bytes: usize) -> EncodedFrame {
+    let mut f = frame(index, keyframe);
+    let mut data = f.data.to_vec();
+    data.resize(bytes.max(data.len()), index as u8 | 1);
+    f.data = Bytes::from(data);
+    f
+}
+
+/// Heavy motion: a constant-bitrate encoder fills every frame to its budget
+/// (bitrate / fps), following the bandwidth estimate as the host does. Each keyframe request
+/// is a soft "reset" frame on screen, so a steady stream must not need any
+/// beyond the one that starts it.
+// Multi-threaded like the host, so the peer's loop doesn't delay the
+// transport's sends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn full_frames_at_the_target_bitrate_need_no_keyframes() {
+    const FPS: u64 = 60;
+    // The host's BWE_HEADROOM. At 90 this forced 20-50 keyframes here.
+    const HEADROOM_PCT: u64 = 75;
+    let (transport, mut events) = Transport::start(TransportConfig {
+        ips: vec![[127, 0, 0, 1].into()],
+        udp_port: 0,
+        tcp_port: None,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let offer = transport.offer().await.unwrap();
+    let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let local = sock.local_addr().unwrap();
+    let mut rtc = Rtc::builder().build(Instant::now());
+    rtc.add_local_candidate(Candidate::host(local, "udp").unwrap());
+    let answer = rtc
+        .sdp_api()
+        .accept_offer(SdpOffer::from_sdp_string(&offer).unwrap())
+        .unwrap();
+    transport
+        .accept_answer(answer.to_sdp_string())
+        .await
+        .unwrap();
+
+    let mut buf = vec![0u8; 2048];
+    let mut connected_at = None;
+    // What the host's encoder would be set to: under the estimate.
+    let mut encoder_bps = TransportConfig::default().initial_bitrate_bps * HEADROOM_PCT / 100;
+    let mut keyframe_requests = 0u32;
+    let mut index = 0u64;
+    let mut next_frame = Instant::now();
+    let mut keyframe_due = true;
+    let mut got_video = 0usize;
+
+    loop {
+        let timeout = loop {
+            match rtc.poll_output().unwrap() {
+                Output::Timeout(t) => break t,
+                Output::Transmit(t) => {
+                    sock.send_to(&t.contents, t.destination).await.unwrap();
+                }
+                Output::Event(Event::MediaData(_)) => got_video += 1,
+                Output::Event(_) => {}
+            }
+        };
+        while let Ok(ev) = events.try_recv() {
+            match ev {
+                TransportEvent::Connected => connected_at = Some(Instant::now()),
+                TransportEvent::KeyframeNeeded => {
+                    keyframe_due = true;
+                    // The one that starts the stream doesn't count.
+                    if connected_at.is_some_and(|t| t.elapsed() > Duration::from_millis(500)) {
+                        keyframe_requests += 1;
+                    }
+                }
+                TransportEvent::TargetBitrate(bps) => {
+                    // As the host: follow the estimate down at once, and up
+                    // in steps of at least 10%.
+                    let target = bps * HEADROOM_PCT / 100;
+                    if target < encoder_bps || (target - encoder_bps) * 10 >= encoder_bps {
+                        encoder_bps = target;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(started) = connected_at else {
+            // Wait for the connection first.
+            let got = recv_until(&sock, &mut buf, timeout).await;
+            rtc.handle_input(input(got, &buf, local)).unwrap();
+            continue;
+        };
+        if started.elapsed() > Duration::from_secs(4) {
+            break;
+        }
+        if Instant::now() >= next_frame {
+            next_frame += Duration::from_micros(1_000_000 / FPS);
+            let budget = (encoder_bps / FPS / 8) as usize;
+            // Constant bitrate with fast motion fills every frame; a
+            // keyframe overshoots the one-frame VBV to about twice it.
+            let bytes = if keyframe_due { budget * 2 } else { budget };
+            transport.send_video(sized_frame(index, keyframe_due, bytes));
+            keyframe_due = false;
+            index += 1;
+        }
+        let got = recv_until(&sock, &mut buf, timeout).await;
+        rtc.handle_input(input(got, &buf, local)).unwrap();
+    }
+    assert!(got_video > 0, "no video reached the peer");
+    assert_eq!(
+        keyframe_requests, 0,
+        "steady full frames forced {keyframe_requests} keyframes in 3.5 s"
+    );
+}
+
+/// Waits for one datagram until `timeout` (at most 2 ms) and returns its
+/// length and source.
+async fn recv_until(
+    sock: &UdpSocket,
+    buf: &mut [u8],
+    timeout: Instant,
+) -> Option<(usize, std::net::SocketAddr)> {
+    let wait = timeout
+        .saturating_duration_since(Instant::now())
+        .min(Duration::from_millis(2));
+    tokio::time::timeout(wait, sock.recv_from(buf))
+        .await
+        .ok()?
+        .ok()
+}
+
+fn input(
+    got: Option<(usize, std::net::SocketAddr)>,
+    buf: &[u8],
+    local: std::net::SocketAddr,
+) -> Input<'_> {
+    match got {
+        Some((n, source)) => Input::Receive(
+            Instant::now(),
+            Receive {
+                proto: Protocol::Udp,
+                source,
+                destination: local,
+                contents: buf[..n].try_into().unwrap(),
+            },
+        ),
+        None => Input::Timeout(Instant::now()),
+    }
+}

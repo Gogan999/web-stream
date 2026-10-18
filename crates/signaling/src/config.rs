@@ -9,8 +9,11 @@ pub struct SignalingConfig {
     pub bind: SocketAddr,
     /// Where the TLS certificate (when self-signed) and paired devices are kept.
     pub data_dir: PathBuf,
-    /// Directory with the built web client. `None` serves a placeholder page.
+    /// Directory with the web client. `None` serves `embedded_web`, or a
+    /// placeholder page when that is empty.
     pub web_root: Option<PathBuf>,
+    /// The web client built into the binary, as (path, contents).
+    pub embedded_web: &'static [(&'static str, &'static [u8])],
     pub tls: TlsSource,
     /// External TURN servers handed to the browser. Usually empty, since the
     /// host is reachable directly.
@@ -28,6 +31,7 @@ impl SignalingConfig {
             bind,
             data_dir,
             web_root: None,
+            embedded_web: &[],
             tls: TlsSource::SelfSigned {
                 hostnames: Vec::new(),
             },

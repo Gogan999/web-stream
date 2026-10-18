@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Installs what web-stream needs to build on Windows, then builds ws-host.
+    Installs what web-stream needs to build on Windows, then builds the host.
 
 .DESCRIPTION
     Installs, through winget and only when missing:
@@ -12,7 +12,9 @@
       - ViGEmBus, the gamepad driver, with -GamepadDriver
       - Steam's Streaming Microphone driver, from Steam's own folder, with
         -MicDriver (needs Steam; nothing is downloaded)
-    Then runs `cargo build --release -p ws-host`.
+    Then builds the host (the ws-host-gui tray app and the ws-host console
+    program), copies the web client next to them and adds a "web-stream host"
+    shortcut to the Start menu.
 
     Run it from a checkout:
         powershell -ExecutionPolicy Bypass -File scripts\install.ps1
@@ -35,7 +37,7 @@
     Skipped when VB-CABLE or the Steam microphone is already installed.
 
 .PARAMETER Run
-    Start the host with pairing open after the build.
+    Start the tray app after the build.
 #>
 [CmdletBinding()]
 param(
@@ -212,21 +214,46 @@ Install-Rust
 if ($GamepadDriver) { Install-WingetPackage 'ViGEm.ViGEmBus' @('--silent') }
 $micReady = if ($MicDriver) { Install-SteamMic } else { Test-MicCable }
 
-Write-Step 'Building ws-host (release)'
+if (Get-Process -Name ws-host-gui, ws-host -ErrorAction SilentlyContinue) {
+    throw 'The host is running. Quit it (tray icon, Quit) and run this script again.'
+}
+
+Write-Step 'Building the host (release)'
 Push-Location $repo
 try {
-    & cargo build --release -p ws-host
+    & cargo build --release -p ws-host -p ws-host-gui
     if ($LASTEXITCODE -ne 0) { throw 'cargo build failed.' }
 } finally {
     Pop-Location
 }
 
-$exe = Join-Path $repo 'target\release\ws-host.exe'
+$bin = Join-Path $repo 'target\release'
+$gui = Join-Path $bin 'ws-host-gui.exe'
+
+# The host serves the web client only from `web` next to its executable.
+Write-Step 'Copying the web client next to the host'
+$webOut = Join-Path $bin 'web'
+if (Test-Path $webOut) { Remove-Item -Recurse -Force $webOut }
+New-Item -ItemType Directory -Path $webOut | Out-Null
+foreach ($item in 'index.html', 'style.css', 'js') {
+    Copy-Item -Recurse -Path (Join-Path $repo "web\$item") -Destination $webOut
+}
+
+Write-Step 'Adding web-stream host to the Start menu'
+$shortcutPath = Join-Path ([Environment]::GetFolderPath('Programs')) 'web-stream host.lnk'
+$shell = New-Object -ComObject WScript.Shell
+$shortcut = $shell.CreateShortcut($shortcutPath)
+$shortcut.TargetPath = $gui
+$shortcut.WorkingDirectory = $bin
+$shortcut.Description = 'Stream this PC to a browser'
+$shortcut.Save()
+
 Write-Host ''
-Write-Host "Built $exe" -ForegroundColor Green
-Write-Host 'Start the host from the repository folder with:'
-Write-Host "    cd `"$repo`""
-Write-Host '    target\release\ws-host.exe --pair --web-root web'
+Write-Host "Built $gui" -ForegroundColor Green
+Write-Host 'Start "web-stream host" from the Start menu. It runs in the tray; closing'
+Write-Host 'its window keeps it running, and Quit in the tray menu stops it.'
+Write-Host 'Allow it through Windows Firewall (Private and Public) when Windows asks.'
+Write-Host "The console version still works: `"$(Join-Path $bin 'ws-host.exe')`" --pair"
 if (-not $GamepadDriver) {
     Write-Host 'Gamepads need ViGEmBus: run this script again with -GamepadDriver.'
 }
@@ -236,6 +263,5 @@ if (-not $micReady) {
 }
 
 if ($Run) {
-    Push-Location $repo
-    try { & $exe --pair --web-root web } finally { Pop-Location }
+    Start-Process -FilePath $gui -WorkingDirectory $bin
 }

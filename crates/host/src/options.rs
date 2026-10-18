@@ -184,7 +184,7 @@ pub fn parse_size(s: &str) -> anyhow::Result<(u32, u32)> {
 }
 
 /// `%LOCALAPPDATA%\web-stream` on Windows, the XDG data dir elsewhere.
-fn default_data_dir() -> PathBuf {
+pub fn default_data_dir() -> PathBuf {
     let base = std::env::var_os("LOCALAPPDATA")
         .or_else(|| std::env::var_os("XDG_DATA_HOME"))
         .map(PathBuf::from)

@@ -16,6 +16,9 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["io-util"] }
 tracing.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = ["Win32_Media"] }
+
 [lints]
 workspace = true
 

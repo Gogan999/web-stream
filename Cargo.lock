@@ -5956,6 +5956,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "windows",
  "ws-proto",
  "ws-signaling",
 ]

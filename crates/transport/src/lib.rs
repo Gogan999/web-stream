@@ -20,6 +20,7 @@
 
 mod net;
 mod session;
+mod timer;
 
 pub use net::lan_ips;
 
@@ -392,6 +393,7 @@ impl Driver {
         mut audio: mpsc::Receiver<AudioPacket>,
     ) {
         let shared = self.shared.clone();
+        let _timer = timer::FineTimer::new();
         loop {
             let deadline = self.drain();
             // Unbiased: no source (a flood on the sockets, say) can starve

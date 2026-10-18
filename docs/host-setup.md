@@ -54,6 +54,12 @@ starting it again brings its window forward.
 Windows Firewall asks about `ws-host-gui.exe` the first time it listens.
 Allow Private and Public networks (see below).
 
+If starting fails with "access denied" on the data folder, an older build ran
+the host as administrator and left files only an administrator can open.
+Run web-stream host as administrator once (it repairs the folder for your
+account), or delete `%LOCALAPPDATA%\web-stream` and pair again. Run the host
+normally, not as administrator.
+
 ### The console version
 
 `ws-host.exe` is the same host without a window, for a console or a script:

@@ -142,7 +142,14 @@ test('client streams from mock host, sends input and switches display', { timeou
   await client.waitForFunction(() => document.getElementById('video').style.cursor.startsWith('url("data:image/png'));
   assert.match(await cursorStyle(), / 1 0, default$/);
   assert.equal(await client.isVisible('#cursor'), false, 'no overlay in absolute mode');
-  await client.selectOption('#mouse-mode', 'relative');
+  // Clicking the stream closed the settings dropdown; the mouse mode is in it.
+  const mouseMode = async (mode) => {
+    await client.click('#more-toggle');
+    await client.selectOption('#mouse-mode', mode);
+    await client.keyboard.press('Escape');
+    await client.waitForSelector('#more', { state: 'hidden' });
+  };
+  await mouseMode('relative');
   await host.waitForFunction(() => window.mockLog.some((e) => e.type === 'setCursorPositions' && e.enabled));
   await sendHost({ type: 'cursorShape', kind: 'ew-resize', id: 1 }); // image already sent: id only
   await client.waitForSelector('#cursor', { state: 'visible' });
@@ -153,7 +160,7 @@ test('client streams from mock host, sends input and switches display', { timeou
   assert.ok(Math.abs(overlay.y + overlay.height / 2 - (box.y + box.height / 2)) < 2, JSON.stringify({ overlay, box }));
   await sendHost({ type: 'cursorShape', kind: 'none' });
   await client.waitForSelector('#cursor', { state: 'hidden' });
-  await client.selectOption('#mouse-mode', 'absolute');
+  await mouseMode('absolute');
   await client.waitForFunction(() => document.getElementById('video').style.cursor === 'none');
 
   // Tab never lands in the hidden on-screen keyboard textarea.

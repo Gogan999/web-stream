@@ -13,11 +13,7 @@
 //! `capture-test` writes the raw bitstream (play it with `ffplay FILE`) and
 //! prints frame rate, drops and capture-to-encoded latency once a second.
 
-mod input;
-mod media;
-mod options;
-mod platform;
-mod serve;
+mod console;
 
 use std::io::Write;
 use std::time::{Duration, Instant};
@@ -26,7 +22,7 @@ use anyhow::{Context, bail};
 use tokio::sync::mpsc;
 use ws_proto::{DisplayId, VideoCodec, VideoConfig, mono_now};
 
-use crate::options::{ServeOptions, parse_codec, parse_quality, parse_size};
+use ws_host::options::{self, ServeOptions, parse_codec, parse_quality, parse_size};
 
 const CAPTURE_TEST_USAGE: &str = "\
 ws-host capture-test [options]   encode a display to a file and print fps,
@@ -67,7 +63,7 @@ fn run_serve(args: &[String]) -> anyhow::Result<()> {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(serve::serve(opts))
+        .block_on(console::run(opts))
 }
 
 fn list_displays() -> anyhow::Result<()> {
@@ -88,7 +84,7 @@ fn list_displays() -> anyhow::Result<()> {
 }
 
 fn list_audio_devices() -> anyhow::Result<()> {
-    for name in platform::audio_devices()? {
+    for name in ws_host::audio_devices()? {
         println!("{name}");
     }
     Ok(())

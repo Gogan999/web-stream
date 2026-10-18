@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Installs what web-stream needs to build on Windows, then builds ws-host.
+    Installs what web-stream needs to build on Windows, then builds the host.
 
 .DESCRIPTION
     Installs, through winget and only when missing:
@@ -10,7 +10,11 @@
       - Rust through rustup (stable, msvc)
       - Git, only when the repository has to be cloned
       - ViGEmBus, the gamepad driver, with -GamepadDriver
-    Then runs `cargo build --release -p ws-host`.
+      - Steam's Streaming Microphone driver, from Steam's own folder, with
+        -MicDriver (needs Steam; nothing is downloaded)
+    Then builds the host (the ws-host-gui tray app and the ws-host console
+    program), copies the web client next to them and adds a "web-stream host"
+    shortcut to the Start menu.
 
     Run it from a checkout:
         powershell -ExecutionPolicy Bypass -File scripts\install.ps1
@@ -27,13 +31,19 @@
 .PARAMETER GamepadDriver
     Also install the ViGEmBus driver for virtual gamepads.
 
+.PARAMETER MicDriver
+    Also install the Steam Streaming Microphone driver that Steam keeps in
+    its folder, so the browser mic shows up in Windows without VB-CABLE.
+    Skipped when VB-CABLE or the Steam microphone is already installed.
+
 .PARAMETER Run
-    Start the host with pairing open after the build.
+    Start the tray app after the build.
 #>
 [CmdletBinding()]
 param(
     [string]$Dir = (Join-Path $HOME 'web-stream'),
     [switch]$GamepadDriver,
+    [switch]$MicDriver,
     [switch]$Run
 )
 
@@ -138,6 +148,46 @@ function Install-Rust {
     if ($LASTEXITCODE -ne 0) { throw 'rustup could not install the stable toolchain.' }
 }
 
+function Test-MicCable {
+    [bool](Get-PnpDevice -Class MEDIA -ErrorAction SilentlyContinue | Where-Object {
+        $_.FriendlyName -match 'VB-Audio Virtual Cable|Steam Streaming Microphone'
+    })
+}
+
+# Installs Steam's signed virtual microphone the way Sunshine installs Steam
+# Streaming Speakers: DiInstallDriverW on the INF in Steam's drivers folder.
+function Install-SteamMic {
+    if (Test-MicCable) {
+        Write-Step 'A virtual mic (VB-CABLE or Steam Streaming Microphone) is already installed'
+        return $true
+    }
+    $inf = Join-Path ${env:CommonProgramFiles(x86)} 'Steam\drivers\Windows10\x64\SteamStreamingMicrophone.inf'
+    if (-not (Test-Path $inf)) {
+        Write-Host "Steam's microphone driver is not on this PC ($inf). Install Steam, or VB-CABLE." -ForegroundColor Yellow
+        return $false
+    }
+    Write-Step 'Installing the Steam Streaming Microphone driver'
+    $code = @'
+Add-Type -Namespace WebStream -Name NewDev -MemberDefinition '[DllImport("newdev.dll", CharSet = CharSet.Unicode, SetLastError = true)] public static extern bool DiInstallDriverW(IntPtr parent, string inf, uint flags, out bool reboot);'
+$reboot = $false
+if (-not [WebStream.NewDev]::DiInstallDriverW([IntPtr]::Zero, 'INF_PATH', 0, [ref]$reboot)) {
+    exit [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+}
+'@
+    # An elevated process does not inherit this one's environment, so the path
+    # goes into the script itself, as a single-quoted string.
+    $code = $code.Replace('INF_PATH', $inf.Replace("'", "''"))
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($code))
+    $p = Start-Process -FilePath powershell -Wait -PassThru -Verb RunAs -WindowStyle Hidden `
+        -ArgumentList @('-NoProfile', '-EncodedCommand', $encoded)
+    if ($p.ExitCode -ne 0) {
+        Write-Host "Installing Steam's microphone driver failed (Windows error $($p.ExitCode))." -ForegroundColor Yellow
+        return $false
+    }
+    Write-Host 'Installed. Check that your speakers or headphones are still the default output.'
+    return $true
+}
+
 function Get-RepoRoot {
     if ($PSScriptRoot) {
         $root = Split-Path -Parent $PSScriptRoot
@@ -162,28 +212,56 @@ Install-BuildTools
 Install-CMake
 Install-Rust
 if ($GamepadDriver) { Install-WingetPackage 'ViGEm.ViGEmBus' @('--silent') }
+$micReady = if ($MicDriver) { Install-SteamMic } else { Test-MicCable }
 
-Write-Step 'Building ws-host (release)'
+if (Get-Process -Name ws-host-gui, ws-host -ErrorAction SilentlyContinue) {
+    throw 'The host is running. Quit it (tray icon, Quit) and run this script again.'
+}
+
+Write-Step 'Building the host (release)'
 Push-Location $repo
 try {
-    & cargo build --release -p ws-host
+    & cargo build --release -p ws-host -p ws-host-gui
     if ($LASTEXITCODE -ne 0) { throw 'cargo build failed.' }
 } finally {
     Pop-Location
 }
 
-$exe = Join-Path $repo 'target\release\ws-host.exe'
+$bin = Join-Path $repo 'target\release'
+$gui = Join-Path $bin 'ws-host-gui.exe'
+
+# The host serves the web client only from `web` next to its executable.
+Write-Step 'Copying the web client next to the host'
+$webOut = Join-Path $bin 'web'
+if (Test-Path $webOut) { Remove-Item -Recurse -Force $webOut }
+New-Item -ItemType Directory -Path $webOut | Out-Null
+foreach ($item in 'index.html', 'style.css', 'js') {
+    Copy-Item -Recurse -Path (Join-Path $repo "web\$item") -Destination $webOut
+}
+
+Write-Step 'Adding web-stream host to the Start menu'
+$shortcutPath = Join-Path ([Environment]::GetFolderPath('Programs')) 'web-stream host.lnk'
+$shell = New-Object -ComObject WScript.Shell
+$shortcut = $shell.CreateShortcut($shortcutPath)
+$shortcut.TargetPath = $gui
+$shortcut.WorkingDirectory = $bin
+$shortcut.Description = 'Stream this PC to a browser'
+$shortcut.Save()
+
 Write-Host ''
-Write-Host "Built $exe" -ForegroundColor Green
-Write-Host 'Start the host from the repository folder with:'
-Write-Host "    cd `"$repo`""
-Write-Host '    target\release\ws-host.exe --pair --web-root web'
+Write-Host "Built $gui" -ForegroundColor Green
+Write-Host 'Start "web-stream host" from the Start menu. It runs in the tray; closing'
+Write-Host 'its window keeps it running, and Quit in the tray menu stops it.'
+Write-Host 'Allow it through Windows Firewall (Private and Public) when Windows asks.'
+Write-Host "The console version still works: `"$(Join-Path $bin 'ws-host.exe')`" --pair"
 if (-not $GamepadDriver) {
     Write-Host 'Gamepads need ViGEmBus: run this script again with -GamepadDriver.'
 }
-Write-Host 'The browser mic needs VB-CABLE (https://vb-audio.com/Cable/); see docs\host-setup.md.'
+if (-not $micReady) {
+    Write-Host 'The browser mic needs a virtual mic: run this script again with -MicDriver'
+    Write-Host 'if Steam is installed, or install VB-CABLE; see docs\host-setup.md.'
+}
 
 if ($Run) {
-    Push-Location $repo
-    try { & $exe --pair --web-root web } finally { Pop-Location }
+    Start-Process -FilePath $gui -WorkingDirectory $bin
 }

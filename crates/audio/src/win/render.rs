@@ -13,7 +13,7 @@ use windows::Win32::Media::Audio::{
 };
 use windows::Win32::System::Threading::WaitForSingleObject;
 
-use super::{AudioThread, Event, activate, find_render_device};
+use super::{AudioThread, Event, activate, find_mic_device};
 use crate::convert::CHANNELS;
 use crate::mic::{MicSource, mic_channel};
 use crate::{AudioError, MicConfig, MicReceiver, Result};
@@ -79,7 +79,7 @@ struct Output {
 
 impl Output {
     fn open(device_name: &str) -> Result<Self> {
-        let device = find_render_device(Some(device_name))?;
+        let device = find_mic_device(device_name)?;
         let client = activate(&device)?;
         let event = Event::new()?;
         let format = super::native_format();

@@ -1,23 +1,64 @@
-//! `ws-host serve`: the signaling server, the transport and the media side
-//! wired together, plus a small console for the host user.
+//! The host: the signaling server, the transport and the media side wired
+//! together. A front end (the console in `ws-host`, the tray app in
+//! `ws-host-gui`) drives it with [`Command`]s and shows its [`Event`]s.
 
-use std::io::BufRead;
+use std::net::IpAddr;
+use std::path::PathBuf;
 
 use anyhow::Context;
 use tokio::sync::{mpsc, oneshot, watch};
 use ws_proto::{ClientSignal, HostSignal, VideoCodec};
+pub use ws_signaling::Notice;
 use ws_signaling::{
-    Notice, SignalingConfig, SignalingHandle, SignalingServer, SignalingSession, TlsSource,
+    SignalingConfig, SignalingHandle, SignalingServer, SignalingSession, TlsSource,
 };
 use ws_transport::{Transport, TransportConfig};
 
 use crate::media;
 use crate::options::ServeOptions;
 
-const CONSOLE_HELP: &str = "\
-commands: pair (let a browser pair for two minutes), unpair-all, drop (end the session), quit";
+/// What the host user asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Command {
+    /// Let a browser pair for two minutes.
+    OpenPairing,
+    /// End the current session.
+    DropSession,
+    /// Forget every paired browser.
+    UnpairAll,
+    /// Stop the host.
+    Quit,
+}
 
-pub async fn serve(opts: ServeOptions) -> anyhow::Result<()> {
+/// What the host user should see.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Event {
+    /// Everything is listening.
+    Started {
+        port: u16,
+        /// LAN addresses the host listens on.
+        ips: Vec<IpAddr>,
+        fingerprint: String,
+        web_root: Option<PathBuf>,
+        data_dir: PathBuf,
+    },
+    /// Pairing is open for two minutes.
+    PairingOpened,
+    /// Every paired browser was removed.
+    UnpairedAll,
+    Notice(Notice),
+    /// A command failed.
+    Error(String),
+}
+
+/// Runs the host until [`Command::Quit`], until every command sender is
+/// dropped, or until the signaling server fails. Shutting down drops the
+/// session and stops capture, which puts back a changed display resolution.
+pub async fn serve(
+    opts: ServeOptions,
+    mut commands: mpsc::Receiver<Command>,
+    events: mpsc::UnboundedSender<Event>,
+) -> anyhow::Result<()> {
     let mut config = SignalingConfig::new(opts.bind(), opts.data_dir.clone());
     config.web_root = opts.web_root.clone();
     config.device_idle_expiry = opts.device_idle_expiry;
@@ -31,7 +72,7 @@ pub async fn serve(opts: ServeOptions) -> anyhow::Result<()> {
             hostnames: opts.hostnames.clone(),
         },
     };
-    let (server, events) = SignalingServer::new(config).context("signaling server")?;
+    let (server, signaling_events) = SignalingServer::new(config).context("signaling server")?;
     let signaling = server.handle();
     let fingerprint = server.fingerprint().to_string();
 
@@ -55,100 +96,74 @@ pub async fn serve(opts: ServeOptions) -> anyhow::Result<()> {
         codecs,
         media_stop_rx,
     ));
-    tokio::spawn(print_notices(events.notices));
-    let sessions = tokio::spawn(run_signaling(events.sessions, transport.clone(), codecs_tx));
+    tokio::spawn(forward_notices(signaling_events.notices, events.clone()));
+    let sessions = tokio::spawn(run_signaling(
+        signaling_events.sessions,
+        transport.clone(),
+        codecs_tx,
+    ));
 
-    println!("web-stream host on https://<this PC>:{}/", opts.port);
-    println!("certificate SHA-256 {fingerprint}");
-    match &opts.web_root {
-        Some(dir) => println!("serving the web client from {}", dir.display()),
-        None => println!("no web client found (pass --web-root); serving a placeholder page"),
-    }
-    println!("data in {}", opts.data_dir.display());
-    println!("{CONSOLE_HELP}");
+    let _ = events.send(Event::Started {
+        port: opts.port,
+        ips: if opts.ips.is_empty() {
+            ws_transport::lan_ips()
+        } else {
+            opts.ips.clone()
+        },
+        fingerprint,
+        web_root: opts.web_root.clone(),
+        data_dir: opts.data_dir.clone(),
+    });
     if opts.pair_at_start {
-        open_pairing(&signaling).await;
+        open_pairing(&signaling, &events).await;
     }
 
-    let mut console = console();
-    let mut console_open = true;
     let result = loop {
         tokio::select! {
-            r = tokio::signal::ctrl_c() => break r.context("ctrl-c handler"),
             r = &mut server_task => break match r {
                 Ok(Ok(())) => Err(anyhow::anyhow!("signaling server stopped")),
                 Ok(Err(e)) => Err(e).context("signaling server"),
                 Err(e) => Err(e).context("signaling server"),
             },
-            cmd = console.recv(), if console_open => match cmd.as_deref().map(str::trim) {
-                // stdin closed (run without a console): keep serving.
-                None => console_open = false,
-                Some("pair" | "p") => open_pairing(&signaling).await,
-                Some("drop" | "d") => signaling.drop_session().await,
-                Some("unpair-all") => match signaling.revoke_all().await {
-                    Ok(()) => println!("every paired browser was removed"),
-                    Err(e) => println!("could not remove paired browsers: {e}"),
-                },
-                Some("quit" | "q" | "exit") => break Ok(()),
-                Some("") => {}
-                Some(_) => println!("{CONSOLE_HELP}"),
+            cmd = commands.recv() => match cmd {
+                Some(Command::OpenPairing) => open_pairing(&signaling, &events).await,
+                Some(Command::DropSession) => signaling.drop_session().await,
+                Some(Command::UnpairAll) => {
+                    let _ = events.send(match signaling.revoke_all().await {
+                        Ok(()) => Event::UnpairedAll,
+                        Err(e) => Event::Error(format!("could not remove paired browsers: {e}")),
+                    });
+                }
+                Some(Command::Quit) | None => break Ok(()),
             },
         }
     };
 
     signaling.drop_session().await;
     sessions.abort();
+    server_task.abort();
     transport.close();
     let _ = media_stop.send(());
     let _ = media_task.await;
     result
 }
 
-async fn open_pairing(signaling: &SignalingHandle) {
-    match signaling.open_pairing().await {
-        Ok(()) => println!("pairing is open for two minutes: request a code in the browser"),
-        Err(e) => println!("could not open pairing: {e}"),
-    }
+async fn open_pairing(signaling: &SignalingHandle, events: &mpsc::UnboundedSender<Event>) {
+    let _ = events.send(match signaling.open_pairing().await {
+        Ok(()) => Event::PairingOpened,
+        Err(e) => Event::Error(format!("could not open pairing: {e}")),
+    });
 }
 
-async fn print_notices(mut notices: mpsc::UnboundedReceiver<Notice>) {
+async fn forward_notices(
+    mut notices: mpsc::UnboundedReceiver<Notice>,
+    events: mpsc::UnboundedSender<Event>,
+) {
     while let Some(n) = notices.recv().await {
-        match n {
-            Notice::PairingCode {
-                code,
-                device_name,
-                expires_in_secs,
-            } => println!(
-                "\n  PAIRING CODE {code}  for {device_name:?} (expires in {expires_in_secs}s)\n"
-            ),
-            Notice::Paired { device_name } => println!("paired {device_name:?}"),
-            Notice::PairingFailed { attempts_left } => {
-                println!("wrong pairing code; {attempts_left} attempts left")
-            }
-            Notice::PairingLocked => {
-                println!("too many wrong codes: pairing is locked until you type `pair`")
-            }
-            Notice::SessionStarted { device_name } => println!("{device_name:?} connected"),
-            Notice::SessionEnded { device_name } => println!("{device_name:?} disconnected"),
+        if events.send(Event::Notice(n)).is_err() {
+            break;
         }
     }
-}
-
-/// Lines typed on stdin. A thread, since tokio's stdin would block shutdown.
-fn console() -> mpsc::Receiver<String> {
-    let (tx, rx) = mpsc::channel(8);
-    std::thread::Builder::new()
-        .name("ws-console".into())
-        .spawn(move || {
-            for line in std::io::stdin().lock().lines() {
-                let Ok(line) = line else { break };
-                if tx.blocking_send(line).is_err() {
-                    break;
-                }
-            }
-        })
-        .expect("spawn console thread");
-    rx
 }
 
 /// Signaling for one browser at a time: offer on connect, apply the answer,

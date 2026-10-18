@@ -21,6 +21,8 @@
 mod net;
 mod session;
 
+pub use net::lan_ips;
+
 use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};

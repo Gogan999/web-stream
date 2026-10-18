@@ -29,7 +29,8 @@ serve options:
   --display N          display to stream first, default the primary
   --codec h264|h265|av1  --size WxH  --fps F  --kbps K   stream settings
   --quality speed|balanced|clarity  encoder effort, default balanced
-  --mic-device NAME    playback device the browser mic plays into, default \"CABLE Input\"
+  --mic-device NAME    playback device the browser mic plays into; default \"auto\":
+                       VB-CABLE's \"CABLE Input\", else Steam Streaming Microphone
   --no-mic             don't play the browser mic
   --no-audio           don't send game audio
   --audio-device NAME  output device to capture game audio from, default the
@@ -94,7 +95,7 @@ impl ServeOptions {
         let mut media = MediaOptions {
             display: None,
             video: VideoConfig::default(),
-            mic_device: Some("CABLE Input".into()),
+            mic_device: Some(ws_audio::AUTO_MIC_DEVICE.into()),
             game_audio: true,
             audio_device: None,
             audio_kbps: DEFAULT_AUDIO_KBPS,
@@ -232,7 +233,7 @@ pub fn parse_size(s: &str) -> anyhow::Result<(u32, u32)> {
 }
 
 /// `%LOCALAPPDATA%\web-stream` on Windows, the XDG data dir elsewhere.
-fn default_data_dir() -> PathBuf {
+pub fn default_data_dir() -> PathBuf {
     let base = std::env::var_os("LOCALAPPDATA")
         .or_else(|| std::env::var_os("XDG_DATA_HOME"))
         .map(PathBuf::from)
@@ -263,7 +264,7 @@ mod tests {
     fn defaults() {
         let o = parse(&[]).unwrap();
         assert_eq!((o.port, o.ice_tcp_port), (8443, Some(8444)));
-        assert_eq!(o.media.mic_device.as_deref(), Some("CABLE Input"));
+        assert_eq!(o.media.mic_device.as_deref(), Some("auto"));
         assert!(o.media.game_audio && !o.pair_at_start);
         assert!(!o.media.allow_resolution_change);
         assert_eq!(o.media.video, VideoConfig::default());

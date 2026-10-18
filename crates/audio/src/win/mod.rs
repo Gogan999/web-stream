@@ -26,7 +26,7 @@ use windows::Win32::System::Threading::{
 use windows::core::{PWSTR, w};
 
 use crate::convert::{CHANNELS, InputFormat, SAMPLE_RATE, SampleFormat};
-use crate::{AudioError, Result};
+use crate::{AUTO_MIC_DEVICE, AudioError, MIC_CABLES, Result};
 
 impl From<windows::core::Error> for AudioError {
     fn from(e: windows::core::Error) -> Self {
@@ -107,7 +107,7 @@ pub(crate) fn device_id(device: &IMMDevice) -> Result<String> {
     Ok(take_pwstr(unsafe { device.GetId()? }))
 }
 
-fn friendly_name(device: &IMMDevice) -> Result<String> {
+pub(crate) fn friendly_name(device: &IMMDevice) -> Result<String> {
     // SAFETY: valid device; the PROPVARIANT string copy is freed by take_pwstr.
     unsafe {
         let store = device.OpenPropertyStore(STGM_READ)?;
@@ -156,6 +156,35 @@ pub(crate) fn find_render_device(name: Option<&str>) -> Result<IMMDevice> {
         "no output device matching {name:?}; available: {}",
         names.join(", ")
     )))
+}
+
+/// The device the browser mic plays into: the named one, or for
+/// [`AUTO_MIC_DEVICE`] the first of [`MIC_CABLES`] that is installed.
+pub(crate) fn find_mic_device(name: &str) -> Result<IMMDevice> {
+    if !name.eq_ignore_ascii_case(AUTO_MIC_DEVICE) {
+        return find_render_device(Some(name));
+    }
+    let devices = render_devices()?;
+    for cable in MIC_CABLES {
+        let wanted = cable.to_lowercase();
+        if let Some(i) = devices
+            .iter()
+            .position(|(_, n)| n.to_lowercase().contains(&wanted))
+        {
+            return Ok(devices.into_iter().nth(i).unwrap().0);
+        }
+    }
+    let names: Vec<_> = devices.into_iter().map(|(_, n)| n).collect();
+    Err(AudioError::DeviceNotFound(format!(
+        "no virtual mic: install VB-CABLE or Steam's audio drivers (see docs/host-setup.md); available: {}",
+        names.join(", ")
+    )))
+}
+
+/// Whether `name` is one of the [`MIC_CABLES`].
+pub(crate) fn is_mic_cable(name: &str) -> bool {
+    let name = name.to_lowercase();
+    MIC_CABLES.iter().any(|c| name.contains(&c.to_lowercase()))
 }
 
 pub(crate) fn activate(device: &IMMDevice) -> Result<IAudioClient> {

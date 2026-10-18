@@ -21,6 +21,7 @@ use ws_proto::{
 };
 use ws_transport::{Transport, TransportConfig, TransportEvent, TransportStats};
 
+use crate::cursor::{CursorSession, CursorTarget};
 use crate::input::InputThread;
 use crate::options::MediaOptions;
 use crate::platform;
@@ -70,6 +71,7 @@ pub async fn run(
     let (control_tx, mut control_rx) = mpsc::channel(CONTROL_QUEUE);
     let (stopped_tx, mut stopped_rx) = mpsc::channel(4);
     let (later_tx, mut later_rx) = mpsc::channel(8);
+    let (cursor_target, _) = watch::channel(CursorTarget::default());
     let mut media = Media {
         transport,
         config: opts.video.clone(),
@@ -82,6 +84,8 @@ pub async fn run(
         unsent: Vec::new(),
         stopped_tx,
         later_tx,
+        cursor_target,
+        display_origin: (0, 0),
         session: 0,
         rebuild_pending: false,
         generation: 0,
@@ -201,6 +205,11 @@ struct Media {
     stopped_tx: mpsc::Sender<u64>,
     /// Hands work done elsewhere (or due later) back to the loop.
     later_tx: mpsc::Sender<Later>,
+    /// Steers the session's cursor sender (see `cursor.rs`).
+    cursor_target: watch::Sender<CursorTarget>,
+    /// Desktop position of the streamed display's top-left corner; pointer
+    /// positions are sent relative to it.
+    display_origin: (i32, i32),
     /// Bumped on every disconnect, so late results for a browser that left
     /// are recognised.
     session: u64,
@@ -236,6 +245,7 @@ struct SentFrames {
 /// released first.
 struct Live {
     input: Option<InputThread>,
+    _cursor: CursorSession,
     video: Option<Video>,
     /// Held only to keep game audio capture running.
     _audio: Option<platform::Loopback>,
@@ -291,12 +301,15 @@ impl Media {
                     for msg in std::mem::take(&mut self.unsent) {
                         self.reply(msg);
                     }
+                    let origin = self.display_origin;
+                    self.cursor_target.send_modify(|t| t.origin = Some(origin));
                 }
             }
             TransportEvent::ChannelClosed(c) => {
                 tracing::debug!(channel = c, "channel closed");
                 if c == channels::CONTROL {
                     self.control_open = false;
+                    self.cursor_target.send_modify(|t| t.origin = None);
                 }
             }
             TransportEvent::ChannelLow(_) => {}
@@ -343,8 +356,10 @@ impl Media {
             None
         };
 
+        let cursor = CursorSession::start(self.transport.clone(), self.cursor_target.subscribe());
         self.live = Some(Live {
             input,
+            _cursor: cursor,
             video: None,
             _audio: audio,
             mic: None,
@@ -366,6 +381,7 @@ impl Media {
         self.rebuild_pending = false;
         self.session += 1;
         self.keyframe_requests = 0;
+        self.cursor_target.send_replace(CursorTarget::default());
         // The next browser turns the mic on if it wants it.
         self.mic_enabled = false;
         *self.sent.lock().expect("sent stats lock") = SentFrames::default();
@@ -460,6 +476,7 @@ impl Media {
             input.set_display(rect(&info));
         }
         self.display = Some(info.id);
+        self.set_display_origin(&info);
         tracing::info!(display = info.id.0, ?config, "streaming");
         Ok(())
     }
@@ -584,6 +601,13 @@ impl Media {
             ClientControl::RequestFile { .. } => {
                 self.error("file transfer is not available yet".into());
             }
+            ClientControl::SetCursorPositions { enabled } => {
+                self.cursor_target.send_if_modified(|t| {
+                    let changed = t.positions != enabled;
+                    t.positions = enabled;
+                    changed
+                });
+            }
             ClientControl::Ping { client_time_ms } => {
                 self.reply(HostControl::Pong { client_time_ms });
             }
@@ -599,14 +623,28 @@ impl Media {
         self.reply(HostControl::Displays { displays, active });
     }
 
-    /// Points input at the streamed display's current position and size.
-    fn refresh_input_rect(&self) {
-        let Some(input) = self.live.as_ref().and_then(|l| l.input.as_ref()) else {
+    /// Points input (and pointer positions) at the streamed display's
+    /// current position and size.
+    fn refresh_input_rect(&mut self) {
+        let Some(info) = self.chosen_display() else {
             return;
         };
-        if let Some(info) = self.chosen_display() {
+        if let Some(input) = self.live.as_ref().and_then(|l| l.input.as_ref()) {
             input.set_display(rect(&info));
         }
+        self.set_display_origin(&info);
+    }
+
+    fn set_display_origin(&mut self, info: &DisplayInfo) {
+        let origin = (info.x, info.y);
+        self.display_origin = origin;
+        self.cursor_target.send_if_modified(|t| match t.origin {
+            Some(o) if o != origin => {
+                t.origin = Some(origin);
+                true
+            }
+            _ => false,
+        });
     }
 
     fn set_host_resolution(&mut self, width: u32, height: u32) {
@@ -801,6 +839,8 @@ impl Media {
                 input.set_display(rect(info));
             }
         }
+        let info = info.clone();
+        self.set_display_origin(&info);
         self.display = Some(id);
         tracing::info!(display = id.0, "display selected");
         self.display_changed();

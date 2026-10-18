@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{DisplayId, DisplayInfo, VideoConfig};
+use crate::{CursorShape, DisplayId, DisplayInfo, VideoConfig};
 
 /// Identifies a file the host has offered this session. The host only ever
 /// serves ids it issued, never paths from the client.
@@ -46,6 +46,12 @@ pub enum ClientControl {
     RequestFile {
         id: FileId,
     },
+    /// Whether to send [`HostControl::CursorPosition`]: the browser draws
+    /// the host pointer itself in relative mouse mode, while in absolute
+    /// mode its own pointer is already where the host's is. Off until asked.
+    SetCursorPositions {
+        enabled: bool,
+    },
     Ping {
         client_time_ms: f64,
     },
@@ -85,6 +91,18 @@ pub enum HostControl {
     /// Sent about once a second while video runs, for the browser's stats
     /// overlay and auto-tune.
     VideoStats(VideoStats),
+    /// The host pointer changed shape, or was hidden or shown. Sent when the
+    /// stream starts and on every change.
+    CursorShape(CursorShape),
+    /// Where the host pointer's hotspot is, in desktop pixels from the
+    /// streamed display's top-left corner (outside the display when the
+    /// pointer is on another one). Sent on change while the pointer shows and
+    /// the browser asked with [`ClientControl::SetCursorPositions`]; only the
+    /// newest matters.
+    CursorPosition {
+        x: i32,
+        y: i32,
+    },
     /// The mic the browser turned on can't play on the host (`--no-mic`, or
     /// no such device). The browser should stop sending it.
     MicUnavailable {

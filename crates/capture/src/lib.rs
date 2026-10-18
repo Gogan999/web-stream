@@ -11,10 +11,10 @@
 //! is dropped (`frame_index` still advances) and the next paced frame is a
 //! keyframe so the decoder can resume.
 //!
-//! The mouse cursor is not drawn into the video. DXGI excludes it, and the
-//! plan is to send its shape and position over the control channel so the
-//! browser draws it locally with no encode latency. That is a follow-up;
-//! until then the stream shows no pointer.
+//! The mouse cursor is not drawn into the video. DXGI excludes it; the host
+//! sends its shape and position over the control channel instead
+//! (`ws_input::cursor`), and the browser draws it locally with no encode
+//! latency.
 //!
 //! [`VideoPipeline::start`] and [`VideoPipeline::select_display`] block
 //! while the GPU objects are created (tens of milliseconds). From async code

@@ -131,6 +131,38 @@ test('client streams from mock host, sends input and switches display', { timeou
   assert.ok(inputs.some((e) => e.type === 'key' && e.usage === 0x1a && !e.down));
   assert.ok(inputs.some((e) => e.type === 'wheel' && e.dy === -120));
 
+  // Host pointer: absolute mode shows it as the video's CSS cursor, relative mode as an overlay.
+  const sendHost = (msg) => host.evaluate((m) => window.__control.send(JSON.stringify(m)), msg);
+  const px = (rgba, n) => Buffer.from(Array(n).fill(rgba).flat()).toString('base64');
+  const cursorStyle = () => client.evaluate(() => document.getElementById('video').style.cursor);
+  await sendHost({ type: 'cursorShape', kind: 'ew-resize', id: 1, image: { width: 4, height: 4, hotX: 2, hotY: 2, rgba: px([0, 0, 0, 255], 16) } });
+  await sendHost({ type: 'cursorPosition', x: 640, y: 360 });
+  await client.waitForFunction(() => document.getElementById('video').style.cursor === 'ew-resize');
+  await sendHost({ type: 'cursorShape', kind: 'custom', id: 2, image: { width: 2, height: 2, hotX: 1, hotY: 0, rgba: px([255, 0, 0, 255], 4) } });
+  await client.waitForFunction(() => document.getElementById('video').style.cursor.startsWith('url("data:image/png'));
+  assert.match(await cursorStyle(), / 1 0, default$/);
+  assert.equal(await client.isVisible('#cursor'), false, 'no overlay in absolute mode');
+  // Clicking the stream closed the settings dropdown; the mouse mode is in it.
+  const mouseMode = async (mode) => {
+    await client.click('#more-toggle');
+    await client.selectOption('#mouse-mode', mode);
+    await client.keyboard.press('Escape');
+    await client.waitForSelector('#more', { state: 'hidden' });
+  };
+  await mouseMode('relative');
+  await host.waitForFunction(() => window.mockLog.some((e) => e.type === 'setCursorPositions' && e.enabled));
+  await sendHost({ type: 'cursorShape', kind: 'ew-resize', id: 1 }); // image already sent: id only
+  await client.waitForSelector('#cursor', { state: 'visible' });
+  assert.equal(await cursorStyle(), '');
+  const overlay = await client.locator('#cursor').boundingBox();
+  // The hotspot (2,2 of a 4x4 image) sits on the middle of the picture.
+  assert.ok(Math.abs(overlay.x + overlay.width / 2 - (box.x + box.width / 2)) < 2, JSON.stringify({ overlay, box }));
+  assert.ok(Math.abs(overlay.y + overlay.height / 2 - (box.y + box.height / 2)) < 2, JSON.stringify({ overlay, box }));
+  await sendHost({ type: 'cursorShape', kind: 'none' });
+  await client.waitForSelector('#cursor', { state: 'hidden' });
+  await mouseMode('absolute');
+  await client.waitForFunction(() => document.getElementById('video').style.cursor === 'none');
+
   // Tab never lands in the hidden on-screen keyboard textarea.
   await client.mouse.move(1, 1); // off the stream, so Tab moves focus instead of going to the host
   await client.focus('#connect');

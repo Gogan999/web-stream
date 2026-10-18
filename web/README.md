@@ -16,6 +16,7 @@ Pairing and signaling: `docs/signaling.md` (transport). Data channel messages: [
 | `js/pairing.js` | Pairing API client (`/api/session`, `/api/pair/*`) |
 | `js/input.js` | Keyboard, mouse (pointer lock or absolute), touch and gamepad capture |
 | `js/touch.js` | Touch gestures → mouse actions (trackpad and direct modes) |
+| `js/cursor.js` | The host pointer: CSS cursor in absolute mode, an overlay at the host position in relative mode |
 | `js/softkeys.js` | On-screen keyboard: typed text → key presses, extra keys row |
 | `js/protocol.js` | Binary input message encoder/decoder |
 | `js/keymap.js` | `KeyboardEvent.code` → USB HID usage |

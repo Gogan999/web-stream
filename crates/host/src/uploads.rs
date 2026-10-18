@@ -20,9 +20,12 @@ use std::path::{Path, PathBuf};
 
 use tokio::sync::mpsc;
 use tokio::task::{AbortHandle, block_in_place};
-use ws_proto::{FILE_WINDOW, FileId, HostControl, parse_file_chunk};
+use ws_proto::{
+    FILE_CHUNK_HEADER, FILE_CHUNK_MAX, FILE_WINDOW, FileId, HostControl, parse_file_chunk,
+};
 
 use crate::files::FileEvent;
+use crate::names;
 use crate::serve::Event;
 
 /// Largest file accepted.
@@ -33,11 +36,23 @@ const _: () = assert!(ACK_EVERY <= FILE_WINDOW);
 /// Chunks waiting to be written; the browser's window keeps it at about
 /// 64.
 const QUEUE: usize = 256;
+/// Files one browser session may send, and their total size: a paired
+/// browser can't fill the host's disk with a stream of files.
+const SESSION_FILES: u32 = 500;
+const SESSION_BYTES: u64 = 32 << 30;
+/// Longest name kept, in UTF-16 units.
 const NAME_MAX: usize = 200;
+/// Device names Windows opens whatever the extension.
 const RESERVED: &[&str] = &[
-    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
-    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$", "COM0", "COM1", "COM2", "COM3", "COM4",
+    "COM5", "COM6", "COM7", "COM8", "COM9", "COM¹", "COM²", "COM³", "LPT0", "LPT1", "LPT2", "LPT3",
+    "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9", "LPT¹", "LPT²", "LPT³",
 ];
+/// Kinds of file Explorer reads by itself when it shows the folder, which
+/// can make it fetch an icon from a remote share and hand over the user's
+/// credentials. Saved with `.download` added, so they are only data.
+const INERT_EXTENSIONS: &[&str] = &["url", "lnk", "scf", "library-ms", "searchconnector-ms"];
+const INERT_NAMES: &[&str] = &["desktop.ini"];
 
 #[derive(Debug)]
 pub enum UploadMsg {
@@ -70,6 +85,8 @@ impl UploadSession {
             control,
             events,
             current: None,
+            files: 0,
+            bytes: 0,
         };
         let task = tokio::spawn(async move {
             while let Some(msg) = rx.recv().await {
@@ -81,6 +98,13 @@ impl UploadSession {
     }
 
     pub fn send(&self, msg: UploadMsg) {
+        if let UploadMsg::Data(d) = &msg {
+            if d.len() > FILE_CHUNK_HEADER + FILE_CHUNK_MAX {
+                // Oversized; the upload in progress fails on the gap.
+                tracing::warn!(len = d.len(), "dropping an oversized file chunk");
+                return;
+            }
+        }
         // The browser sent past its window. The upload in progress fails on
         // the gap this leaves.
         if let Err(mpsc::error::TrySendError::Full(UploadMsg::Data(_))) = self.tx.try_send(msg) {
@@ -101,6 +125,9 @@ struct Receiver {
     control: mpsc::Sender<HostControl>,
     events: mpsc::UnboundedSender<Event>,
     current: Option<Incoming>,
+    /// Files accepted this session, and their total size.
+    files: u32,
+    bytes: u64,
 }
 
 /// A file being received. Dropped before it is complete, it deletes its
@@ -166,6 +193,18 @@ impl Receiver {
             });
             return;
         }
+        if self.files >= SESSION_FILES || self.bytes + size > SESSION_BYTES {
+            self.reply(HostControl::UploadFailed {
+                id,
+                message: format!(
+                    "the host takes up to {SESSION_FILES} files or {} GiB per connection",
+                    SESSION_BYTES >> 30
+                ),
+            });
+            return;
+        }
+        self.files += 1;
+        self.bytes += size;
         let name = safe_name(name);
         let reserved = block_in_place(|| reserve(&dir, &name));
         let (path, part, file) = match reserved {
@@ -243,9 +282,10 @@ impl Receiver {
         let saved = block_in_place(|| -> std::io::Result<()> {
             file.sync_all()?;
             drop(file);
+            // Marked before it gets its name: the stream moves with it.
+            mark_downloaded(&cur.part);
             // Replaces the empty file that held the name.
             std::fs::rename(&cur.part, &cur.path)?;
-            mark_downloaded(&cur.path);
             Ok(())
         });
         if let Err(e) = saved {
@@ -253,6 +293,10 @@ impl Receiver {
             tracing::warn!(name = %cur.name, "{message}");
             self.reply(HostControl::UploadFailed {
                 id: cur.id,
+                message: message.clone(),
+            });
+            self.event(FileEvent::ReceiveFailed {
+                name: cur.name.clone(),
                 message,
             });
             return;
@@ -300,11 +344,13 @@ impl Receiver {
 }
 
 /// A bare file name Windows takes as it is: no folders, no `:` (a stream),
-/// no device name, no trailing dots or spaces.
+/// no device name, no trailing dots or spaces, nothing invisible, and
+/// nothing Explorer acts on by itself.
 fn safe_name(name: &str) -> String {
     let base = name.rsplit(['/', '\\']).next().unwrap_or("");
     let cleaned: String = base
         .chars()
+        .filter(|&c| c.is_control() || names::printable(c))
         .map(|c| {
             if c.is_control() || r#"<>:"|?*"#.contains(c) {
                 '_'
@@ -312,14 +358,20 @@ fn safe_name(name: &str) -> String {
                 c
             }
         })
-        .take(NAME_MAX)
         .collect();
-    let mut name = cleaned
-        .trim_matches(|c: char| c == '.' || c.is_whitespace())
-        .to_string();
+    let trim = |s: &str| {
+        s.trim_matches(|c: char| c == '.' || c.is_whitespace())
+            .to_string()
+    };
+    let mut name = trim(names::truncate_utf16(&trim(&cleaned), NAME_MAX));
     let stem = name.split('.').next().unwrap_or("").trim_end();
     if RESERVED.iter().any(|r| r.eq_ignore_ascii_case(stem)) {
         name.insert(0, '_');
+    }
+    let lower = name.to_lowercase();
+    let ext = lower.rsplit_once('.').map(|(_, e)| e);
+    if INERT_NAMES.contains(&lower.as_str()) || ext.is_some_and(|e| INERT_EXTENSIONS.contains(&e)) {
+        name.push_str(".download");
     }
     if name.is_empty() { "file".into() } else { name }
 }
@@ -411,6 +463,8 @@ mod tests {
                     control: control_tx,
                     events,
                     current: None,
+                    files: 0,
+                    bytes: 0,
                 },
                 control,
                 dir,
@@ -539,6 +593,14 @@ mod tests {
             HostControl::UploadFailed { id: FileId(2), .. }
         ));
 
+        // A session can't send endless files.
+        h.rx.files = SESSION_FILES;
+        h.rx.handle(offer(5, "a", 1));
+        assert!(matches!(
+            h.replies()[..],
+            [HostControl::UploadFailed { id: FileId(5), .. }]
+        ));
+
         h.rx.dir = None;
         h.rx.handle(offer(4, "a", 1));
         assert!(matches!(
@@ -570,6 +632,18 @@ mod tests {
         assert_eq!(safe_name("notes. . "), "notes");
         assert_eq!(safe_name("tab\there?.txt"), "tab_here_.txt");
         assert_eq!(safe_name(&"y".repeat(500)).len(), NAME_MAX);
+        assert_eq!(
+            safe_name(&"😀".repeat(150)).encode_utf16().count(),
+            NAME_MAX
+        );
+        assert_eq!(safe_name("pic\u{202E}gpj.exe"), "picgpj.exe");
+        assert_eq!(safe_name("COM¹.txt"), "_COM¹.txt");
+        assert_eq!(safe_name("conin$"), "_conin$");
+        assert_eq!(safe_name("LPT0.log"), "_LPT0.log");
+        assert_eq!(safe_name("evil.URL"), "evil.URL.download");
+        assert_eq!(safe_name("x.lnk"), "x.lnk.download");
+        assert_eq!(safe_name("Desktop.ini"), "Desktop.ini.download");
+        assert_eq!(safe_name("notes.url.txt"), "notes.url.txt");
         assert_eq!(numbered("a.tar.gz", 2), "a.tar (2).gz");
         assert_eq!(numbered(".bashrc", 3), ".bashrc (3)");
         assert_eq!(numbered("README", 2), "README (2)");

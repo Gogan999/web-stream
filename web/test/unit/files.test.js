@@ -47,6 +47,10 @@ test('names are safe to save', () => {
   assert.equal(safeName('CON.txt'), '_CON.txt');
   assert.equal(safeName(' .. '), 'file');
   assert.equal(safeName('x'.repeat(300)).length, 200);
+  assert.equal(safeName('pic\u202Egpj.exe'), 'picgpj.exe');
+  assert.equal(safeName('COM¹.txt'), '_COM¹.txt');
+  assert.equal(safeName('conout$'), '_conout$');
+  assert.equal(safeName('a' + '😀'.repeat(150)).length, 199, 'no half emoji');
 });
 
 test('sizes read well', () => {

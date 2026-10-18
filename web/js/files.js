@@ -21,8 +21,12 @@ export function parseChunk(buf) {
 // A name safe to suggest when saving: no folders, no characters Windows refuses, no reserved names.
 export function safeName(name) {
   let n = String(name ?? '').split(/[\\/]/).pop();
-  n = n.replace(/[\x00-\x1f\x7f<>:"|?*]/g, '_').replace(/^[\s.]+|[\s.]+$/g, '').slice(0, 200);
-  if (/^(con|prn|aux|nul|com\d|lpt\d)(\.|$)/i.test(n)) n = '_' + n;
+  // Invisible formatting characters (U+202E and the like) could disguise the extension.
+  n = n.replace(/\p{Cf}/gu, '').replace(/[\x00-\x1f\x7f<>:"|?*]/g, '_');
+  const trim = (s) => s.replace(/^[\s.]+|[\s.]+$/g, '');
+  n = trim(n).slice(0, 200).replace(/[\ud800-\udbff]$/, '');
+  n = trim(n);
+  if (/^(con|prn|aux|nul|conin\$|conout\$|com[0-9¹²³]|lpt[0-9¹²³])(\.|$)/i.test(n)) n = '_' + n;
   return n || 'file';
 }
 

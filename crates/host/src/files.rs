@@ -29,14 +29,16 @@ use tokio::task::AbortHandle;
 use ws_proto::{FILE_CHUNK_MAX, FILE_WINDOW, FileId, HostControl, channels, file_chunk};
 use ws_transport::Transport;
 
+use crate::names;
 use crate::serve::Event;
 
 /// Bytes read from disk at a time.
 const READ_BLOCK: usize = 256 * 1024;
 /// Share of the bandwidth estimate a file may use.
 const BWE_SHARE: f64 = 0.25;
-/// Least a file is paced to, in bits per second.
-const MIN_RATE_BPS: f64 = 1_000_000.0;
+/// Least a file is paced to, in bits per second: enough to finish a small
+/// file on a link too weak to spare a quarter of itself.
+const MIN_RATE_BPS: f64 = 100_000.0;
 /// Bytes the pacer lets out in one burst.
 const BURST: f64 = 64.0 * 1024.0;
 /// After the channel refused a write, the next try waits for
@@ -336,17 +338,28 @@ impl<O: ChunkOut> Sender<O> {
             });
             return;
         }
-        if let Some(cur) = &mut self.current {
+        if let Some(cur) = &self.current {
             if cur.id == id {
                 // Asked again: start over.
-                *cur = Sending::new(id);
+                self.start(id);
             } else if !self.queue.contains(&id) {
                 self.queue.push_back(id);
             }
             return;
         }
+        self.start(id);
+    }
+
+    fn start(&mut self, id: FileId) {
         self.current = Some(Sending::new(id));
-        self.check_done();
+        if !self.check_done() {
+            let name = self.name(id);
+            self.event(FileEvent::Progress {
+                id,
+                name,
+                received: 0,
+            });
+        }
     }
 
     fn ack(&mut self, id: FileId, received: u64) {
@@ -418,8 +431,7 @@ impl<O: ChunkOut> Sender<O> {
                 return;
             };
             if self.offers.contains_key(&id) {
-                self.current = Some(Sending::new(id));
-                self.check_done();
+                self.start(id);
             }
         }
     }
@@ -434,7 +446,13 @@ impl<O: ChunkOut> Sender<O> {
             let size = offer.size;
             let now = Instant::now();
             if let Some(at) = cur.blocked {
-                return Some(at + RETRY);
+                // `ChannelLow` may never come when the buffer that was full
+                // is the one all channels share: try again after a while.
+                if now < at + RETRY {
+                    return Some(at + RETRY);
+                }
+                self.current.as_mut()?.blocked = None;
+                continue;
             }
             if cur.sent >= size || cur.sent - cur.acked >= FILE_WINDOW {
                 return None;
@@ -575,10 +593,9 @@ fn display_name(path: &Path) -> String {
         .map(|n| n.to_string_lossy())
         .unwrap_or_default()
         .chars()
-        .filter(|c| !c.is_control())
-        .take(NAME_MAX)
+        .filter(|&c| names::printable(c))
         .collect();
-    let name = name.trim();
+    let name = names::truncate_utf16(name.trim(), NAME_MAX).trim();
     if name.is_empty() {
         "file".into()
     } else {
@@ -800,6 +817,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retries_a_full_channel_without_channel_low() {
+        let mut h = Harness::new("retry");
+        let data = pattern(3 * FILE_CHUNK_MAX);
+        let id = h.share("f.bin", &data).await;
+        *h.out.room.lock().unwrap() = Some(1);
+        let retry = h.msg(FileMsg::Request(id)).await.expect("a retry time");
+        assert!(
+            retry > Instant::now(),
+            "the retry is in the future, not a spin"
+        );
+        // The shared buffer drains, but no ChannelLow comes for this channel.
+        *h.out.room.lock().unwrap() = None;
+        tokio::time::sleep_until(retry.into()).await;
+        assert_eq!(h.sender.pump().await, None);
+        assert_eq!(h.received(id), data);
+    }
+
+    #[tokio::test]
     async fn cancel_stops_and_a_new_request_starts_over() {
         let mut h = Harness::new("cancel");
         let data = pattern(2 * FILE_WINDOW as usize);
@@ -876,6 +911,7 @@ mod tests {
         assert_eq!(display_name(Path::new("/a/b/report.pdf")), "report.pdf");
         assert_eq!(display_name(Path::new("/a/b\u{7}c\n.txt")), "bc.txt");
         assert_eq!(display_name(Path::new("/")), "file");
+        assert_eq!(display_name(Path::new("/a/x\u{202E}txt.exe")), "xtxt.exe");
         assert_eq!(display_name(Path::new(&"x".repeat(300))).len(), NAME_MAX);
     }
 }

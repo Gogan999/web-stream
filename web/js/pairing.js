@@ -32,6 +32,7 @@ export async function confirmPairing(pairingId, code) {
 
 export function pairingError(status, data = {}) {
   if (status === 403 && data.error === 'pairing_closed') return 'Pairing is closed. Open pairing on the host first, then request a code.';
+  if (status === 409) return 'Another pairing is in progress. Try again in a couple of minutes, or reopen pairing on the host.';
   if (status === 423) return 'Too many wrong codes. Reopen pairing on the host, then request a new code.';
   if (status === 410) return 'Code expired, request a new one';
   if (status === 429) return 'Too many attempts, wait a minute and try again';

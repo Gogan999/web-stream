@@ -86,7 +86,9 @@ test('client streams from mock host, sends input and switches display', { timeou
     [1280, 720, 60, 'balanced', 'h264'],
   );
   assert.ok(asked.bitrateKbps > 5000 && asked.bitrateKbps < 20000, String(asked.bitrateKbps));
-  // A bitrate pick goes straight to the host.
+  // Settings live in one dropdown; a bitrate pick goes straight to the host.
+  assert.equal(await client.isVisible('#bitrate'), false);
+  await client.click('#more-toggle');
   await client.selectOption('#bitrate', '30000');
   await host.waitForFunction(() => window.mockLog.some((e) => e.type === 'setVideoConfig' && e.config.bitrateKbps === 30000));
   // Matching the host resolution asks the host, which refuses unless allowed; the refusal shows.
@@ -152,8 +154,12 @@ test('client streams from mock host, sends input and switches display', { timeou
   assert.ok(after.some((e) => e.ev === 'control' && e.type === 'selectDisplay' && e.id === 1));
   assert.ok(!after.some((e) => e.type === 'key' && e.usage === 0x1f), 'Digit2 must not reach the host');
 
-  // Stats overlay fills in.
+  // Clicking the stream closed the dropdown. Stats overlay fills in.
+  assert.equal(await client.isVisible('#more'), false);
+  await client.click('#more-toggle');
   await client.click('#stats-toggle');
+  await client.keyboard.press('Escape');
+  assert.equal(await client.isVisible('#more'), false);
   await client.waitForFunction(() => /fps \d+/.test(document.getElementById('stats').textContent), null, { timeout: 5000 });
   await client.waitForFunction(() => /host enc 30\.0\/30\.0 Mb\/s/.test(document.getElementById('stats').textContent), null, { timeout: 5000 });
   console.log(await client.textContent('#stats'));

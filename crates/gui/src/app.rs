@@ -369,6 +369,32 @@ impl App {
                 ui.label("Game audio");
                 ui.checkbox(&mut d.game_audio, "send to the browser");
                 ui.end_row();
+                ui.label("Audio quality");
+                ui.add_enabled_ui(d.game_audio, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::DragValue::new(&mut d.audio_kbps)
+                                .range(32..=510)
+                                .suffix(" kbps"),
+                        )
+                        .on_hover_text("192 kbps and up is hard to tell from the original");
+                        egui::ComboBox::from_id_salt("audio-frame")
+                            .selected_text(format!("{} ms frames", d.audio_frame_ms))
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut d.audio_frame_ms,
+                                    10,
+                                    "10 ms (lowest delay)",
+                                );
+                                ui.selectable_value(
+                                    &mut d.audio_frame_ms,
+                                    20,
+                                    "20 ms (better sound)",
+                                );
+                            });
+                    });
+                });
+                ui.end_row();
                 ui.label("Browser mic");
                 ui.horizontal(|ui| {
                     ui.checkbox(&mut d.mic, "play into");

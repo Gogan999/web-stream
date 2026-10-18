@@ -31,6 +31,10 @@ pub struct Settings {
     pub kbps: u32,
     pub quality: String,
     pub game_audio: bool,
+    /// Game audio Opus bitrate (kb/s) and frame length (10 or 20 ms). A
+    /// browser can override both from its own settings.
+    pub audio_kbps: u32,
+    pub audio_frame_ms: u32,
     pub mic: bool,
     pub mic_device: String,
     pub allow_resolution_change: bool,
@@ -55,6 +59,8 @@ impl Default for Settings {
             kbps: 20_000,
             quality: "balanced".into(),
             game_audio: true,
+            audio_kbps: 128,
+            audio_frame_ms: 10,
             mic: true,
             mic_device: "auto".into(),
             allow_resolution_change: false,
@@ -118,6 +124,12 @@ impl Settings {
         if !self.game_audio {
             args.push("--no-audio".into());
         }
+        args.extend([
+            "--audio-kbps".into(),
+            self.audio_kbps.to_string(),
+            "--audio-frame-ms".into(),
+            self.audio_frame_ms.to_string(),
+        ]);
         if self.mic {
             args.extend(["--mic-device".into(), self.mic_device.clone()]);
         } else {
@@ -205,6 +217,8 @@ mod tests {
             mic: false,
             game_audio: false,
             allow_resolution_change: true,
+            audio_kbps: 256,
+            audio_frame_ms: 20,
             extra_args: r#"--hostname home.example.net --data-dir "C:\some dir""#.into(),
             ..Settings::default()
         };
@@ -214,6 +228,7 @@ mod tests {
         assert_eq!(o.media.display.map(|d| d.0), Some(2));
         assert_eq!(o.media.mic_device, None);
         assert!(!o.media.game_audio && o.media.allow_resolution_change);
+        assert_eq!((o.media.audio_kbps, o.media.audio_frame_ms), (256, 20));
         assert_eq!(o.hostnames, vec!["home.example.net".to_string()]);
         assert_eq!(o.data_dir, std::path::PathBuf::from(r"C:\some dir"));
         assert!(s.command_line().unwrap().contains(r#""C:\some dir""#));
@@ -231,6 +246,11 @@ mod tests {
             ..Settings::default()
         };
         assert!(bad_extra.serve_options().is_err());
+        let bad_frame = Settings {
+            audio_frame_ms: 15,
+            ..Settings::default()
+        };
+        assert!(bad_frame.serve_options().is_err());
         let unmatched = Settings {
             extra_args: "--hostname \"x".into(),
             ..Settings::default()

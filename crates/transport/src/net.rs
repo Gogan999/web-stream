@@ -15,12 +15,15 @@ use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
-use tokio::sync::{Semaphore, mpsc};
+use tokio::sync::{Semaphore, mpsc, watch};
 
 use str0m::net::Protocol;
 
 /// Most ICE-TCP connections a browser will reasonably open at once.
 const MAX_TCP_CONNS: usize = 8;
+/// ICE-TCP connections from one IP, so a single host cannot hold every
+/// permit while it stalls through the first-check deadline.
+const MAX_TCP_PER_IP: usize = 2;
 /// RFC 4571 frames are length-prefixed with a u16.
 const MAX_FRAME: usize = u16::MAX as usize;
 /// An ICE-TCP connection must open with a STUN check this soon.
@@ -51,10 +54,21 @@ pub struct Packet {
 
 /// Which packets the readers let through, set by the run loop for each new
 /// session.
-#[derive(Default)]
 pub struct Filter {
     ufrag: Option<Vec<u8>>,
     peers: HashSet<SocketAddr>,
+    /// Bumped on every reset; ICE-TCP connections of an older session close.
+    epoch: watch::Sender<u64>,
+}
+
+impl Default for Filter {
+    fn default() -> Self {
+        Self {
+            ufrag: None,
+            peers: HashSet::new(),
+            epoch: watch::Sender::new(0),
+        }
+    }
 }
 
 pub type SharedFilter = Arc<Mutex<Filter>>;
@@ -65,6 +79,7 @@ impl Filter {
     pub fn reset(&mut self, ufrag: Option<&str>) {
         self.ufrag = ufrag.map(|u| u.as_bytes().to_vec());
         self.peers.clear();
+        self.epoch.send_modify(|e| *e += 1);
     }
 
     fn is_valid_check(&self, data: &[u8]) -> bool {
@@ -231,8 +246,9 @@ async fn udp_reader(
             if f.peers.contains(&source) {
                 true
             } else if f.peers.len() < MAX_PEERS
-                && unknown.take(UNKNOWN_STUN_PPS, UNKNOWN_STUN_BURST, now)
+                // Budget only checks that pass, so junk cannot use it up.
                 && f.is_valid_check(data)
+                && unknown.take(UNKNOWN_STUN_PPS, UNKNOWN_STUN_BURST, now)
             {
                 f.peers.insert(source);
                 true
@@ -273,6 +289,7 @@ async fn tcp_acceptor(
     filter: SharedFilter,
     incoming: mpsc::Sender<Packet>,
 ) {
+    let per_ip: PerIp = Arc::default();
     loop {
         let (stream, peer) = match listener.accept().await {
             Ok(s) => s,
@@ -283,6 +300,10 @@ async fn tcp_acceptor(
         };
         // Taken before spawning, so the cap holds however fast connections
         // arrive; released when the connection task ends.
+        let Some(ip_slot) = IpSlot::take(&per_ip, peer.ip()) else {
+            tracing::debug!(%peer, "too many ICE-TCP connections from this address");
+            continue;
+        };
         let Ok(permit) = permits.clone().try_acquire_owned() else {
             tracing::debug!(%peer, "too many ICE-TCP connections");
             continue;
@@ -295,8 +316,37 @@ async fn tcp_acceptor(
         let (writers, filter, incoming) = (writers.clone(), filter.clone(), incoming.clone());
         tokio::spawn(async move {
             tcp_conn(stream, local, peer, writers, filter, incoming).await;
-            drop(permit);
+            drop((permit, ip_slot));
         });
+    }
+}
+
+type PerIp = Arc<Mutex<HashMap<IpAddr, usize>>>;
+
+/// One of an IP's ICE-TCP connection slots, given back on drop.
+struct IpSlot(PerIp, IpAddr);
+
+impl IpSlot {
+    fn take(per_ip: &PerIp, ip: IpAddr) -> Option<Self> {
+        let mut map = per_ip.lock().expect("per-ip lock");
+        let n = map.entry(ip).or_default();
+        if *n >= MAX_TCP_PER_IP {
+            return None;
+        }
+        *n += 1;
+        Some(Self(per_ip.clone(), ip))
+    }
+}
+
+impl Drop for IpSlot {
+    fn drop(&mut self) {
+        let mut map = self.0.lock().expect("per-ip lock");
+        if let Some(n) = map.get_mut(&self.1) {
+            *n -= 1;
+            if *n == 0 {
+                map.remove(&self.1);
+            }
+        }
     }
 }
 
@@ -321,6 +371,7 @@ async fn tcp_conn(
 ) {
     let (mut rd, mut wr) = stream.into_split();
     let mut buf = vec![0u8; MAX_FRAME];
+    let mut epoch = filter.lock().expect("filter lock").epoch.subscribe();
 
     // The first frame must be a check for the current session.
     let first = match tokio::time::timeout(TCP_FIRST_STUN, read_frame(&mut rd, &mut buf)).await {
@@ -356,9 +407,13 @@ async fn tcp_conn(
     loop {
         let data = match next.take() {
             Some(d) => d,
-            None => match tokio::time::timeout(TCP_IDLE, read_frame(&mut rd, &mut buf)).await {
-                Ok(Ok(f)) => f.to_vec(),
-                _ => break,
+            None => tokio::select! {
+                read = tokio::time::timeout(TCP_IDLE, read_frame(&mut rd, &mut buf)) => match read {
+                    Ok(Ok(f)) => f.to_vec(),
+                    _ => break,
+                },
+                // A new session (or none): this connection belonged to the old one.
+                _ = epoch.changed() => break,
             },
         };
         if !bucket.take(PEER_PPS, PEER_BURST, Instant::now()) {
@@ -436,6 +491,18 @@ mod tests {
             b"abcd"
         ));
         assert!(!binding_request_for(&[0x80; 200], b"abcd"));
+    }
+
+    #[test]
+    fn per_ip_slots() {
+        let per_ip = PerIp::default();
+        let ip: IpAddr = [10, 0, 0, 1].into();
+        let a = IpSlot::take(&per_ip, ip).unwrap();
+        let _b = IpSlot::take(&per_ip, ip).unwrap();
+        assert!(IpSlot::take(&per_ip, ip).is_none());
+        assert!(IpSlot::take(&per_ip, [10, 0, 0, 2].into()).is_some());
+        drop(a);
+        assert!(IpSlot::take(&per_ip, ip).is_some());
     }
 
     #[test]

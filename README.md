@@ -16,7 +16,8 @@ HTTPS port (see `docs/signaling.md`).
 | `crates/signaling` | `ws-signaling` | HTTPS server in the host: web client, device pairing, `/ws` signaling |
 | `crates/input` | `ws-input` | Keyboard/mouse injection on the host |
 | `crates/audio` | `ws-audio` | Loopback capture + Opus, browser mic to virtual mic |
-| `crates/host` | `ws-host` (bin) | Host agent wiring the crates together |
+| `crates/host` | `ws-host` (lib, bin) | Host agent wiring the crates together; console front end |
+| `crates/gui` | `ws-host-gui` (bin) | Tray app and status/settings window around the same host |
 | `web/` | | Browser client, plain and fast |
 
 Data flow on the host: `capture` emits `EncodedFrame`s and `audio` emits

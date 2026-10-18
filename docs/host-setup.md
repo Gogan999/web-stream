@@ -2,7 +2,8 @@
 
 `scripts\install.ps1` installs the build dependencies (Visual Studio Build
 Tools with the C++ tools and Windows SDK, CMake, Rust) through winget and
-builds the host; add `-GamepadDriver` for ViGEmBus:
+builds the host; add `-GamepadDriver` for ViGEmBus and `-MicDriver` for the
+Steam Streaming Microphone (see below):
 
 ```
 powershell -ExecutionPolicy Bypass -File scripts\install.ps1
@@ -91,20 +92,49 @@ in `ws-input` switches to DualShock 4). Rumble is supported on Xbox 360 pads.
 
 ## Microphone: a virtual audio cable
 
-The browser mic is played into a render device whose other end shows up in
-Windows as a microphone. The default is VB-Audio Virtual Cable
-(https://vb-audio.com/Cable/, donationware; not bundled because its licence
-does not allow redistribution without permission).
+Windows has no way for a program to add a microphone on its own; it takes an
+audio driver. The host plays the browser mic into a render device whose other
+end Windows shows as a microphone. With `--mic-device auto` (the default) it
+uses the first of these it finds:
+
+1. VB-CABLE's **CABLE Input**, which games see as **CABLE Output**.
+2. Steam's **Speakers (Steam Streaming Microphone)**, which games see as
+   **Microphone (Steam Streaming Microphone)**.
+
+### Steam Streaming Microphone (no download)
+
+Steam ships a signed virtual microphone driver for Remote Play in
+`%CommonProgramFiles(x86)%\Steam\drivers\Windows10\x64`. If Steam is
+installed, `scripts\install.ps1 -MicDriver` installs it from there (one UAC
+prompt), the same way Sunshine installs Steam Streaming Speakers. If you have
+used Steam Remote Play on this PC it may already be there: look for
+"Steam Streaming Microphone" under Sound, video and game controllers in
+Device Manager.
+
+After installing, check that your speakers or headphones are still the
+default output in Sound settings. In each game or chat app, pick
+**Microphone (Steam Streaming Microphone)** as the microphone. If its
+playback side, **Speakers (Steam Streaming Microphone)**, is disabled in the
+Sound control panel, enable it.
+
+### VB-CABLE
+
+VB-Audio Virtual Cable (https://vb-audio.com/Cable/) is donationware. Its
+licence does not allow putting it in another program's installer, so the
+script does not install it.
 
 1. Install VB-CABLE and reboot.
 2. Leave **CABLE Input** as a playback device but do *not* make it the
-   default output; game audio capture follows the default output, and making
-   the cable the default would loop the mic back to the client.
+   default output.
 3. In each game or chat app, pick **CABLE Output** as the microphone.
 
-Another cable works too: set `MicConfig::device` to part of its playback
-device name. If no device matches, the error lists the playback devices the
-host can see.
+### Either way
+
+Game audio capture follows the default output, so a mic cable must never be
+the default output or the browser hears its own mic; the host logs a warning
+if it is. Another cable works too: pass part of its playback device name to
+`--mic-device`. If no device matches, the error lists the playback devices
+the host can see.
 
 ## Game audio
 

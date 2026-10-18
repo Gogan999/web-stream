@@ -17,7 +17,8 @@ use windows::Win32::System::Threading::WaitForSingleObject;
 use ws_proto::AudioPacket;
 
 use super::{
-    AudioThread, Event, activate, device_id, find_render_device, mix_format, native_format,
+    AudioThread, Event, activate, device_id, find_render_device, friendly_name, is_mic_cable,
+    mix_format, native_format,
 };
 use crate::convert::{Converter, InputFormat, SAMPLE_RATE, SampleFormat};
 use crate::encode::{FRAME_DURATION, FRAME_SAMPLES, OpusFrameEncoder};
@@ -97,6 +98,14 @@ struct Stream {
 
 impl Stream {
     fn open(device: &IMMDevice) -> Result<Self> {
+        let name = friendly_name(device).unwrap_or_default();
+        if is_mic_cable(&name) {
+            warn!(
+                device = name,
+                "game audio is captured from a virtual mic cable, so the browser will hear its own \
+                 mic; make your speakers or headphones the default output"
+            );
+        }
         let event = Event::new()?;
         let (client, input) = init_client(device)?;
         // SAFETY: COM calls on an initialised client.

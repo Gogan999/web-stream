@@ -66,7 +66,10 @@ pub struct TransportConfig {
     /// round trip (a receive-only peer rarely does) it assumes 100 ms.
     pub max_resend_age: Duration,
     /// Drop a (non-key) frame instead of queueing it when the oldest unsent
-    /// video packet has waited longer than this.
+    /// video packet has waited longer than this. A drop costs a keyframe (a
+    /// stall and a soft picture), so this only catches a queue that has truly
+    /// fallen behind: a burst can sit a few milliseconds past two frame times,
+    /// on Windows especially, and is better sent a little late.
     pub max_send_delay: Duration,
     /// Starting point for bandwidth estimation.
     pub initial_bitrate_bps: u64,
@@ -82,7 +85,7 @@ impl Default for TransportConfig {
             udp_port: 8443,
             tcp_port: Some(8444),
             max_resend_age: Duration::from_millis(250),
-            max_send_delay: Duration::from_millis(25),
+            max_send_delay: Duration::from_millis(50),
             initial_bitrate_bps: 10_000_000,
             max_bitrate_bps: 50_000_000,
         }

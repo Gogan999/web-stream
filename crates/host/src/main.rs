@@ -1,17 +1,140 @@
 //! Host agent entry point.
+//!
+//! Until the transport lands this only exercises the video pipeline:
+//!
+//! ```text
+//! ws-host displays
+//! ws-host capture-test [--display N] [--seconds S] [--fps F] [--kbps K]
+//!                      [--size WxH] [--codec h264|h265|av1] [--out FILE]
+//! ```
+//!
+//! `capture-test` writes the raw bitstream (play it with `ffplay FILE`) and
+//! prints frame rate, drops and capture-to-encoded latency once a second.
+
+use std::io::Write;
+use std::time::{Duration, Instant};
+
+use anyhow::{Context, bail};
+use tokio::sync::mpsc;
+use ws_proto::{DisplayId, VideoCodec, VideoConfig, mono_now};
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+        )
         .init();
 
-    match ws_capture::list_displays() {
-        Ok(displays) => {
-            for d in displays {
-                tracing::info!(id = d.id.0, name = %d.name, "{}x{}", d.width, d.height);
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.first().map(String::as_str) {
+        None | Some("displays") => list_displays(),
+        Some("capture-test") => capture_test(&args[1..]),
+        Some(other) => bail!("unknown command {other:?}; try `displays` or `capture-test`"),
+    }
+}
+
+fn list_displays() -> anyhow::Result<()> {
+    for d in ws_capture::list_displays()? {
+        println!(
+            "{:>3}  {}x{} @ {:.2} Hz at ({}, {}){}  {}",
+            d.id.0,
+            d.width,
+            d.height,
+            f64::from(d.refresh_mhz) / 1000.0,
+            d.x,
+            d.y,
+            if d.primary { " primary" } else { "" },
+            d.name
+        );
+    }
+    Ok(())
+}
+
+fn capture_test(args: &[String]) -> anyhow::Result<()> {
+    let mut display = None;
+    let mut seconds = 10u64;
+    let mut out = None;
+    let mut config = VideoConfig::default();
+    let mut it = args.iter();
+    while let Some(flag) = it.next() {
+        let mut value = || it.next().with_context(|| format!("{flag} needs a value"));
+        match flag.as_str() {
+            "--display" => display = Some(DisplayId(value()?.parse()?)),
+            "--seconds" => seconds = value()?.parse()?,
+            "--fps" => config.fps = value()?.parse()?,
+            "--kbps" => config.bitrate_kbps = value()?.parse()?,
+            "--out" => out = Some(value()?.clone()),
+            "--size" => {
+                let v = value()?;
+                let (w, h) = v.split_once('x').context("--size is WxH")?;
+                config.width = w.parse()?;
+                config.height = h.parse()?;
+            }
+            "--codec" => {
+                config.codec = match value()?.as_str() {
+                    "h264" => VideoCodec::H264,
+                    "h265" | "hevc" => VideoCodec::H265,
+                    "av1" => VideoCodec::Av1,
+                    c => bail!("unknown codec {c}"),
+                }
+            }
+            f => bail!("unknown flag {f}"),
+        }
+    }
+    let display = match display {
+        Some(d) => d,
+        None => {
+            ws_capture::list_displays()?
+                .into_iter()
+                .find(|d| d.primary)
+                .context("no primary display")?
+                .id
+        }
+    };
+    let ext = match config.codec {
+        VideoCodec::H264 => "h264",
+        VideoCodec::H265 => "h265",
+        VideoCodec::Av1 => "obu",
+    };
+    let out = out.unwrap_or_else(|| format!("capture-test.{ext}"));
+    let mut file = std::io::BufWriter::new(std::fs::File::create(&out)?);
+
+    let (tx, mut rx) = mpsc::channel(4);
+    let _pipeline = ws_capture::VideoPipeline::start(display, config, tx)?;
+    println!("capturing display {} to {out} for {seconds}s", display.0);
+
+    let end = Instant::now() + Duration::from_secs(seconds);
+    let mut window = Instant::now();
+    let (mut frames, mut bytes, mut keyframes, mut latency_us, mut gaps) = (0u64, 0u64, 0, 0u64, 0);
+    let mut last_index = None;
+    while Instant::now() < end {
+        let Some(frame) = rx.blocking_recv() else {
+            bail!("pipeline stopped (see log)");
+        };
+        if let Some(prev) = last_index {
+            if frame.frame_index != prev + 1 {
+                gaps += 1;
             }
         }
-        Err(e) => tracing::warn!("listing displays failed: {e}"),
+        last_index = Some(frame.frame_index);
+        latency_us += mono_now().saturating_sub(frame.capture_time);
+        frames += 1;
+        bytes += frame.data.len() as u64;
+        keyframes += u32::from(frame.keyframe);
+        file.write_all(&frame.data)?;
+
+        let elapsed = window.elapsed();
+        if elapsed >= Duration::from_secs(1) {
+            println!(
+                "{:5.1} fps  {:6.0} kbps  capture->here {:5.2} ms  keyframes {keyframes}  drops {gaps}",
+                frames as f64 / elapsed.as_secs_f64(),
+                bytes as f64 * 8.0 / 1000.0 / elapsed.as_secs_f64(),
+                latency_us as f64 / 1000.0 / frames.max(1) as f64,
+            );
+            (frames, bytes, keyframes, latency_us, gaps) = (0, 0, 0, 0, 0);
+            window = Instant::now();
+        }
     }
+    file.flush()?;
     Ok(())
 }

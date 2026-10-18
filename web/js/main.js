@@ -8,6 +8,7 @@ import * as settingsStore from './settings.js';
 import { AutoTune, Cancelled } from './autotune.js';
 import { SoftKeyboard } from './softkeys.js';
 import * as P from './protocol.js';
+import { Files, formatSize } from './files.js';
 
 const $ = (id) => document.getElementById(id);
 const ui = {
@@ -21,6 +22,7 @@ const ui = {
   audioKbps: $('audio-kbps'), audioFrame: $('audio-frame'),
   moreToggle: $('more-toggle'), more: $('more'), kbdToggle: $('kbd-toggle'), keysToggle: $('keys-toggle'), keys: $('keys'),
   kbdInput: $('kbd-input'), touchFullscreen: $('touch-fullscreen'),
+  filesToggle: $('files-toggle'), files: $('files'), fileList: $('file-list'),
 };
 
 const params = new URLSearchParams(location.search);
@@ -51,7 +53,10 @@ async function connect() {
   session = new Session({ signalUrl, video: ui.video });
   session.addEventListener('status', (e) => setStatus(e.detail.text, e.detail.state));
   session.addEventListener('control', (e) => onControl(e.detail));
+  session.addEventListener('file-chunk', (e) => files.onChunk(e.detail));
   session.addEventListener('control-open', () => {
+    // A new connection: the host offers its files afresh.
+    files.clear();
     session.sendControl({ type: 'listDisplays' });
     sendCursorMode();
     // The host keeps the last choice across sessions; tell it this browser's.
@@ -62,6 +67,7 @@ async function connect() {
     ui.connect.textContent = 'Connect';
     ui.display.disabled = true;
     tuning?.cancel();
+    files.clear();
   });
   host = { displays: [], active: null, config: null, stats: null, matched: false, awaitingMatch: false };
   lastSent = null;
@@ -100,6 +106,7 @@ function disconnect() {
   session = null;
   stopStats();
   tuning?.cancel();
+  files.clear();
   host = null;
   ui.display.replaceChildren();
   setStatus('Not connected', 'idle');
@@ -107,6 +114,7 @@ function disconnect() {
 
 function onControl(msg) {
   if (cursor?.onControl(msg)) return;
+  if (files.onControl(msg)) return;
   if (msg.type === 'displays' && Array.isArray(msg.displays)) {
     ui.display.replaceChildren(...msg.displays.map((d, i) => {
       const o = document.createElement('option');
@@ -483,17 +491,87 @@ ui.statsToggle.addEventListener('click', toggleStats);
 // Toolbar controls keep focus otherwise, and Space/Enter would re-trigger them.
 for (const el of [ui.connect, ui.fullscreen, ui.statsToggle, ui.autotune]) el.addEventListener('mouseup', () => el.blur());
 
-// Settings dropdown: the toggle opens it; a click or tap anywhere else, or Esc, closes it.
+// Settings and Files dropdowns: a toggle opens one; a click or tap anywhere else, or Esc, closes it.
 function setSettingsOpen(open) {
+  if (open) setFilesOpen(false);
   document.body.classList.toggle('more-open', open);
   ui.moreToggle.setAttribute('aria-expanded', String(open));
 }
+function setFilesOpen(open) {
+  if (open) setSettingsOpen(false);
+  document.body.classList.toggle('files-open', open);
+  ui.filesToggle.setAttribute('aria-expanded', String(open));
+}
 ui.moreToggle.addEventListener('click', () => setSettingsOpen(!document.body.classList.contains('more-open')));
+ui.filesToggle.addEventListener('click', () => setFilesOpen(!document.body.classList.contains('files-open')));
 document.addEventListener('pointerdown', (e) => {
   if (!ui.more.contains(e.target) && !ui.moreToggle.contains(e.target)) setSettingsOpen(false);
+  if (!ui.files.contains(e.target) && !ui.filesToggle.contains(e.target)) setFilesOpen(false);
 }, { capture: true });
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && document.body.classList.contains('more-open')) setSettingsOpen(false);
+  if (e.key !== 'Escape') return;
+  if (document.body.classList.contains('more-open')) setSettingsOpen(false);
+  if (document.body.classList.contains('files-open')) setFilesOpen(false);
+});
+
+// Files the host shares: the Files button shows how many; each row saves, cancels or says what happened.
+const files = new Files({ sendControl: (msg) => session?.sendControl(msg) });
+files.addEventListener('offer', (e) => {
+  setStatus(`Host shared ${e.detail.name} (${formatSize(e.detail.size)}): see Files`, ui.status.dataset.state);
+});
+let filesQueued = false;
+files.addEventListener('change', () => {
+  if (filesQueued) return;
+  filesQueued = true;
+  requestAnimationFrame(() => { filesQueued = false; showFiles(); });
+});
+// Rows are updated in place, so a click isn't lost to a row redrawn under the pointer.
+const fileRows = new Map();
+function showFiles() {
+  const list = files.list();
+  ui.filesToggle.hidden = list.length === 0;
+  ui.filesToggle.textContent = `Files (${list.length})`;
+  if (!list.length) setFilesOpen(false);
+  for (const [id, row] of fileRows) {
+    if (!files.files.has(id)) { row.li.remove(); fileRows.delete(id); }
+  }
+  for (const f of list) {
+    let row = fileRows.get(f.id);
+    if (!row) {
+      const li = document.createElement('li');
+      const name = Object.assign(document.createElement('span'), { className: 'name', textContent: f.name, title: f.name });
+      const info = Object.assign(document.createElement('span'), { className: 'info' });
+      const button = Object.assign(document.createElement('button'), { type: 'button' });
+      button.dataset.id = String(f.id);
+      const bar = document.createElement('progress');
+      li.append(name, button, info, bar);
+      ui.fileList.append(li);
+      row = { li, info, button, bar };
+      fileRows.set(f.id, row);
+    }
+    row.button.textContent = { offered: 'Save', receiving: 'Cancel', saved: 'Save again', failed: 'Save' }[f.state];
+    row.bar.hidden = f.state !== 'receiving';
+    row.bar.max = Math.max(f.size, 1);
+    row.bar.value = f.stored;
+    row.info.classList.toggle('failed', f.state === 'failed');
+    row.info.textContent = fileInfo(f);
+  }
+}
+function fileInfo(f) {
+  const size = formatSize(f.size);
+  if (f.state === 'saved') return `Saved · ${size}`;
+  if (f.state === 'failed') return f.error;
+  if (f.state !== 'receiving') return size;
+  const secs = (performance.now() - f.startedAt) / 1000;
+  const rate = secs > 0.5 ? ` · ${formatSize(Math.round(f.stored / secs))}/s` : '';
+  return `${formatSize(f.stored)} of ${size}${rate}`;
+}
+ui.fileList.addEventListener('click', (e) => {
+  const button = e.target.closest('button[data-id]');
+  if (!button) return;
+  const id = Number(button.dataset.id);
+  if (files.files.get(id)?.state === 'receiving') files.cancel(id);
+  else files.save(id);
 });
 
 // Touch screens: overlay buttons and on-screen keyboard.

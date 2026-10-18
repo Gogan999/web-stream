@@ -16,8 +16,15 @@
   <span id="status" data-state="idle">Not connected</span>
   <span class="spacer"></span>
   <button id="fullscreen" type="button">Fullscreen</button>
+  <button id="files-toggle" type="button" aria-expanded="false" aria-controls="files" aria-haspopup="true" hidden>Files</button>
+  <div id="files" class="panel" role="group" aria-label="Files from the host">
+    <section>
+      <h2>Files from the host</h2>
+      <ul id="file-list"></ul>
+    </section>
+  </div>
   <button id="more-toggle" type="button" aria-expanded="false" aria-controls="more" aria-haspopup="true">Settings ▾</button>
-  <div id="more" role="group" aria-label="Settings">
+  <div id="more" class="panel" role="group" aria-label="Settings">
     <section>
       <h2>Display</h2>
       <label>Display <select id="display" disabled></select></label>

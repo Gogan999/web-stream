@@ -22,9 +22,11 @@ use ws_proto::{
 use ws_transport::{Transport, TransportConfig, TransportEvent, TransportStats};
 
 use crate::cursor::{CursorSession, CursorTarget};
+use crate::files::{FileCommand, FileMsg, FileSession};
 use crate::input::InputThread;
 use crate::options::MediaOptions;
 use crate::platform;
+use crate::serve::Event;
 
 /// Encoded frames waiting for the transport. The transport keeps only the
 /// newest frame anyway; a full channel makes the encoder drop and send a
@@ -66,6 +68,8 @@ pub async fn run(
     mut events: mpsc::Receiver<TransportEvent>,
     opts: MediaOptions,
     codecs: AcceptedCodecs,
+    mut file_commands: mpsc::Receiver<FileCommand>,
+    host_events: mpsc::UnboundedSender<Event>,
     mut shutdown: oneshot::Receiver<()>,
 ) {
     let (control_tx, mut control_rx) = mpsc::channel(CONTROL_QUEUE);
@@ -99,6 +103,7 @@ pub async fn run(
         changed_modes: ChangedModes::default(),
         mode_busy: false,
         last_mode_change: None,
+        host_events,
     };
     media.set_ceiling();
     loop {
@@ -118,6 +123,7 @@ pub async fn run(
             Some(msg) = control_rx.recv() => media.send_control(msg).await,
             Some(generation) = stopped_rx.recv() => media.video_stopped(generation),
             Some(later) = later_rx.recv() => media.later(later),
+            Some(cmd) = file_commands.recv() => media.file_command(cmd),
             _ = &mut shutdown => break,
         }
     }
@@ -234,6 +240,8 @@ struct Media {
     /// A resolution change or restore is running.
     mode_busy: bool,
     last_mode_change: Option<Instant>,
+    /// What the host user sees.
+    host_events: mpsc::UnboundedSender<Event>,
 }
 
 #[derive(Debug, Default)]
@@ -249,6 +257,7 @@ struct SentFrames {
 struct Live {
     input: Option<InputThread>,
     _cursor: CursorSession,
+    files: FileSession,
     video: Option<Video>,
     /// Held only to keep game audio capture running.
     audio: Option<platform::Loopback>,
@@ -272,7 +281,11 @@ impl Media {
                     v.pipeline.request_keyframe();
                 }
             }
-            TransportEvent::TargetBitrate(bps) => self.target_bitrate(bps),
+            TransportEvent::TargetBitrate(bps) => {
+                let video = self.live.as_ref().is_some_and(|l| l.video.is_some());
+                self.to_files(FileMsg::Bitrate(video.then_some(bps)));
+                self.target_bitrate(bps)
+            }
             TransportEvent::Data {
                 channel,
                 binary,
@@ -315,6 +328,7 @@ impl Media {
                     self.cursor_target.send_modify(|t| t.origin = None);
                 }
             }
+            TransportEvent::ChannelLow(channels::FILE) => self.to_files(FileMsg::ChannelLow),
             TransportEvent::ChannelLow(_) => {}
         }
     }
@@ -361,9 +375,15 @@ impl Media {
         };
 
         let cursor = CursorSession::start(self.transport.clone(), self.cursor_target.subscribe());
+        let files = FileSession::start(
+            self.transport.clone(),
+            self.control_tx.clone(),
+            self.host_events.clone(),
+        );
         self.live = Some(Live {
             input,
             _cursor: cursor,
+            files,
             video: None,
             audio,
             mic: None,
@@ -612,9 +632,9 @@ impl Media {
                     drop_blocking(mic);
                 }
             }
-            ClientControl::RequestFile { .. } => {
-                self.error("file transfer is not available yet".into());
-            }
+            ClientControl::RequestFile { id } => self.to_files(FileMsg::Request(id)),
+            ClientControl::FileAck { id, received } => self.to_files(FileMsg::Ack { id, received }),
+            ClientControl::CancelFile { id } => self.to_files(FileMsg::Cancel(id)),
             ClientControl::SetCursorPositions { enabled } => {
                 self.cursor_target.send_if_modified(|t| {
                     let changed = t.positions != enabled;
@@ -624,6 +644,25 @@ impl Media {
             }
             ClientControl::Ping { client_time_ms } => {
                 self.reply(HostControl::Pong { client_time_ms });
+            }
+        }
+    }
+
+    fn to_files(&self, msg: FileMsg) {
+        if let Some(live) = &self.live {
+            live.files.send(msg);
+        }
+    }
+
+    fn file_command(&self, cmd: FileCommand) {
+        match &self.live {
+            Some(live) => live.files.send(FileMsg::Command(cmd)),
+            None => {
+                if matches!(cmd, FileCommand::Share(_)) {
+                    let _ = self.host_events.send(Event::Error(
+                        "no browser is connected: connect one, then share the file".into(),
+                    ));
+                }
             }
         }
     }

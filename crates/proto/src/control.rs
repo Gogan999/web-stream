@@ -8,6 +8,38 @@ use crate::{CursorShape, DisplayId, DisplayInfo, VideoConfig};
 #[serde(transparent)]
 pub struct FileId(pub u64);
 
+impl FileId {
+    /// Ids stay below 2^53 so they survive as JSON numbers in the browser.
+    pub const MAX: u64 = (1 << 53) - 1;
+}
+
+/// Most file bytes in one message on the `file` channel.
+pub const FILE_CHUNK_MAX: usize = 16 * 1024;
+/// Bytes of a file chunk's header: the [`FileId`] then the offset of the
+/// first byte, both big-endian `u64`.
+pub const FILE_CHUNK_HEADER: usize = 16;
+/// Most bytes the sender keeps in flight past the receiver's last ack
+/// ([`ClientControl::FileAck`]).
+pub const FILE_WINDOW: u64 = 1024 * 1024;
+
+/// One binary message on the `file` channel: header, then the bytes of the
+/// file from `offset` on. The offset lets the receiver drop bytes left over
+/// from a transfer it cancelled.
+pub fn file_chunk(id: FileId, offset: u64, data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(FILE_CHUNK_HEADER + data.len());
+    out.extend_from_slice(&id.0.to_be_bytes());
+    out.extend_from_slice(&offset.to_be_bytes());
+    out.extend_from_slice(data);
+    out
+}
+
+/// The parts of a [`file_chunk`]; `None` if it is too short.
+pub fn parse_file_chunk(msg: &[u8]) -> Option<(FileId, u64, &[u8])> {
+    let id = u64::from_be_bytes(msg.get(..8)?.try_into().ok()?);
+    let offset = u64::from_be_bytes(msg.get(8..16)?.try_into().ok()?);
+    Some((FileId(id), offset, &msg[FILE_CHUNK_HEADER..]))
+}
+
 /// Messages on the reliable `control` data channel, browser -> host.
 ///
 /// Everything here is untrusted input: the host must validate or clamp every
@@ -49,8 +81,21 @@ pub enum ClientControl {
     /// Put every display this session changed back to its own resolution.
     RestoreHostResolution,
     /// Ask for a file the host offered with [`HostControl::FileOffer`]; any
-    /// other id is rejected. The file transfer work owns the transfer itself.
+    /// other id is rejected. The bytes come on the `file` channel as
+    /// [`file_chunk`]s from offset 0; the file is done when the browser has
+    /// the offer's `size`. Asking again starts over.
     RequestFile {
+        id: FileId,
+    },
+    /// The browser has stored the first `received` bytes of a requested
+    /// file. The host sends at most [`FILE_WINDOW`] past it, and counts the
+    /// file as sent when `received` is its size.
+    FileAck {
+        id: FileId,
+        received: u64,
+    },
+    /// Stop sending a requested file. It stays on offer.
+    CancelFile {
         id: FileId,
     },
     /// Whether to send [`HostControl::CursorPosition`]: the browser draws
@@ -84,10 +129,22 @@ pub enum HostControl {
         client_time_ms: f64,
     },
     /// A file the host user chose to share; the client may request it by id.
+    /// `name` is a bare file name, for display and as the suggested name.
     FileOffer {
         id: FileId,
         name: String,
         size: u64,
+    },
+    /// The host user stopped sharing the file: it can't be requested, and a
+    /// transfer of it stopped.
+    FileWithdrawn {
+        id: FileId,
+    },
+    /// Sending a requested file failed (it couldn't be read, or the id is
+    /// not on offer). It may be requested again if still on offer.
+    FileFailed {
+        id: FileId,
+        message: String,
     },
     /// Gamepad rumble, motor strengths 0.0..=1.0.
     Rumble {
@@ -169,6 +226,49 @@ mod tests {
         assert!(
             serde_json::from_str::<ClientControl>(r#"{"type":"requestFile","path":"C:/x"}"#)
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn file_messages_shape() {
+        let ack: ClientControl =
+            serde_json::from_str(r#"{"type":"fileAck","id":7,"received":262144}"#).unwrap();
+        assert_eq!(
+            ack,
+            ClientControl::FileAck {
+                id: FileId(7),
+                received: 262_144
+            }
+        );
+        let cancel: ClientControl =
+            serde_json::from_str(r#"{"type":"cancelFile","id":7}"#).unwrap();
+        assert_eq!(cancel, ClientControl::CancelFile { id: FileId(7) });
+        assert_eq!(
+            serde_json::to_string(&HostControl::FileFailed {
+                id: FileId(7),
+                message: "gone".into()
+            })
+            .unwrap(),
+            r#"{"type":"fileFailed","id":7,"message":"gone"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&HostControl::FileWithdrawn { id: FileId(7) }).unwrap(),
+            r#"{"type":"fileWithdrawn","id":7}"#
+        );
+    }
+
+    #[test]
+    fn file_chunk_round_trip() {
+        let msg = file_chunk(FileId(FileId::MAX), 1 << 40, b"abc");
+        assert_eq!(msg.len(), FILE_CHUNK_HEADER + 3);
+        assert_eq!(
+            parse_file_chunk(&msg),
+            Some((FileId(FileId::MAX), 1 << 40, &b"abc"[..]))
+        );
+        assert_eq!(parse_file_chunk(&msg[..15]), None);
+        assert_eq!(
+            parse_file_chunk(&msg[..16]),
+            Some((FileId(FileId::MAX), 1 << 40, &b""[..]))
         );
     }
 

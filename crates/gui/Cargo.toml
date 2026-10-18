@@ -19,6 +19,7 @@ eframe = { version = "0.32", default-features = false, features = ["default_font
 
 [target.'cfg(windows)'.dependencies]
 tray-icon = "0.21"
+rfd = { version = "0.15", default-features = false }
 raw-window-handle = "0.6"
 windows = { workspace = true, features = [
     "Win32_Foundation",

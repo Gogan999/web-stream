@@ -28,7 +28,11 @@ The window shows:
 - whether the host is running, the addresses to open in the browser (click
   one to copy it) and the certificate fingerprint to compare with the
   browser's;
-- the connected browser, with **Disconnect**;
+- the connected browser, with **Disconnect**, and **Send file...** to offer
+  files to it (or drop files on the window). The browser shows them under
+  **Files** and saves one when you click **Save** there. Shared files are
+  listed with their progress and **Stop sharing**, and forgotten when the
+  browser disconnects;
 - **Pair a browser**, which opens pairing for two minutes. The code to type
   in the browser appears here in large digits, and the window comes forward
   by itself when a browser asks for one. **Forget paired browsers** removes
@@ -79,7 +83,8 @@ at the same time; they use the same ports.
 
 The console takes a few commands: `pair` opens pairing for two minutes (the
 code to type in the browser is printed here), `drop` ends the session,
-`unpair-all` forgets every paired browser, `quit` exits. `--pair` opens
+`unpair-all` forgets every paired browser, `send <path>` offers a file to
+the connected browser, `quit` exits. `--pair` opens
 pairing at startup. `ws-host --help` lists the options: ports, public IPs for
 port forwarding, a real certificate, the starting display and stream
 settings, and turning the mic or game audio off. The tray app's settings

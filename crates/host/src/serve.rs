@@ -14,11 +14,14 @@ use ws_signaling::{
 };
 use ws_transport::{Transport, TransportConfig};
 
+use crate::files::FileCommand;
+pub use crate::files::FileEvent;
 use crate::media;
 use crate::options::ServeOptions;
+pub use ws_proto::FileId;
 
 /// What the host user asks for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     /// Let a browser pair for two minutes.
     OpenPairing,
@@ -26,6 +29,10 @@ pub enum Command {
     DropSession,
     /// Forget every paired browser.
     UnpairAll,
+    /// Offer these files to the connected browser.
+    ShareFiles(Vec<PathBuf>),
+    /// Stop offering a shared file.
+    StopSharing(FileId),
     /// Stop the host.
     Quit,
 }
@@ -47,6 +54,8 @@ pub enum Event {
     /// Every paired browser was removed.
     UnpairedAll,
     Notice(Notice),
+    /// Something happened to a shared file.
+    File(FileEvent),
     /// A command failed.
     Error(String),
 }
@@ -91,11 +100,14 @@ pub async fn serve(
     let mut server_task = tokio::spawn(server.serve());
     let (media_stop, media_stop_rx) = oneshot::channel();
     let (codecs_tx, codecs) = watch::channel(None);
+    let (files, files_rx) = mpsc::channel(8);
     let media_task = tokio::spawn(media::run(
         transport.clone(),
         transport_events,
         opts.media.clone(),
         codecs,
+        files_rx,
+        events.clone(),
         media_stop_rx,
     ));
     tokio::spawn(forward_notices(signaling_events.notices, events.clone()));
@@ -135,6 +147,12 @@ pub async fn serve(
                         Ok(()) => Event::UnpairedAll,
                         Err(e) => Event::Error(format!("could not remove paired browsers: {e}")),
                     });
+                }
+                Some(Command::ShareFiles(paths)) => {
+                    let _ = files.send(FileCommand::Share(paths)).await;
+                }
+                Some(Command::StopSharing(id)) => {
+                    let _ = files.send(FileCommand::Stop(id)).await;
                 }
                 Some(Command::Quit) | None => break Ok(()),
             },

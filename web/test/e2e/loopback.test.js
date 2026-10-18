@@ -31,6 +31,8 @@ test('client streams from mock host, sends input and switches display', { timeou
     window.__pcs = [];
     window.RTCPeerConnection = function (...a) { const pc = new Orig(...a); window.__pcs.push(pc); return pc; };
     window.RTCPeerConnection.prototype = Orig.prototype;
+    // No save dialog in a headless test: files take the in-memory path to downloads.
+    window.showSaveFilePicker = undefined;
   });
   await client.goto(`${base}/?autoconnect`);
 
@@ -201,6 +203,24 @@ test('client streams from mock host, sends input and switches display', { timeou
   await client.waitForFunction(() => /fps \d+/.test(document.getElementById('stats').textContent), null, { timeout: 5000 });
   await client.waitForFunction(() => /host enc 30\.0\/30\.0 Mb\/s/.test(document.getElementById('stats').textContent), null, { timeout: 5000 });
   console.log(await client.textContent('#stats'));
+
+  // A shared file: the Files button appears with a count, Save downloads it, and the status says so.
+  assert.equal(await client.isVisible('#files-toggle'), false);
+  const text = 'hello from the host\n'.repeat(2000); // 40 KB: three chunks
+  await host.evaluate((t) => window.mockShareFile(4242, 'notes.txt', t), text);
+  await client.waitForSelector('#files-toggle:has-text("Files (1)")');
+  await client.waitForFunction(() => /Host shared notes\.txt/.test(document.getElementById('status').textContent));
+  await client.click('#files-toggle');
+  await client.waitForSelector('#file-list li:has-text("notes.txt")');
+  const [download] = await Promise.all([client.waitForEvent('download'), client.click('#file-list button:has-text("Save")')]);
+  assert.equal(download.suggestedFilename(), 'notes.txt');
+  const { readFile } = await import('node:fs/promises');
+  assert.equal(await readFile(await download.path(), 'utf8'), text);
+  await client.waitForSelector('#file-list li:has-text("Saved")');
+  await host.waitForFunction(() => window.mockLog.some((e) => e.type === 'fileAck' && e.id === 4242 && e.received === 40000));
+  // The host stops sharing it: the row and the button go.
+  await sendHost({ type: 'fileWithdrawn', id: 4242 });
+  await client.waitForSelector('#files-toggle', { state: 'hidden' });
 
   // Reload: the pairing cookie persists, so it connects straight away.
   await client.reload();

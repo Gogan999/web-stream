@@ -4,7 +4,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 
 use anyhow::{Context, bail};
-use ws_proto::{DisplayId, VideoCodec, VideoConfig};
+use ws_proto::{DisplayId, VideoCodec, VideoConfig, VideoQuality};
 
 pub const USAGE: &str = "\
 ws-host [serve] [options]      run the host (the default)
@@ -23,9 +23,12 @@ serve options:
   --web-root DIR       web client to serve, default <exe dir>/web
   --display N          display to stream first, default the primary
   --codec h264|h265|av1  --size WxH  --fps F  --kbps K   stream settings
+  --quality speed|balanced|clarity  encoder effort, default balanced
   --mic-device NAME    playback device the browser mic plays into, default \"CABLE Input\"
   --no-mic             don't play the browser mic
   --no-audio           don't send game audio
+  --allow-resolution-change  let the browser change the streamed display's
+                       resolution to match its screen (undone on disconnect)
   --pair               open pairing for two minutes at startup
 ";
 
@@ -51,6 +54,8 @@ pub struct MediaOptions {
     /// `None` disables the mic.
     pub mic_device: Option<String>,
     pub game_audio: bool,
+    /// The browser may change the host display's resolution.
+    pub allow_resolution_change: bool,
 }
 
 impl ServeOptions {
@@ -73,6 +78,7 @@ impl ServeOptions {
             video: VideoConfig::default(),
             mic_device: Some("CABLE Input".into()),
             game_audio: true,
+            allow_resolution_change: false,
         };
         let mut no_mic = false;
         let mut pair_at_start = false;
@@ -104,9 +110,11 @@ impl ServeOptions {
                 }
                 "--fps" => media.video.fps = value()?.parse().context("--fps")?,
                 "--kbps" => media.video.bitrate_kbps = value()?.parse().context("--kbps")?,
+                "--quality" => media.video.quality = parse_quality(value()?)?,
                 "--mic-device" => media.mic_device = Some(value()?.clone()),
                 "--no-mic" => no_mic = true,
                 "--no-audio" => media.game_audio = false,
+                "--allow-resolution-change" => media.allow_resolution_change = true,
                 "--pair" => pair_at_start = true,
                 f => bail!("unknown flag {f}\n\n{USAGE}"),
             }
@@ -160,6 +168,15 @@ pub fn parse_codec(s: &str) -> anyhow::Result<VideoCodec> {
     })
 }
 
+pub fn parse_quality(s: &str) -> anyhow::Result<VideoQuality> {
+    Ok(match s {
+        "speed" => VideoQuality::Speed,
+        "balanced" => VideoQuality::Balanced,
+        "clarity" => VideoQuality::Clarity,
+        q => bail!("unknown quality {q}"),
+    })
+}
+
 pub fn parse_size(s: &str) -> anyhow::Result<(u32, u32)> {
     let (w, h) = s.split_once('x').context("size is WxH")?;
     Ok((w.parse()?, h.parse()?))
@@ -199,6 +216,7 @@ mod tests {
         assert_eq!((o.port, o.ice_tcp_port), (8443, Some(8444)));
         assert_eq!(o.media.mic_device.as_deref(), Some("CABLE Input"));
         assert!(o.media.game_audio && !o.pair_at_start);
+        assert!(!o.media.allow_resolution_change);
         assert_eq!(o.media.video, VideoConfig::default());
     }
 
@@ -217,8 +235,13 @@ mod tests {
             "--display",
             "2",
             "--pair",
+            "--allow-resolution-change",
+            "--quality",
+            "speed",
         ])
         .unwrap();
+        assert!(o.media.allow_resolution_change);
+        assert_eq!(o.media.video.quality, VideoQuality::Speed);
         assert_eq!((o.port, o.ice_tcp_port), (9000, Some(9001)));
         assert_eq!(o.media.mic_device, None);
         assert_eq!(o.public_ips, vec![IpAddr::from([203, 0, 113, 5])]);
@@ -235,5 +258,6 @@ mod tests {
         assert!(parse(&["--size", "1921x1080"]).is_err());
         assert!(parse(&["--port", "65535"]).is_err());
         assert!(parse(&["--bogus"]).is_err());
+        assert!(parse(&["--quality", "max"]).is_err());
     }
 }

@@ -26,6 +26,20 @@ pub enum VideoCodec {
     Av1,
 }
 
+/// How the encoder trades picture quality against encode time. The bitrate
+/// is set separately; this picks how hard the encoder works to spend it well.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VideoQuality {
+    /// Fastest encode, softest picture.
+    Speed,
+    #[default]
+    Balanced,
+    /// Slowest encode the frame rate allows, and a little room for large
+    /// frames (fast motion, keyframes) to take longer than one frame time.
+    Clarity,
+}
+
 /// Encoder settings requested by the client or chosen by the host.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -35,6 +49,9 @@ pub struct VideoConfig {
     pub height: u32,
     pub fps: u32,
     pub bitrate_kbps: u32,
+    /// Older clients leave this out and get the default.
+    #[serde(default)]
+    pub quality: VideoQuality,
 }
 
 impl VideoConfig {
@@ -48,6 +65,7 @@ impl VideoConfig {
             height: even(self.height, 180, 4320),
             fps: self.fps.clamp(1, 240),
             bitrate_kbps: self.bitrate_kbps.clamp(500, 200_000),
+            quality: self.quality,
         }
     }
 }
@@ -60,6 +78,7 @@ impl Default for VideoConfig {
             height: 1080,
             fps: 60,
             bitrate_kbps: 20_000,
+            quality: VideoQuality::Balanced,
         }
     }
 }
@@ -102,6 +121,7 @@ mod tests {
             height: 1,
             fps: 0,
             bitrate_kbps: u32::MAX,
+            quality: VideoQuality::Speed,
         }
         .clamped();
         assert_eq!(
@@ -115,5 +135,21 @@ mod tests {
         }
         .clamped();
         assert_eq!((odd.width, odd.height), (1920, 1080));
+    }
+
+    #[test]
+    fn quality_is_optional_on_the_wire() {
+        let json = r#"{"codec":"h264","width":1280,"height":720,"fps":60,"bitrateKbps":8000}"#;
+        let c: VideoConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(c.quality, VideoQuality::Balanced);
+        let c = VideoConfig {
+            quality: VideoQuality::Clarity,
+            ..Default::default()
+        };
+        assert!(
+            serde_json::to_string(&c)
+                .unwrap()
+                .contains(r#""quality":"clarity""#)
+        );
     }
 }

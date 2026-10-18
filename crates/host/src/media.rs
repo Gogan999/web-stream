@@ -7,6 +7,7 @@
 //! done in place (`block_in_place`), as are the thread joins when a pipeline
 //! stops; events queue in the transport meanwhile.
 
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, oneshot, watch};
@@ -16,9 +17,9 @@ use ws_capture::VideoPipeline;
 use ws_input::DisplayRect;
 use ws_proto::{
     ClientControl, DisplayId, DisplayInfo, EncodedFrame, HostControl, VideoCodec, VideoConfig,
-    channels,
+    VideoStats, channels,
 };
-use ws_transport::{Transport, TransportConfig, TransportEvent};
+use ws_transport::{Transport, TransportConfig, TransportEvent, TransportStats};
 
 use crate::input::InputThread;
 use crate::options::MediaOptions;
@@ -39,10 +40,13 @@ const BWE_HEADROOM: f64 = 0.9;
 /// Bitrate changes smaller than this fraction are not passed to the encoder.
 const BITRATE_STEP: f64 = 0.1;
 const MIN_KBPS: u32 = 500;
+/// Room above the video ceiling the bandwidth estimate may probe for, for
+/// game audio and data channels.
+const NON_VIDEO_BPS: u64 = 500_000;
 /// Replies kept while the `control` channel is not open yet.
 const UNSENT_MAX: usize = 16;
-/// A `setVideoConfig` that needs a new pipeline is refused if the last one
-/// was less than this long ago.
+/// A `setVideoConfig` that needs a new pipeline waits until the last one is
+/// at least this old.
 const MIN_RESTART_GAP: Duration = Duration::from_secs(1);
 
 /// Video codecs the browser's answer accepted; `None` until known.
@@ -57,6 +61,7 @@ pub async fn run(
 ) {
     let (control_tx, mut control_rx) = mpsc::channel(CONTROL_QUEUE);
     let (stopped_tx, mut stopped_rx) = mpsc::channel(4);
+    let (later_tx, mut later_rx) = mpsc::channel(8);
     let mut media = Media {
         transport,
         config: opts.video.clone(),
@@ -67,18 +72,30 @@ pub async fn run(
         control_open: false,
         unsent: Vec::new(),
         stopped_tx,
+        later_tx,
+        session: 0,
+        rebuild_pending: false,
         generation: 0,
         last_bwe: None,
         last_restart: None,
         codecs,
         live: None,
+        sent: Arc::default(),
+        keyframe_requests: 0,
+        changed_modes: ChangedModes::default(),
+        mode_busy: false,
+        last_mode_change: None,
     };
+    media.set_ceiling();
     loop {
         tokio::select! {
             ev = events.recv() => match ev {
                 Some(ev) => {
                     let down = matches!(ev, TransportEvent::Disconnected);
                     media.event(ev);
+                    if down {
+                        media.restore_host_resolution();
+                    }
                     // Replies meant for the browser that just left.
                     while down && control_rx.try_recv().is_ok() {}
                 }
@@ -86,10 +103,57 @@ pub async fn run(
             },
             Some(msg) = control_rx.recv() => media.send_control(msg).await,
             Some(generation) = stopped_rx.recv() => media.video_stopped(generation),
+            Some(later) = later_rx.recv() => media.later(later),
             _ = &mut shutdown => break,
         }
     }
     media.stop();
+    // Dropping `media` puts changed display resolutions back (ChangedModes),
+    // here and if this task panics.
+}
+
+/// Work finished off the event loop, or due later.
+enum Later {
+    /// A deferred pipeline rebuild may run, if `session` is still current.
+    Rebuild { session: u64 },
+    ModeSet {
+        session: u64,
+        id: DisplayId,
+        result: ws_capture::Result<ws_capture::ModeChange>,
+    },
+    /// A second after a resolution change, when the desktop has settled.
+    ModeSettled { session: u64 },
+}
+
+/// Displays whose resolution this host changed. Dropping it puts them back,
+/// so a panic in the media task doesn't leave the user's screen changed.
+#[derive(Default)]
+struct ChangedModes(Vec<DisplayId>);
+
+impl ChangedModes {
+    fn add(&mut self, id: DisplayId) {
+        if !self.0.contains(&id) {
+            self.0.push(id);
+        }
+    }
+
+    fn take(&mut self) -> Vec<DisplayId> {
+        std::mem::take(&mut self.0)
+    }
+}
+
+impl Drop for ChangedModes {
+    fn drop(&mut self) {
+        restore_modes(self.take());
+    }
+}
+
+fn restore_modes(ids: Vec<DisplayId>) {
+    for id in ids {
+        if let Err(e) = ws_capture::restore_display_mode(id) {
+            tracing::warn!(display = id.0, "restore resolution: {e}");
+        }
+    }
 }
 
 struct Media {
@@ -105,6 +169,14 @@ struct Media {
     control_open: bool,
     unsent: Vec<HostControl>,
     stopped_tx: mpsc::Sender<u64>,
+    /// Hands work done elsewhere (or due later) back to the loop.
+    later_tx: mpsc::Sender<Later>,
+    /// Bumped on every disconnect, so late results for a browser that left
+    /// are recognised.
+    session: u64,
+    /// `config` changed while the last rebuild was too recent; rebuild on
+    /// [`Later::Rebuild`].
+    rebuild_pending: bool,
     /// Bumped for every pipeline started, so a stale "stopped" is ignored.
     generation: u64,
     /// Latest bandwidth estimate of this connection, in bits per second.
@@ -112,6 +184,22 @@ struct Media {
     last_restart: Option<Instant>,
     codecs: AcceptedCodecs,
     live: Option<Live>,
+    /// Frames handed to the transport since the last stats report.
+    sent: Arc<Mutex<SentFrames>>,
+    keyframe_requests: u32,
+    /// Displays whose resolution this session changed, to put back.
+    changed_modes: ChangedModes,
+    /// A resolution change or restore is running.
+    mode_busy: bool,
+    last_mode_change: Option<Instant>,
+}
+
+#[derive(Debug, Default)]
+struct SentFrames {
+    frames: u32,
+    bytes: u64,
+    /// Sum of capture-to-encoded times.
+    encode_micros: u64,
 }
 
 /// What runs while a browser is connected. Fields drop in order: input is
@@ -137,6 +225,7 @@ impl Media {
             TransportEvent::Disconnected => self.stop(),
             TransportEvent::KeyframeNeeded => {
                 if let Some(v) = self.live.as_ref().and_then(|l| l.video.as_ref()) {
+                    self.keyframe_requests += 1;
                     v.pipeline.request_keyframe();
                 }
             }
@@ -161,7 +250,10 @@ impl Media {
                     rx.push(packet.sequence as u16, &packet.data);
                 }
             }
-            TransportEvent::Stats(s) => tracing::debug!(?s, "transport stats"),
+            TransportEvent::Stats(s) => {
+                tracing::debug!(?s, "transport stats");
+                self.report_stats(&s);
+            }
             TransportEvent::ChannelOpen(c) => {
                 tracing::debug!(channel = c, "channel open");
                 if c == channels::CONTROL {
@@ -237,6 +329,10 @@ impl Media {
         self.control_open = false;
         self.unsent.clear();
         self.last_bwe = None;
+        self.rebuild_pending = false;
+        self.session += 1;
+        self.keyframe_requests = 0;
+        *self.sent.lock().expect("sent stats lock") = SentFrames::default();
         if let Some(live) = self.live.take() {
             drop_blocking(live);
             tracing::info!("browser disconnected; media stopped");
@@ -308,6 +404,7 @@ impl Media {
         tokio::spawn(forward_video(
             rx,
             self.transport.clone(),
+            self.sent.clone(),
             self.stopped_tx.clone(),
             self.generation,
         ));
@@ -350,6 +447,38 @@ impl Media {
         target_kbps(bwe, self.config.bitrate_kbps)
     }
 
+    /// Lets the bandwidth estimate probe up to the browser's bitrate
+    /// setting (plus room for audio), and no further.
+    fn set_ceiling(&self) {
+        let video = (f64::from(self.config.bitrate_kbps) * 1000.0 / BWE_HEADROOM) as u64;
+        self.transport.set_max_bitrate(video + NON_VIDEO_BPS);
+    }
+
+    /// Tells the browser how the host side of the stream is doing.
+    fn report_stats(&mut self, s: &TransportStats) {
+        let Some(live) = &self.live else { return };
+        if live.video.is_none() || !self.control_open {
+            return;
+        }
+        let sent = std::mem::take(&mut *self.sent.lock().expect("sent stats lock"));
+        let keyframe_requests = std::mem::take(&mut self.keyframe_requests);
+        // Transport stats arrive once a second.
+        self.reply(HostControl::VideoStats(VideoStats {
+            encoder_kbps: live.bitrate_kbps,
+            max_kbps: self.config.bitrate_kbps,
+            bwe_kbps: s.bwe.map(|b| (b / 1000) as u32),
+            fps: sent.frames as f32,
+            sent_kbps: (sent.bytes * 8 / 1000) as u32,
+            encode_ms: if sent.frames == 0 {
+                0.0
+            } else {
+                sent.encode_micros as f32 / sent.frames as f32 / 1000.0
+            },
+            keyframe_requests,
+            loss: s.egress_loss,
+        }));
+    }
+
     fn target_bitrate(&mut self, bps: u64) {
         self.last_bwe = Some(bps);
         self.apply_bitrate(false);
@@ -380,16 +509,19 @@ impl Media {
         tracing::debug!(?msg, "control");
         match msg {
             ClientControl::ListDisplays => {
-                let displays = ws_capture::list_displays().unwrap_or_else(|e| {
-                    tracing::debug!("list displays: {e}");
-                    Vec::new()
-                });
-                let active = pick_display(&displays, self.display).map(|d| d.id);
-                self.reply(HostControl::Displays { displays, active });
+                self.send_displays();
+                // And what is streaming, so the browser's settings start
+                // from the host's.
+                self.display_changed();
             }
+            ClientControl::SetHostResolution { width, height } => {
+                self.set_host_resolution(width, height)
+            }
+            ClientControl::RestoreHostResolution => self.restore_host_resolution(),
             ClientControl::SelectDisplay { id } => self.select_display(id),
             ClientControl::RequestKeyframe => {
                 if let Some(v) = self.live.as_ref().and_then(|l| l.video.as_ref()) {
+                    self.keyframe_requests += 1;
                     v.pipeline.request_keyframe();
                 }
             }
@@ -411,6 +543,150 @@ impl Media {
         }
     }
 
+    fn send_displays(&self) {
+        let displays = ws_capture::list_displays().unwrap_or_else(|e| {
+            tracing::debug!("list displays: {e}");
+            Vec::new()
+        });
+        let active = pick_display(&displays, self.display).map(|d| d.id);
+        self.reply(HostControl::Displays { displays, active });
+    }
+
+    /// Points input at the streamed display's current position and size.
+    fn refresh_input_rect(&self) {
+        let Some(input) = self.live.as_ref().and_then(|l| l.input.as_ref()) else {
+            return;
+        };
+        if let Some(info) = self.chosen_display() {
+            input.set_display(rect(&info));
+        }
+    }
+
+    fn set_host_resolution(&mut self, width: u32, height: u32) {
+        if !self.opts.allow_resolution_change {
+            self.error(
+                "the host doesn't allow changing its resolution; \
+                 start it with --allow-resolution-change"
+                    .into(),
+            );
+            return;
+        }
+        if self.live.is_none() {
+            return;
+        }
+        if self.mode_busy
+            || self
+                .last_mode_change
+                .is_some_and(|t| t.elapsed() < MIN_RESTART_GAP)
+        {
+            self.error("the host resolution is still changing; try again in a moment".into());
+            return;
+        }
+        let Some(id) = self.chosen_display().map(|d| d.id) else {
+            self.error("no display to change".into());
+            return;
+        };
+        // A mode change can take seconds; keep this loop (and input) moving.
+        self.mode_busy = true;
+        let (tx, session) = (self.later_tx.clone(), self.session);
+        tokio::spawn(async move {
+            let result = tokio::task::spawn_blocking(move || {
+                ws_capture::set_display_mode(id, width, height)
+            })
+            .await
+            .unwrap_or_else(|e| Err(ws_capture::CaptureError::Platform(e.to_string())));
+            let _ = tx
+                .send(Later::ModeSet {
+                    session,
+                    id,
+                    result,
+                })
+                .await;
+        });
+    }
+
+    fn mode_set(
+        &mut self,
+        session: u64,
+        id: DisplayId,
+        result: ws_capture::Result<ws_capture::ModeChange>,
+    ) {
+        self.mode_busy = false;
+        self.last_mode_change = Some(Instant::now());
+        match result {
+            Ok(change) => {
+                if change.changed {
+                    self.changed_modes.add(id);
+                }
+                if session != self.session {
+                    // The browser left meanwhile.
+                    self.restore_host_resolution();
+                    return;
+                }
+                tracing::info!(
+                    display = id.0,
+                    change.width,
+                    change.height,
+                    "host resolution matched to the browser"
+                );
+                // Capture picks the new size up by itself (duplication is
+                // lost and reopened); input needs the new rectangle, now and
+                // again once the desktop has settled.
+                self.refresh_input_rect();
+                self.send_displays();
+                let tx = self.later_tx.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(MIN_RESTART_GAP).await;
+                    let _ = tx.send(Later::ModeSettled { session }).await;
+                });
+            }
+            Err(e) => {
+                tracing::warn!(display = id.0, "change resolution: {e}");
+                if session == self.session {
+                    self.error(format!("could not change the host resolution: {e}"));
+                }
+            }
+        }
+    }
+
+    /// Puts changed displays back, off the event loop.
+    fn restore_host_resolution(&mut self) {
+        let ids = self.changed_modes.take();
+        if ids.is_empty() {
+            return;
+        }
+        self.last_mode_change = Some(Instant::now());
+        let (tx, session) = (self.later_tx.clone(), self.session);
+        tokio::spawn(async move {
+            let _ = tokio::task::spawn_blocking(move || restore_modes(ids)).await;
+            let _ = tx.send(Later::ModeSettled { session }).await;
+        });
+    }
+
+    fn later(&mut self, later: Later) {
+        match later {
+            Later::Rebuild { session } => {
+                if session == self.session
+                    && std::mem::take(&mut self.rebuild_pending)
+                    && self.live.as_ref().is_some_and(|l| l.video.is_some())
+                {
+                    self.rebuild();
+                }
+            }
+            Later::ModeSet {
+                session,
+                id,
+                result,
+            } => self.mode_set(session, id, result),
+            Later::ModeSettled { session } => {
+                if session == self.session && self.live.is_some() {
+                    block_in_place(|| self.refresh_input_rect());
+                    self.send_displays();
+                }
+            }
+        }
+    }
+
     fn set_video_config(&mut self, config: VideoConfig) {
         let same_but_bitrate = VideoConfig {
             bitrate_kbps: self.config.bitrate_kbps,
@@ -423,19 +699,35 @@ impl Media {
             let bitrate_changed = config.bitrate_kbps != self.config.bitrate_kbps;
             self.config = config;
             if bitrate_changed {
+                self.set_ceiling();
                 self.apply_bitrate(true);
             }
             self.display_changed();
             return;
         }
-        if self
+        self.config = config;
+        self.set_ceiling();
+        if let Some(wait) = self
             .last_restart
-            .is_some_and(|t| t.elapsed() < MIN_RESTART_GAP)
+            .and_then(|t| MIN_RESTART_GAP.checked_sub(t.elapsed()))
         {
-            self.error("video settings are changing too fast; try again in a moment".into());
+            // Too soon after the last rebuild: apply the newest settings
+            // once the gap is over.
+            if !self.rebuild_pending {
+                self.rebuild_pending = true;
+                let (tx, session) = (self.later_tx.clone(), self.session);
+                tokio::spawn(async move {
+                    tokio::time::sleep(wait).await;
+                    let _ = tx.send(Later::Rebuild { session }).await;
+                });
+            }
             return;
         }
-        self.config = config;
+        self.rebuild();
+    }
+
+    /// Restarts the pipeline with the current config.
+    fn rebuild(&mut self) {
         if let Err(e) = self.start_video() {
             tracing::error!("video: {e}");
             self.error(format!("could not apply video settings: {e}"));
@@ -520,10 +812,17 @@ impl Media {
 async fn forward_video(
     mut frames: mpsc::Receiver<EncodedFrame>,
     transport: Transport,
+    sent: Arc<Mutex<SentFrames>>,
     stopped: mpsc::Sender<u64>,
     generation: u64,
 ) {
     while let Some(frame) = frames.recv().await {
+        {
+            let mut sent = sent.lock().expect("sent stats lock");
+            sent.frames += 1;
+            sent.bytes += frame.data.len() as u64;
+            sent.encode_micros += frame.encode_done_time.saturating_sub(frame.capture_time);
+        }
         transport.send_video(frame);
     }
     // The pipeline is gone: dropped on purpose (the generation is then stale)

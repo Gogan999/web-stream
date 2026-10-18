@@ -9,7 +9,9 @@
 //! Late frames are dropped, never queued: if the send side is behind (a
 //! newer frame arrived before the last was sent, or the pacer queue is older
 //! than [`TransportConfig::max_send_delay`]) it skips to the newest frame and
-//! asks the encoder for a keyframe. NACKs are answered only for packets
+//! asks the encoder for a keyframe. Until that keyframe goes out, frames
+//! that build on the skipped one are dropped too, so the browser never
+//! decodes against a picture it doesn't have. NACKs are answered only for packets
 //! younger than [`TransportConfig::max_resend_age`].
 //!
 //! The host is ICE-lite and reachable directly: one UDP port (and optionally
@@ -132,6 +134,7 @@ enum Cmd {
     Answer(String, oneshot::Sender<Result<(), Error>>),
     Candidate(String),
     Close,
+    MaxBitrate(u64),
     Data {
         channel: String,
         binary: bool,
@@ -171,6 +174,14 @@ impl Shared {
 
     fn keyframe_sent(&self) {
         *self.keyframe_asked.lock().expect("keyframe lock") = None;
+    }
+
+    /// The keyframe answering a request never went out: ask again now
+    /// rather than after [`KEYFRAME_RETRY`], since every frame until the
+    /// next keyframe is held back.
+    fn keyframe_lost(&self) {
+        self.keyframe_sent();
+        self.keyframe_needed();
     }
 }
 
@@ -291,16 +302,31 @@ impl Transport {
     /// sent yet it is discarded and [`TransportEvent::KeyframeNeeded`] is
     /// raised (while connected), because later frames reference it.
     pub fn send_video(&self, frame: EncodedFrame) {
+        let keyframe = frame.keyframe;
         let replaced = self
             .shared
             .frame
             .lock()
             .expect("video slot lock")
             .replace(frame);
-        if replaced.is_some() && self.shared.connected.load(Ordering::Relaxed) {
-            self.shared.keyframe_needed();
+        if let Some(old) = replaced {
+            if self.shared.connected.load(Ordering::Relaxed) {
+                if old.keyframe && !keyframe {
+                    self.shared.keyframe_lost();
+                } else {
+                    self.shared.keyframe_needed();
+                }
+            }
         }
         self.shared.notify.notify_one();
+    }
+
+    /// Change the most the bandwidth estimate probes up to (see
+    /// [`TransportConfig::max_bitrate_bps`]), for this and later sessions.
+    pub fn set_max_bitrate(&self, bps: u64) {
+        if self.cmds.try_send(Cmd::MaxBitrate(bps)).is_err() {
+            tracing::debug!("transport busy; dropping bitrate ceiling change");
+        }
     }
 
     /// Queue one Opus packet of game audio. Dropped if the queue is full.
@@ -372,8 +398,12 @@ impl Driver {
                     if let (Some(frame), Some(s)) = (frame, &mut self.session) {
                         match s.write_video(&frame, Instant::now()) {
                             VideoWrite::Sent if frame.keyframe => shared.keyframe_sent(),
-                            VideoWrite::Late => shared.keyframe_needed(),
-                            _ => {}
+                            VideoWrite::Sent => {}
+                            VideoWrite::Skipped if frame.keyframe && s.is_connected() => {
+                                shared.keyframe_lost()
+                            }
+                            VideoWrite::Late | VideoWrite::Broken => shared.keyframe_needed(),
+                            VideoWrite::Skipped => {}
                         }
                     }
                 }
@@ -496,6 +526,12 @@ impl Driver {
                 }
             }
             Cmd::Close => self.end_session(),
+            Cmd::MaxBitrate(bps) => {
+                self.config.max_bitrate_bps = bps;
+                if let Some(s) = &mut self.session {
+                    s.set_max_bitrate(bps);
+                }
+            }
             Cmd::Data {
                 channel,
                 binary,

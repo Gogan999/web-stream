@@ -1,8 +1,10 @@
 import { Session } from './session.js';
 import { defaultSignalUrl } from './signaling.js';
 import { InputCapture } from './input.js';
-import { snapshot, compute, format, FrameTimer } from './stats.js';
+import { snapshot, compute, format, formatHost, FrameTimer } from './stats.js';
 import * as pairing from './pairing.js';
+import * as settingsStore from './settings.js';
+import { AutoTune, Cancelled } from './autotune.js';
 
 const $ = (id) => document.getElementById(id);
 const ui = {
@@ -10,6 +12,8 @@ const ui = {
   fullscreen: $('fullscreen'), statsToggle: $('stats-toggle'), stage: $('stage'), video: $('video'), stats: $('stats'),
   unpair: $('unpair'), pair: $('pair'), deviceName: $('device-name'), pairStart: $('pair-start'),
   pairCode: $('pair-code'), pairConfirm: $('pair-confirm'), pairMsg: $('pair-msg'),
+  resolution: $('resolution'), bitrate: $('bitrate'), fps: $('fps'), quality: $('quality'),
+  matchHost: $('match-host'), autotune: $('autotune'),
 };
 
 const params = new URLSearchParams(location.search);
@@ -20,6 +24,13 @@ let input = null;
 let statsTimer = 0;
 let prevSnap = null;
 const frameTimer = new FrameTimer(ui.video);
+
+// Stream settings and what the host reported. See settings.js.
+const settings = settingsStore.load();
+let host = null; // { displays, active, config, stats } for the current session
+let lastSent = null;
+let tuning = null; // running AutoTune
+let tuneWindow = null; // host stats gathered while auto-tune measures
 
 function setStatus(text, state) {
   ui.status.textContent = text;
@@ -35,7 +46,10 @@ async function connect() {
   session.addEventListener('closed', () => {
     ui.connect.textContent = 'Connect';
     ui.display.disabled = true;
+    tuning?.cancel();
   });
+  host = { displays: [], active: null, config: null, stats: null, matched: false, awaitingMatch: false };
+  lastSent = null;
   // The host sends "bye" with reason "revoked" when this browser is unpaired.
   session.addEventListener('status', (e) => { if (/unpaired/.test(e.detail.text)) checkPairing(); });
   input = new InputCapture({ session, video: ui.video, stage: ui.stage, onHotkey });
@@ -58,6 +72,8 @@ function disconnect() {
   input = null;
   session = null;
   stopStats();
+  tuning?.cancel();
+  host = null;
   ui.display.replaceChildren();
   setStatus('Not connected', 'idle');
 }
@@ -74,10 +90,184 @@ function onControl(msg) {
     }));
     if (msg.active != null) ui.display.value = String(msg.active);
     ui.display.disabled = msg.displays.length < 2;
+    if (host) {
+      host.displays = msg.displays;
+      if (msg.active != null) host.active = msg.active;
+      host.awaitingMatch = false;
+      applySettings();
+    }
   } else if (msg.type === 'displayChanged' && msg.id != null) {
     ui.display.value = String(msg.id);
+    if (host) {
+      host.active = msg.id;
+      if (msg.config) host.config = msg.config;
+      applySettings();
+    }
+  } else if (msg.type === 'videoStats' && host) {
+    host.stats = msg;
+    if (tuneWindow) tuneWindow.push(msg);
+  } else if (msg.type === 'error' && typeof msg.message === 'string') {
+    setStatus(`Host: ${msg.message}`, ui.status.dataset.state);
+    if (host) {
+      // Whatever was asked for may not have applied; let the next change (or this one) go again.
+      lastSent = null;
+      if (host.awaitingMatch) {
+        host.awaitingMatch = false;
+        applySettings();
+      }
+    }
   }
 }
+
+// Asks the host for the stream the settings describe, once the host has said what it streams now.
+function applySettings() {
+  if (!session || !host?.config || tuning) return;
+  if (settings.matchHost && !host.matched) {
+    host.matched = true;
+    host.awaitingMatch = true;
+    const { width, height } = settingsStore.screenPixels();
+    // The host answers with a fresh display list (or an error), which brings us back here; the
+    // stream is sized for the new resolution then, not twice.
+    session.sendControl({ type: 'setHostResolution', width, height });
+  }
+  if (host.awaitingMatch) return;
+  sendConfig(currentConfig());
+}
+
+function currentConfig() {
+  const display = host.displays.find((d) => d.id === host.active) ?? null;
+  return settingsStore.videoConfig(settings, { screen: settingsStore.screenPixels(), display, codec: host.config.codec });
+}
+
+function sendConfig(config) {
+  if (settingsStore.sameConfig(config, host.config) || settingsStore.sameConfig(config, lastSent)) return;
+  lastSent = config;
+  session.sendControl({ type: 'setVideoConfig', config });
+}
+
+function fillSelect(select, values, label) {
+  select.replaceChildren(...values.map((v) => {
+    const o = document.createElement('option');
+    o.value = String(v);
+    o.textContent = label(v);
+    return o;
+  }));
+}
+
+const RES_LABELS = { screen: 'Match this screen', native: 'Host native', 2160: '2160p', 1440: '1440p', 1080: '1080p', 720: '720p' };
+fillSelect(ui.resolution, settingsStore.RESOLUTIONS, (v) => RES_LABELS[v]);
+fillSelect(ui.bitrate, ['auto', ...settingsStore.BITRATES_KBPS], (v) => (v === 'auto' ? 'Auto' : `${v / 1000} Mb/s`));
+fillSelect(ui.fps, settingsStore.FRAME_RATES, (v) => String(v));
+fillSelect(ui.quality, settingsStore.QUALITIES, (v) => v[0].toUpperCase() + v.slice(1));
+
+// Shows the settings; a bitrate auto-tune picked that isn't in the list gets its own entry.
+function showSettings() {
+  if (![...ui.bitrate.options].some((o) => o.value === String(settings.bitrate))) {
+    const o = document.createElement('option');
+    o.value = String(settings.bitrate);
+    o.textContent = `${Number(settings.bitrate) / 1000} Mb/s`;
+    ui.bitrate.append(o);
+  }
+  ui.resolution.value = settings.resolution;
+  ui.bitrate.value = String(settings.bitrate);
+  ui.fps.value = String(settings.fps);
+  ui.quality.value = settings.quality;
+  ui.matchHost.checked = !!settings.matchHost;
+}
+showSettings();
+
+for (const [el, key] of [[ui.resolution, 'resolution'], [ui.bitrate, 'bitrate'], [ui.fps, 'fps'], [ui.quality, 'quality']]) {
+  el.addEventListener('change', () => {
+    settings[key] = key === 'fps' ? Number(el.value) : el.value;
+    settingsStore.save(settings);
+    applySettings();
+  });
+}
+
+ui.matchHost.addEventListener('change', () => {
+  settings.matchHost = ui.matchHost.checked;
+  settingsStore.save(settings);
+  if (!host) return;
+  if (settings.matchHost) {
+    host.matched = false;
+    applySettings();
+  } else if (host.matched) {
+    host.matched = false;
+    session?.sendControl({ type: 'restoreHostResolution' });
+  }
+});
+
+// Health of the stream over `ms`, from the browser's stats and the host's videoStats.
+async function measureWindow(ms) {
+  const pc = session?.pc;
+  if (!pc) throw new Cancelled();
+  const a = snapshot(await pc.getStats(), performance.now());
+  tuneWindow = [];
+  await new Promise((r) => setTimeout(r, ms));
+  const got = tuneWindow;
+  tuneWindow = null;
+  if (!session?.pc) throw new Cancelled();
+  const b = snapshot(await session.pc.getStats(), performance.now());
+  const s = compute(a, b);
+  const d = (k) => (b.video?.[k] ?? 0) - (a.video?.[k] ?? 0);
+  const received = d('packetsReceived');
+  const clientLoss = received + s.lostDelta > 0 ? s.lostDelta / (received + s.lostDelta) : null;
+  const hostLoss = got.map((h) => h.loss).filter((l) => l != null);
+  const encode = got.map((h) => h.encodeMs).filter((e) => e > 0);
+  const last = got.at(-1);
+  return {
+    freezes: d('freezeCount'),
+    keyframeRequests: got.reduce((n, h) => n + (h.keyframeRequests ?? 0), 0),
+    loss: Math.max(clientLoss ?? 0, ...hostLoss),
+    bweKbps: last?.bweKbps ?? null,
+    hostFps: got.length ? got.reduce((x, h) => x + (h.fps ?? 0), 0) / got.length : null,
+    encodeMs: encode.length ? encode.reduce((x, y) => x + y, 0) / encode.length : null,
+    decodeMs: s.decodeMs,
+  };
+}
+
+async function autoTune() {
+  if (tuning) {
+    tuning.cancel();
+    return;
+  }
+  if (!session?.pc || !host?.config) {
+    setStatus('Connect first, then auto-tune', ui.status.dataset.state);
+    return;
+  }
+  const base = currentConfig();
+  tuning = new AutoTune({
+    base,
+    apply: (config) => {
+      lastSent = config;
+      session?.sendControl({ type: 'setVideoConfig', config });
+    },
+    measure: measureWindow,
+    onProgress: (text) => setStatus(text, 'connecting'),
+  });
+  ui.autotune.textContent = 'Stop auto-tune';
+  for (const el of [ui.resolution, ui.bitrate, ui.fps, ui.quality, ui.display, ui.matchHost]) el.disabled = true;
+  try {
+    const { config, summary } = await tuning.run();
+    settings.bitrate = String(config.bitrateKbps);
+    settings.quality = config.quality;
+    settingsStore.save(settings);
+    setStatus(summary, 'connected');
+  } catch (err) {
+    if (err instanceof Cancelled) setStatus('Auto-tune stopped', session ? 'connected' : 'idle');
+    else setStatus(`Auto-tune failed: ${err.message}`, session ? 'connected' : 'idle');
+  } finally {
+    tuning = null;
+    tuneWindow = null;
+    ui.autotune.textContent = 'Auto-tune (test)';
+    for (const el of [ui.resolution, ui.bitrate, ui.fps, ui.quality, ui.matchHost]) el.disabled = false;
+    ui.display.disabled = ui.display.options.length < 2;
+    showSettings();
+    if (session) applySettings();
+  }
+}
+
+ui.autotune.addEventListener('click', autoTune);
 
 function selectDisplay(id) {
   if (!session) return;
@@ -115,7 +305,7 @@ function startStats() {
     const pc = session?.pc;
     if (!pc) return;
     const snap = snapshot(await pc.getStats(), performance.now());
-    if (prevSnap) ui.stats.textContent = format(compute(prevSnap, snap), frameTimer.avgMs);
+    if (prevSnap) ui.stats.textContent = `${format(compute(prevSnap, snap), frameTimer.avgMs)}\n${formatHost(host?.stats)}`;
     prevSnap = snap;
   }, 500);
 }
@@ -154,7 +344,7 @@ ui.mouseMode.addEventListener('change', () => setMouseMode(ui.mouseMode.value));
 ui.fullscreen.addEventListener('click', toggleFullscreen);
 ui.statsToggle.addEventListener('click', toggleStats);
 // Toolbar controls keep focus otherwise, and Space/Enter would re-trigger them.
-for (const el of [ui.connect, ui.fullscreen, ui.statsToggle]) el.addEventListener('mouseup', () => el.blur());
+for (const el of [ui.connect, ui.fullscreen, ui.statsToggle, ui.autotune]) el.addEventListener('mouseup', () => el.blur());
 
 // Pairing: the host sets an HttpOnly cookie once the code shown on the host is confirmed.
 let pairingId = null;

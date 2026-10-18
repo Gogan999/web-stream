@@ -31,6 +31,16 @@ pub enum ClientControl {
     SetMicEnabled {
         enabled: bool,
     },
+    /// Change the streamed display's desktop resolution to the largest it
+    /// supports within `width` x `height` (the browser's screen). Only
+    /// honoured when the host user started the host with
+    /// `--allow-resolution-change`; undone on disconnect.
+    SetHostResolution {
+        width: u32,
+        height: u32,
+    },
+    /// Put every display this session changed back to its own resolution.
+    RestoreHostResolution,
     /// Ask for a file the host offered with [`HostControl::FileOffer`]; any
     /// other id is rejected. The file transfer work owns the transfer itself.
     RequestFile {
@@ -72,9 +82,35 @@ pub enum HostControl {
         strong: f32,
         weak: f32,
     },
+    /// Sent about once a second while video runs, for the browser's stats
+    /// overlay and auto-tune.
+    VideoStats(VideoStats),
     Error {
         message: String,
     },
+}
+
+/// The host's side of the stream over the last stats interval.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoStats {
+    /// Bitrate the encoder is set to now.
+    pub encoder_kbps: u32,
+    /// The browser's bitrate setting: the most the encoder may use.
+    pub max_kbps: u32,
+    /// What the network is estimated to carry, if known yet.
+    pub bwe_kbps: Option<u32>,
+    /// Encoded frames handed to the network per second.
+    pub fps: f32,
+    /// Bitrate of those frames.
+    pub sent_kbps: u32,
+    /// Average capture-to-encoded time.
+    pub encode_ms: f32,
+    /// Keyframes asked for (by the browser or after a dropped frame) in
+    /// the interval: each is a stall or a soft picture, so fewer is better.
+    pub keyframe_requests: u32,
+    /// Fraction of packets the browser reports lost, 0..=1.
+    pub loss: Option<f32>,
 }
 
 #[cfg(test)]

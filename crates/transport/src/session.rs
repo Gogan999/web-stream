@@ -32,6 +32,10 @@ pub enum VideoWrite {
     /// The send queue was too far behind, so the frame was dropped; the
     /// encoder must send a keyframe.
     Late,
+    /// An earlier frame this one builds on never went out, so the browser
+    /// would decode it against the wrong picture (smeared, ghosted motion).
+    /// Dropped; the encoder must send a keyframe.
+    Broken,
     /// Not connected, or a codec the browser did not accept.
     Skipped,
 }
@@ -52,6 +56,9 @@ pub struct Session {
     max_bitrate_bps: u64,
     /// When the last keyframe went into the send queue.
     keyframe_at: Option<Instant>,
+    /// `frame_index` a non-keyframe must have to be sent: the one right
+    /// after the last frame sent. `None` until a keyframe goes out.
+    next_index: Option<u64>,
     /// Codec of the last frame we could not send, to log once.
     unsupported_codec: Option<VideoCodec>,
 }
@@ -127,6 +134,7 @@ impl Session {
             max_send_delay: config.max_send_delay,
             max_bitrate_bps: config.max_bitrate_bps,
             keyframe_at: None,
+            next_index: None,
             unsupported_codec: None,
         };
         Ok((session, offer.to_sdp_string()))
@@ -149,10 +157,15 @@ impl Session {
             tx.set_rtx_cache(2048, self.max_resend_age, Some(0.15));
         }
         // Probe up towards what the encoder can use, not just the start rate.
-        self.rtc
-            .bwe()
-            .set_desired_bitrate(Bitrate::bps(self.max_bitrate_bps));
+        self.set_max_bitrate(self.max_bitrate_bps);
         Ok(())
+    }
+
+    pub fn set_max_bitrate(&mut self, bps: u64) {
+        self.max_bitrate_bps = bps;
+        if self.pending.is_none() {
+            self.rtc.bwe().set_desired_bitrate(Bitrate::bps(bps));
+        }
     }
 
     /// The local ICE ufrag, which the browser's checks must name.
@@ -256,6 +269,12 @@ impl Session {
         if !self.connected {
             return VideoWrite::Skipped;
         }
+        // Every frame references the one before it, and the browser can't
+        // tell one went missing (RTP sequence numbers stay continuous), so
+        // after any gap only a keyframe may go out.
+        if !follows(self.next_index, frame) {
+            return VideoWrite::Broken;
+        }
         // Drop rather than queue: a frame that would wait behind older ones
         // arrives late, and every frame after it would too.
         if !frame.keyframe && self.video_backlog(now) > self.max_send_delay {
@@ -286,6 +305,7 @@ impl Session {
                 if frame.keyframe {
                     self.keyframe_at = Some(now);
                 }
+                self.next_index = Some(frame.frame_index + 1);
                 VideoWrite::Sent
             }
             Err(e) => {
@@ -436,6 +456,11 @@ impl Session {
     }
 }
 
+/// Whether `frame` can be decoded after the frames sent so far.
+fn follows(next_index: Option<u64>, frame: &EncodedFrame) -> bool {
+    frame.keyframe || next_index == Some(frame.frame_index)
+}
+
 /// Pick the payload type for the encoder's codec. For H.264 prefer
 /// packetization-mode 1, which is what NVENC/AMF/QSV slices need.
 fn video_pt<'a>(
@@ -500,4 +525,37 @@ pub fn candidates(
         );
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ws_proto::DisplayId;
+
+    fn frame(frame_index: u64, keyframe: bool) -> EncodedFrame {
+        EncodedFrame {
+            display: DisplayId(0),
+            codec: VideoCodec::H264,
+            frame_index,
+            keyframe,
+            capture_time: 0,
+            encode_done_time: 0,
+            width: 1920,
+            height: 1080,
+            data: Default::default(),
+        }
+    }
+
+    #[test]
+    fn only_a_keyframe_follows_a_gap() {
+        // Nothing sent yet: the browser needs a keyframe first.
+        assert!(!follows(None, &frame(0, false)));
+        assert!(follows(None, &frame(0, true)));
+        // Frame 4 went out; 5 may follow, 6 (5 was dropped) may not.
+        assert!(follows(Some(5), &frame(5, false)));
+        assert!(!follows(Some(5), &frame(6, false)));
+        assert!(follows(Some(5), &frame(9, true)));
+        // A new encoder session starts over at 0 with a keyframe.
+        assert!(follows(Some(500), &frame(0, true)));
+    }
 }

@@ -97,3 +97,13 @@ export function format(s, recvToDisplayMs) {
     `dropped ${s.dropped} (+${s.droppedDelta})  lost ${s.lost} (+${s.lostDelta})  freezes ${s.freezes}`,
   ].join('\n');
 }
+
+// The host's side, from its videoStats message.
+export function formatHost(h) {
+  if (!h) return 'host –';
+  const mb = (k) => (k == null ? '–' : (k / 1000).toFixed(1));
+  return [
+    `host enc ${mb(h.encoderKbps)}/${mb(h.maxKbps)} Mb/s  bwe ${mb(h.bweKbps)}  sent ${mb(h.sentKbps)}`,
+    `host fps ${f(h.fps)}  encode ${f(h.encodeMs, 1)} ms  keyframes ${h.keyframeRequests ?? '–'}  loss ${h.loss == null ? '–' : (h.loss * 100).toFixed(1) + '%'}`,
+  ].join('\n');
+}

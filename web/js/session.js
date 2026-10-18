@@ -19,9 +19,23 @@ const BYE_TEXT = {
   revoked: 'Disconnected: this browser was unpaired',
 };
 
-// Play frames as soon as they decode instead of smoothing with a jitter buffer.
+// Play video frames as soon as they decode instead of smoothing with a jitter buffer. Audio keeps
+// Chrome's adaptive buffer: forced to zero it constantly speeds up and stretches the sound to keep up,
+// which is audible as warble.
 export function minimizePlayout(receiver) {
+  if (receiver.track?.kind !== 'video') return;
   try { receiver.jitterBufferTarget = 0; } catch { /* unsupported */ }
+}
+
+// The host sends stereo Opus, but Chrome decodes Opus as mono unless its own answer says stereo=1.
+export function withStereoOpus(sdp) {
+  const pts = [...sdp.matchAll(/^a=rtpmap:(\d+) opus\/48000\/2\r?$/gim)].map((m) => m[1]);
+  let out = sdp;
+  for (const pt of pts) {
+    out = out.replace(new RegExp(`^(a=fmtp:${pt} )(.*?)(\r?)$`, 'm'), (line, head, params, cr) =>
+      /(^|;)\s*stereo=/.test(params) ? line : `${head}${params};stereo=1;sprop-stereo=1${cr}`);
+  }
+  return out;
 }
 
 export class Session extends EventTarget {
@@ -105,7 +119,8 @@ export class Session extends EventTarget {
       // Mic is not wired up yet; receive game audio only.
       if (t.receiver.track.kind === 'audio') t.direction = 'recvonly';
     }
-    await pc.setLocalDescription(await pc.createAnswer());
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription({ type: 'answer', sdp: withStereoOpus(answer.sdp) });
     this.signal.send({ type: 'answer', sdp: pc.localDescription.sdp });
   }
 

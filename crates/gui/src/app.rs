@@ -197,9 +197,9 @@ impl App {
                     ui.label("Certificate SHA-256");
                     ui.add(egui::Label::new(RichText::new(fingerprint).monospace().small()).wrap());
                     ui.end_row();
-                    if web_root.is_none() {
+                    if let Some(dir) = web_root {
                         ui.label("Web client");
-                        ui.colored_label(Color32::YELLOW, "not found: set its folder in Settings");
+                        ui.label(format!("from {}", dir.display()));
                         ui.end_row();
                     }
                 });
@@ -375,7 +375,7 @@ impl App {
                 ui.label("Web client folder");
                 ui.add(
                     egui::TextEdit::singleline(&mut d.web_root)
-                        .hint_text("default: web next to the program"),
+                        .hint_text("empty: the one built into the host"),
                 );
                 ui.end_row();
 

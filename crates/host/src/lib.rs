@@ -12,3 +12,8 @@ pub mod serve;
 mod uploads;
 
 pub use platform::audio_devices;
+
+/// The web client this host was built with, as (path, contents).
+pub mod web {
+    include!(concat!(env!("OUT_DIR"), "/web_files.rs"));
+}

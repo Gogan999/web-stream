@@ -25,7 +25,7 @@ serve options:
   --forget-after DAYS  unpair a browser unused for this long, default 30
   --allow-origin URL   extra origin allowed to use the API, e.g. a reverse
                        proxy's https://name (repeatable)
-  --web-root DIR       web client to serve, default <exe dir>/web
+  --web-root DIR       serve the web client from DIR instead of the one built in
   --display N          display to stream first, default the primary
   --codec h264|h265|av1  --size WxH  --fps F  --kbps K   stream settings
   --quality speed|balanced|clarity  encoder effort, default balanced
@@ -210,7 +210,7 @@ impl ServeOptions {
             data_dir: data_dir.unwrap_or_else(default_data_dir),
             device_idle_expiry: Duration::from_secs(u64::from(forget_after_days) * 24 * 3600),
             extra_origins,
-            web_root: web_root.or_else(default_web_root),
+            web_root,
             media,
             pair_at_start,
         })
@@ -275,14 +275,6 @@ pub fn default_upload_dir() -> PathBuf {
         Some(h) => PathBuf::from(h).join("Downloads").join("web-stream"),
         None => PathBuf::from("web-stream-received"),
     }
-}
-
-/// `web/` next to the executable. Never the working directory: whatever is
-/// served there runs as the host's own origin, with the paired cookie.
-fn default_web_root() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let dir = exe.parent()?.join("web");
-    dir.join("index.html").is_file().then_some(dir)
 }
 
 #[cfg(test)]

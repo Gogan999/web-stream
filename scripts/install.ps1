@@ -202,6 +202,24 @@ function Get-RepoRoot {
     return $Dir
 }
 
+# Brings an existing checkout of main up to date, so running the script
+# again builds the latest version. Other branches and local changes are left
+# alone.
+function Update-Checkout($root) {
+    if (-not (Test-Command git) -or -not (Test-Path (Join-Path $root '.git'))) { return }
+    $branch = (& git -C $root rev-parse --abbrev-ref HEAD).Trim()
+    $dirty = & git -C $root status --porcelain --untracked-files=no
+    if ($branch -ne 'main' -or $dirty) {
+        Write-Host "Building $branch as it is (not updating: not a clean main checkout)." -ForegroundColor Yellow
+        return
+    }
+    Write-Step 'Updating the checkout'
+    & git -C $root pull --ff-only | Out-Host
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host 'Could not update the checkout; building it as it is.' -ForegroundColor Yellow
+    }
+}
+
 if (-not (Test-Command winget)) {
     throw 'winget is missing. Install "App Installer" from the Microsoft Store, then run this script again.'
 }
@@ -218,6 +236,8 @@ if (Get-Process -Name ws-host-gui, ws-host -ErrorAction SilentlyContinue) {
     throw 'The host is running. Quit it (tray icon, Quit) and run this script again.'
 }
 
+Update-Checkout $repo
+
 Write-Step 'Building the host (release)'
 Push-Location $repo
 try {
@@ -230,14 +250,10 @@ try {
 $bin = Join-Path $repo 'target\release'
 $gui = Join-Path $bin 'ws-host-gui.exe'
 
-# The host serves the web client only from `web` next to its executable.
-Write-Step 'Copying the web client next to the host'
-$webOut = Join-Path $bin 'web'
-if (Test-Path $webOut) { Remove-Item -Recurse -Force $webOut }
-New-Item -ItemType Directory -Path $webOut | Out-Null
-foreach ($item in 'index.html', 'style.css', 'js') {
-    Copy-Item -Recurse -Path (Join-Path $repo "web\$item") -Destination $webOut
-}
+# The web client is built into the host now; an old copy next to it would
+# only confuse.
+$oldWeb = Join-Path $bin 'web'
+if (Test-Path $oldWeb) { Remove-Item -Recurse -Force $oldWeb }
 
 Write-Step 'Adding web-stream host to the Start menu'
 $shortcutPath = Join-Path ([Environment]::GetFolderPath('Programs')) 'web-stream host.lnk'

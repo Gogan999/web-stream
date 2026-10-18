@@ -20,7 +20,7 @@ pub struct Settings {
     pub ice_tcp: bool,
     /// Public addresses that forward to this PC, separated by spaces or commas.
     pub public_ips: String,
-    /// Empty: `web` next to the executable.
+    /// Empty: the web client built into the host.
     pub web_root: String,
     /// `None`: the primary display.
     pub display: Option<u32>,

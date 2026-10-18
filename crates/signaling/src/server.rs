@@ -236,8 +236,12 @@ fn router(shared: Arc<Shared>) -> Router {
         .layer(DefaultBodyLimit::max(MAX_API_BODY))
         .with_state(shared.clone());
 
+    let embedded = shared.config.embedded_web;
     let app = match &shared.config.web_root {
         Some(root) => api.fallback_service(ServeDir::new(root)),
+        None if !embedded.is_empty() => {
+            api.fallback(move |uri: axum::http::Uri| async move { embedded_file(embedded, &uri) })
+        }
         None => api.fallback(|| async { Html(PLACEHOLDER) }),
     };
 
@@ -261,6 +265,26 @@ fn router(shared: Arc<Shared>) -> Router {
         StatusCode::REQUEST_TIMEOUT,
         REQUEST_TIMEOUT,
     ))
+}
+
+/// A file of the built-in web client by its URL path, `/` being `index.html`.
+fn embedded_file(
+    files: &'static [(&'static str, &'static [u8])],
+    uri: &axum::http::Uri,
+) -> Response {
+    let path = uri.path().trim_start_matches('/');
+    let path = if path.is_empty() { "index.html" } else { path };
+    let Some((name, body)) = files.iter().find(|(name, _)| *name == path) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let mime = match name.rsplit('.').next() {
+        Some("html") => "text/html; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("js") => "text/javascript; charset=utf-8",
+        Some("webmanifest") => "application/manifest+json",
+        _ => "application/octet-stream",
+    };
+    ([(header::CONTENT_TYPE, mime)], *body).into_response()
 }
 
 const PLACEHOLDER: &str = "<!doctype html><meta charset=utf-8><title>web-stream</title>\

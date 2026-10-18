@@ -88,8 +88,8 @@ impl State {
                 ..
             } => {
                 self.log(format!("hosting on port {port}"));
-                if web_root.is_none() {
-                    self.log("no web client found: set the web client folder in Settings");
+                if let Some(dir) = &web_root {
+                    self.log(format!("serving the web client from {}", dir.display()));
                 }
                 self.status = Status::Running {
                     port,

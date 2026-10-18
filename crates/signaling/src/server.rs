@@ -172,7 +172,8 @@ pub struct SignalingServer {
 impl SignalingServer {
     pub fn new(config: SignalingConfig) -> Result<(Self, SignalingEvents), Error> {
         std::fs::create_dir_all(&config.data_dir)?;
-        crate::acl::restrict_to_owner(&config.data_dir)?;
+        // Also tighten files left by an older build or copied in.
+        crate::acl::restrict_tree(&config.data_dir)?;
         let pairing = Pairing::load(&config.data_dir)?;
         if pairing.is_locked() {
             tracing::warn!(
@@ -355,6 +356,7 @@ async fn pair_start(
             err(StatusCode::FORBIDDEN, json!({"error": "pairing_closed"}))
         }
         Ok(Err(StartError::Locked)) => err(StatusCode::LOCKED, json!({"error": "locked"})),
+        Ok(Err(StartError::Busy)) => err(StatusCode::CONFLICT, json!({"error": "busy"})),
         Ok(Err(StartError::RateLimited)) => err(
             StatusCode::TOO_MANY_REQUESTS,
             json!({"error": "rate_limited"}),

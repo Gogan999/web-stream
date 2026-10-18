@@ -47,6 +47,10 @@ pub enum StartError {
     /// Too many wrong codes; the host user must open pairing again.
     Locked,
     RateLimited,
+    /// Another browser's code is still pending. The first request keeps the
+    /// window, so a stranger cannot replace the code the host user is
+    /// about to read out.
+    Busy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,6 +100,7 @@ impl Pairing {
     /// lockout, since the host user is evidently present.
     pub fn open(&mut self, now: Instant, window: Duration) -> Result<(), Error> {
         self.open_until = Some(now + window);
+        self.pending = None;
         if self.state.failures != 0 || self.state.locked {
             self.state = Persisted::default();
             self.save()?;
@@ -112,7 +117,8 @@ impl Pairing {
         self.state.locked
     }
 
-    /// Starting again replaces the pending code.
+    /// Only one code is pending at a time; a new one can start once it is
+    /// confirmed, burned by wrong guesses, or expired.
     pub fn start(
         &mut self,
         device_name: &str,
@@ -123,6 +129,9 @@ impl Pairing {
         }
         if !self.open_until.is_some_and(|t| now < t) {
             return Ok(Err(StartError::Closed));
+        }
+        if self.pending.as_ref().is_some_and(|p| now < p.expires) {
+            return Ok(Err(StartError::Busy));
         }
         while self
             .starts
@@ -318,6 +327,7 @@ mod tests {
             let s = p.start("x", now).unwrap().unwrap();
             last = Some(p.confirm(&s.pairing_id, wrong(&s.code), now).unwrap());
             p.starts.clear(); // stay clear of the start rate limit
+            p.pending = None; // and of the pending code
         }
         assert_eq!(last, Some(Err(ConfirmError::Locked)));
         assert_eq!(p.start("x", now).unwrap(), Err(StartError::Locked));
@@ -339,7 +349,27 @@ mod tests {
         let mut p = open(dir.path(), now);
         for _ in 0..MAX_STARTS {
             assert!(p.start("x", now).unwrap().is_ok());
+            p.pending = None;
         }
         assert_eq!(p.start("x", now).unwrap(), Err(StartError::RateLimited));
+    }
+
+    #[test]
+    fn first_pending_code_keeps_the_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = Instant::now();
+        let mut p = open(dir.path(), now);
+        let first = p.start("mine", now).unwrap().unwrap();
+        assert_eq!(p.start("theirs", now).unwrap(), Err(StartError::Busy));
+        assert_eq!(
+            p.confirm(&first.pairing_id, &first.code, now).unwrap(),
+            Ok("mine".into())
+        );
+
+        // Once the code expires, a new request may start.
+        let mut p = Pairing::load(dir.path()).unwrap();
+        p.open(now, 2 * CODE_TTL).unwrap();
+        p.start("x", now).unwrap().unwrap();
+        assert!(p.start("y", now + CODE_TTL).unwrap().is_ok());
     }
 }

@@ -39,7 +39,7 @@ sibling subdomain can set it.
 | Request | Body | Responses |
 |---------|------|-----------|
 | `GET /api/session` | | `200 {"paired":true,"device":"<name>"}` or `401 {"paired":false}` |
-| `POST /api/pair/start` | `{"device_name":"Chrome on laptop"}` | `200 {"pairing_id":"…","expires_in":120}`; host shows a 6-digit code. `403 {"error":"pairing_closed"}` until the host user opens pairing. `423 {"error":"locked"}`. `429 {"error":"rate_limited"}` |
+| `POST /api/pair/start` | `{"device_name":"Chrome on laptop"}` | `200 {"pairing_id":"…","expires_in":120}`; host shows a 6-digit code. `403 {"error":"pairing_closed"}` until the host user opens pairing. `423 {"error":"locked"}`. `409 {"error":"busy"}` while another browser's code is pending (the first request keeps it until it is confirmed, burned or expires). `429 {"error":"rate_limited"}` |
 | `POST /api/pair/confirm` | `{"pairing_id":"…","code":"123456"}` | `200 {"paired":true}` + cookie. `403 {"error":"bad_code","attempts_left":2}`. `410 {"error":"expired"}`. `423 {"error":"locked"}` |
 | `POST /api/unpair` | `{}` | `200`, revokes this device and clears the cookie |
 

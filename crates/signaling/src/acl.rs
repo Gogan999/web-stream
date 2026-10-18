@@ -5,6 +5,19 @@
 
 use std::path::Path;
 
+/// Restrict `dir` and every regular file directly inside it. Links are left
+/// alone, so nothing outside the directory is changed through one.
+pub fn restrict_tree(dir: &Path) -> std::io::Result<()> {
+    restrict_to_owner(dir)?;
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        if entry.file_type()?.is_file() {
+            restrict_to_owner(&entry.path())?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(windows)]
 pub fn restrict_to_owner(path: &Path) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
@@ -61,4 +74,21 @@ pub fn restrict_to_owner(path: &Path) -> std::io::Result<()> {
 #[cfg(not(any(unix, windows)))]
 pub fn restrict_to_owner(_path: &Path) -> std::io::Result<()> {
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn tightens_existing_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("devices.json");
+        std::fs::write(&file, b"{}").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        super::restrict_tree(dir.path()).unwrap();
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&file), 0o600);
+        assert_eq!(mode(dir.path()), 0o700);
+    }
 }

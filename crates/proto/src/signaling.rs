@@ -104,7 +104,7 @@ pub struct PairConfirmed {
 /// Error body on 403/410/429 from the pairing API.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApiError {
-    /// `pairing_closed`, `locked`, `bad_code`, `expired` or `rate_limited`.
+    /// `pairing_closed`, `locked`, `busy`, `bad_code`, `expired` or `rate_limited`.
     pub error: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempts_left: Option<u32>,

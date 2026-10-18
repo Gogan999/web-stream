@@ -461,49 +461,43 @@ fn video_pt<'a>(
     best.map(|(pt, _)| pt)
 }
 
-/// Local ICE candidates for the bound sockets, plus server-reflexive ones for
-/// public addresses that port-forward to them.
+/// Local ICE candidates for the bound sockets, plus candidates for public
+/// addresses that port-forward to them.
+///
+/// The public ones are host candidates, not server-reflexive: str0m drops
+/// non-host local candidates in ICE-lite mode, so a srflx one never reached
+/// the offer. As host candidates they are only advertised; checks sent to
+/// them arrive (after the router's port forward) on the bound address and
+/// match its candidate there.
 pub fn candidates(
     udp: &[SocketAddr],
     tcp: &[SocketAddr],
     public: &[std::net::IpAddr],
 ) -> Vec<Candidate> {
-    let mut out = Vec::new();
-    for addr in udp {
-        if let Ok(c) = Candidate::host(*addr, "udp") {
-            out.push(c);
-        }
-    }
-    for addr in tcp {
-        if let Ok(c) = Candidate::builder()
+    let udp_host = |addr| Candidate::host(addr, "udp").ok();
+    let tcp_host = |addr| {
+        Candidate::builder()
             .tcp()
-            .host(*addr)
+            .host(addr)
             .tcptype(TcpType::Passive)
             .build()
-        {
-            out.push(c);
-        }
-    }
+            .ok()
+    };
+    let mut out: Vec<Candidate> = udp.iter().filter_map(|a| udp_host(*a)).collect();
+    out.extend(tcp.iter().filter_map(|a| tcp_host(*a)));
     if let Some(base) = udp.first() {
-        for ip in public {
-            let addr = SocketAddr::new(*ip, base.port());
-            if let Ok(c) = Candidate::server_reflexive(addr, *base, "udp") {
-                out.push(c);
-            }
-        }
+        out.extend(
+            public
+                .iter()
+                .filter_map(|ip| udp_host(SocketAddr::new(*ip, base.port()))),
+        );
     }
     if let Some(base) = tcp.first() {
-        for ip in public {
-            let addr = SocketAddr::new(*ip, base.port());
-            if let Ok(c) = Candidate::builder()
-                .tcp()
-                .server_reflexive(addr, *base)
-                .tcptype(TcpType::Passive)
-                .build()
-            {
-                out.push(c);
-            }
-        }
+        out.extend(
+            public
+                .iter()
+                .filter_map(|ip| tcp_host(SocketAddr::new(*ip, base.port()))),
+        );
     }
     out
 }

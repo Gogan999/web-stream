@@ -1,13 +1,15 @@
 // Drives headless Chromium against the test_pattern example and checks that
 // pairing, signaling, video decode and every data channel work, over UDP and
 // then ICE-TCP. Usage: node run.mjs <port> (needs the `playwright` package).
+// TEST_ORIGIN_HOST connects through another address (say one forwarded to
+// 127.0.0.1, standing in for a router's WAN address).
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 const { chromium } = require(process.env.PLAYWRIGHT_PATH || 'playwright');
 const port = process.argv[2] || '18443';
-const origin = `https://127.0.0.1:${port}`;
+const origin = `https://${process.env.TEST_ORIGIN_HOST || '127.0.0.1'}:${port}`;
 
 const codes = [];
 const host = spawn(process.env.TEST_PATTERN_BIN, [port], { stdio: ['ignore', 'pipe', 'inherit'] });

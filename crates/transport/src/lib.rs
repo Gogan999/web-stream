@@ -128,7 +128,7 @@ pub enum Error {
 }
 
 enum Cmd {
-    Offer(oneshot::Sender<Result<String, Error>>),
+    Offer(Vec<IpAddr>, oneshot::Sender<Result<String, Error>>),
     Answer(String, oneshot::Sender<Result<(), Error>>),
     Candidate(String),
     Close,
@@ -209,7 +209,6 @@ impl Transport {
         )
         .await?;
         tracing::info!(udp = ?net.udp_addrs, tcp = ?net.tcp_addrs, "transport listening");
-        let candidates = session::candidates(&net.udp_addrs, &net.tcp_addrs, &config.public_ips);
 
         let (cmds, cmd_rx) = mpsc::channel(CMD_QUEUE);
         let (events_tx, events) = mpsc::channel(EVENT_QUEUE);
@@ -227,7 +226,6 @@ impl Transport {
             net,
             filter,
             confirmed: HashSet::new(),
-            candidates,
             session: None,
             shared: shared.clone(),
             steps: Vec::new(),
@@ -246,9 +244,18 @@ impl Transport {
     /// Start a new peer connection (replacing any current one) and return
     /// the SDP offer for the browser.
     pub async fn offer(&self) -> Result<String, Error> {
+        self.offer_reachable_at(Vec::new()).await
+    }
+
+    /// Like [`Transport::offer`], also advertising `public`: addresses this
+    /// browser reached the host at (say, the WAN address or DDNS name in its
+    /// URL), which forward the media ports here. Without one of these (or
+    /// [`TransportConfig::public_ips`]) a browser outside the LAN only sees
+    /// LAN candidates and can never connect.
+    pub async fn offer_reachable_at(&self, public: Vec<IpAddr>) -> Result<String, Error> {
         let (tx, rx) = oneshot::channel();
         self.cmds
-            .send(Cmd::Offer(tx))
+            .send(Cmd::Offer(public, tx))
             .await
             .map_err(|_| Error::Stopped)?;
         rx.await.map_err(|_| Error::Stopped)?
@@ -327,7 +334,6 @@ impl Transport {
 struct Driver {
     config: TransportConfig,
     net: Net,
-    candidates: Vec<str0m::Candidate>,
     filter: SharedFilter,
     /// UDP destinations already reported to `filter` as confirmed.
     confirmed: HashSet<SocketAddr>,
@@ -431,6 +437,25 @@ impl Driver {
         deadline
     }
 
+    /// Host candidates for the bound sockets, plus server-reflexive ones for
+    /// the configured public addresses and `extra` (IPv4 only, as the
+    /// sockets are; local addresses are already host candidates).
+    fn candidates(&self, extra: &[IpAddr]) -> Vec<str0m::Candidate> {
+        let mut public = self.config.public_ips.clone();
+        for ip in extra {
+            let local = self.net.udp_addrs.iter().any(|a| a.ip() == *ip);
+            if ip.is_ipv4()
+                && !ip.is_loopback()
+                && !ip.is_unspecified()
+                && !local
+                && !public.contains(ip)
+            {
+                public.push(*ip);
+            }
+        }
+        session::candidates(&self.net.udp_addrs, &self.net.tcp_addrs, &public)
+    }
+
     /// Drop the session, reporting Disconnected unless already reported.
     fn end_session(&mut self) {
         if let Some(mut s) = self.session.take() {
@@ -445,9 +470,10 @@ impl Driver {
 
     fn command(&mut self, cmd: Cmd) {
         match cmd {
-            Cmd::Offer(reply) => {
+            Cmd::Offer(extra, reply) => {
                 self.end_session();
-                let result = Session::offer(&self.config, &self.candidates, Instant::now()).map(
+                let candidates = self.candidates(&extra);
+                let result = Session::offer(&self.config, &candidates, Instant::now()).map(
                     |(mut s, sdp)| {
                         let ufrag = s.local_ufrag();
                         self.filter.lock().expect("filter lock").reset(Some(&ufrag));

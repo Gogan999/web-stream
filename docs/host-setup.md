@@ -34,6 +34,21 @@ pairing at startup. `ws-host --help` lists the options: ports, public IPs for
 port forwarding, a real certificate, the starting display and stream
 settings, and turning the mic or game audio off.
 
+## Connecting from outside your network
+
+1. On the router, forward TCP 8443, UDP 8443 and TCP 8444 to this PC, to the
+   same port numbers.
+2. Allow `ws-host` through Windows Firewall on those ports for the Public
+   profile as well as Private. Localhost works without this, which can make
+   a firewall block look like a network problem.
+3. Open the host by its WAN address or a DDNS name that points at it, for
+   example `https://home.example.net:8443/`.
+
+The host advertises the address in the browser's URL (resolving a DDNS name)
+as a media address. `--public-ip` adds more, for when browsers reach the
+host by some other name. If pairing works but the stream never starts, a
+media port is not forwarded or the firewall is blocking it.
+
 Capture, game audio, the mic and input start when a browser connects and
 stop when it leaves; dropping the session releases every held key and
 unplugs the virtual gamepads. The encoder follows the connection's bandwidth

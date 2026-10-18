@@ -13,9 +13,14 @@ TURN server is needed.
 | 8443      | UDP   | WebRTC media and data channels (all sessions)    |
 | 8444      | TCP   | ICE-TCP fallback for networks that block UDP     |
 
-For access from the internet, forward these three ports to the host. The
-host advertises its LAN address automatically and any public address or
-hostname listed in its config.
+For access from the internet, forward these three ports to the host, to the
+same port numbers. Each offer carries host candidates for the LAN
+addresses, for every `--public-ip`, and for the address the browser used to
+reach the host (the `Host` header of its `/ws` request, resolved if it is a
+DDNS name). The public ones are advertised as `typ host`, not `srflx`,
+because str0m drops non-host local candidates in ICE-lite mode. Checks sent
+to them arrive through the port forward on the LAN address and are answered
+from there.
 
 ## TLS
 

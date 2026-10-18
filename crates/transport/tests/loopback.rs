@@ -236,3 +236,49 @@ async fn junk_and_bad_tcp_are_ignored() {
         assert_ne!(ev, TransportEvent::Connected);
     }
 }
+
+#[tokio::test]
+async fn offer_advertises_public_addresses() {
+    let (transport, _events) = Transport::start(TransportConfig {
+        ips: vec![[127, 0, 0, 1].into()],
+        public_ips: vec![[198, 51, 100, 7].into()],
+        udp_port: 0,
+        tcp_port: Some(0),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let candidates = |sdp: &str| -> Vec<String> {
+        sdp.lines()
+            .filter(|l| l.starts_with("a=candidate"))
+            .map(str::to_string)
+            .collect()
+    };
+    let plain = candidates(&transport.offer().await.unwrap());
+    // Host, ICE-TCP, and both again for the configured public address.
+    assert_eq!(plain.len(), 4, "{plain:?}");
+    assert_eq!(
+        plain.iter().filter(|l| l.contains("198.51.100.7")).count(),
+        2
+    );
+
+    // The address the browser reached us at is added; local and duplicate
+    // ones are not.
+    let offer = transport
+        .offer_reachable_at(vec![
+            [203, 0, 113, 9].into(),
+            [198, 51, 100, 7].into(),
+            [127, 0, 0, 1].into(),
+        ])
+        .await
+        .unwrap();
+    let reachable = candidates(&offer);
+    assert_eq!(reachable.len(), 6, "{reachable:?}");
+    assert_eq!(
+        reachable
+            .iter()
+            .filter(|l| l.contains("203.0.113.9"))
+            .count(),
+        2
+    );
+}

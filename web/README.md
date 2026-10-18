@@ -8,7 +8,7 @@ Pairing and signaling: `docs/signaling.md` (transport). Data channel messages: [
 
 | File | What it does |
 |---|---|
-| `index.html`, `style.css` | Toolbar plus a full-size `<video>`, stats overlay and touch overlay |
+| `index.html`, `style.css` | Toolbar with a Settings dropdown, plus a full-size `<video>`, stats overlay and touch overlay |
 | `manifest.webmanifest` | Lets a phone add the client to its home screen, opening fullscreen and landscape |
 | `js/main.js` | UI wiring, hotkeys, fullscreen + Keyboard Lock, stats polling |
 | `js/session.js` | Signaling + `RTCPeerConnection`, data channels, low playout delay |
@@ -32,7 +32,8 @@ Pairing and signaling: `docs/signaling.md` (transport). Data channel messages: [
 - Click **Connect**. Click the video to capture the mouse (relative mode); **Ctrl+Alt+Shift+Q** releases it.
 - **Fullscreen** also turns on Keyboard Lock so Esc, Alt+Tab and the Windows key go to the host. Hold Esc to leave fullscreen.
 - Hotkeys, all Ctrl+Alt+Shift +: **1–9** switch display, **S** stats, **F** fullscreen, **M** relative/absolute mouse, **Q** release mouse.
-- Stream settings (toolbar), remembered in this browser:
+- The toolbar holds **Connect**, the status, **Fullscreen** and **Settings ▾**. Settings opens one dropdown, grouped into Display, Video, Input, Audio and Other (stats, unpair, hotkeys); a click outside it or Esc closes it.
+- Stream settings (in the dropdown), remembered in this browser:
   - **Resolution**: *Match this screen* (default) streams at this screen's size in device pixels, fitted to the host display's shape and never larger than it. *Host native* is the display's own size; the others are fixed heights.
   - **Bitrate**: *Auto* picks from resolution and fps (20 Mb/s at 1080p60). It is a ceiling: the host follows the network's estimate below it.
   - **FPS**, and **Quality**: *Speed* (fastest encode, softest), *Balanced*, *Clarity* (slowest encode the frame rate allows, more room for fast motion).
@@ -46,7 +47,7 @@ Pairing and signaling: `docs/signaling.md` (transport). Data channel messages: [
 
 Chrome on Android is the target; iPhone and iPad Safari work with the limits below.
 
-- The settings fold behind **Settings** on small or touch screens. Buttons over the stream (top right) stay there in fullscreen: **Keyboard**, **Keys** and **Fullscreen**.
+- The Settings dropdown spans a narrow screen and its controls are finger-sized. Buttons over the stream (top right) stay there in fullscreen: **Keyboard**, **Keys** and **Fullscreen**.
 - **Mouse: Relative** works as a trackpad: drag moves the cursor, tap clicks, hold then drag drags with the left button, two-finger tap right-clicks, two-finger drag scrolls.
 - **Mouse: Absolute** is direct touch: the cursor goes where the finger is; tap clicks there, drag drags, hold right-clicks, two-finger tap right-clicks, two-finger drag scrolls.
 - **Keyboard** opens the phone's keyboard. What it types is sent as key presses on a US layout (the host's layout decides what they produce); characters a US keyboard can't type are skipped. Autocorrect is off, but some keyboards still send a word only when it's finished.

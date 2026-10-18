@@ -18,7 +18,7 @@ const ui = {
   pairCode: $('pair-code'), pairConfirm: $('pair-confirm'), pairMsg: $('pair-msg'),
   resolution: $('resolution'), bitrate: $('bitrate'), fps: $('fps'), quality: $('quality'),
   matchHost: $('match-host'), autotune: $('autotune'), mic: $('mic'),
-  moreToggle: $('more-toggle'), kbdToggle: $('kbd-toggle'), keysToggle: $('keys-toggle'), keys: $('keys'),
+  moreToggle: $('more-toggle'), more: $('more'), kbdToggle: $('kbd-toggle'), keysToggle: $('keys-toggle'), keys: $('keys'),
   kbdInput: $('kbd-input'), touchFullscreen: $('touch-fullscreen'),
 };
 
@@ -469,7 +469,20 @@ ui.statsToggle.addEventListener('click', toggleStats);
 // Toolbar controls keep focus otherwise, and Space/Enter would re-trigger them.
 for (const el of [ui.connect, ui.fullscreen, ui.statsToggle, ui.autotune]) el.addEventListener('mouseup', () => el.blur());
 
-// Touch screens: overlay buttons, on-screen keyboard and folded-away settings.
+// Settings dropdown: the toggle opens it; a click or tap anywhere else, or Esc, closes it.
+function setSettingsOpen(open) {
+  document.body.classList.toggle('more-open', open);
+  ui.moreToggle.setAttribute('aria-expanded', String(open));
+}
+ui.moreToggle.addEventListener('click', () => setSettingsOpen(!document.body.classList.contains('more-open')));
+document.addEventListener('pointerdown', (e) => {
+  if (!ui.more.contains(e.target) && !ui.moreToggle.contains(e.target)) setSettingsOpen(false);
+}, { capture: true });
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && document.body.classList.contains('more-open')) setSettingsOpen(false);
+});
+
+// Touch screens: overlay buttons and on-screen keyboard.
 const softKeys = new SoftKeyboard({
   textarea: ui.kbdInput,
   keys: ui.keys,
@@ -479,10 +492,6 @@ const markTouch = () => document.body.classList.add('touch');
 if (matchMedia('(pointer: coarse)').matches) markTouch();
 document.addEventListener('pointerdown', (e) => { if (e.pointerType === 'touch') markTouch(); }, { capture: true });
 
-ui.moreToggle.addEventListener('click', () => {
-  const open = document.body.classList.toggle('more-open');
-  ui.moreToggle.setAttribute('aria-expanded', String(open));
-});
 // Overlay buttons don't take focus, so tapping them leaves the phone keyboard open.
 for (const el of [$('touchbar'), ui.keys]) {
   for (const ev of ['pointerdown', 'mousedown']) el.addEventListener(ev, (e) => e.preventDefault());

@@ -164,6 +164,8 @@ async fn run_signaling(
                 let Some(s) = s else { break };
                 tracing::info!(device = %s.device_name, "signaling session");
                 current = Some(s);
+                // Until this browser answers, its codecs are unknown.
+                codecs.send_replace(None);
                 if !send_offer(&transport, current.as_ref()).await {
                     current = None;
                 }
@@ -193,6 +195,7 @@ async fn run_signaling(
                 transport.add_remote_candidate(candidate)
             }
             Some(ClientSignal::Restart) => {
+                codecs.send_replace(None);
                 if !send_offer(&transport, current.as_ref()).await {
                     current = None;
                     transport.close();

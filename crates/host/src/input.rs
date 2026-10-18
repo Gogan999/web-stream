@@ -5,17 +5,16 @@
 //!
 //! Presses and releases (the reliable `input` channel) are never dropped: a
 //! lost key-up would leave the key held. Motion (`input-motion`) is never
-//! queued: pending motion is merged into one slot (relative deltas summed,
+//! replayed as a backlog: the thread takes everything waiting at once and
+//! merges each run of motion between two presses (relative deltas summed,
 //! the newest absolute position and the newest state per gamepad kept), so
-//! a backlog cannot turn into lag.
+//! order against presses holds and a backlog cannot turn into lag.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError, channel};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use ws_input::{DisplayRect, InputHandler, InputSink};
+use ws_input::{DisplayRect, InputHandler};
 use ws_proto::{GamepadState, HostControl, InputEvent, MAX_GAMEPADS};
 
 use crate::platform;
@@ -26,10 +25,9 @@ const TICK: Duration = Duration::from_millis(100);
 /// this often.
 const ERROR_LOG_EVERY: Duration = Duration::from_secs(5);
 
+#[derive(Debug, PartialEq)]
 enum Msg {
     Event(InputEvent),
-    /// New motion is waiting in the slot.
-    Motion,
     Display(DisplayRect),
 }
 
@@ -89,15 +87,8 @@ impl Motion {
     }
 }
 
-struct Shared {
-    motion: Mutex<Motion>,
-    /// A `Msg::Motion` wake-up is queued; don't queue another.
-    woken: AtomicBool,
-}
-
 pub struct InputThread {
     tx: Option<Sender<Msg>>,
-    shared: Arc<Shared>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -108,43 +99,24 @@ impl InputThread {
         display: Option<DisplayRect>,
         rumble: impl Fn(HostControl) + Send + Sync + 'static,
     ) -> std::io::Result<Self> {
-        // Unbounded so presses are never dropped; the transport's own bounded
-        // event queue limits how much can arrive.
+        // Unbounded so presses are never dropped. It only grows while the
+        // thread is stuck inside an injection call, and the transport's own
+        // bounded event queue limits how fast anything arrives.
         let (tx, rx) = channel();
-        let shared = Arc::new(Shared {
-            motion: Mutex::new(Motion::default()),
-            woken: AtomicBool::new(false),
-        });
-        let thread = {
-            let shared = shared.clone();
-            std::thread::Builder::new()
-                .name("ws-input".into())
-                .spawn(move || run(rx, shared, display, rumble))?
-        };
+        let thread = std::thread::Builder::new()
+            .name("ws-input".into())
+            .spawn(move || run(rx, display, rumble))?;
         Ok(Self {
             tx: Some(tx),
-            shared,
             thread: Some(thread),
         })
     }
 
     /// One `input` or `input-motion` message.
     pub fn send(&self, data: &[u8]) {
-        let event = match InputEvent::decode(data) {
-            Ok(e) => e,
-            Err(e) => {
-                tracing::debug!("bad input message: {e}");
-                return;
-            }
-        };
-        let rest = self.shared.motion.lock().expect("motion lock").merge(event);
-        match rest {
-            Some(event) => self.push(Msg::Event(event)),
-            None => {
-                if !self.shared.woken.swap(true, Ordering::AcqRel) {
-                    self.push(Msg::Motion);
-                }
-            }
+        match InputEvent::decode(data) {
+            Ok(event) => self.push(Msg::Event(event)),
+            Err(e) => tracing::debug!("bad input message: {e}"),
         }
     }
 
@@ -172,7 +144,6 @@ impl Drop for InputThread {
 
 fn run(
     rx: Receiver<Msg>,
-    shared: Arc<Shared>,
     display: Option<DisplayRect>,
     rumble: impl Fn(HostControl) + Send + Sync + 'static,
 ) {
@@ -182,19 +153,31 @@ fn run(
     }
     let mut errors = ErrorLog::default();
     let mut next_tick = Instant::now() + TICK;
-    loop {
+    let mut open = true;
+    while open {
         let wait = next_tick.saturating_duration_since(Instant::now());
-        match rx.recv_timeout(wait) {
-            // Motion that arrived before a press is injected before it, so a
-            // click lands where the pointer was moved.
-            Ok(Msg::Event(event)) => {
-                flush_motion(&shared, &mut handler, &mut errors);
-                errors.check(handler.apply(event, Instant::now()));
-            }
-            Ok(Msg::Motion) => flush_motion(&shared, &mut handler, &mut errors),
-            Ok(Msg::Display(rect)) => platform::set_display_rect(handler.sink_mut(), rect),
-            Err(RecvTimeoutError::Timeout) => {}
+        let mut batch = match rx.recv_timeout(wait) {
+            Ok(msg) => vec![msg],
+            Err(RecvTimeoutError::Timeout) => Vec::new(),
             Err(RecvTimeoutError::Disconnected) => break,
+        };
+        // Everything else already waiting, merged together.
+        loop {
+            match rx.try_recv() {
+                Ok(msg) => batch.push(msg),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    open = false;
+                    break;
+                }
+            }
+        }
+        let now = Instant::now();
+        for msg in coalesce(batch) {
+            match msg {
+                Msg::Event(event) => errors.check(handler.apply(event, now)),
+                Msg::Display(rect) => platform::set_display_rect(handler.sink_mut(), rect),
+            }
         }
         let now = Instant::now();
         if now >= next_tick {
@@ -206,17 +189,24 @@ fn run(
     drop(handler);
 }
 
-fn flush_motion<S: InputSink>(
-    shared: &Shared,
-    handler: &mut InputHandler<S>,
-    errors: &mut ErrorLog,
-) {
-    shared.woken.store(false, Ordering::Release);
-    let events = shared.motion.lock().expect("motion lock").drain();
-    let now = Instant::now();
-    for event in events {
-        errors.check(handler.apply(event, now));
+/// Merges each run of motion in `batch`, keeping it in order with the
+/// presses and display changes around it.
+fn coalesce(batch: Vec<Msg>) -> Vec<Msg> {
+    let mut out = Vec::with_capacity(batch.len());
+    let mut motion = Motion::default();
+    for msg in batch {
+        let msg = match msg {
+            Msg::Event(event) => match motion.merge(event) {
+                None => continue,
+                Some(other) => Msg::Event(other),
+            },
+            display => display,
+        };
+        out.extend(motion.drain().into_iter().map(Msg::Event));
+        out.push(msg);
     }
+    out.extend(motion.drain().into_iter().map(Msg::Event));
+    out
 }
 
 #[derive(Default)]
@@ -283,5 +273,22 @@ mod tests {
             ]
         );
         assert_eq!(m, Motion::default());
+    }
+
+    #[test]
+    fn motion_stays_on_its_side_of_a_press() {
+        use ws_proto::MouseButton;
+        let abs = |x| Msg::Event(InputEvent::MouseAbs { x, y: 0 });
+        let button = |down| {
+            Msg::Event(InputEvent::MouseButton {
+                button: MouseButton::Left,
+                down,
+            })
+        };
+        // Move to A, press, move to B (twice), release: the click is at A,
+        // the release at B.
+        let out = coalesce(vec![abs(1), button(true), abs(2), abs(3), button(false)]);
+        assert_eq!(out, vec![abs(1), button(true), abs(3), button(false)]);
+        assert_eq!(coalesce(vec![abs(1), abs(2)]), vec![abs(2)]);
     }
 }

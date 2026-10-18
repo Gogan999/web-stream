@@ -26,6 +26,12 @@ const FILE_MAX_BUFFERED: usize = 64 * 1024;
 /// drop. Several frame times: enough for a keyframe at a few times the
 /// frame budget to drain at the pacing rate.
 const KEYFRAME_DRAIN_MAX: Duration = Duration::from_millis(250);
+/// Timeouts due within this are run at once rather than slept for (see
+/// [`Session::poll`]).
+const TIMER_SLACK: Duration = Duration::from_millis(1);
+/// Most timeouts [`Session::poll`] runs early before it returns, so a busy
+/// pacer can't hold up the rest of the run loop.
+const MAX_EARLY_TIMEOUTS: usize = 256;
 /// When the file channel drains below this, [`TransportEvent::ChannelLow`].
 const FILE_LOW: usize = 16 * 1024;
 /// Sent video packets kept for resends: [`TransportConfig::max_resend_age`]
@@ -390,9 +396,25 @@ impl Session {
 
     /// Drain everything str0m has to say until it only has a timeout left.
     pub fn poll(&mut self, out: &mut Vec<Step>) -> Instant {
+        let mut early = 0;
         loop {
             match self.rtc.poll_output() {
-                Ok(Output::Timeout(t)) => return t,
+                Ok(Output::Timeout(t)) => {
+                    // A sleep can't be shorter than the OS timer tick (1 ms
+                    // at best), so the pacer, which spaces packets a fraction
+                    // of a millisecond apart at high rates, would release
+                    // about one per tick: some 10 Mb/s. Run timeouts that
+                    // are almost due now instead.
+                    let now = Instant::now();
+                    if t > now + TIMER_SLACK || early == MAX_EARLY_TIMEOUTS {
+                        return t;
+                    }
+                    early += 1;
+                    if let Err(e) = self.rtc.handle_input(Input::Timeout(t.max(now))) {
+                        tracing::debug!("rtc timeout: {e}");
+                        return t;
+                    }
+                }
                 Ok(Output::Transmit(t)) => out.push(Step::Transmit {
                     proto: t.proto,
                     source: t.source,

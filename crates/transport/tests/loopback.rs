@@ -289,6 +289,9 @@ async fn offer_advertises_public_addresses() {
     );
 }
 
+/// Ceiling for the timed tests whose peer reads one datagram per wakeup.
+const PEER_MAX_BPS: u64 = 12_000_000;
+
 /// A frame of `bytes` total (Annex B, H.264 slice) for the load test.
 fn sized_frame(index: u64, keyframe: bool, bytes: usize) -> EncodedFrame {
     let mut f = frame(index, keyframe);
@@ -329,6 +332,9 @@ async fn full_frames_at_the_target_bitrate_need_almost_no_keyframes() {
         ips: vec![[127, 0, 0, 1].into()],
         udp_port: 0,
         tcp_port: None,
+        // This peer reads one datagram per wakeup, which tops out not far
+        // above this; past it the peer, not the transport, loses packets.
+        max_bitrate_bps: PEER_MAX_BPS,
         ..Default::default()
     })
     .await
@@ -454,6 +460,9 @@ async fn lost_packets_are_resent_not_keyframed() {
         ips: vec![[127, 0, 0, 1].into()],
         udp_port: 0,
         tcp_port: None,
+        // This peer reads one datagram per wakeup, which tops out not far
+        // above this; past it the peer, not the transport, loses packets.
+        max_bitrate_bps: PEER_MAX_BPS,
         ..Default::default()
     })
     .await
@@ -708,4 +717,85 @@ fn input(
         ),
         None => Input::Timeout(Instant::now()),
     }
+}
+
+/// On a fast link the bandwidth estimate climbs well past 10 Mb/s within a
+/// few seconds. The pacer releases packets a fraction of a millisecond
+/// apart at these rates; when the run loop slept for each one (timers tick
+/// at 1 ms at best) it sent about one packet per tick, every probe measured
+/// that, and the estimate (so the encoder) stayed near 8 Mb/s whatever the
+/// bitrate setting.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bandwidth_estimate_climbs_past_the_timer_tick() {
+    let _alone = REAL_TIME.write().await;
+    const WANT_BPS: u64 = 25_000_000;
+    let (transport, mut events) = Transport::start(TransportConfig {
+        ips: vec![[127, 0, 0, 1].into()],
+        udp_port: 0,
+        tcp_port: None,
+        max_bitrate_bps: 200_000_000,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let offer = transport.offer().await.unwrap();
+    let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let local = sock.local_addr().unwrap();
+    let mut rtc = Rtc::builder().build(Instant::now());
+    rtc.add_local_candidate(Candidate::host(local, "udp").unwrap());
+    let answer = rtc
+        .sdp_api()
+        .accept_offer(SdpOffer::from_sdp_string(&offer).unwrap())
+        .unwrap();
+    transport
+        .accept_answer(answer.to_sdp_string())
+        .await
+        .unwrap();
+
+    let mut buf = vec![0u8; 2048];
+    let mut connected_at = None;
+    let mut best = 0;
+    let mut index = 0u64;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        let timeout = loop {
+            match rtc.poll_output().unwrap() {
+                Output::Timeout(t) => break t,
+                Output::Transmit(t) => {
+                    sock.send_to(&t.contents, t.destination).await.unwrap();
+                }
+                Output::Event(_) => {}
+            }
+        };
+        while let Ok(ev) = events.try_recv() {
+            match ev {
+                TransportEvent::Connected => connected_at = Some(Instant::now()),
+                TransportEvent::TargetBitrate(bps) => best = best.max(bps),
+                _ => {}
+            }
+        }
+        if let Some(t) = connected_at {
+            if best > WANT_BPS || t.elapsed() > Duration::from_secs(4) {
+                break;
+            }
+            // A trickle of small frames, so the video stream is live.
+            if index < t.elapsed().as_millis() as u64 / 100 {
+                transport.send_video(frame(index, index == 0));
+                index += 1;
+            }
+        }
+        // Take every waiting datagram: a peer that reads one per wakeup
+        // limits the rate itself.
+        let got = recv_until(&sock, &mut buf, timeout).await;
+        rtc.handle_input(input(got, &buf, local)).unwrap();
+        while let Ok((n, source)) = sock.try_recv_from(&mut buf) {
+            rtc.handle_input(input(Some((n, source)), &buf, local))
+                .unwrap();
+        }
+    }
+    assert!(connected_at.is_some(), "never connected");
+    assert!(
+        best > WANT_BPS,
+        "bandwidth estimate peaked at {best} b/s on localhost"
+    );
 }

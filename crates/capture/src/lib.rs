@@ -23,6 +23,8 @@
 #[cfg_attr(not(windows), allow(dead_code))]
 mod layout;
 #[cfg_attr(not(windows), allow(dead_code))]
+mod modes;
+#[cfg_attr(not(windows), allow(dead_code))]
 mod pacing;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod tuning;
@@ -72,6 +74,39 @@ pub fn list_displays() -> Result<Vec<DisplayInfo>> {
     }
     #[cfg(not(windows))]
     {
+        Err(CaptureError::Unsupported)
+    }
+}
+
+/// Switches `display`'s desktop to the largest resolution it supports that
+/// fits in `width` x `height`, keeping the refresh rate where it can, and
+/// returns the size chosen. The change is temporary: it is not saved as the
+/// display's setting, [`restore_display_mode`] undoes it, and Windows undoes
+/// it when the host process exits.
+///
+/// This changes the host user's own screen, so callers only do it when the
+/// host user has opted in.
+pub fn set_display_mode(display: DisplayId, width: u32, height: u32) -> Result<(u32, u32)> {
+    #[cfg(windows)]
+    {
+        win::set_display_mode(display, width, height)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (display, width, height);
+        Err(CaptureError::Unsupported)
+    }
+}
+
+/// Puts `display` back to its saved resolution.
+pub fn restore_display_mode(display: DisplayId) -> Result<()> {
+    #[cfg(windows)]
+    {
+        win::restore_display_mode(display)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = display;
         Err(CaptureError::Unsupported)
     }
 }

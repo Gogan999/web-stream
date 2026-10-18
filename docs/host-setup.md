@@ -52,8 +52,16 @@ media port is not forwarded or the firewall is blocking it.
 Capture, game audio, the mic and input start when a browser connects and
 stop when it leaves; dropping the session releases every held key and
 unplugs the virtual gamepads. The encoder follows the connection's bandwidth
-estimate, up to `--kbps`. If the browser can't decode `--codec`, the host
-falls back to H.264 and says so in the browser.
+estimate, up to `--kbps` or the bitrate chosen in the browser. If the browser
+can't decode `--codec`, the host falls back to H.264 and says so in the
+browser.
+
+`--allow-resolution-change` lets the browser switch the streamed display's
+resolution to the largest one that fits its screen ("Match host resolution"
+in the browser). It is off by default because it changes this PC's screen.
+The change is temporary: it is never saved as the display's setting, it is
+undone when the browser disconnects or the host exits, and a reboot clears
+it too.
 
 Two drivers are needed on the host for gamepads and the microphone. Keyboard,
 mouse and game audio need nothing extra.

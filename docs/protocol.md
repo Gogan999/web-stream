@@ -50,6 +50,7 @@ JSON text, `ws-proto` `ClientControl` / `HostControl`. The client uses:
 | browser → host | `{"type":"selectDisplay","id":1}` |
 | host → browser | `{"type":"displayChanged","id":1,"config":{"codec":"h264","width":1920,"height":1080,"fps":60,"bitrateKbps":20000,"quality":"balanced"}}` |
 | browser → host | `{"type":"setVideoConfig","config":{"codec":"h264","width":2560,"height":1440,"fps":60,"bitrateKbps":30000,"quality":"clarity"}}`. A bitrate-only change applies in place; anything else rebuilds the encoder (refused if the last rebuild was under a second ago). `quality` is `speed`, `balanced` (default) or `clarity`. `bitrateKbps` is the ceiling: the encoder follows the bandwidth estimate below it. |
+| browser → host | `{"type":"setHostResolution","width":2560,"height":1600}` switches the streamed display to the largest mode that fits; `{"type":"restoreHostResolution"}` undoes it. Refused with an `error` unless the host runs with `--allow-resolution-change`; undone on disconnect. The host replies with a fresh `displays`. |
 | host → browser | `{"type":"videoStats","encoderKbps":18000,"maxKbps":20000,"bweKbps":21500,"fps":60.0,"sentKbps":17200,"encodeMs":3.1,"keyframeRequests":0,"loss":0.0}` about once a second while video runs |
 | host → browser | `{"type":"rumble","index":0,"strong":0.0,"weak":0.0}` (0–1; sent on change, 0/0 stops). Proposed addition to `HostControl`. |
 

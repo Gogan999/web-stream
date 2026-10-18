@@ -27,6 +27,8 @@ use crate::Result;
 /// A capturable display and the DXGI objects needed to duplicate it.
 pub(crate) struct Output {
     pub info: DisplayInfo,
+    /// GDI device name, `\\.\DISPLAY1`.
+    pub gdi_name: String,
     pub adapter: IDXGIAdapter1,
     pub adapter_luid: LUID,
     pub adapter_vendor: u32,
@@ -97,6 +99,7 @@ pub(crate) fn enumerate() -> Result<Vec<Output>> {
                     refresh_mhz,
                     primary: r.left == 0 && r.top == 0,
                 },
+                gdi_name: gdi_name.clone(),
                 adapter: adapter.clone(),
                 adapter_luid: adesc.AdapterLuid,
                 adapter_vendor: adesc.VendorId,

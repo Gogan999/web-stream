@@ -26,6 +26,8 @@ serve options:
   --mic-device NAME    playback device the browser mic plays into, default \"CABLE Input\"
   --no-mic             don't play the browser mic
   --no-audio           don't send game audio
+  --allow-resolution-change  let the browser change the streamed display's
+                       resolution to match its screen (undone on disconnect)
   --pair               open pairing for two minutes at startup
 ";
 
@@ -51,6 +53,8 @@ pub struct MediaOptions {
     /// `None` disables the mic.
     pub mic_device: Option<String>,
     pub game_audio: bool,
+    /// The browser may change the host display's resolution.
+    pub allow_resolution_change: bool,
 }
 
 impl ServeOptions {
@@ -73,6 +77,7 @@ impl ServeOptions {
             video: VideoConfig::default(),
             mic_device: Some("CABLE Input".into()),
             game_audio: true,
+            allow_resolution_change: false,
         };
         let mut no_mic = false;
         let mut pair_at_start = false;
@@ -107,6 +112,7 @@ impl ServeOptions {
                 "--mic-device" => media.mic_device = Some(value()?.clone()),
                 "--no-mic" => no_mic = true,
                 "--no-audio" => media.game_audio = false,
+                "--allow-resolution-change" => media.allow_resolution_change = true,
                 "--pair" => pair_at_start = true,
                 f => bail!("unknown flag {f}\n\n{USAGE}"),
             }
@@ -199,6 +205,7 @@ mod tests {
         assert_eq!((o.port, o.ice_tcp_port), (8443, Some(8444)));
         assert_eq!(o.media.mic_device.as_deref(), Some("CABLE Input"));
         assert!(o.media.game_audio && !o.pair_at_start);
+        assert!(!o.media.allow_resolution_change);
         assert_eq!(o.media.video, VideoConfig::default());
     }
 
@@ -217,8 +224,10 @@ mod tests {
             "--display",
             "2",
             "--pair",
+            "--allow-resolution-change",
         ])
         .unwrap();
+        assert!(o.media.allow_resolution_change);
         assert_eq!((o.port, o.ice_tcp_port), (9000, Some(9001)));
         assert_eq!(o.media.mic_device, None);
         assert_eq!(o.public_ips, vec![IpAddr::from([203, 0, 113, 5])]);

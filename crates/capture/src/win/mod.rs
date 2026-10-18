@@ -3,6 +3,7 @@
 mod convert;
 mod display;
 mod duplication;
+mod mode;
 mod nvenc;
 mod pipeline;
 
@@ -21,6 +22,7 @@ use windows::Win32::UI::HiDpi::{
 use windows::core::Interface;
 use ws_proto::DisplayInfo;
 
+pub(crate) use mode::{restore_display_mode, set_display_mode};
 pub(crate) use pipeline::PipelineHandle;
 
 use crate::{CaptureError, Result};

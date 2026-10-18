@@ -78,6 +78,7 @@ pub async fn run(
         live: None,
         sent: Arc::default(),
         keyframe_requests: 0,
+        changed_modes: Vec::new(),
     };
     media.set_ceiling();
     loop {
@@ -122,6 +123,8 @@ struct Media {
     /// Frames handed to the transport since the last stats report.
     sent: Arc<Mutex<SentFrames>>,
     keyframe_requests: u32,
+    /// Displays whose resolution this session changed, to put back.
+    changed_modes: Vec<DisplayId>,
 }
 
 #[derive(Debug, Default)]
@@ -265,6 +268,7 @@ impl Media {
             drop_blocking(live);
             tracing::info!("browser disconnected; media stopped");
         }
+        self.restore_host_resolution();
     }
 
     fn start_mic(&mut self) {
@@ -388,6 +392,11 @@ impl Media {
         if live.video.is_none() {
             return;
         }
+        if !self.changed_modes.is_empty() {
+            // The desktop may still have been settling when the resolution
+            // changed; keep input lined up with it.
+            self.refresh_input_rect();
+        }
         let sent = std::mem::take(&mut *self.sent.lock().expect("sent stats lock"));
         let keyframe_requests = std::mem::take(&mut self.keyframe_requests);
         // Transport stats arrive once a second.
@@ -436,13 +445,14 @@ impl Media {
         };
         tracing::debug!(?msg, "control");
         match msg {
-            ClientControl::ListDisplays => {
-                let displays = ws_capture::list_displays().unwrap_or_else(|e| {
-                    tracing::debug!("list displays: {e}");
-                    Vec::new()
-                });
-                let active = pick_display(&displays, self.display).map(|d| d.id);
-                self.reply(HostControl::Displays { displays, active });
+            ClientControl::ListDisplays => self.send_displays(),
+            ClientControl::SetHostResolution { width, height } => {
+                self.set_host_resolution(width, height)
+            }
+            ClientControl::RestoreHostResolution => {
+                self.restore_host_resolution();
+                self.refresh_input_rect();
+                self.send_displays();
             }
             ClientControl::SelectDisplay { id } => self.select_display(id),
             ClientControl::RequestKeyframe => {
@@ -464,6 +474,72 @@ impl Media {
             }
             ClientControl::Ping { client_time_ms } => {
                 self.reply(HostControl::Pong { client_time_ms });
+            }
+        }
+    }
+
+    fn send_displays(&self) {
+        let displays = ws_capture::list_displays().unwrap_or_else(|e| {
+            tracing::debug!("list displays: {e}");
+            Vec::new()
+        });
+        let active = pick_display(&displays, self.display).map(|d| d.id);
+        self.reply(HostControl::Displays { displays, active });
+    }
+
+    /// Points input at the streamed display's current position and size.
+    fn refresh_input_rect(&self) {
+        let Some(input) = self.live.as_ref().and_then(|l| l.input.as_ref()) else {
+            return;
+        };
+        if let Some(info) = self.chosen_display() {
+            input.set_display(rect(&info));
+        }
+    }
+
+    fn set_host_resolution(&mut self, width: u32, height: u32) {
+        if !self.opts.allow_resolution_change {
+            self.error(
+                "the host doesn't allow changing its resolution; \
+                 start it with --allow-resolution-change"
+                    .into(),
+            );
+            return;
+        }
+        if self.live.is_none() {
+            return;
+        }
+        let Some(id) = self.chosen_display().map(|d| d.id) else {
+            self.error("no display to change".into());
+            return;
+        };
+        match block_in_place(|| ws_capture::set_display_mode(id, width, height)) {
+            Ok((w, h)) => {
+                tracing::info!(
+                    display = id.0,
+                    w,
+                    h,
+                    "host resolution matched to the browser"
+                );
+                if !self.changed_modes.contains(&id) {
+                    self.changed_modes.push(id);
+                }
+                // Capture picks the new size up by itself (duplication is
+                // lost and reopened); input needs the new rectangle.
+                self.refresh_input_rect();
+                self.send_displays();
+            }
+            Err(e) => {
+                tracing::warn!(display = id.0, "change resolution: {e}");
+                self.error(format!("could not change the host resolution: {e}"));
+            }
+        }
+    }
+
+    fn restore_host_resolution(&mut self) {
+        for id in std::mem::take(&mut self.changed_modes) {
+            if let Err(e) = block_in_place(|| ws_capture::restore_display_mode(id)) {
+                tracing::warn!(display = id.0, "restore resolution: {e}");
             }
         }
     }

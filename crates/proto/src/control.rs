@@ -31,6 +31,16 @@ pub enum ClientControl {
     SetMicEnabled {
         enabled: bool,
     },
+    /// Change the streamed display's desktop resolution to the largest it
+    /// supports within `width` x `height` (the browser's screen). Only
+    /// honoured when the host user started the host with
+    /// `--allow-resolution-change`; undone on disconnect.
+    SetHostResolution {
+        width: u32,
+        height: u32,
+    },
+    /// Put every display this session changed back to its own resolution.
+    RestoreHostResolution,
     /// Ask for a file the host offered with [`HostControl::FileOffer`]; any
     /// other id is rejected. The file transfer work owns the transfer itself.
     RequestFile {

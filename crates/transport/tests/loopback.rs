@@ -185,10 +185,11 @@ async fn no_keyframe_requests_without_a_session() {
     })
     .await
     .unwrap();
-    // Back-to-back frames without yielding supersede each other, but with
-    // nobody connected there is no one to send a keyframe to.
-    transport.send_video(frame(0, true));
-    transport.send_video(frame(1, false));
+    // More frames than the queue holds drop the oldest, but with nobody
+    // connected there is no one to send a keyframe to.
+    for i in 0..5 {
+        transport.send_video(frame(i, i == 0));
+    }
     let ev = tokio::time::timeout(Duration::from_millis(200), events.recv()).await;
     assert!(ev.is_err(), "unexpected event: {ev:?}");
 }
@@ -297,6 +298,8 @@ fn sized_frame(index: u64, keyframe: bool, bytes: usize) -> EncodedFrame {
 /// is a soft "reset" frame on screen, so a steady stream must not need more
 /// than the odd one beyond the one that starts it (at 0.9 headroom it needed
 /// 20-50). A small allowance absorbs a loaded test machine's scheduling.
+/// Once a second two frames arrive together, as after an encoder stall; when
+/// the transport kept only the newest unsent frame, each forced a keyframe.
 // Multi-threaded like the host, so the peer's loop doesn't delay the
 // transport's sends.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -341,6 +344,7 @@ async fn full_frames_at_the_target_bitrate_need_almost_no_keyframes() {
     let mut index = 0u64;
     let mut next_frame = Instant::now();
     let mut keyframe_due = true;
+    let mut held = None;
     let mut got_video = 0usize;
 
     loop {
@@ -387,18 +391,28 @@ async fn full_frames_at_the_target_bitrate_need_almost_no_keyframes() {
         }
         let now = Instant::now();
         if now >= next_frame {
-            // Like a capture clock, never two frames back to back after a
-            // late wake (Windows timers are coarse): the transport keeps only
-            // the newest unsent frame, so the first would be replaced and a
-            // keyframe forced. That is a test artefact, not the pacing.
+            // A capture clock: never two frames back to back because this
+            // loop woke late (Windows timers are coarse). Those come only from
+            // the stalls below.
             next_frame = (next_frame + FRAME).max(now + FRAME / 2);
             let budget = (encoder_bps / FPS / 8) as usize;
             // Constant bitrate with fast motion fills every frame; a
             // keyframe overshoots the one-frame VBV to about twice it.
             let bytes = if keyframe_due { budget * 2 } else { budget };
-            transport.send_video(sized_frame(index, keyframe_due, bytes));
+            let frame = sized_frame(index, keyframe_due, bytes);
             keyframe_due = false;
             index += 1;
+            // Once a second a frame is held back and handed over with the
+            // next one, as from an encoder catching up after a stall: both
+            // must go out.
+            if index % FPS == 30 {
+                held = Some(frame);
+            } else {
+                if let Some(held) = held.take() {
+                    transport.send_video(held);
+                }
+                transport.send_video(frame);
+            }
         }
         let got = recv_until(&sock, &mut buf, timeout).await;
         rtc.handle_input(input(got, &buf, local)).unwrap();

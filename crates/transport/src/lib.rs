@@ -23,7 +23,7 @@ mod session;
 
 pub use net::lan_ips;
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -36,6 +36,9 @@ use ws_proto::{AudioPacket, EncodedFrame};
 use crate::net::{Net, Packet, SharedFilter};
 use crate::session::{Session, Step, VideoWrite};
 
+/// Frames the encoder may get ahead of the send loop (about 50 ms at 60 fps)
+/// before the oldest is dropped. The late-frame drop still bounds latency.
+const VIDEO_QUEUE: usize = 3;
 /// Events waiting for the host app. If it falls this far behind, events are
 /// dropped rather than stalling media.
 const EVENT_QUEUE: usize = 1024;
@@ -147,8 +150,9 @@ enum Cmd {
 
 /// State shared by the handle and the run loop.
 struct Shared {
-    /// Newest-only slot between the encoder and the send loop.
-    frame: Mutex<Option<EncodedFrame>>,
+    /// Frames from the encoder not yet taken by the send loop (at most
+    /// [`VIDEO_QUEUE`]).
+    frames: Mutex<VecDeque<EncodedFrame>>,
     notify: Notify,
     connected: AtomicBool,
     /// When the outstanding keyframe request was made.
@@ -228,7 +232,7 @@ impl Transport {
         // About 80 ms of 10 ms Opus packets; beyond that, old audio is useless.
         let (audio, audio_rx) = mpsc::channel(8);
         let shared = Arc::new(Shared {
-            frame: Mutex::new(None),
+            frames: Mutex::new(VecDeque::new()),
             notify: Notify::new(),
             connected: AtomicBool::new(false),
             keyframe_asked: Mutex::new(None),
@@ -300,24 +304,30 @@ impl Transport {
         }
     }
 
-    /// Hand over the newest encoded frame. If the previous one has not been
-    /// sent yet it is discarded and [`TransportEvent::KeyframeNeeded`] is
-    /// raised (while connected), because later frames reference it.
+    /// Hand over the next encoded frame. Frames the send loop has not taken
+    /// yet stay queued, so two arriving back to back (the encoder catching up
+    /// after a stall) both go out. A keyframe supersedes the queue. Past
+    /// [`VIDEO_QUEUE`] frames the oldest is discarded and
+    /// [`TransportEvent::KeyframeNeeded`] raised (while connected), because
+    /// later frames reference it.
     pub fn send_video(&self, frame: EncodedFrame) {
         let keyframe = frame.keyframe;
-        let replaced = self
-            .shared
-            .frame
-            .lock()
-            .expect("video slot lock")
-            .replace(frame);
-        if let Some(old) = replaced {
-            tracing::debug!(
-                index = old.frame_index,
-                "video frame replaced before it was sent"
-            );
+        let dropped = {
+            let mut frames = self.shared.frames.lock().expect("video queue lock");
+            if keyframe {
+                frames.clear();
+            }
+            frames.push_back(frame);
+            if frames.len() > VIDEO_QUEUE {
+                frames.pop_front()
+            } else {
+                None
+            }
+        };
+        if let Some(old) = dropped {
+            tracing::debug!(index = old.frame_index, "video queue full; frame dropped");
             if self.shared.connected.load(Ordering::Relaxed) {
-                if old.keyframe && !keyframe {
+                if old.keyframe {
                     self.shared.keyframe_lost();
                 } else {
                     self.shared.keyframe_needed();
@@ -400,8 +410,9 @@ impl Driver {
                     }
                 }
                 _ = shared.notify.notified() => {
-                    let frame = shared.frame.lock().expect("video slot lock").take();
-                    if let (Some(frame), Some(s)) = (frame, &mut self.session) {
+                    let frames = std::mem::take(&mut *shared.frames.lock().expect("video queue lock"));
+                    for frame in frames {
+                        let Some(s) = &mut self.session else { break };
                         match s.write_video(&frame, Instant::now()) {
                             VideoWrite::Sent if frame.keyframe => shared.keyframe_sent(),
                             VideoWrite::Sent => {}

@@ -263,5 +263,13 @@ if (-not $micReady) {
 }
 
 if ($Run) {
-    Start-Process -FilePath $gui -WorkingDirectory $bin
+    $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator)
+    if ($admin) {
+        # Never start the host elevated from an administrator shell: Explorer
+        # starts it as the normal user, like the Start menu shortcut does.
+        Start-Process -FilePath explorer.exe -ArgumentList "`"$gui`""
+    } else {
+        Start-Process -FilePath $gui -WorkingDirectory $bin
+    }
 }

@@ -261,3 +261,39 @@ async fn pair_then_signal() {
     );
     assert_eq!(ws_connect(addr, &cookie).await.err(), Some(401));
 }
+
+#[tokio::test]
+async fn serves_the_built_in_web_client() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = SignalingConfig::new("127.0.0.1:0".parse().unwrap(), dir.path().to_path_buf());
+    config.embedded_web = &[
+        ("index.html", b"<!doctype html>hi"),
+        ("js/main.js", b"export {};"),
+    ];
+    let (server, _events) = SignalingServer::new(config).unwrap();
+    let router = server.router();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+    let r = request(addr, "GET", "/", None, None, "").await;
+    assert_eq!((r.status, r.body.as_str()), (200, "<!doctype html>hi"));
+    let headers = r.headers.to_lowercase();
+    assert!(headers.contains("content-type: text/html"));
+    assert!(headers.contains("content-security-policy"));
+    let r = request(addr, "GET", "/js/main.js", None, None, "").await;
+    assert_eq!(r.status, 200);
+    assert!(r.headers.to_lowercase().contains("text/javascript"));
+    assert_eq!(
+        request(addr, "GET", "/js/other.js", None, None, "")
+            .await
+            .status,
+        404
+    );
+    assert_eq!(
+        request(addr, "GET", "/../Cargo.toml", None, None, "")
+            .await
+            .status,
+        404
+    );
+}

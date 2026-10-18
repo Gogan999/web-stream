@@ -36,9 +36,7 @@ async fn print_events(mut events: mpsc::UnboundedReceiver<Event>) {
                 println!("certificate SHA-256 {fingerprint}");
                 match web_root {
                     Some(dir) => println!("serving the web client from {}", dir.display()),
-                    None => println!(
-                        "no web client found (pass --web-root); serving a placeholder page"
-                    ),
+                    None => println!("serving the web client built into this host"),
                 }
                 println!("data in {}", data_dir.display());
                 println!("{CONSOLE_HELP}");

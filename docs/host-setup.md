@@ -17,8 +17,9 @@ On a PC without the repository it clones it into `%USERPROFILE%\web-stream`:
 
 ## Running the host
 
-The install script builds the host, copies the web client next to it and adds
-**web-stream host** to the Start menu. Start it from there. It is a tray app:
+The install script updates the checkout (when it is a clean `main`), builds
+the host with the web client built into it and adds **web-stream host** to
+the Start menu. Re-run it to update. Start it from there. It is a tray app:
 the window shows what the host is doing, and closing it leaves the host
 running in the tray (click the icon to bring the window back; Quit in its
 menu, or the Quit button, stops the host).
@@ -66,14 +67,13 @@ normally, not as administrator.
 
 ```
 cargo build --release -p ws-host
-target\release\ws-host.exe --pair --web-root web
+target\release\ws-host.exe --pair
 ```
 
 `ws-host` (or `ws-host serve`) starts everything: the HTTPS server with the
 web client, pairing and signaling on TCP 8443, WebRTC media on UDP 8443 and
-the ICE-TCP fallback on TCP 8444. It serves the web client from `web\` next
-to the executable only (the install script copies it there; pass
-`--web-root web` when running from a checkout) and keeps its certificate and
+the ICE-TCP fallback on TCP 8444. It serves the web client built into it
+(`--web-root DIR` serves one from a folder instead, for web development) and keeps its certificate and
 paired browsers in `%LOCALAPPDATA%\web-stream`. Don't run it and the tray app
 at the same time; they use the same ports.
 

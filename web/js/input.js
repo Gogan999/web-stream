@@ -40,21 +40,34 @@ export function videoPoint(clientX, clientY, rect, videoW, videoH, clamp = false
 }
 
 export class InputCapture {
-  constructor({ session, video, stage, onHotkey, keyTarget = null, onKeySent = null }) {
+  constructor({ session, video, stage, onHotkey, keyTarget = null, onKeySent = null, onReleaseAll = null, displaySize = null }) {
     this.session = session;
     this.video = video;
     this.stage = stage;
     this.onHotkey = onHotkey;
     this.keyTarget = keyTarget; // the on-screen keyboard's textarea (softkeys.js)
     this.onKeySent = onKeySent;
+    this.onReleaseAll = onReleaseAll; // softkeys: forget sticky modifiers the host just let go
+    this.displaySize = displaySize; // () => { width, height } of the host display, for trackpad scaling
     this.touchActive = false; // the stream was touched last, so keys from a paired keyboard go to it
     this.touchRest = { x: 0, y: 0 }; // sub-pixel trackpad motion not yet sent
     this.holdTimer = 0;
     this.gestures = new TouchGestures({
       move: (dx, dy) => this.touchMove(dx, dy),
-      moveTo: (x, y) => this.touchMoveTo(x, y),
-      button: (b, down) => this.rel(P.mouseButton(b, down)),
-      wheel: (dx, dy) => this.rel(P.wheel(dx, dy)),
+      moveTo: (x, y, reliable) => this.touchMoveTo(x, y, reliable),
+      button: (b, down) => {
+        this.rel(P.mouseButton(b, down));
+        if (!down) this.onKeySent?.(0, false); // a click ends a sticky Ctrl/Alt/Shift/Win
+      },
+      wheel: (dx, dy) => {
+        const b = this.touchBatch;
+        if (b) {
+          b.wheel = { dx: (b.wheel?.dx ?? 0) + dx, dy: (b.wheel?.dy ?? 0) + dy };
+          return;
+        }
+        this.rel(P.wheel(dx, dy));
+        this.onKeySent?.(0, false);
+      },
       haptic: () => navigator.vibrate?.(15),
     });
     this.mode = 'relative'; // 'relative' (pointer lock) or 'absolute'
@@ -106,7 +119,9 @@ export class InputCapture {
       // Coalesced events keep a fast swipe's full path; the sum is the same, but the hold/tap
       // slop check sees every step.
       const steps = e.getCoalescedEvents?.();
-      for (const c of steps?.length ? steps : [e]) this.gestures.move(e.pointerId, c.clientX, c.clientY);
+      this.batchTouch(() => {
+        for (const c of steps?.length ? steps : [e]) this.gestures.move(e.pointerId, c.clientX, c.clientY);
+      });
     }, opt);
     v.addEventListener('pointerup', (e) => { if (touch(e)) this.onTouchUp(e); }, opt);
     v.addEventListener('pointercancel', (e) => { if (touch(e)) this.gestures.cancel(); }, opt);
@@ -217,8 +232,25 @@ export class InputCapture {
     if (!this.gestures.points.size) clearTimeout(this.holdTimer);
   }
 
+  // Coalesced touch steps go out as one motion message and one wheel message per event.
+  batchTouch(fn) {
+    this.touchBatch = { wheel: null };
+    try {
+      fn();
+    } finally {
+      const w = this.touchBatch.wheel;
+      this.touchBatch = null;
+      if (w) this.gestures.out.wheel(w.dx, w.dy);
+      this.flushMotion();
+    }
+  }
+
   touchMove(dx, dy) {
-    const scale = pictureScale(this.video.getBoundingClientRect(), this.video.videoWidth, this.video.videoHeight);
+    // Relative motion is in host display pixels, so scale CSS px -> video px -> display px.
+    const vw = this.video.videoWidth;
+    const d = this.displaySize?.();
+    const toDisplay = d?.width && vw ? d.width / vw : 1;
+    const scale = pictureScale(this.video.getBoundingClientRect(), vw, this.video.videoHeight) * toDisplay;
     const r = this.touchRest;
     r.x += dx * scale;
     r.y += dy * scale;
@@ -228,14 +260,21 @@ export class InputCapture {
     r.y -= iy;
     this.motion.dx += ix;
     this.motion.dy += iy;
-    this.flushMotion();
+    if (!this.touchBatch) this.flushMotion();
   }
 
-  touchMoveTo(x, y) {
+  // `reliable`: where a click is about to land (touch down, drag start), the position goes on the
+  // ordered reliable channel ahead of the button, so a lost or held motion packet can't misplace it.
+  touchMoveTo(x, y, reliable) {
     const p = videoPoint(x, y, this.video.getBoundingClientRect(), this.video.videoWidth, this.video.videoHeight, true);
     if (!p) return;
+    if (reliable) {
+      this.motion.abs = null;
+      this.rel(P.mouseAbs(p.x, p.y));
+      return;
+    }
     this.motion.abs = p;
-    this.flushMotion();
+    if (!this.touchBatch) this.flushMotion();
   }
 
   onWheel(e) {
@@ -255,7 +294,9 @@ export class InputCapture {
     if (!this.active) return;
     // From the on-screen keyboard, characters are read from the text it types (softkeys.js);
     // only named keys with a real key code are taken here. 229 is "the IME has it".
-    if (e.target === this.keyTarget && (e.key.length === 1 || e.keyCode === 229)) return;
+    // Shortcuts (Ctrl/Alt/Win + key) from a hardware keyboard are still taken here.
+    if (e.target === this.keyTarget &&
+        (e.keyCode === 229 || (e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey))) return;
     const usage = hidUsage(e.code);
     if (!usage) return;
     e.preventDefault();
@@ -270,6 +311,7 @@ export class InputCapture {
     this.gestures.reset();
     clearTimeout(this.holdTimer);
     this.heldKeys.clear();
+    this.onReleaseAll?.();
     this.motion = { dx: 0, dy: 0, abs: null };
     this.rel(P.releaseAll());
   }

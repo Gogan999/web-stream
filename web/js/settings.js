@@ -31,14 +31,14 @@ export function fitToDisplay(boxW, boxH, dispW, dispH) {
 }
 
 // The stream size for a resolution setting. `screen` is this screen's size in device pixels.
-export function streamSize(resolution, screen, display) {
+// `rotate` (touch devices): fit the screen the same way round as the display, since a phone held
+// upright gets turned sideways to watch a landscape display (fullscreen locks it so).
+export function streamSize(resolution, screen, display, rotate = false) {
   const dw = display?.width ?? 1920;
   const dh = display?.height ?? 1080;
   if (resolution === 'native') return { width: even(dw), height: even(dh) };
   if (resolution === 'screen') {
-    // A phone held upright gets turned sideways to watch a landscape display (fullscreen locks it so),
-    // so the screen is fitted the same way round as the display.
-    const turn = (screen.width >= screen.height) !== (dw >= dh);
+    const turn = rotate && (screen.width >= screen.height) !== (dw >= dh);
     return turn ? fitToDisplay(screen.height, screen.width, dw, dh) : fitToDisplay(screen.width, screen.height, dw, dh);
   }
   // A fixed height keeps the display's shape: 1080p on a 3440x1440 display is 2580x1080.
@@ -47,9 +47,9 @@ export function streamSize(resolution, screen, display) {
 }
 
 // The VideoConfig to ask the host for. `codec` is kept from what the host streams now.
-export function videoConfig(settings, { screen, display, codec = 'h264' }) {
+export function videoConfig(settings, { screen, display, codec = 'h264', rotate = false }) {
   settings = sanitize(settings);
-  const { width, height } = streamSize(settings.resolution, screen, display);
+  const { width, height } = streamSize(settings.resolution, screen, display, rotate);
   const fps = Number(settings.fps) || DEFAULTS.fps;
   const bitrateKbps = settings.bitrate === 'auto' ? autoKbps(width, height, fps) : Number(settings.bitrate);
   const quality = QUALITIES.includes(settings.quality) ? settings.quality : DEFAULTS.quality;

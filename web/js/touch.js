@@ -16,7 +16,8 @@ const LEFT = 0;
 const RIGHT = 2;
 
 export class TouchGestures {
-  // out: { move(dx, dy), moveTo(x, y), button(b, down), wheel(dx, dy), haptic() }
+  // out: { move(dx, dy), moveTo(x, y, reliable), button(b, down), wheel(dx, dy), haptic() }
+  // moveTo's `reliable` is true where a button event follows at that point (touch down, drag start).
   constructor(out, mode = 'trackpad') {
     this.out = out;
     this.mode = mode; // 'trackpad' or 'direct'
@@ -45,7 +46,7 @@ export class TouchGestures {
       this.primary = id;
       this.state = 'pending';
       this.t0 = t;
-      if (this.mode === 'direct') this.out.moveTo(x, y);
+      if (this.mode === 'direct') this.out.moveTo(x, y, true);
     } else if (n === 2 && (this.state === 'pending' || this.state === 'moving')) {
       this.state = 'two';
       this.t0 = t;
@@ -74,8 +75,9 @@ export class TouchGestures {
           this.out.move(x - p.sx, y - p.sy);
         } else {
           this.state = 'dragging';
+          this.out.moveTo(p.sx, p.sy, true); // the drag starts where the finger landed
           this.pressLeft();
-          this.out.moveTo(x, y);
+          this.out.moveTo(x, y, false);
         }
         return;
       case 'moving':
@@ -83,7 +85,7 @@ export class TouchGestures {
         this.out.move(dx, dy);
         return;
       case 'dragging':
-        this.out.moveTo(x, y);
+        this.out.moveTo(x, y, false);
         return;
       case 'two': {
         if (!this.scrolling) {

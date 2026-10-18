@@ -59,6 +59,8 @@ async function connect() {
   input = new InputCapture({
     session, video: ui.video, stage: ui.stage, onHotkey,
     keyTarget: ui.kbdInput, onKeySent: (usage, down) => softKeys.keySent(usage, down),
+    onReleaseAll: () => softKeys.forget(),
+    displaySize: () => host?.displays.find((d) => d.id === host.active) ?? null,
   });
   input.setMode(ui.mouseMode.value);
   input.start();
@@ -143,7 +145,7 @@ function applySettings() {
 
 function currentConfig() {
   const display = host.displays.find((d) => d.id === host.active) ?? null;
-  return settingsStore.videoConfig(settings, { screen: settingsStore.screenPixels(), display, codec: host.config.codec });
+  return settingsStore.videoConfig(settings, { screen: settingsStore.screenPixels(), display, codec: host.config.codec, rotate: isTouch() });
 }
 
 function sendConfig(config) {
@@ -302,7 +304,8 @@ async function toggleFullscreen() {
     if (!fullscreenElement()) throw new Error('not fullscreen');
   } catch {
     // iPhone Safari only fullscreens <video>, with its own controls and no input; fill the window instead.
-    setFakeFullscreen(true);
+    // On desktop a refusal just leaves things as they were.
+    if (isTouch()) setFakeFullscreen(true);
     return;
   }
   // Keyboard Lock (Chromium, fullscreen only) lets Esc, Alt+Tab and the Windows key reach the host.

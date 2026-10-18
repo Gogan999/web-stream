@@ -31,7 +31,7 @@ const CHARS = (() => {
   m.set('\n', { usage: HID.Enter, shift: false });
   m.set('\t', { usage: HID.Tab, shift: false });
   // Phone keyboards substitute these; send what the user meant.
-  for (const [ch, plain] of [['‘', "'"], ['’', "'"], ['“', '"'], ['”', '"'], [' ', ' ']]) m.set(ch, m.get(plain));
+  for (const [ch, plain] of [['\u2018', "'"], ['\u2019', "'"], ['\u201c', '"'], ['\u201d', '"'], ['\u00a0', ' ']]) m.set(ch, m.get(plain));
   return m;
 })();
 
@@ -50,7 +50,7 @@ export function diffText(before, after) {
 
 // Kept in the textarea so Backspace always has something to delete (keyboards send nothing on
 // an empty field). Zero-width, so it shows nothing and isn't a word for autocorrect.
-export const SENTINEL = '​'.repeat(16);
+export const SENTINEL = '\u200b'.repeat(16);
 
 // Key presses for a diff. send(usage, down); `shiftHeld` is true when a sticky Shift is already down.
 export function typeDiff({ backspaces, text }, send, shiftHeld = false) {
@@ -157,10 +157,15 @@ export class SoftKeyboard {
     if (!down && !MODIFIERS.has(usage) && this.sticky.size) this.releaseSticky();
   }
 
+  // The host already let go of everything (RELEASE_ALL): just show the keys as up.
+  forget() {
+    this.sticky.clear();
+    for (const b of this.keys?.querySelectorAll('[aria-pressed="true"]') ?? []) b.setAttribute('aria-pressed', 'false');
+  }
+
   // After one other key, sticky modifiers let go.
   releaseSticky() {
     for (const usage of this.sticky) this.send(usage, false);
-    this.sticky.clear();
-    for (const b of this.keys?.querySelectorAll('[aria-pressed="true"]') ?? []) b.setAttribute('aria-pressed', 'false');
+    this.forget();
   }
 }

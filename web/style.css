@@ -36,7 +36,7 @@ body.unpaired #stage, body.unpaired #bar > :not(#status) { display: none; }
 #touchbar button[aria-pressed="true"], #keys button[aria-pressed="true"] { background: rgba(61, 79, 107, .85); }
 #kbd-input { position: absolute; left: 0; bottom: 0; width: 1px; height: 1px; opacity: 0; border: 0; padding: 0; resize: none; font-size: 16px; pointer-events: none; }
 #touchbar { display: none; }
-body.touch #touchbar { display: flex; }
+body.touch #touchbar, body.fake-fs #touchbar { display: flex; }
 body.touch #fullscreen { display: none; } /* the overlay has it, and it stays reachable in fullscreen */
 
 /* Fullscreen fallback where the page can't go fullscreen (iPhone): the stream fills the window. */

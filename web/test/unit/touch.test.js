@@ -6,7 +6,7 @@ function rig(mode) {
   const log = [];
   const g = new TouchGestures({
     move: (dx, dy) => log.push(['move', dx, dy]),
-    moveTo: (x, y) => log.push(['to', x, y]),
+    moveTo: (x, y, reliable) => log.push([reliable ? 'TO' : 'to', x, y]), // TO: on the reliable channel
     button: (b, down) => log.push([down ? 'down' : 'up', b]),
     wheel: (dx, dy) => log.push(['wheel', dx, dy]),
     haptic: () => log.push(['haptic']),
@@ -70,17 +70,17 @@ test('direct: cursor follows the finger; tap clicks there, drag drags, hold righ
   const { g, log } = rig('direct');
   g.down(1, 10, 20, 0);
   g.up(1, 50);
-  assert.deepEqual(log, [['to', 10, 20], ['down', 0], ['up', 0]]);
+  assert.deepEqual(log, [['TO', 10, 20], ['down', 0], ['up', 0]]);
   log.length = 0;
   g.down(1, 10, 20, 1000);
   g.move(1, 40, 20);
   g.up(1, 1200);
-  assert.deepEqual(log, [['to', 10, 20], ['down', 0], ['to', 40, 20], ['up', 0]]);
+  assert.deepEqual(log, [['TO', 10, 20], ['TO', 10, 20], ['down', 0], ['to', 40, 20], ['up', 0]]);
   log.length = 0;
   g.down(1, 10, 20, 2000);
   g.tick(2000 + HOLD_MS);
   g.up(1, 2600);
-  assert.deepEqual(log, [['to', 10, 20], ['haptic'], ['down', 2], ['up', 2]]);
+  assert.deepEqual(log, [['TO', 10, 20], ['haptic'], ['down', 2], ['up', 2]]);
 });
 
 test('cancel lets go of a held button; a second finger mid-drag is ignored', () => {
@@ -90,5 +90,5 @@ test('cancel lets go of a held button; a second finger mid-drag is ignored', () 
   g.down(2, 300, 300, 100);
   g.move(2, 320, 300);
   g.cancel();
-  assert.deepEqual(log, [['to', 0, 0], ['down', 0], ['to', 50, 0], ['up', 0]]);
+  assert.deepEqual(log, [['TO', 0, 0], ['TO', 0, 0], ['down', 0], ['to', 50, 0], ['up', 0]]);
 });

@@ -84,6 +84,9 @@ test('phone: touch input, on-screen keyboard and small-screen toolbar', { timeou
   got = await inputs();
   const abs = got.find((e) => e.type === 'mouse-abs');
   assert.ok(abs && Math.abs(abs.x - 32768) < 700 && Math.abs(abs.y - 32768) < 700, JSON.stringify(abs));
+  // The click position goes on the reliable channel, ahead of the button.
+  assert.equal(abs.ch, 'input');
+  assert.ok(got.indexOf(abs) < got.findIndex((e) => e.type === 'mouse-button'));
 
   // On-screen keyboard: text typed by an IME (no key codes) arrives as key presses, with Shift.
   await clearLog();
@@ -102,12 +105,27 @@ test('phone: touch input, on-screen keyboard and small-screen toolbar', { timeou
   got = (await inputs()).filter((e) => e.type === 'key').map((e) => [e.usage, e.down]);
   assert.deepEqual(got, [[0xe0, true], [0x29, true], [0x29, false], [0xe0, false]]);
   assert.ok(await client.evaluate(() => document.activeElement.id === 'kbd-input'), 'keyboard stayed open');
+  // A hardware shortcut while the keyboard is open goes through whole, not as Ctrl alone.
+  await clearLog();
+  await client.keyboard.press('Control+KeyC');
+  await host.waitForFunction(() => window.mockLog.filter((e) => e.type === 'key').length >= 4);
+  got = (await inputs()).filter((e) => e.type === 'key').map((e) => [e.usage, e.down]);
+  assert.deepEqual(got, [[0xe0, true], [0x06, true], [0x06, false], [0xe0, false]]);
+  assert.equal(await client.inputValue('#kbd-input').then((v) => v.replace(/\u200b/g, '')), '');
   // Backspace from the IME (deleting the hidden text) is a Backspace press.
   await clearLog();
   await client.keyboard.press('Backspace');
   await host.waitForFunction(() => window.mockLog.some((e) => e.type === 'key' && e.usage === 0x2a && !e.down));
   await client.tap('#kbd-toggle');
   assert.ok(await client.evaluate(() => document.activeElement.id !== 'kbd-input'));
+  // A sticky Ctrl ends with the next touch click, not just the next key.
+  await clearLog();
+  await client.tap('#keys [data-key="ControlLeft"]');
+  await client.touchscreen.tap(cx, cy);
+  await host.waitForFunction(() => window.mockLog.some((e) => e.type === 'key' && e.usage === 0xe0 && !e.down));
+  got = (await inputs()).filter((e) => e.type === 'key' || e.type === 'mouse-button').map((e) => e.type === 'key' ? ['key', e.usage, e.down] : ['btn', e.button, e.down]);
+  assert.deepEqual(got, [['key', 0xe0, true], ['btn', 0, true], ['btn', 0, false], ['key', 0xe0, false]]);
+  assert.equal(await client.getAttribute('#keys [data-key="ControlLeft"]', 'aria-pressed'), 'false');
 
   // Fullscreen from the overlay; Exit brings the toolbar back.
   await client.tap('#touch-fullscreen');

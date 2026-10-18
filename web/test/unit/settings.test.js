@@ -33,10 +33,12 @@ test('stream size for each resolution setting', () => {
 
 test('a phone held upright is fitted as it will be turned', () => {
   const display = { width: 1920, height: 1080 };
-  assert.deepEqual(streamSize('screen', { width: 1080, height: 2400 }, display), { width: 1920, height: 1080 });
-  assert.deepEqual(streamSize('screen', { width: 2400, height: 1080 }, display), { width: 1920, height: 1080 });
+  assert.deepEqual(streamSize('screen', { width: 1080, height: 2400 }, display, true), { width: 1920, height: 1080 });
+  assert.deepEqual(streamSize('screen', { width: 2400, height: 1080 }, display, true), { width: 1920, height: 1080 });
   // A portrait display is fitted to a portrait box even when the screen is landscape.
-  assert.deepEqual(streamSize('screen', { width: 1920, height: 1080 }, { width: 1080, height: 1920 }), { width: 1080, height: 1920 });
+  assert.deepEqual(streamSize('screen', { width: 1920, height: 1080 }, { width: 1080, height: 1920 }, true), { width: 1080, height: 1920 });
+  // Desktop (no rotate): a portrait monitor keeps a portrait-fitted stream.
+  assert.deepEqual(streamSize('screen', { width: 1080, height: 1920 }, display), { width: 1080, height: 606 });
 });
 
 test('video config from settings', () => {

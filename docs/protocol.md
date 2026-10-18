@@ -25,7 +25,7 @@ One binary frame per message, little-endian, first byte is the type. The host in
 | Type | Name | Layout | Size | Channel |
 |---|---|---|---|---|
 | `0x01` | mouse relative | `u8 type, i16 dx, i16 dy` | 5 | input-motion |
-| `0x02` | mouse absolute | `u8 type, u16 x, u16 y` (0..65535 across the active display) | 5 | input-motion |
+| `0x02` | mouse absolute | `u8 type, u16 x, u16 y` (0..65535 across the active display) | 5 | input-motion (input before a touch click) |
 | `0x03` | mouse button | `u8 type, u8 button, u8 down` (0 left, 1 middle, 2 right, 3 back, 4 forward; down 1/0) | 3 | input |
 | `0x04` | wheel | `u8 type, i16 dx, i16 dy` (120 = one notch; +dy away from the user, +dx right, as Windows) | 5 | input |
 | `0x05` | key | `u8 type, u16 usage, u8 down` (USB HID usage, Keyboard page 0x07, physical position) | 4 | input |
@@ -34,6 +34,7 @@ One binary frame per message, little-endian, first byte is the type. The host in
 | `0x08` | release all | `u8 type` | 1 | input |
 
 - Motion is never queued: when `input-motion` has more than 1 KiB buffered the client holds relative deltas and sends their sum on the next free send; absolute keeps only the latest point.
+- Touch in direct (absolute) mode sends the position where a click or drag starts as a `mouse absolute` on `input`, ahead of the button, so a lost or held motion packet can't move the click. The host decodes both channels the same way.
 - Gamepad `buttons` are `XINPUT_GAMEPAD_*` flags (DPAD_UP 0x0001 … Y 0x8000, plus 0x0400 for Guide). Sticks use XInput's sign (+y up). Index 0–3. Full state is sent on change and every 100 ms as a keepalive; the first state for an index plugs in a virtual pad, disconnect unplugs it.
 - `release all` is sent on window blur, tab hide, pointer-lock loss and disconnect; the host releases every key and button it holds for this client.
 - Key repeat: repeated `keydown`s are forwarded as further key-down messages.

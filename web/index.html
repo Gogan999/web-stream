@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'">
+<title>web-stream</title>
+<link rel="stylesheet" href="style.css">
+<script type="module" src="js/main.js"></script>
+</head>
+<body>
+<header id="bar">
+  <button id="connect" type="button">Connect</button>
+  <span id="status" data-state="idle">Not connected</span>
+  <label>Display <select id="display" disabled></select></label>
+  <label>Mouse
+    <select id="mouse-mode">
+      <option value="relative">Relative (game)</option>
+      <option value="absolute">Absolute (desktop)</option>
+    </select>
+  </label>
+  <button id="fullscreen" type="button">Fullscreen</button>
+  <button id="stats-toggle" type="button" aria-pressed="false">Stats</button>
+  <button id="unpair" type="button" hidden>Unpair</button>
+  <span class="hint">Ctrl+Alt+Shift: 1–9 display · S stats · F fullscreen · M mouse mode · Q release mouse</span>
+</header>
+<form id="pair" hidden>
+  <h1>Pair this browser</h1>
+  <p>This browser isn't paired with the host yet. Request a code, then type the 6-digit code shown on the host.</p>
+  <label>Device name <input id="device-name" maxlength="64" required></label>
+  <button id="pair-start" type="button">Request code</button>
+  <label>Code <input id="pair-code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" disabled></label>
+  <button id="pair-confirm" type="submit" disabled>Pair</button>
+  <p id="pair-msg" role="status"></p>
+</form>
+<main id="stage" tabindex="-1">
+  <video id="video" autoplay playsinline disablepictureinpicture disableremoteplayback></video>
+  <pre id="stats" hidden></pre>
+</main>
+</body>
+</html>

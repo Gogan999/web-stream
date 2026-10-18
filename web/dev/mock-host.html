@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>mock host</title>
+<style>
+  body { background: #111; color: #ccc; font: 12px ui-monospace, monospace; margin: 8px; }
+  canvas { border: 1px solid #333; max-width: 480px; display: block; margin-bottom: 8px; }
+  #log { white-space: pre; height: 60vh; overflow: auto; }
+</style>
+<script type="module" src="mock-host.js"></script>
+</head>
+<body>
+<div>Mock host: streams the canvas below, logs input received from the client.</div>
+<canvas id="screen" width="1280" height="720"></canvas>
+<div id="log"></div>
+</body>
+</html>

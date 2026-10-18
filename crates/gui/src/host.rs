@@ -225,7 +225,10 @@ impl Host {
         let thread = std::thread::Builder::new()
             .name("ws-host".into())
             .spawn(move || {
-                let result = host.run(opts, commands_rx);
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    host.run(opts, commands_rx)
+                }))
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("the host crashed (see the log)")));
                 host.state().stopped(result);
                 (host.on_change)(None);
             })
@@ -241,13 +244,17 @@ impl Host {
             .build()?;
         let (events_tx, mut events) = mpsc::unbounded_channel::<Event>();
         let host = self.clone();
-        rt.spawn(async move {
+        let pump = rt.spawn(async move {
             while let Some(e) = events.recv().await {
                 host.state().apply(e.clone());
                 (host.on_change)(Some(&e));
             }
         });
         let result = rt.block_on(serve::serve(opts, commands, events_tx));
+        // Show what the host said last (a final error, say) before stopping.
+        rt.block_on(async {
+            let _ = tokio::time::timeout(Duration::from_millis(500), pump).await;
+        });
         rt.shutdown_timeout(Duration::from_secs(2));
         result
     }

@@ -520,7 +520,7 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        self.host.stop_and_wait(Duration::from_secs(10));
+        self.host.stop_and_wait(Duration::from_secs(15));
     }
 }
 

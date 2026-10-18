@@ -167,7 +167,7 @@ pub fn create_tray(host: Host, ctx: eframe::egui::Context) -> anyhow::Result<()>
 /// the UI thread, from the tray menu or when the window closes.
 pub fn quit(host: &Host) -> ! {
     hide_window();
-    host.stop_and_wait(Duration::from_secs(10));
+    host.stop_and_wait(Duration::from_secs(15));
     TRAY.with(|t| t.borrow_mut().take());
     std::process::exit(0)
 }

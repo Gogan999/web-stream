@@ -108,9 +108,30 @@ pub async fn run(
         }
     }
     media.stop();
+    // A resolution change still running would never be put back: wait for
+    // it, so it is recorded. The tray app keeps running after the host
+    // stops, so nothing else would restore it.
+    if media.mode_busy {
+        let wait = tokio::time::timeout(MODE_CHANGE_WAIT, async {
+            while let Some(later) = later_rx.recv().await {
+                if let Later::ModeSet { id, result, .. } = later {
+                    if result.is_ok_and(|c| c.changed) {
+                        media.changed_modes.add(id);
+                    }
+                    break;
+                }
+            }
+        });
+        if wait.await.is_err() {
+            tracing::warn!("a resolution change did not finish; it may not be put back");
+        }
+    }
     // Dropping `media` puts changed display resolutions back (ChangedModes),
     // here and if this task panics.
 }
+
+/// How long stopping waits for a resolution change in progress.
+const MODE_CHANGE_WAIT: Duration = Duration::from_secs(10);
 
 /// Work finished off the event loop, or due later.
 enum Later {

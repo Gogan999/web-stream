@@ -123,6 +123,16 @@ test('client streams from mock host, sends input and switches display', { timeou
   assert.ok(inputs.some((e) => e.type === 'key' && e.usage === 0x1a && !e.down));
   assert.ok(inputs.some((e) => e.type === 'wheel' && e.dy === -120));
 
+  // Tab never lands in the hidden on-screen keyboard textarea.
+  await client.mouse.move(1, 1); // off the stream, so Tab moves focus instead of going to the host
+  await client.focus('#connect');
+  let tabbed = false;
+  for (let i = 0; i < 20; i++) {
+    await client.keyboard.press('Tab');
+    tabbed ||= await client.evaluate(() => document.activeElement?.id === 'kbd-input');
+  }
+  assert.ok(!tabbed);
+
   // Hotkey switches display without forwarding the digit, and the stream changes resolution.
   await client.keyboard.down('Control');
   await client.keyboard.down('Alt');

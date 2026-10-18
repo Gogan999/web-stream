@@ -5,6 +5,8 @@ import { snapshot, compute, format, formatHost, FrameTimer } from './stats.js';
 import * as pairing from './pairing.js';
 import * as settingsStore from './settings.js';
 import { AutoTune, Cancelled } from './autotune.js';
+import { SoftKeyboard } from './softkeys.js';
+import * as P from './protocol.js';
 
 const $ = (id) => document.getElementById(id);
 const ui = {
@@ -14,6 +16,8 @@ const ui = {
   pairCode: $('pair-code'), pairConfirm: $('pair-confirm'), pairMsg: $('pair-msg'),
   resolution: $('resolution'), bitrate: $('bitrate'), fps: $('fps'), quality: $('quality'),
   matchHost: $('match-host'), autotune: $('autotune'), mic: $('mic'),
+  moreToggle: $('more-toggle'), kbdToggle: $('kbd-toggle'), keysToggle: $('keys-toggle'), keys: $('keys'),
+  kbdInput: $('kbd-input'), touchFullscreen: $('touch-fullscreen'),
 };
 
 const params = new URLSearchParams(location.search);
@@ -57,7 +61,12 @@ async function connect() {
   lastSent = null;
   // The host sends "bye" with reason "revoked" when this browser is unpaired.
   session.addEventListener('status', (e) => { if (/unpaired/.test(e.detail.text)) checkPairing(); });
-  input = new InputCapture({ session, video: ui.video, stage: ui.stage, onHotkey });
+  input = new InputCapture({
+    session, video: ui.video, stage: ui.stage, onHotkey,
+    keyTarget: ui.kbdInput, onKeySent: (usage, down) => softKeys.keySent(usage, down),
+    onReleaseAll: () => softKeys.forget(),
+    displaySize: () => host?.displays.find((d) => d.id === host.active) ?? null,
+  });
   input.setMode(ui.mouseMode.value);
   input.start();
   ui.connect.textContent = 'Disconnect';
@@ -144,7 +153,7 @@ function applySettings() {
 
 function currentConfig() {
   const display = host.displays.find((d) => d.id === host.active) ?? null;
-  return settingsStore.videoConfig(settings, { screen: settingsStore.screenPixels(), display, codec: host.config.codec });
+  return settingsStore.videoConfig(settings, { screen: settingsStore.screenPixels(), display, codec: host.config.codec, rotate: isTouch() });
 }
 
 function sendConfig(config) {
@@ -323,20 +332,61 @@ function selectDisplay(id) {
   session.sendControl({ type: 'selectDisplay', id: Number(id) });
 }
 
+const fullscreenElement = () => document.fullscreenElement ?? document.webkitFullscreenElement ?? null;
+const isTouch = () => document.body.classList.contains('touch');
+
 async function toggleFullscreen() {
-  if (document.fullscreenElement) {
-    await document.exitFullscreen();
+  if (document.body.classList.contains('fake-fs')) {
+    setFakeFullscreen(false);
     return;
   }
-  await ui.stage.requestFullscreen({ navigationUI: 'hide' });
+  if (fullscreenElement()) {
+    await (document.exitFullscreen ?? document.webkitExitFullscreen).call(document);
+    return;
+  }
+  const request = ui.stage.requestFullscreen ?? ui.stage.webkitRequestFullscreen;
+  try {
+    await request.call(ui.stage, { navigationUI: 'hide' });
+    // The old webkit call returns nothing and may quietly do nothing.
+    if (!fullscreenElement()) await new Promise((r) => setTimeout(r, 300));
+    if (!fullscreenElement()) throw new Error('not fullscreen');
+  } catch {
+    // iPhone Safari only fullscreens <video>, with its own controls and no input; fill the window instead.
+    // On desktop a refusal just leaves things as they were.
+    if (isTouch()) setFakeFullscreen(true);
+    return;
+  }
   // Keyboard Lock (Chromium, fullscreen only) lets Esc, Alt+Tab and the Windows key reach the host.
   // Hold Esc to leave fullscreen.
   try { await navigator.keyboard?.lock(); } catch { /* unsupported */ }
+  // Phones: turn to the host display's shape (Android Chrome allows this only while fullscreen).
+  if (isTouch()) {
+    const d = host?.displays.find((x) => x.id === host.active);
+    const portrait = d?.width && d?.height && d.height > d.width;
+    screen.orientation?.lock?.(portrait ? 'portrait' : 'landscape').catch(() => {});
+  }
 }
 
-document.addEventListener('fullscreenchange', () => {
-  if (!document.fullscreenElement) navigator.keyboard?.unlock?.();
-});
+function setFakeFullscreen(on) {
+  document.body.classList.toggle('fake-fs', on);
+  showFullscreenState();
+}
+
+function showFullscreenState() {
+  const on = !!fullscreenElement() || document.body.classList.contains('fake-fs');
+  ui.fullscreen.textContent = on ? 'Exit fullscreen' : 'Fullscreen';
+  ui.touchFullscreen.textContent = on ? 'Exit' : 'Fullscreen';
+}
+
+for (const ev of ['fullscreenchange', 'webkitfullscreenchange']) {
+  document.addEventListener(ev, () => {
+    if (!fullscreenElement()) {
+      navigator.keyboard?.unlock?.();
+      try { screen.orientation?.unlock?.(); } catch { /* not locked */ }
+    }
+    showFullscreenState();
+  });
+}
 
 function toggleStats() {
   ui.stats.hidden = !ui.stats.hidden;
@@ -390,9 +440,46 @@ ui.connect.addEventListener('click', () => (session && !session.closed ? disconn
 ui.display.addEventListener('change', () => selectDisplay(ui.display.value));
 ui.mouseMode.addEventListener('change', () => setMouseMode(ui.mouseMode.value));
 ui.fullscreen.addEventListener('click', toggleFullscreen);
+ui.touchFullscreen.addEventListener('click', toggleFullscreen);
 ui.statsToggle.addEventListener('click', toggleStats);
 // Toolbar controls keep focus otherwise, and Space/Enter would re-trigger them.
 for (const el of [ui.connect, ui.fullscreen, ui.statsToggle, ui.autotune]) el.addEventListener('mouseup', () => el.blur());
+
+// Touch screens: overlay buttons, on-screen keyboard and folded-away settings.
+const softKeys = new SoftKeyboard({
+  textarea: ui.kbdInput,
+  keys: ui.keys,
+  send: (usage, down) => input?.rel(P.key(usage, down)),
+});
+const markTouch = () => document.body.classList.add('touch');
+if (matchMedia('(pointer: coarse)').matches) markTouch();
+document.addEventListener('pointerdown', (e) => { if (e.pointerType === 'touch') markTouch(); }, { capture: true });
+
+ui.moreToggle.addEventListener('click', () => {
+  const open = document.body.classList.toggle('more-open');
+  ui.moreToggle.setAttribute('aria-expanded', String(open));
+});
+// Overlay buttons don't take focus, so tapping them leaves the phone keyboard open.
+for (const el of [$('touchbar'), ui.keys]) {
+  for (const ev of ['pointerdown', 'mousedown']) el.addEventListener(ev, (e) => e.preventDefault());
+}
+// Opening the keyboard has to happen on click: phones show it only for a focus() inside a tap's
+// user activation, which a touch pointerdown doesn't give. Whether it was open is read on pointerdown
+// in case the tap moved focus anyway.
+let kbdWasOpen = false;
+ui.kbdToggle.addEventListener('pointerdown', () => { kbdWasOpen = softKeys.open; });
+ui.kbdToggle.addEventListener('click', () => {
+  if (kbdWasOpen || softKeys.open) ui.kbdInput.blur();
+  else softKeys.show();
+  kbdWasOpen = false;
+});
+ui.kbdInput.addEventListener('focus', () => ui.kbdToggle.setAttribute('aria-pressed', 'true'));
+ui.kbdInput.addEventListener('blur', () => ui.kbdToggle.setAttribute('aria-pressed', 'false'));
+ui.keysToggle.addEventListener('click', () => {
+  ui.keys.hidden = !ui.keys.hidden;
+  ui.keysToggle.setAttribute('aria-pressed', String(!ui.keys.hidden));
+  if (ui.keys.hidden) softKeys.releaseSticky();
+});
 
 // Pairing: the host sets an HttpOnly cookie once the code shown on the host is confirmed.
 let pairingId = null;

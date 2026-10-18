@@ -44,6 +44,11 @@ mod imp {
     pub fn audio_devices() -> ws_audio::Result<Vec<String>> {
         ws_audio::list_render_devices()
     }
+
+    pub fn set_audio(capture: &Loopback, bitrate: u32, frame_ms: u32) {
+        capture.set_bitrate(bitrate);
+        capture.set_frame_ms(frame_ms);
+    }
 }
 
 #[cfg(not(windows))]
@@ -116,6 +121,10 @@ mod imp {
 
     pub fn audio_devices() -> ws_audio::Result<Vec<String>> {
         Err(unsupported())
+    }
+
+    pub fn set_audio(capture: &Loopback, _: u32, _: u32) {
+        match *capture {}
     }
 
     fn unsupported() -> ws_audio::AudioError {

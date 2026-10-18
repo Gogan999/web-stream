@@ -31,6 +31,13 @@ pub enum ClientControl {
     SetMicEnabled {
         enabled: bool,
     },
+    /// Game audio quality. `None` is the host's own setting
+    /// (`--audio-kbps`, `--audio-frame-ms`). Bitrates are clamped to
+    /// 32-510 kb/s; frames are 10 or 20 ms.
+    SetAudioConfig {
+        bitrate_kbps: Option<u32>,
+        frame_ms: Option<u32>,
+    },
     /// Change the streamed display's desktop resolution to the largest it
     /// supports within `width` x `height` (the browser's screen). Only
     /// honoured when the host user started the host with

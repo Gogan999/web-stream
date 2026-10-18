@@ -8,8 +8,13 @@ export const FRAME_RATES = Object.freeze([30, 60, 90, 120, 144]);
 // display's shape (never above its own size).
 export const RESOLUTIONS = Object.freeze(['screen', 'native', '2160', '1440', '1080', '720']);
 
+// Game audio: Opus kb/s and frame length in ms; 'host' keeps the host's own setting.
+export const AUDIO_KBPS = Object.freeze(['host', '96', '128', '192', '256', '320', '510']);
+export const AUDIO_FRAMES = Object.freeze(['host', '10', '20']);
+
 export const DEFAULTS = Object.freeze({
   bitrate: 'auto', resolution: 'screen', fps: 60, quality: 'balanced', matchHost: false, mic: false,
+  audioKbps: 'host', audioFrame: 'host',
 });
 
 const STORAGE_KEY = 'ws-stream-settings';
@@ -56,6 +61,16 @@ export function videoConfig(settings, { screen, display, codec = 'h264', rotate 
   return { codec, width, height, fps, bitrateKbps, quality };
 }
 
+// The setAudioConfig message for the audio settings; null fields keep the host's own.
+export function audioConfig(settings) {
+  const s = sanitize(settings);
+  return {
+    type: 'setAudioConfig',
+    bitrateKbps: s.audioKbps === 'host' ? null : Number(s.audioKbps),
+    frameMs: s.audioFrame === 'host' ? null : Number(s.audioFrame),
+  };
+}
+
 export function sameConfig(a, b) {
   return !!a && !!b && ['codec', 'width', 'height', 'fps', 'bitrateKbps', 'quality']
     .every((k) => a[k] === b[k] || (k === 'quality' && (a[k] ?? 'balanced') === (b[k] ?? 'balanced')));
@@ -79,6 +94,8 @@ export function sanitize(saved) {
     quality: QUALITIES.includes(v.quality) ? v.quality : DEFAULTS.quality,
     matchHost: v.matchHost === true,
     mic: v.mic === true,
+    audioKbps: AUDIO_KBPS.includes(v.audioKbps) ? v.audioKbps : DEFAULTS.audioKbps,
+    audioFrame: AUDIO_FRAMES.includes(v.audioFrame) ? v.audioFrame : DEFAULTS.audioFrame,
   };
 }
 

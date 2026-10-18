@@ -18,6 +18,7 @@ const ui = {
   pairCode: $('pair-code'), pairConfirm: $('pair-confirm'), pairMsg: $('pair-msg'),
   resolution: $('resolution'), bitrate: $('bitrate'), fps: $('fps'), quality: $('quality'),
   matchHost: $('match-host'), autotune: $('autotune'), mic: $('mic'),
+  audioKbps: $('audio-kbps'), audioFrame: $('audio-frame'),
   moreToggle: $('more-toggle'), more: $('more'), kbdToggle: $('kbd-toggle'), keysToggle: $('keys-toggle'), keys: $('keys'),
   kbdInput: $('kbd-input'), touchFullscreen: $('touch-fullscreen'),
 };
@@ -55,6 +56,7 @@ async function connect() {
     sendCursorMode();
     // The host keeps the last choice across sessions; tell it this browser's.
     session.sendControl({ type: 'setMicEnabled', enabled: settings.mic });
+    session.sendControl(settingsStore.audioConfig(settings));
   });
   session.addEventListener('closed', () => {
     ui.connect.textContent = 'Connect';
@@ -192,6 +194,8 @@ fillSelect(ui.resolution, settingsStore.RESOLUTIONS, (v) => RES_LABELS[v]);
 fillSelect(ui.bitrate, ['auto', ...settingsStore.BITRATES_KBPS], (v) => (v === 'auto' ? 'Auto' : `${v / 1000} Mb/s`));
 fillSelect(ui.fps, settingsStore.FRAME_RATES, (v) => String(v));
 fillSelect(ui.quality, settingsStore.QUALITIES, (v) => v[0].toUpperCase() + v.slice(1));
+fillSelect(ui.audioKbps, settingsStore.AUDIO_KBPS, (v) => (v === 'host' ? 'Host setting' : `${v} kb/s`));
+fillSelect(ui.audioFrame, settingsStore.AUDIO_FRAMES, (v) => (v === 'host' ? 'Host setting' : v === '10' ? '10 ms (lowest delay)' : '20 ms (better sound)'));
 
 // Shows the settings; a bitrate auto-tune picked that isn't in the list gets its own entry.
 function showSettings() {
@@ -207,6 +211,8 @@ function showSettings() {
   ui.quality.value = settings.quality;
   ui.matchHost.checked = !!settings.matchHost;
   ui.mic.checked = !!settings.mic;
+  ui.audioKbps.value = settings.audioKbps;
+  ui.audioFrame.value = settings.audioFrame;
 }
 showSettings();
 
@@ -263,6 +269,14 @@ async function setMic(on) {
   micTrack = track;
   await s.setMicTrack(track);
   s.sendControl({ type: 'setMicEnabled', enabled: on });
+}
+
+for (const [el, key] of [[ui.audioKbps, 'audioKbps'], [ui.audioFrame, 'audioFrame']]) {
+  el.addEventListener('change', () => {
+    settings[key] = el.value;
+    settingsStore.save(settings);
+    session?.sendControl(settingsStore.audioConfig(settings));
+  });
 }
 
 ui.mic.addEventListener('change', () => {

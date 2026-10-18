@@ -78,6 +78,7 @@ pub async fn run(
         display: opts.display,
         // Off until the browser turns it on.
         mic_enabled: false,
+        audio: (opts.audio_kbps, opts.audio_frame_ms),
         opts,
         control_tx,
         control_open: false,
@@ -197,6 +198,8 @@ struct Media {
     config: VideoConfig,
     display: Option<DisplayId>,
     mic_enabled: bool,
+    /// Game audio bitrate (kb/s) and Opus frame length (ms).
+    audio: (u32, u32),
     control_tx: mpsc::Sender<HostControl>,
     /// Replies made before the `control` channel opened (an error while
     /// starting media, say) wait here.
@@ -248,7 +251,7 @@ struct Live {
     _cursor: CursorSession,
     video: Option<Video>,
     /// Held only to keep game audio capture running.
-    _audio: Option<platform::Loopback>,
+    audio: Option<platform::Loopback>,
     mic: Option<(platform::Mic, MicReceiver)>,
     bitrate_kbps: u32,
 }
@@ -340,7 +343,8 @@ impl Media {
             let (tx, rx) = mpsc::channel(AUDIO_QUEUE);
             let config = LoopbackConfig {
                 device: self.opts.audio_device.clone(),
-                bitrate: self.opts.audio_kbps * 1000,
+                bitrate: self.audio.0 * 1000,
+                frame_ms: self.audio.1,
             };
             match block_in_place(|| platform::start_loopback(config, tx)) {
                 Ok(capture) => {
@@ -361,7 +365,7 @@ impl Media {
             input,
             _cursor: cursor,
             video: None,
-            _audio: audio,
+            audio,
             mic: None,
             bitrate_kbps: self.start_kbps(),
         });
@@ -382,8 +386,10 @@ impl Media {
         self.session += 1;
         self.keyframe_requests = 0;
         self.cursor_target.send_replace(CursorTarget::default());
-        // The next browser turns the mic on if it wants it.
+        // The next browser turns the mic on if it wants it, and sets its
+        // own audio quality.
         self.mic_enabled = false;
+        self.audio = (self.opts.audio_kbps, self.opts.audio_frame_ms);
         *self.sent.lock().expect("sent stats lock") = SentFrames::default();
         if let Some(live) = self.live.take() {
             drop_blocking(live);
@@ -584,6 +590,10 @@ impl Media {
                 }
             }
             ClientControl::SetVideoConfig { config } => self.set_video_config(config.clamped()),
+            ClientControl::SetAudioConfig {
+                bitrate_kbps,
+                frame_ms,
+            } => self.set_audio_config(bitrate_kbps, frame_ms),
             ClientControl::SetMicEnabled { enabled } => {
                 if enabled && self.opts.mic_device.is_none() {
                     self.reply(HostControl::MicUnavailable {
@@ -612,6 +622,20 @@ impl Media {
                 self.reply(HostControl::Pong { client_time_ms });
             }
         }
+    }
+
+    fn set_audio_config(&mut self, kbps: Option<u32>, frame_ms: Option<u32>) {
+        let frame_ms = frame_ms.unwrap_or(self.opts.audio_frame_ms);
+        if !ws_audio::FRAME_MS.contains(&frame_ms) {
+            self.error(format!("audio frames are 10 or 20 ms, not {frame_ms}"));
+            return;
+        }
+        let kbps = kbps.unwrap_or(self.opts.audio_kbps).clamp(32, 510);
+        self.audio = (kbps, frame_ms);
+        if let Some(capture) = self.live.as_ref().and_then(|l| l.audio.as_ref()) {
+            platform::set_audio(capture, kbps * 1000, frame_ms);
+        }
+        tracing::info!(kbps, frame_ms, "game audio");
     }
 
     fn send_displays(&self) {

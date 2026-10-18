@@ -4,7 +4,8 @@
 export const QUALITIES = Object.freeze(['speed', 'balanced', 'clarity']);
 export const BITRATES_KBPS = Object.freeze([5000, 10000, 15000, 20000, 30000, 50000, 80000, 120000, 150000]);
 export const FRAME_RATES = Object.freeze([30, 60, 90, 120, 144]);
-// 'screen' fits this screen, 'native' is the host display's own size; the rest are fixed heights in 16:9.
+// 'screen' fits this screen, 'native' is the host display's own size; the rest are fixed heights in the
+// display's shape (never above its own size).
 export const RESOLUTIONS = Object.freeze(['screen', 'native', '2160', '1440', '1080', '720']);
 
 export const DEFAULTS = Object.freeze({
@@ -35,12 +36,14 @@ export function streamSize(resolution, screen, display) {
   const dh = display?.height ?? 1080;
   if (resolution === 'native') return { width: even(dw), height: even(dh) };
   if (resolution === 'screen') return fitToDisplay(screen.width, screen.height, dw, dh);
-  const h = Number(resolution);
-  return fitToDisplay(Math.round((h * 16) / 9), h, dw, dh);
+  // A fixed height keeps the display's shape: 1080p on a 3440x1440 display is 2580x1080.
+  const scale = Math.min(Number(resolution) / dh, 1);
+  return { width: even(dw * scale), height: even(dh * scale) };
 }
 
 // The VideoConfig to ask the host for. `codec` is kept from what the host streams now.
 export function videoConfig(settings, { screen, display, codec = 'h264' }) {
+  settings = sanitize(settings);
   const { width, height } = streamSize(settings.resolution, screen, display);
   const fps = Number(settings.fps) || DEFAULTS.fps;
   const bitrateKbps = settings.bitrate === 'auto' ? autoKbps(width, height, fps) : Number(settings.bitrate);
@@ -59,11 +62,24 @@ export function screenPixels(win = globalThis) {
   return { width: Math.round(win.screen.width * dpr), height: Math.round(win.screen.height * dpr) };
 }
 
+// Each stored field is checked and falls back to its default: a bad value would build a config the
+// host rejects. Bitrate may be any whole kbps auto-tune picked, not only the list.
+export function sanitize(saved) {
+  const v = saved && typeof saved === 'object' ? saved : {};
+  const kbps = Number(v.bitrate);
+  return {
+    bitrate: Number.isInteger(kbps) && kbps >= 500 && kbps <= 200000 ? String(kbps) : DEFAULTS.bitrate,
+    resolution: RESOLUTIONS.includes(v.resolution) ? v.resolution : DEFAULTS.resolution,
+    fps: FRAME_RATES.includes(Number(v.fps)) ? Number(v.fps) : DEFAULTS.fps,
+    quality: QUALITIES.includes(v.quality) ? v.quality : DEFAULTS.quality,
+    matchHost: v.matchHost === true,
+  };
+}
+
 // Storage can be missing or throw (private windows, blocked site data); settings then last for the page only.
 export function load(storage = globalThis.localStorage) {
   try {
-    const saved = JSON.parse(storage?.getItem(STORAGE_KEY) ?? 'null');
-    return { ...DEFAULTS, ...(saved && typeof saved === 'object' ? saved : {}) };
+    return sanitize(JSON.parse(storage?.getItem(STORAGE_KEY) ?? 'null'));
   } catch {
     return { ...DEFAULTS };
   }

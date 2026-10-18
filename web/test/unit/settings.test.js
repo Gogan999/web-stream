@@ -26,8 +26,9 @@ test('stream size for each resolution setting', () => {
   assert.deepEqual(streamSize('native', screen, display), { width: 2560, height: 1440 });
   assert.deepEqual(streamSize('1080', screen, display), { width: 1920, height: 1080 });
   assert.deepEqual(streamSize('2160', screen, display), { width: 2560, height: 1440 });
-  // An ultrawide display keeps its shape at a fixed height.
-  assert.deepEqual(streamSize('1080', screen, { width: 3440, height: 1440 }), { width: 1920, height: 802 });
+  // An ultrawide display keeps its shape and the height.
+  assert.deepEqual(streamSize('1080', screen, { width: 3440, height: 1440 }), { width: 2580, height: 1080 });
+  assert.deepEqual(streamSize('1440', screen, { width: 3440, height: 1440 }), { width: 3440, height: 1440 });
 });
 
 test('video config from settings', () => {
@@ -52,4 +53,19 @@ test('settings survive broken storage', () => {
   const mem = { getItem: (k) => map.get(k) ?? null, setItem: (k, v) => map.set(k, v) };
   save({ ...DEFAULTS, bitrate: '30000' }, mem);
   assert.equal(load(mem).bitrate, '30000');
+  // Auto-tune picks off the list are kept.
+  save({ ...DEFAULTS, bitrate: '42500' }, mem);
+  assert.equal(load(mem).bitrate, '42500');
+});
+
+test('junk in storage falls back field by field', () => {
+  const map = new Map([['ws-stream-settings', JSON.stringify({ bitrate: 'abc', resolution: 'foo', fps: 59.5, quality: 'max', matchHost: 'yes' })]]);
+  const mem = { getItem: (k) => map.get(k) ?? null, setItem: (k, v) => map.set(k, v) };
+  assert.deepEqual(load(mem), { ...DEFAULTS });
+  map.set('ws-stream-settings', JSON.stringify({ bitrate: '999999', fps: '120', quality: 'clarity' }));
+  assert.deepEqual(load(mem), { ...DEFAULTS, fps: 120, quality: 'clarity' });
+  map.set('ws-stream-settings', '[1,2]');
+  assert.deepEqual(load(mem), { ...DEFAULTS });
+  const c = videoConfig({ bitrate: 'abc', resolution: 'foo', fps: 59.5 }, { screen: { width: 1920, height: 1080 }, display: { width: 1920, height: 1080 } });
+  assert.deepEqual([c.width, c.height, c.fps, c.bitrateKbps], [1920, 1080, 60, 20000]);
 });

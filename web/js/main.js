@@ -48,7 +48,7 @@ async function connect() {
     ui.display.disabled = true;
     tuning?.cancel();
   });
-  host = { displays: [], active: null, config: null, stats: null, matched: false };
+  host = { displays: [], active: null, config: null, stats: null, matched: false, awaitingMatch: false };
   lastSent = null;
   // The host sends "bye" with reason "revoked" when this browser is unpaired.
   session.addEventListener('status', (e) => { if (/unpaired/.test(e.detail.text)) checkPairing(); });
@@ -93,6 +93,7 @@ function onControl(msg) {
     if (host) {
       host.displays = msg.displays;
       if (msg.active != null) host.active = msg.active;
+      host.awaitingMatch = false;
       applySettings();
     }
   } else if (msg.type === 'displayChanged' && msg.id != null) {
@@ -107,6 +108,14 @@ function onControl(msg) {
     if (tuneWindow) tuneWindow.push(msg);
   } else if (msg.type === 'error' && typeof msg.message === 'string') {
     setStatus(`Host: ${msg.message}`, ui.status.dataset.state);
+    if (host) {
+      // Whatever was asked for may not have applied; let the next change (or this one) go again.
+      lastSent = null;
+      if (host.awaitingMatch) {
+        host.awaitingMatch = false;
+        applySettings();
+      }
+    }
   }
 }
 
@@ -115,10 +124,13 @@ function applySettings() {
   if (!session || !host?.config || tuning) return;
   if (settings.matchHost && !host.matched) {
     host.matched = true;
+    host.awaitingMatch = true;
     const { width, height } = settingsStore.screenPixels();
-    // The host answers with a fresh display list, which brings us back here with the new size.
+    // The host answers with a fresh display list (or an error), which brings us back here; the
+    // stream is sized for the new resolution then, not twice.
     session.sendControl({ type: 'setHostResolution', width, height });
   }
+  if (host.awaitingMatch) return;
   sendConfig(currentConfig());
 }
 
@@ -208,6 +220,7 @@ async function measureWindow(ms) {
     keyframeRequests: got.reduce((n, h) => n + (h.keyframeRequests ?? 0), 0),
     loss: Math.max(clientLoss ?? 0, ...hostLoss),
     bweKbps: last?.bweKbps ?? null,
+    hostFps: got.length ? got.reduce((x, h) => x + (h.fps ?? 0), 0) / got.length : null,
     encodeMs: encode.length ? encode.reduce((x, y) => x + y, 0) / encode.length : null,
     decodeMs: s.decodeMs,
   };
@@ -233,7 +246,7 @@ async function autoTune() {
     onProgress: (text) => setStatus(text, 'connecting'),
   });
   ui.autotune.textContent = 'Stop auto-tune';
-  for (const el of [ui.resolution, ui.bitrate, ui.fps, ui.quality]) el.disabled = true;
+  for (const el of [ui.resolution, ui.bitrate, ui.fps, ui.quality, ui.display, ui.matchHost]) el.disabled = true;
   try {
     const { config, summary } = await tuning.run();
     settings.bitrate = String(config.bitrateKbps);
@@ -241,13 +254,14 @@ async function autoTune() {
     settingsStore.save(settings);
     setStatus(summary, 'connected');
   } catch (err) {
-    if (!(err instanceof Cancelled)) throw err;
-    setStatus('Auto-tune stopped', session ? 'connected' : 'idle');
+    if (err instanceof Cancelled) setStatus('Auto-tune stopped', session ? 'connected' : 'idle');
+    else setStatus(`Auto-tune failed: ${err.message}`, session ? 'connected' : 'idle');
   } finally {
     tuning = null;
     tuneWindow = null;
     ui.autotune.textContent = 'Auto-tune (test)';
-    for (const el of [ui.resolution, ui.bitrate, ui.fps, ui.quality]) el.disabled = false;
+    for (const el of [ui.resolution, ui.bitrate, ui.fps, ui.quality, ui.matchHost]) el.disabled = false;
+    ui.display.disabled = ui.display.options.length < 2;
     showSettings();
     if (session) applySettings();
   }

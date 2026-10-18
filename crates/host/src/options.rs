@@ -4,7 +4,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 
 use anyhow::{Context, bail};
-use ws_proto::{DisplayId, VideoCodec, VideoConfig};
+use ws_proto::{DisplayId, VideoCodec, VideoConfig, VideoQuality};
 
 pub const USAGE: &str = "\
 ws-host [serve] [options]      run the host (the default)
@@ -23,6 +23,7 @@ serve options:
   --web-root DIR       web client to serve, default <exe dir>/web
   --display N          display to stream first, default the primary
   --codec h264|h265|av1  --size WxH  --fps F  --kbps K   stream settings
+  --quality speed|balanced|clarity  encoder effort, default balanced
   --mic-device NAME    playback device the browser mic plays into, default \"CABLE Input\"
   --no-mic             don't play the browser mic
   --no-audio           don't send game audio
@@ -109,6 +110,7 @@ impl ServeOptions {
                 }
                 "--fps" => media.video.fps = value()?.parse().context("--fps")?,
                 "--kbps" => media.video.bitrate_kbps = value()?.parse().context("--kbps")?,
+                "--quality" => media.video.quality = parse_quality(value()?)?,
                 "--mic-device" => media.mic_device = Some(value()?.clone()),
                 "--no-mic" => no_mic = true,
                 "--no-audio" => media.game_audio = false,
@@ -163,6 +165,15 @@ pub fn parse_codec(s: &str) -> anyhow::Result<VideoCodec> {
         "h265" | "hevc" => VideoCodec::H265,
         "av1" => VideoCodec::Av1,
         c => bail!("unknown codec {c}"),
+    })
+}
+
+pub fn parse_quality(s: &str) -> anyhow::Result<VideoQuality> {
+    Ok(match s {
+        "speed" => VideoQuality::Speed,
+        "balanced" => VideoQuality::Balanced,
+        "clarity" => VideoQuality::Clarity,
+        q => bail!("unknown quality {q}"),
     })
 }
 
@@ -225,9 +236,12 @@ mod tests {
             "2",
             "--pair",
             "--allow-resolution-change",
+            "--quality",
+            "speed",
         ])
         .unwrap();
         assert!(o.media.allow_resolution_change);
+        assert_eq!(o.media.video.quality, VideoQuality::Speed);
         assert_eq!((o.port, o.ice_tcp_port), (9000, Some(9001)));
         assert_eq!(o.media.mic_device, None);
         assert_eq!(o.public_ips, vec![IpAddr::from([203, 0, 113, 5])]);
@@ -244,5 +258,6 @@ mod tests {
         assert!(parse(&["--size", "1921x1080"]).is_err());
         assert!(parse(&["--port", "65535"]).is_err());
         assert!(parse(&["--bogus"]).is_err());
+        assert!(parse(&["--quality", "max"]).is_err());
     }
 }

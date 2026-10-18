@@ -175,6 +175,14 @@ impl Shared {
     fn keyframe_sent(&self) {
         *self.keyframe_asked.lock().expect("keyframe lock") = None;
     }
+
+    /// The keyframe answering a request never went out: ask again now
+    /// rather than after [`KEYFRAME_RETRY`], since every frame until the
+    /// next keyframe is held back.
+    fn keyframe_lost(&self) {
+        self.keyframe_sent();
+        self.keyframe_needed();
+    }
 }
 
 /// Handle to the transport task. Cheap to clone.
@@ -294,14 +302,21 @@ impl Transport {
     /// sent yet it is discarded and [`TransportEvent::KeyframeNeeded`] is
     /// raised (while connected), because later frames reference it.
     pub fn send_video(&self, frame: EncodedFrame) {
+        let keyframe = frame.keyframe;
         let replaced = self
             .shared
             .frame
             .lock()
             .expect("video slot lock")
             .replace(frame);
-        if replaced.is_some() && self.shared.connected.load(Ordering::Relaxed) {
-            self.shared.keyframe_needed();
+        if let Some(old) = replaced {
+            if self.shared.connected.load(Ordering::Relaxed) {
+                if old.keyframe && !keyframe {
+                    self.shared.keyframe_lost();
+                } else {
+                    self.shared.keyframe_needed();
+                }
+            }
         }
         self.shared.notify.notify_one();
     }
@@ -383,8 +398,12 @@ impl Driver {
                     if let (Some(frame), Some(s)) = (frame, &mut self.session) {
                         match s.write_video(&frame, Instant::now()) {
                             VideoWrite::Sent if frame.keyframe => shared.keyframe_sent(),
+                            VideoWrite::Sent => {}
+                            VideoWrite::Skipped if frame.keyframe && s.is_connected() => {
+                                shared.keyframe_lost()
+                            }
                             VideoWrite::Late | VideoWrite::Broken => shared.keyframe_needed(),
-                            _ => {}
+                            VideoWrite::Skipped => {}
                         }
                     }
                 }

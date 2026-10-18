@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { AutoTune, Cancelled, problem } from '../../js/autotune.js';
 
 const base = { codec: 'h264', width: 1920, height: 1080, fps: 60, bitrateKbps: 20000, quality: 'balanced' };
-const clean = { freezes: 0, keyframeRequests: 0, loss: 0, bweKbps: null, decodeMs: 2, encodeMs: 3 };
+const clean = { freezes: 0, keyframeRequests: 0, loss: 0, bweKbps: null, hostFps: 60, decodeMs: 2, encodeMs: 3 };
 
 test('problems in a measurement window', () => {
   assert.equal(problem(clean, base), null);
@@ -12,12 +12,14 @@ test('problems in a measurement window', () => {
   assert.match(problem({ ...clean, loss: 0.05 }, base), /5\.0% packet loss/);
   assert.match(problem({ ...clean, bweKbps: 12000 }, base), /12 Mb\/s/);
   assert.equal(problem({ ...clean, bweKbps: 19000 }, base), null);
+  // A still screen sends little, and the estimate stays low: not a network problem.
+  assert.equal(problem({ ...clean, bweKbps: 3000, hostFps: 10 }, base), null);
   assert.match(problem({ ...clean, encodeMs: 12 }, base), /encode too slow/);
   assert.match(problem({ ...clean, decodeMs: 12 }, base), /decode too slow/);
 });
 
 // A fake link that carries up to `capKbps` and a host that encodes `clarity` too slowly.
-function run(capKbps, slowClarity = false) {
+function run(capKbps, slowClarity = false, still = false) {
   const applied = [];
   let current = base;
   const tune = new AutoTune({
@@ -26,7 +28,8 @@ function run(capKbps, slowClarity = false) {
     wait: async () => {},
     measure: async () => ({
       ...clean,
-      bweKbps: Math.min(current.bitrateKbps, capKbps),
+      bweKbps: still ? 2000 : Math.min(current.bitrateKbps, capKbps),
+      hostFps: still ? 10 : 60,
       encodeMs: slowClarity && current.quality === 'clarity' ? 14 : 3,
     }),
   });
@@ -46,6 +49,13 @@ test('steps quality down when the encoder can not keep up', async () => {
   const r = await run(1_000_000, true);
   assert.equal(r.config.bitrateKbps, 127500);
   assert.equal(r.config.quality, 'balanced');
+});
+
+test('says so when the picture was still', async () => {
+  const r = await run(3000, false, true);
+  assert.equal(r.config.bitrateKbps, 127500);
+  assert.match(r.summary, /mostly still/);
+  assert.doesNotMatch((await run(55000)).summary, /mostly still/);
 });
 
 test('falls back to the floor when nothing passes', async () => {

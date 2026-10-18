@@ -56,12 +56,22 @@ estimate, up to `--kbps` or the bitrate chosen in the browser. If the browser
 can't decode `--codec`, the host falls back to H.264 and says so in the
 browser.
 
+`--quality` (or Quality in the browser) sets how hard NVENC works on each
+frame. The default is `balanced` on purpose: NVENC preset P4 at up to
+1080p60 and P3 up to 1440p60, stepping down above that. That costs a few
+milliseconds of encode time over `speed` (P1, the old fixed setting) and
+gives a much sharper picture in fast motion at the same bitrate. Use
+`speed` on an older GPU or at very high resolutions or frame rates;
+`clarity` gives the most detail per bit.
+
 `--allow-resolution-change` lets the browser switch the streamed display's
 resolution to the largest one that fits its screen ("Match host resolution"
 in the browser). It is off by default because it changes this PC's screen.
-The change is temporary: it is never saved as the display's setting, it is
-undone when the browser disconnects or the host exits, and a reboot clears
-it too.
+The change is temporary: it is never saved as the display's setting, and
+the host puts the resolution back when the browser disconnects or when the
+host quits (including after a crash in the media code). If the host process
+is killed or its console window closed, Windows should still revert it, but
+Microsoft doesn't document that; a reboot always clears it.
 
 Two drivers are needed on the host for gamepads and the microphone. Keyboard,
 mouse and game audio need nothing extra.

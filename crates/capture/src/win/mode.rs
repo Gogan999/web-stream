@@ -1,6 +1,7 @@
 //! Changes a display's desktop resolution, temporarily (`CDS_FULLSCREEN`):
-//! the change is never written to the registry, so restoring, a reboot or
-//! the host exiting puts the user's own setting back.
+//! the change is never written to the registry, so restoring or a reboot
+//! puts the user's own setting back (and Windows is expected to when the
+//! host process ends, though that is not documented).
 
 use windows::Win32::Graphics::Gdi::{
     CDS_FULLSCREEN, CDS_TYPE, ChangeDisplaySettingsExW, DEVMODEW, DISP_CHANGE,
@@ -12,9 +13,9 @@ use ws_proto::DisplayId;
 
 use super::{display, init_process};
 use crate::modes::{Mode, pick_mode};
-use crate::{CaptureError, Result};
+use crate::{CaptureError, ModeChange, Result};
 
-pub(crate) fn set_display_mode(id: DisplayId, width: u32, height: u32) -> Result<(u32, u32)> {
+pub(crate) fn set_display_mode(id: DisplayId, width: u32, height: u32) -> Result<ModeChange> {
     init_process();
     let name = HSTRING::from(display::find(id)?.gdi_name);
     let current = enum_mode(&name, ENUM_CURRENT_SETTINGS)
@@ -29,8 +30,13 @@ pub(crate) fn set_display_mode(id: DisplayId, width: u32, height: u32) -> Result
             id.0
         ))
     })?;
-    if mode(current) == want {
-        return Ok((want.width, want.height));
+    let change = ModeChange {
+        width: want.width,
+        height: want.height,
+        changed: mode(current) != want,
+    };
+    if !change.changed {
+        return Ok(change);
     }
     let dm = DEVMODEW {
         dmSize: size_of::<DEVMODEW>() as u16,
@@ -50,7 +56,7 @@ pub(crate) fn set_display_mode(id: DisplayId, width: u32, height: u32) -> Result
         hz = want.refresh_hz,
         "display resolution changed"
     );
-    Ok((want.width, want.height))
+    Ok(change)
 }
 
 pub(crate) fn restore_display_mode(id: DisplayId) -> Result<()> {

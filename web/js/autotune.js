@@ -1,6 +1,6 @@
 // Auto-tune (test): steps the stream through bitrates, then encoder qualities, and keeps the best
-// that streams cleanly. Run it while something is moving on screen; a still desktop needs few bits
-// and passes everything.
+// that streams cleanly. Run it while something is moving on screen: a still desktop needs few bits,
+// so the network is never really loaded, and the result says so.
 //
 // The policy lives here; main.js supplies apply(config), measure(ms) and wait(ms).
 
@@ -16,18 +16,27 @@ export class Cancelled extends Error {
 }
 
 // Why a measurement window is not good enough, or null if it is.
-// m: { freezes, keyframeRequests, loss, bweKbps, decodeMs, encodeMs } over the window (any may be null).
+// m: { freezes, keyframeRequests, loss, bweKbps, hostFps, decodeMs, encodeMs } over the window
+// (any may be null).
 export function problem(m, config) {
   const frameMs = 1000 / config.fps;
   if (m.freezes > 0) return 'the picture froze';
   if (m.keyframeRequests > 1) return 'frames were dropped on the way';
   if (m.loss != null && m.loss > 0.02) return `${(m.loss * 100).toFixed(1)}% packet loss`;
-  if (m.bweKbps != null && m.bweKbps < config.bitrateKbps * 0.85) {
+  // The estimate only climbs as far as what is sent, and a still picture sends little, so it says
+  // something only while the picture moves.
+  if (moving(m, config) && m.bweKbps != null && m.bweKbps < config.bitrateKbps * 0.85) {
     return `the network only carries about ${(m.bweKbps / 1000).toFixed(0)} Mb/s`;
   }
   if (m.encodeMs != null && m.encodeMs > frameMs * 0.6) return `host encode too slow (${m.encodeMs.toFixed(1)} ms)`;
   if (m.decodeMs != null && m.decodeMs > frameMs * 0.6) return `browser decode too slow (${m.decodeMs.toFixed(1)} ms)`;
   return null;
+}
+
+// Whether the picture was moving: the host encodes at the full frame rate only then (a still
+// desktop is re-sent about 10 times a second).
+export function moving(m, config) {
+  return m.hostFps != null && m.hostFps >= config.fps * 0.8;
 }
 
 const mbps = (kbps) => `${(kbps / 1000).toFixed(kbps % 1000 ? 1 : 0)} Mb/s`;
@@ -53,7 +62,7 @@ export class AutoTune {
     const m = await this.measure(MEASURE_MS);
     if (this.cancelled) throw new Cancelled();
     const why = problem(m, config);
-    this.log.push({ label, ok: !why, why, metrics: m });
+    this.log.push({ label, ok: !why, why, metrics: m, moving: moving(m, config) });
     return !why;
   }
 
@@ -80,8 +89,10 @@ export class AutoTune {
     const config = { ...this.base, bitrateKbps, quality };
     this.apply(config);
     const failed = this.log.find((t) => !t.ok);
+    const still = !this.log.some((t) => t.moving);
     const summary = `Auto-tune: ${mbps(bitrateKbps)}, ${quality}` +
-      (failed ? ` (${failed.label} failed: ${failed.why})` : '');
+      (failed ? ` (${failed.label} failed: ${failed.why})` : '') +
+      (still ? ' (the picture was mostly still, so the network was not really tested)' : '');
     return { config, summary };
   }
 }

@@ -456,13 +456,13 @@ impl Session {
     }
 }
 
-/// Pick the payload type for the encoder's codec. For H.264 prefer
-/// packetization-mode 1, which is what NVENC/AMF/QSV slices need.
 /// Whether `frame` can be decoded after the frames sent so far.
 fn follows(next_index: Option<u64>, frame: &EncodedFrame) -> bool {
     frame.keyframe || next_index == Some(frame.frame_index)
 }
 
+/// Pick the payload type for the encoder's codec. For H.264 prefer
+/// packetization-mode 1, which is what NVENC/AMF/QSV slices need.
 fn video_pt<'a>(
     params: impl Iterator<Item = &'a str0m::format::PayloadParams>,
     codec: VideoCodec,

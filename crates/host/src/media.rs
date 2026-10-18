@@ -34,11 +34,19 @@ const AUDIO_QUEUE: usize = 4;
 const CONTROL_QUEUE: usize = 64;
 /// A pipeline that stopped by itself is restarted after this pause.
 const VIDEO_RESTART_DELAY: Duration = Duration::from_secs(1);
-/// Encode below the bandwidth estimate to leave room for audio, data and
-/// estimate error.
-const BWE_HEADROOM: f64 = 0.9;
-/// Bitrate changes smaller than this fraction are not passed to the encoder.
-const BITRATE_STEP: f64 = 0.1;
+/// Encode this far below the bandwidth estimate. The transport's pacer sends
+/// at 1.1x the estimate, and RTP and encryption add about 5%, so at 0.9 a
+/// fast-motion stream (every frame at its full budget) used nearly all of
+/// the send rate: any dip backed the queue up, frames went out late and
+/// were dropped, and each drop forced a keyframe. That showed as the picture
+/// going soft and sharpening again several times a second. 0.75 leaves the
+/// pacer a third more than the encoder makes.
+const BWE_HEADROOM: f64 = 0.75;
+/// Increases smaller than this fraction are not passed to the encoder.
+const BITRATE_STEP_UP: f64 = 0.1;
+/// Decreases follow sooner: an encoder above the send rate backs up the
+/// queue.
+const BITRATE_STEP_DOWN: f64 = 0.02;
 const MIN_KBPS: u32 = 500;
 /// Room above the video ceiling the bandwidth estimate may probe for, for
 /// game audio and data channels.
@@ -524,8 +532,7 @@ impl Media {
         let kbps = self.start_kbps();
         let Some(live) = &mut self.live else { return };
         let Some(video) = &live.video else { return };
-        let step = f64::from(live.bitrate_kbps) * BITRATE_STEP;
-        if force || f64::from(kbps.abs_diff(live.bitrate_kbps)) >= step {
+        if force || worth_changing(live.bitrate_kbps, kbps) {
             tracing::debug!(kbps, "encoder bitrate");
             video.pipeline.set_bitrate(kbps);
             live.bitrate_kbps = kbps;
@@ -911,6 +918,17 @@ fn rect(d: &DisplayInfo) -> DisplayRect {
     }
 }
 
+/// Whether moving the encoder from `current` to `target` kbps is worth a
+/// reconfigure.
+fn worth_changing(current: u32, target: u32) -> bool {
+    let step = if target < current {
+        BITRATE_STEP_DOWN
+    } else {
+        BITRATE_STEP_UP
+    };
+    f64::from(target.abs_diff(current)) >= f64::from(current) * step
+}
+
 /// Encoder bitrate for a bandwidth estimate, capped by the configured rate.
 fn target_kbps(bwe_bps: u64, max_kbps: u32) -> u32 {
     let kbps = (bwe_bps as f64 * BWE_HEADROOM / 1000.0) as u64;
@@ -962,8 +980,16 @@ mod tests {
 
     #[test]
     fn bitrate_follows_estimate_under_cap() {
-        assert_eq!(target_kbps(10_000_000, 20_000), 9_000);
+        assert_eq!(target_kbps(10_000_000, 20_000), 7_500);
         assert_eq!(target_kbps(100_000_000, 20_000), 20_000);
         assert_eq!(target_kbps(100_000, 20_000), MIN_KBPS);
+    }
+
+    #[test]
+    fn bitrate_follows_down_sooner_than_up() {
+        assert!(!worth_changing(10_000, 10_500));
+        assert!(worth_changing(10_000, 11_000));
+        assert!(!worth_changing(10_000, 9_900));
+        assert!(worth_changing(10_000, 9_800));
     }
 }

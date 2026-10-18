@@ -22,6 +22,10 @@ const PLAYOUT_DELAY_EXT_ID: u8 = 5;
 /// The file channel may hold at most this much unsent data, so transfers
 /// leave room in the shared SCTP buffer (128 KiB) for control and input.
 const FILE_MAX_BUFFERED: usize = 64 * 1024;
+/// Longest the frames behind a keyframe are exempt from the late-frame
+/// drop. Several frame times: enough for a keyframe at a few times the
+/// frame budget to drain at the pacing rate.
+const KEYFRAME_DRAIN_MAX: Duration = Duration::from_millis(250);
 /// When the file channel drains below this, [`TransportEvent::ChannelLow`].
 const FILE_LOW: usize = 16 * 1024;
 
@@ -54,8 +58,9 @@ pub struct Session {
     max_resend_age: Duration,
     max_send_delay: Duration,
     max_bitrate_bps: u64,
-    /// When the last keyframe went into the send queue.
-    keyframe_at: Option<Instant>,
+    /// When the last keyframe went into the send queue, while the queue
+    /// has not emptied since.
+    keyframe_draining: Option<Instant>,
     /// `frame_index` a non-keyframe must have to be sent: the one right
     /// after the last frame sent. `None` until a keyframe goes out.
     next_index: Option<u64>,
@@ -133,7 +138,7 @@ impl Session {
             max_resend_age: config.max_resend_age,
             max_send_delay: config.max_send_delay,
             max_bitrate_bps: config.max_bitrate_bps,
-            keyframe_at: None,
+            keyframe_draining: None,
             next_index: None,
             unsupported_codec: None,
         };
@@ -247,20 +252,29 @@ impl Session {
         }
     }
 
-    /// How long the oldest unsent video packet has waited in the pacer, if
-    /// that backlog is from frames after the last keyframe. A keyframe is
-    /// big and is allowed to drain; the frames right behind it need it.
+    /// How long the oldest unsent video packet has waited in the pacer.
+    /// Zero while the queue is still draining the last keyframe: a keyframe
+    /// is several frames' worth of data, so the frames right behind it
+    /// always wait, and dropping them would only ask for another keyframe,
+    /// which backs the queue up again (the stream then "pulses" between a
+    /// soft keyframe and sharper frames a few times a second). The pass
+    /// ends when the queue empties, or after [`KEYFRAME_DRAIN_MAX`] so real
+    /// congestion still drops frames.
     fn video_backlog(&mut self, now: Instant) -> Duration {
-        let keyframe_at = self.keyframe_at;
+        let draining_since = self.keyframe_draining;
         let mut api = self.rtc.direct_api();
         let Some(tx) = api.stream_tx_by_mid(self.video, None) else {
             return Duration::ZERO;
         };
         let Some(first_unsent) = tx.queue_info().and_then(|q| q.first_unsent()) else {
+            self.keyframe_draining = None;
             return Duration::ZERO;
         };
-        if keyframe_at.is_some_and(|k| first_unsent <= k) {
-            return Duration::ZERO;
+        if let Some(k) = draining_since {
+            if now.saturating_duration_since(k) < KEYFRAME_DRAIN_MAX {
+                return Duration::ZERO;
+            }
+            self.keyframe_draining = None;
         }
         now.saturating_duration_since(first_unsent)
     }
@@ -273,12 +287,20 @@ impl Session {
         // tell one went missing (RTP sequence numbers stay continuous), so
         // after any gap only a keyframe may go out.
         if !follows(self.next_index, frame) {
+            tracing::debug!(
+                index = frame.frame_index,
+                "video frame after a gap; dropped"
+            );
             return VideoWrite::Broken;
         }
         // Drop rather than queue: a frame that would wait behind older ones
         // arrives late, and every frame after it would too.
-        if !frame.keyframe && self.video_backlog(now) > self.max_send_delay {
-            return VideoWrite::Late;
+        if !frame.keyframe {
+            let backlog = self.video_backlog(now);
+            if backlog > self.max_send_delay {
+                tracing::debug!(?backlog, "video frame late; dropped");
+                return VideoWrite::Late;
+            }
         }
         let Some(writer) = self.rtc.writer(self.video) else {
             return VideoWrite::Skipped;
@@ -303,7 +325,7 @@ impl Session {
         {
             Ok(()) => {
                 if frame.keyframe {
-                    self.keyframe_at = Some(now);
+                    self.keyframe_draining = Some(now);
                 }
                 self.next_index = Some(frame.frame_index + 1);
                 VideoWrite::Sent
@@ -412,7 +434,10 @@ impl Session {
                 }
                 TransportEvent::Disconnected
             }
-            Event::KeyframeRequest(req) if req.mid == self.video => TransportEvent::KeyframeNeeded,
+            Event::KeyframeRequest(req) if req.mid == self.video => {
+                tracing::debug!(kind = ?req.kind, "browser asked for a keyframe");
+                TransportEvent::KeyframeNeeded
+            }
             Event::EgressBitrateEstimate(BweKind::Twcc { estimate, .. })
             | Event::EgressBitrateEstimate(BweKind::Remb { estimate, .. }) => {
                 TransportEvent::TargetBitrate(estimate.as_u64())

@@ -61,7 +61,7 @@ impl DisplayRect {
 /// Makes the process per-monitor DPI aware (v2), so system metrics are in
 /// the same physical pixels as DXGI's display coordinates. Fails harmlessly
 /// when awareness was already set, e.g. by the manifest or another crate.
-fn ensure_dpi_aware() {
+pub(crate) fn ensure_dpi_aware() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         // SAFETY: no pointer arguments.

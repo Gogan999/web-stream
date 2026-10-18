@@ -5,6 +5,7 @@
 use tokio::sync::mpsc;
 use ws_audio::{LoopbackConfig, MicConfig, MicReceiver};
 use ws_input::DisplayRect;
+use ws_input::cursor::CursorState;
 use ws_proto::{AudioPacket, HostControl};
 
 #[cfg(windows)]
@@ -32,6 +33,12 @@ mod imp {
 
     pub fn start_mic(config: MicConfig) -> ws_audio::Result<(Mic, MicReceiver)> {
         ws_audio::MicPlayback::start(config)
+    }
+
+    /// Reads the host pointer; called from the cursor thread only.
+    pub fn cursor_reader() -> Option<impl FnMut() -> Option<CursorState>> {
+        let mut reader = ws_input::cursor::CursorReader::new();
+        Some(move || reader.read())
     }
 }
 
@@ -97,6 +104,10 @@ mod imp {
 
     pub fn start_mic(_: MicConfig) -> ws_audio::Result<(Mic, MicReceiver)> {
         Err(unsupported())
+    }
+
+    pub fn cursor_reader() -> Option<impl FnMut() -> Option<CursorState>> {
+        None::<fn() -> Option<CursorState>>
     }
 
     fn unsupported() -> ws_audio::AudioError {

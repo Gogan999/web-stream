@@ -1,6 +1,7 @@
 import { Session } from './session.js';
 import { defaultSignalUrl } from './signaling.js';
 import { InputCapture } from './input.js';
+import { CursorView } from './cursor.js';
 import { snapshot, compute, format, formatHost, FrameTimer } from './stats.js';
 import * as pairing from './pairing.js';
 import * as settingsStore from './settings.js';
@@ -12,6 +13,7 @@ const $ = (id) => document.getElementById(id);
 const ui = {
   connect: $('connect'), status: $('status'), display: $('display'), mouseMode: $('mouse-mode'),
   fullscreen: $('fullscreen'), statsToggle: $('stats-toggle'), stage: $('stage'), video: $('video'), stats: $('stats'),
+  cursor: $('cursor'),
   unpair: $('unpair'), pair: $('pair'), deviceName: $('device-name'), pairStart: $('pair-start'),
   pairCode: $('pair-code'), pairConfirm: $('pair-confirm'), pairMsg: $('pair-msg'),
   resolution: $('resolution'), bitrate: $('bitrate'), fps: $('fps'), quality: $('quality'),
@@ -25,6 +27,7 @@ const signalUrl = defaultSignalUrl();
 
 let session = null;
 let input = null;
+let cursor = null;
 let statsTimer = 0;
 let prevSnap = null;
 const frameTimer = new FrameTimer(ui.video);
@@ -64,6 +67,8 @@ async function connect() {
   });
   input.setMode(ui.mouseMode.value);
   input.start();
+  cursor = new CursorView({ video: ui.video, overlay: ui.cursor, displaySize: () => host?.displays.find((d) => d.id === host.active) ?? null });
+  cursor.setMode(ui.mouseMode.value);
   ui.connect.textContent = 'Disconnect';
   if (!ui.stats.hidden) startStats();
   try {
@@ -78,7 +83,9 @@ async function connect() {
 function disconnect() {
   if (input) input.stop();
   if (session) session.close();
+  cursor?.stop();
   input = null;
+  cursor = null;
   session = null;
   stopStats();
   tuning?.cancel();
@@ -88,6 +95,7 @@ function disconnect() {
 }
 
 function onControl(msg) {
+  if (cursor?.onControl(msg)) return;
   if (msg.type === 'displays' && Array.isArray(msg.displays)) {
     ui.display.replaceChildren(...msg.displays.map((d, i) => {
       const o = document.createElement('option');
@@ -369,6 +377,7 @@ function stopStats() {
 function setMouseMode(mode) {
   ui.mouseMode.value = mode;
   input?.setMode(mode);
+  cursor?.setMode(mode);
 }
 
 // Ctrl+Alt+Shift+<key>. Returns true when handled so the key is not sent to the host.

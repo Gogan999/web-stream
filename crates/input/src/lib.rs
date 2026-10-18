@@ -20,6 +20,7 @@
 //! sends nothing, so without it a held stick keeps the game moving until the
 //! connection times out.
 
+pub mod cursor;
 pub mod gamepad;
 pub mod handler;
 pub mod keymap;
@@ -27,6 +28,8 @@ pub mod mouse;
 
 #[cfg(windows)]
 mod win;
+#[cfg(windows)]
+mod win_cursor;
 
 pub use handler::{
     GAMEPAD_HOLDOFF, GAMEPAD_STALE_AFTER, GamepadKind, HandleError, InputHandler, InputSink,

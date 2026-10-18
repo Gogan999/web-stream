@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{DisplayId, DisplayInfo, VideoConfig};
+use crate::{CursorShape, DisplayId, DisplayInfo, VideoConfig};
 
 /// Identifies a file the host has offered this session. The host only ever
 /// serves ids it issued, never paths from the client.
@@ -85,6 +85,16 @@ pub enum HostControl {
     /// Sent about once a second while video runs, for the browser's stats
     /// overlay and auto-tune.
     VideoStats(VideoStats),
+    /// The host pointer changed shape, or was hidden or shown. Sent when the
+    /// stream starts and on every change.
+    CursorShape(CursorShape),
+    /// Where the host pointer's hotspot is, in desktop pixels from the
+    /// streamed display's top-left corner (outside the display when the
+    /// pointer is on another one). Sent on change; only the newest matters.
+    CursorPosition {
+        x: i32,
+        y: i32,
+    },
     Error {
         message: String,
     },

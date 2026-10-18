@@ -293,6 +293,10 @@ fn sized_frame(index: u64, keyframe: bool, bytes: usize) -> EncodedFrame {
     f
 }
 
+/// The real-time tests stream at full rate for seconds and check timing;
+/// run together they starve each other on a small CI runner.
+static REAL_TIME: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Heavy motion: a constant-bitrate encoder fills every frame to its budget
 /// (bitrate / fps), following the bandwidth estimate as the host does. Each keyframe request
 /// is a soft "reset" frame on screen, so a steady stream must not need more
@@ -304,6 +308,7 @@ fn sized_frame(index: u64, keyframe: bool, bytes: usize) -> EncodedFrame {
 // transport's sends.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn full_frames_at_the_target_bitrate_need_almost_no_keyframes() {
+    let _alone = REAL_TIME.lock().await;
     // On failure, the transport's debug log says why each keyframe was asked for.
     let _ = tracing_subscriber::fmt()
         .with_env_filter("ws_transport=debug")
@@ -428,6 +433,7 @@ async fn full_frames_at_the_target_bitrate_need_almost_no_keyframes() {
 /// keyframe nor a frame.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn lost_packets_are_resent_not_keyframed() {
+    let _alone = REAL_TIME.lock().await;
     // On failure, the transport's debug log says why each keyframe was asked for.
     let _ = tracing_subscriber::fmt()
         .with_env_filter("ws_transport=debug")

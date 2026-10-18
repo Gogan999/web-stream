@@ -22,6 +22,8 @@ import { defaultDeviceName } from '../../js/pairing.js';
 test('device name from user agent', () => {
   assert.equal(defaultDeviceName('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0 Safari/537.36'), 'Chrome on Windows');
   assert.equal(defaultDeviceName('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/141.0 Safari/537.36 Edg/141.0'), 'Edge on macOS');
+  assert.equal(defaultDeviceName('Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0 Mobile Safari/537.36'), 'Chrome on Android');
+  assert.equal(defaultDeviceName('Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1'), 'Safari on iPhone');
 });
 
 import { pairingError } from '../../js/pairing.js';
@@ -30,4 +32,12 @@ test('pairing error messages', () => {
   assert.match(pairingError(423, { error: 'locked' }), /Reopen pairing/);
   assert.match(pairingError(409, { error: 'busy' }), /Another pairing is in progress/);
   assert.match(pairingError(500), /Pairing failed \(500\)/);
+});
+
+import { pictureScale } from '../../js/input.js';
+test('touch points clamp to the picture; trackpad scale is picture pixels per CSS pixel', () => {
+  const rect = { left: 0, top: 0, width: 1000, height: 1000 };
+  assert.deepEqual(videoPoint(500, 100, rect, 1920, 1080, true), { x: 0.5, y: 0 });
+  assert.equal(pictureScale(rect, 1920, 1080), 1.92);
+  assert.equal(pictureScale(rect, 0, 0), 1);
 });

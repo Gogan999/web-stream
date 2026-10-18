@@ -4,6 +4,7 @@ import * as P from './protocol.js';
 import { hidUsage } from './keymap.js';
 import { toXInput, sameState } from './gamepad.js';
 import { CHANNELS } from './session.js';
+import { TouchGestures, HOLD_MS } from './touch.js';
 
 const GAMEPAD_KEEPALIVE_MS = 100;
 const MAX_PADS = 4;
@@ -15,8 +16,16 @@ export function wheelToDelta(e) {
   return { dx: Math.round(e.deltaX * scale), dy: Math.round(-e.deltaY * scale) };
 }
 
+// Picture pixels per CSS pixel of the letterboxed video, so a trackpad drag across the picture moves
+// the host cursor across the display.
+export function pictureScale(rect, videoW, videoH) {
+  if (!videoW || !videoH || !rect.width || !rect.height) return 1;
+  return Math.max(videoW / rect.width, videoH / rect.height);
+}
+
 // Map a client point to 0..1 over the actual picture inside a letterboxed (object-fit: contain) video.
-export function videoPoint(clientX, clientY, rect, videoW, videoH) {
+// With `clamp`, points in the black bars snap to the nearest edge instead of being dropped.
+export function videoPoint(clientX, clientY, rect, videoW, videoH, clamp = false) {
   if (!videoW || !videoH) return null;
   const scale = Math.min(rect.width / videoW, rect.height / videoH);
   const w = videoW * scale;
@@ -25,16 +34,42 @@ export function videoPoint(clientX, clientY, rect, videoW, videoH) {
   const top = rect.top + (rect.height - h) / 2;
   const x = (clientX - left) / w;
   const y = (clientY - top) / h;
+  if (clamp) return { x: Math.min(1, Math.max(0, x)), y: Math.min(1, Math.max(0, y)) };
   if (x < 0 || x > 1 || y < 0 || y > 1) return null;
   return { x, y };
 }
 
 export class InputCapture {
-  constructor({ session, video, stage, onHotkey }) {
+  constructor({ session, video, stage, onHotkey, keyTarget = null, onKeySent = null, onReleaseAll = null, displaySize = null }) {
     this.session = session;
     this.video = video;
     this.stage = stage;
     this.onHotkey = onHotkey;
+    this.keyTarget = keyTarget; // the on-screen keyboard's textarea (softkeys.js)
+    this.onKeySent = onKeySent;
+    this.onReleaseAll = onReleaseAll; // softkeys: forget sticky modifiers the host just let go
+    this.displaySize = displaySize; // () => { width, height } of the host display, for trackpad scaling
+    this.touchActive = false; // the stream was touched last, so keys from a paired keyboard go to it
+    this.touchRest = { x: 0, y: 0 }; // sub-pixel trackpad motion not yet sent
+    this.holdTimer = 0;
+    this.gestures = new TouchGestures({
+      move: (dx, dy) => this.touchMove(dx, dy),
+      moveTo: (x, y, reliable) => this.touchMoveTo(x, y, reliable),
+      button: (b, down) => {
+        this.rel(P.mouseButton(b, down));
+        if (!down) this.onKeySent?.(0, false); // a click ends a sticky Ctrl/Alt/Shift/Win
+      },
+      wheel: (dx, dy) => {
+        const b = this.touchBatch;
+        if (b) {
+          b.wheel = { dx: (b.wheel?.dx ?? 0) + dx, dy: (b.wheel?.dy ?? 0) + dy };
+          return;
+        }
+        this.rel(P.wheel(dx, dy));
+        this.onKeySent?.(0, false);
+      },
+      haptic: () => navigator.vibrate?.(15),
+    });
     this.mode = 'relative'; // 'relative' (pointer lock) or 'absolute'
     this.heldKeys = new Set();
     this.pads = new Array(MAX_PADS).fill(null); // last sent state per slot
@@ -50,7 +85,8 @@ export class InputCapture {
 
   // Input reaches the host only while the user has clearly handed it to the stream.
   get active() {
-    return this.locked || (this.mode === 'absolute' && this.stageFocused);
+    return this.locked || (this.mode === 'absolute' && this.stageFocused) || this.touchActive ||
+      (!!this.keyTarget && document.activeElement === this.keyTarget);
   }
 
   rel(buf) { this.session.sendInput(CHANNELS.INPUT, buf); }
@@ -61,17 +97,38 @@ export class InputCapture {
 
     // Mouse events are taken at the document so they are seen once whether or not the
     // pointer is locked; ours() keeps toolbar clicks out of the stream.
-    const ours = (e) => this.locked || e.target === v;
+    // Mouse events a touch screen synthesizes are skipped; touch goes through the pointer handlers below.
+    const fromTouch = (e) => e.sourceCapabilities?.firesTouchEvents === true;
+    const ours = (e) => (this.locked || e.target === v) && !fromTouch(e);
     document.addEventListener('mousedown', (e) => { if (ours(e)) this.onMouseDown(e); }, opt);
     document.addEventListener('mouseup', (e) => { if (ours(e)) this.onMouseUp(e); }, opt);
     document.addEventListener('mousemove', (e) => { if (ours(e)) this.onMouseMove(e); }, opt);
     document.addEventListener('wheel', (e) => { if (ours(e)) this.onWheel(e); }, { ...opt, passive: false });
     v.addEventListener('contextmenu', (e) => e.preventDefault(), opt);
-    v.addEventListener('mouseenter', () => { this.stageFocused = true; }, opt);
-    v.addEventListener('mouseleave', () => {
+    v.addEventListener('mouseenter', (e) => { if (!fromTouch(e)) this.stageFocused = true; }, opt);
+    v.addEventListener('mouseleave', (e) => {
+      if (fromTouch(e)) return;
       if (this.mode === 'absolute') this.releaseAll();
       this.stageFocused = false;
     }, opt);
+
+    const touch = (e) => e.pointerType === 'touch';
+    v.addEventListener('pointerdown', (e) => { if (touch(e)) this.onTouchDown(e); }, opt);
+    v.addEventListener('pointermove', (e) => {
+      if (!touch(e)) return;
+      // Coalesced events keep a fast swipe's full path; the sum is the same, but the hold/tap
+      // slop check sees every step.
+      const steps = e.getCoalescedEvents?.();
+      this.batchTouch(() => {
+        for (const c of steps?.length ? steps : [e]) this.gestures.move(e.pointerId, c.clientX, c.clientY);
+      });
+    }, opt);
+    v.addEventListener('pointerup', (e) => { if (touch(e)) this.onTouchUp(e); }, opt);
+    v.addEventListener('pointercancel', (e) => { if (touch(e)) this.gestures.cancel(); }, opt);
+    // Touching anything outside the stream (toolbar, settings) hands keys back to the page.
+    document.addEventListener('pointerdown', (e) => {
+      if (!this.stage.contains(e.target) && e.target !== this.keyTarget) this.touchActive = false;
+    }, { ...opt, capture: true });
 
     window.addEventListener('keydown', (e) => this.onKey(e, true), { ...opt, capture: true });
     window.addEventListener('keyup', (e) => this.onKey(e, false), { ...opt, capture: true });
@@ -95,11 +152,13 @@ export class InputCapture {
     this.releaseAll();
     this.abort.abort();
     cancelAnimationFrame(this.rafId);
+    clearTimeout(this.holdTimer);
     if (this.locked) document.exitPointerLock();
   }
 
   setMode(mode) {
     this.mode = mode;
+    this.gestures.setMode(mode === 'relative' ? 'trackpad' : 'direct');
     if (mode === 'absolute' && this.locked) document.exitPointerLock();
   }
 
@@ -158,6 +217,66 @@ export class InputCapture {
     }
   }
 
+  onTouchDown(e) {
+    e.preventDefault(); // no synthesized mouse events, no focus change
+    this.video.setPointerCapture?.(e.pointerId);
+    this.touchActive = true;
+    if (this.video.paused) this.video.play().catch(() => {}); // autoplay refused (iOS): a touch starts it
+    this.gestures.down(e.pointerId, e.clientX, e.clientY, performance.now());
+    clearTimeout(this.holdTimer);
+    this.holdTimer = setTimeout(() => this.gestures.tick(performance.now()), HOLD_MS + 10);
+  }
+
+  onTouchUp(e) {
+    this.gestures.up(e.pointerId, performance.now());
+    if (!this.gestures.points.size) clearTimeout(this.holdTimer);
+  }
+
+  // Coalesced touch steps go out as one motion message and one wheel message per event.
+  batchTouch(fn) {
+    this.touchBatch = { wheel: null };
+    try {
+      fn();
+    } finally {
+      const w = this.touchBatch.wheel;
+      this.touchBatch = null;
+      if (w) this.gestures.out.wheel(w.dx, w.dy);
+      this.flushMotion();
+    }
+  }
+
+  touchMove(dx, dy) {
+    // Relative motion is in host display pixels, so scale CSS px -> video px -> display px.
+    const vw = this.video.videoWidth;
+    const d = this.displaySize?.();
+    const toDisplay = d?.width && vw ? d.width / vw : 1;
+    const scale = pictureScale(this.video.getBoundingClientRect(), vw, this.video.videoHeight) * toDisplay;
+    const r = this.touchRest;
+    r.x += dx * scale;
+    r.y += dy * scale;
+    const ix = Math.trunc(r.x);
+    const iy = Math.trunc(r.y);
+    r.x -= ix;
+    r.y -= iy;
+    this.motion.dx += ix;
+    this.motion.dy += iy;
+    if (!this.touchBatch) this.flushMotion();
+  }
+
+  // `reliable`: where a click is about to land (touch down, drag start), the position goes on the
+  // ordered reliable channel ahead of the button, so a lost or held motion packet can't misplace it.
+  touchMoveTo(x, y, reliable) {
+    const p = videoPoint(x, y, this.video.getBoundingClientRect(), this.video.videoWidth, this.video.videoHeight, true);
+    if (!p) return;
+    if (reliable) {
+      this.motion.abs = null;
+      this.rel(P.mouseAbs(p.x, p.y));
+      return;
+    }
+    this.motion.abs = p;
+    if (!this.touchBatch) this.flushMotion();
+  }
+
   onWheel(e) {
     if (!this.active) return;
     e.preventDefault();
@@ -173,6 +292,11 @@ export class InputCapture {
       return;
     }
     if (!this.active) return;
+    // From the on-screen keyboard, characters are read from the text it types (softkeys.js);
+    // only named keys with a real key code are taken here. 229 is "the IME has it".
+    // Shortcuts (Ctrl/Alt/Win + key) from a hardware keyboard are still taken here.
+    if (e.target === this.keyTarget &&
+        (e.keyCode === 229 || (e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey))) return;
     const usage = hidUsage(e.code);
     if (!usage) return;
     e.preventDefault();
@@ -180,10 +304,14 @@ export class InputCapture {
     if (down) this.heldKeys.add(usage);
     else if (!this.heldKeys.delete(usage)) return; // key went down before we had focus
     this.rel(P.key(usage, down));
+    this.onKeySent?.(usage, down);
   }
 
   releaseAll() {
+    this.gestures.reset();
+    clearTimeout(this.holdTimer);
     this.heldKeys.clear();
+    this.onReleaseAll?.();
     this.motion = { dx: 0, dy: 0, abs: null };
     this.rel(P.releaseAll());
   }

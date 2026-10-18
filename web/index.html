@@ -2,7 +2,9 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="theme-color" content="#000000">
+<link rel="manifest" href="manifest.webmanifest">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'">
 <title>web-stream</title>
 <link rel="stylesheet" href="style.css">
@@ -12,6 +14,8 @@
 <header id="bar">
   <button id="connect" type="button">Connect</button>
   <span id="status" data-state="idle">Not connected</span>
+  <button id="more-toggle" type="button" aria-expanded="false" aria-controls="more">Settings</button>
+  <div id="more">
   <label>Display <select id="display" disabled></select></label>
   <label>Resolution <select id="resolution"></select></label>
   <label>Bitrate <select id="bitrate"></select></label>
@@ -25,9 +29,10 @@
       <option value="absolute">Absolute (desktop)</option>
     </select>
   </label>
-  <button id="fullscreen" type="button">Fullscreen</button>
   <button id="stats-toggle" type="button" aria-pressed="false">Stats</button>
   <button id="unpair" type="button" hidden>Unpair</button>
+  </div>
+  <button id="fullscreen" type="button">Fullscreen</button>
   <span class="hint">Ctrl+Alt+Shift: 1–9 display · S stats · F fullscreen · M mouse mode · Q release mouse</span>
 </header>
 <form id="pair" hidden>
@@ -42,6 +47,27 @@
 <main id="stage" tabindex="-1">
   <video id="video" autoplay playsinline disablepictureinpicture disableremoteplayback></video>
   <pre id="stats" hidden></pre>
+  <div id="touchbar">
+    <button id="kbd-toggle" type="button" aria-pressed="false" title="On-screen keyboard">Keyboard</button>
+    <button id="keys-toggle" type="button" aria-pressed="false" title="Esc, Tab, Ctrl, Alt, Win, arrows">Keys</button>
+    <button id="touch-fullscreen" type="button">Fullscreen</button>
+  </div>
+  <div id="keys" hidden>
+    <button type="button" data-key="Escape">Esc</button>
+    <button type="button" data-key="Tab">Tab</button>
+    <button type="button" data-key="ControlLeft" aria-pressed="false">Ctrl</button>
+    <button type="button" data-key="AltLeft" aria-pressed="false">Alt</button>
+    <button type="button" data-key="ShiftLeft" aria-pressed="false">Shift</button>
+    <button type="button" data-key="MetaLeft" aria-pressed="false">Win</button>
+    <button type="button" data-key="ArrowLeft">←</button>
+    <button type="button" data-key="ArrowUp">↑</button>
+    <button type="button" data-key="ArrowDown">↓</button>
+    <button type="button" data-key="ArrowRight">→</button>
+    <button type="button" data-key="Delete">Del</button>
+    <button type="button" data-key="Backspace">Bksp</button>
+    <button type="button" data-key="Enter">Enter</button>
+  </div>
+  <textarea id="kbd-input" tabindex="-1" aria-label="On-screen keyboard input" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" enterkeyhint="enter"></textarea>
 </main>
 </body>
 </html>

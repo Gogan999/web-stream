@@ -46,6 +46,12 @@ pub enum ClientControl {
     RequestFile {
         id: FileId,
     },
+    /// Whether to send [`HostControl::CursorPosition`]: the browser draws
+    /// the host pointer itself in relative mouse mode, while in absolute
+    /// mode its own pointer is already where the host's is. Off until asked.
+    SetCursorPositions {
+        enabled: bool,
+    },
     Ping {
         client_time_ms: f64,
     },
@@ -90,7 +96,9 @@ pub enum HostControl {
     CursorShape(CursorShape),
     /// Where the host pointer's hotspot is, in desktop pixels from the
     /// streamed display's top-left corner (outside the display when the
-    /// pointer is on another one). Sent on change; only the newest matters.
+    /// pointer is on another one). Sent on change while the pointer shows and
+    /// the browser asked with [`ClientControl::SetCursorPositions`]; only the
+    /// newest matters.
     CursorPosition {
         x: i32,
         y: i32,

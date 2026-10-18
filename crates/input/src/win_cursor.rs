@@ -3,6 +3,7 @@
 //! `GetIconInfo` + `GetDIBits` for the image of anything else.
 
 use std::ffi::c_void;
+use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::POINT;
 use windows::Win32::Graphics::Gdi::{
@@ -17,7 +18,15 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::PCWSTR;
 use ws_proto::{CursorImage, CursorKind, MAX_CURSOR_SIDE};
 
-use crate::cursor::{CursorLook, CursorState, ImageIds, rgba_from_color, rgba_from_monochrome};
+/// Largest pointer bitmap read; it is scaled to [`MAX_CURSOR_SIDE`].
+const MAX_READ_SIDE: u32 = 512;
+/// An unchanged handle is read again this often: a handle can be destroyed
+/// and reused for another image, and an animated cursor keeps its handle.
+const REREAD: Duration = Duration::from_secs(1);
+
+use crate::cursor::{
+    CursorLook, CursorState, ImageIds, fit, rgba_from_color, rgba_from_monochrome,
+};
 
 /// Reads the pointer; one per streaming session, polled from one thread.
 pub struct CursorReader {
@@ -27,7 +36,7 @@ pub struct CursorReader {
     ids: ImageIds,
     /// The handle last read and what it looked like, so an unchanged pointer
     /// costs one call.
-    last: Option<(usize, CursorLook)>,
+    last: Option<(usize, Instant, CursorLook)>,
 }
 
 impl Default for CursorReader {
@@ -89,10 +98,10 @@ impl CursorReader {
             });
         }
         let look = match &self.last {
-            Some((h, look)) if *h == handle => look.clone(),
+            Some((h, at, look)) if *h == handle && at.elapsed() < REREAD => look.clone(),
             _ => {
                 let look = self.look(info.hCursor);
-                self.last = Some((handle, look.clone()));
+                self.last = Some((handle, Instant::now(), look.clone()));
                 look
             }
         };
@@ -173,16 +182,19 @@ fn image(cursor: HCURSOR) -> Option<CursorImage> {
         let mask = pixels(&dc, info.hbmMask, width, height);
         (width, height, rgba_from_color(&color, mask.as_deref()))
     };
-    if width == 0 || height == 0 || width > MAX_CURSOR_SIDE || height > MAX_CURSOR_SIDE {
+    if width == 0 || height == 0 {
         return None;
     }
-    Some(CursorImage {
-        width,
-        height,
-        hot_x: info.xHotspot.min(width - 1),
-        hot_y: info.yHotspot.min(height - 1),
-        rgba,
-    })
+    Some(fit(
+        CursorImage {
+            width,
+            height,
+            hot_x: info.xHotspot.min(width - 1),
+            hot_y: info.yHotspot.min(height - 1),
+            rgba,
+        },
+        MAX_CURSOR_SIDE,
+    ))
 }
 
 fn size(bitmap: HBITMAP) -> Option<(u32, u32)> {
@@ -204,7 +216,7 @@ fn size(bitmap: HBITMAP) -> Option<(u32, u32)> {
 
 /// The bitmap as 32-bit top-down BGRA, whatever its own format.
 fn pixels(dc: &ScreenDc, bitmap: HBITMAP, width: u32, height: u32) -> Option<Vec<u8>> {
-    if width > MAX_CURSOR_SIDE || height > MAX_CURSOR_SIDE * 2 {
+    if width > MAX_READ_SIDE || height > MAX_READ_SIDE * 2 {
         return None;
     }
     let mut info = BITMAPINFO {

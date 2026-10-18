@@ -49,7 +49,10 @@ async function connect() {
   session = new Session({ signalUrl, video: ui.video });
   session.addEventListener('status', (e) => setStatus(e.detail.text, e.detail.state));
   session.addEventListener('control', (e) => onControl(e.detail));
-  session.addEventListener('control-open', () => session.sendControl({ type: 'listDisplays' }));
+  session.addEventListener('control-open', () => {
+    session.sendControl({ type: 'listDisplays' });
+    sendCursorMode();
+  });
   session.addEventListener('closed', () => {
     ui.connect.textContent = 'Connect';
     ui.display.disabled = true;
@@ -378,6 +381,12 @@ function setMouseMode(mode) {
   ui.mouseMode.value = mode;
   input?.setMode(mode);
   cursor?.setMode(mode);
+  sendCursorMode();
+}
+
+// The host sends pointer positions only for relative mode, where the browser draws the pointer.
+function sendCursorMode() {
+  session?.sendControl({ type: 'setCursorPositions', enabled: ui.mouseMode.value === 'relative' });
 }
 
 // Ctrl+Alt+Shift+<key>. Returns true when handled so the key is not sent to the host.

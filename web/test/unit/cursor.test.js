@@ -20,7 +20,7 @@ test('cursor images are checked before use', () => {
   assert.equal(decodeImage({ width: 2, height: 1, hotX: 0, hotY: 0, rgba }), null, 'wrong length');
   assert.equal(decodeImage({ width: 1, height: 1, hotX: 1, hotY: 0, rgba }), null, 'hotspot outside');
   assert.equal(decodeImage({ width: 1, height: 1, hotX: 0, hotY: 0, rgba: '!!' }), null, 'not base64');
-  assert.equal(decodeImage({ width: 1000, height: 1, hotX: 0, hotY: 0, rgba }), null, 'too big');
+  assert.equal(decodeImage({ width: 129, height: 1, hotX: 0, hotY: 0, rgba }), null, 'too big');
 });
 
 test('overlay sits at the host position, scaled with the picture', () => {

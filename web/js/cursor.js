@@ -1,12 +1,12 @@
 // Shows the host pointer; the video carries none. In absolute mode it is the video's CSS cursor, so
 // the browser draws it with no added latency: standard shapes as the browser's own, anything else as
 // the host's image. In relative mode pointer lock hides the browser's pointer, so the host's image is
-// drawn over the video where the host says its pointer is.
+// drawn over the video where the host says its pointer is; the host sends positions only while the
+// browser asks for them (setCursorPositions).
 
 const CSS_KINDS = new Set(['default', 'pointer', 'text', 'wait', 'progress', 'crosshair', 'move', 'ew-resize',
   'ns-resize', 'nwse-resize', 'nesw-resize', 'not-allowed', 'help', 'none']);
-const MAX_SIDE = 256; // what the host sends at most
-const MAX_CSS_SIDE = 128; // Chrome ignores bigger cursor images
+const MAX_SIDE = 128; // what the host sends at most; also Chrome's limit for CSS cursor images
 // The host's id table holds as many and never reuses an id, so the newest this many are all it may
 // name without resending the image.
 const MAX_IMAGES = 256;
@@ -29,7 +29,7 @@ export function decodeImage(img) {
 // The CSS cursor for a shape; `image` is the host's ({ url, width, height, hotX, hotY }) if known.
 export function cssCursor(kind, image) {
   if (kind !== 'custom' && CSS_KINDS.has(kind)) return kind;
-  if (image?.url && image.width <= MAX_CSS_SIDE && image.height <= MAX_CSS_SIDE) {
+  if (image?.url && image.width <= MAX_SIDE && image.height <= MAX_SIDE) {
     return `url("${image.url}") ${image.hotX} ${image.hotY}, default`;
   }
   return 'default';

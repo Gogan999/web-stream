@@ -125,6 +125,7 @@ test('client streams from mock host, sends input and switches display', { timeou
   assert.match(await cursorStyle(), / 1 0, default$/);
   assert.equal(await client.isVisible('#cursor'), false, 'no overlay in absolute mode');
   await client.selectOption('#mouse-mode', 'relative');
+  await host.waitForFunction(() => window.mockLog.some((e) => e.type === 'setCursorPositions' && e.enabled));
   await sendHost({ type: 'cursorShape', kind: 'ew-resize', id: 1 }); // image already sent: id only
   await client.waitForSelector('#cursor', { state: 'visible' });
   assert.equal(await cursorStyle(), '');

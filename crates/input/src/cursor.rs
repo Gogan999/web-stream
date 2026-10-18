@@ -64,6 +64,33 @@ impl ImageIds {
     }
 }
 
+/// `image` scaled down (nearest pixel) to fit `max` per side, hotspot
+/// included; smaller images are returned as they are.
+pub fn fit(image: CursorImage, max: u32) -> CursorImage {
+    let side = image.width.max(image.height);
+    if side <= max || max == 0 {
+        return image;
+    }
+    let scale = |v: u32| (u64::from(v) * u64::from(max) / u64::from(side)) as u32;
+    let (width, height) = (scale(image.width).max(1), scale(image.height).max(1));
+    let mut rgba = Vec::with_capacity(width as usize * height as usize * 4);
+    for y in 0..height {
+        let sy = (u64::from(y) * u64::from(image.height) / u64::from(height)) as usize;
+        for x in 0..width {
+            let sx = (u64::from(x) * u64::from(image.width) / u64::from(width)) as usize;
+            let i = (sy * image.width as usize + sx) * 4;
+            rgba.extend_from_slice(&image.rgba[i..i + 4]);
+        }
+    }
+    CursorImage {
+        width,
+        height,
+        hot_x: scale(image.hot_x).min(width - 1),
+        hot_y: scale(image.hot_y).min(height - 1),
+        rgba,
+    }
+}
+
 /// RGBA from a colour pointer's 32-bit BGRA pixels. Pointers without an
 /// alpha channel take it from the AND mask (also 32-bit, set = transparent).
 pub fn rgba_from_color(bgra: &[u8], mask: Option<&[u8]>) -> Vec<u8> {
@@ -157,6 +184,28 @@ mod tests {
             let id = ids.get(img).0;
             assert!(seen.insert(id), "id {id} reused");
         }
+    }
+
+    #[test]
+    fn big_images_scale_down_with_their_hotspot() {
+        let rgba = (0..256 * 128).flat_map(|i: u32| i.to_le_bytes()).collect();
+        let big = CursorImage {
+            width: 256,
+            height: 128,
+            hot_x: 100,
+            hot_y: 127,
+            rgba,
+        };
+        let small = fit(big, 128);
+        assert_eq!((small.width, small.height), (128, 64));
+        assert_eq!((small.hot_x, small.hot_y), (50, 63));
+        assert_eq!(small.rgba.len(), 128 * 64 * 4);
+        // Pixel (1, 1) comes from (2, 2).
+        assert_eq!(
+            &small.rgba[(128 + 1) * 4..(128 + 2) * 4],
+            &(256 * 2 + 2u32).to_le_bytes()
+        );
+        assert_eq!(fit(image(3), 128), image(3));
     }
 
     #[test]

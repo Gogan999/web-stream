@@ -7,7 +7,6 @@
 //! done in place (`block_in_place`), as are the thread joins when a pipeline
 //! stops; events queue in the transport meanwhile.
 
-use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -16,14 +15,13 @@ use tokio::task::block_in_place;
 use ws_audio::{LoopbackConfig, MicConfig, MicReceiver};
 use ws_capture::VideoPipeline;
 use ws_input::DisplayRect;
-use ws_input::cursor::{CursorLook, CursorState};
 use ws_proto::{
-    ClientControl, CursorKind, CursorShape, DisplayId, DisplayInfo, EncodedFrame, HostControl,
-    VideoCodec, VideoConfig, VideoStats, channels,
+    ClientControl, DisplayId, DisplayInfo, EncodedFrame, HostControl, VideoCodec, VideoConfig,
+    VideoStats, channels,
 };
 use ws_transport::{Transport, TransportConfig, TransportEvent, TransportStats};
 
-use crate::cursor::{CursorThread, CursorWatch};
+use crate::cursor::{CursorSession, CursorTarget};
 use crate::input::InputThread;
 use crate::options::MediaOptions;
 use crate::platform;
@@ -65,7 +63,7 @@ pub async fn run(
     let (control_tx, mut control_rx) = mpsc::channel(CONTROL_QUEUE);
     let (stopped_tx, mut stopped_rx) = mpsc::channel(4);
     let (later_tx, mut later_rx) = mpsc::channel(8);
-    let (cursor_tx, mut cursor_rx) = watch::channel(None);
+    let (cursor_target, _) = watch::channel(CursorTarget::default());
     let mut media = Media {
         transport,
         config: opts.video.clone(),
@@ -77,8 +75,7 @@ pub async fn run(
         unsent: Vec::new(),
         stopped_tx,
         later_tx,
-        cursor_tx,
-        cursor_sent: CursorSent::default(),
+        cursor_target,
         display_origin: (0, 0),
         session: 0,
         rebuild_pending: false,
@@ -108,15 +105,9 @@ pub async fn run(
                 }
                 None => break,
             },
-            Some(msg) = control_rx.recv() => {
-                media.send_control(msg).await;
-            }
+            Some(msg) = control_rx.recv() => media.send_control(msg).await,
             Some(generation) = stopped_rx.recv() => media.video_stopped(generation),
             Some(later) = later_rx.recv() => media.later(later),
-            Ok(()) = cursor_rx.changed() => {
-                let state = cursor_rx.borrow_and_update().clone();
-                media.send_cursor(state).await;
-            }
             _ = &mut shutdown => break,
         }
     }
@@ -205,10 +196,8 @@ struct Media {
     stopped_tx: mpsc::Sender<u64>,
     /// Hands work done elsewhere (or due later) back to the loop.
     later_tx: mpsc::Sender<Later>,
-    /// The cursor thread's newest reading.
-    cursor_tx: CursorWatch,
-    /// What the browser has been told about the pointer.
-    cursor_sent: CursorSent,
+    /// Steers the session's cursor sender (see `cursor.rs`).
+    cursor_target: watch::Sender<CursorTarget>,
     /// Desktop position of the streamed display's top-left corner; pointer
     /// positions are sent relative to it.
     display_origin: (i32, i32),
@@ -243,20 +232,11 @@ struct SentFrames {
     encode_micros: u64,
 }
 
-/// The pointer as the browser last heard it, this session.
-#[derive(Debug, Default)]
-struct CursorSent {
-    look: Option<CursorLook>,
-    position: Option<(i32, i32)>,
-    /// Custom images the browser has (it caches them by id).
-    images: HashSet<u32>,
-}
-
 /// What runs while a browser is connected. Fields drop in order: input is
 /// released first.
 struct Live {
     input: Option<InputThread>,
-    _cursor: Option<CursorThread>,
+    _cursor: CursorSession,
     video: Option<Video>,
     /// Held only to keep game audio capture running.
     _audio: Option<platform::Loopback>,
@@ -312,13 +292,15 @@ impl Media {
                     for msg in std::mem::take(&mut self.unsent) {
                         self.reply(msg);
                     }
-                    self.resend_cursor();
+                    let origin = self.display_origin;
+                    self.cursor_target.send_modify(|t| t.origin = Some(origin));
                 }
             }
             TransportEvent::ChannelClosed(c) => {
                 tracing::debug!(channel = c, "channel closed");
                 if c == channels::CONTROL {
                     self.control_open = false;
+                    self.cursor_target.send_modify(|t| t.origin = None);
                 }
             }
             TransportEvent::ChannelLow(_) => {}
@@ -361,7 +343,7 @@ impl Media {
             None
         };
 
-        let cursor = CursorThread::start(self.cursor_tx.clone());
+        let cursor = CursorSession::start(self.transport.clone(), self.cursor_target.subscribe());
         self.live = Some(Live {
             input,
             _cursor: cursor,
@@ -386,7 +368,7 @@ impl Media {
         self.rebuild_pending = false;
         self.session += 1;
         self.keyframe_requests = 0;
-        self.cursor_sent = CursorSent::default();
+        self.cursor_target.send_replace(CursorTarget::default());
         *self.sent.lock().expect("sent stats lock") = SentFrames::default();
         if let Some(live) = self.live.take() {
             drop_blocking(live);
@@ -593,6 +575,13 @@ impl Media {
             ClientControl::RequestFile { .. } => {
                 self.error("file transfer is not available yet".into());
             }
+            ClientControl::SetCursorPositions { enabled } => {
+                self.cursor_target.send_if_modified(|t| {
+                    let changed = t.positions != enabled;
+                    t.positions = enabled;
+                    changed
+                });
+            }
             ClientControl::Ping { client_time_ms } => {
                 self.reply(HostControl::Pong { client_time_ms });
             }
@@ -622,51 +611,14 @@ impl Media {
 
     fn set_display_origin(&mut self, info: &DisplayInfo) {
         let origin = (info.x, info.y);
-        if origin != self.display_origin {
-            self.display_origin = origin;
-            // Positions are relative to it: send the current one again.
-            self.cursor_sent.position = None;
-            self.cursor_tx.send_modify(|_| {});
-        }
-    }
-
-    /// Tells a browser whose `control` channel just opened what the pointer
-    /// looks like now, without waiting for it to change.
-    fn resend_cursor(&mut self) {
-        self.cursor_sent = CursorSent::default();
-        self.cursor_tx.send_modify(|_| {});
-    }
-
-    /// Sends what changed since the browser last heard: the shape (with its
-    /// image the first time), then the position while the pointer shows.
-    async fn send_cursor(&mut self, state: Option<CursorState>) {
-        let Some(state) = state else { return };
-        if !self.control_open || self.live.is_none() {
-            return;
-        }
-        if self.cursor_sent.look.as_ref() != Some(&state.look) {
-            let shape = shape_message(&state.look, &self.cursor_sent.images);
-            let sent_image = shape.image.is_some().then_some(shape.id).flatten();
-            if !self.send_control(HostControl::CursorShape(shape)).await {
-                return;
+        self.display_origin = origin;
+        self.cursor_target.send_if_modified(|t| match t.origin {
+            Some(o) if o != origin => {
+                t.origin = Some(origin);
+                true
             }
-            self.cursor_sent.images.extend(sent_image);
-            self.cursor_sent.look = Some(state.look.clone());
-        }
-        if state.look.kind == CursorKind::Hidden {
-            return;
-        }
-        let (ox, oy) = self.display_origin;
-        let position = (state.x - ox, state.y - oy);
-        if self.cursor_sent.position != Some(position) {
-            let (x, y) = position;
-            if self
-                .send_control(HostControl::CursorPosition { x, y })
-                .await
-            {
-                self.cursor_sent.position = Some(position);
-            }
-        }
+            _ => false,
+        });
     }
 
     fn set_host_resolution(&mut self, width: u32, height: u32) {
@@ -892,21 +844,18 @@ impl Media {
         }
     }
 
-    /// Whether the message went out (or, before the channel opens, was
-    /// kept for it).
-    async fn send_control(&mut self, msg: HostControl) -> bool {
+    async fn send_control(&mut self, msg: HostControl) {
         if !self.control_open {
             if self.unsent.len() < UNSENT_MAX {
                 self.unsent.push(msg);
-                return true;
             }
-            return false;
+            return;
         }
         let json = match serde_json::to_vec(&msg) {
             Ok(j) => j,
             Err(e) => {
                 tracing::error!("encode control message: {e}");
-                return false;
+                return;
             }
         };
         match self
@@ -914,20 +863,9 @@ impl Media {
             .send_data(channels::CONTROL, false, json)
             .await
         {
-            Ok(true) => true,
-            Ok(false) => {
-                if let HostControl::CursorShape(_) | HostControl::CursorPosition { .. } = msg {
-                    // Tried again on the pointer's next change.
-                    tracing::debug!("control channel full; cursor update dropped");
-                } else {
-                    tracing::warn!("control channel full; dropped {msg:?}");
-                }
-                false
-            }
-            Err(e) => {
-                tracing::debug!("control message not sent: {e}");
-                false
-            }
+            Ok(true) => {}
+            Ok(false) => tracing::warn!("control channel full; dropped {msg:?}"),
+            Err(e) => tracing::debug!("control message not sent: {e}"),
         }
     }
 }
@@ -976,20 +914,6 @@ fn pick_codec(wanted: VideoCodec, accepted: Option<&[VideoCodec]>) -> Option<Vid
         .into_iter()
         .find(|c| accepted.contains(c))
         .or_else(|| accepted.first().copied())
-}
-
-/// The `cursorShape` message for `look`; the image goes along only if the
-/// browser doesn't have it yet.
-fn shape_message(look: &CursorLook, images: &HashSet<u32>) -> CursorShape {
-    CursorShape {
-        kind: look.kind,
-        id: look.image.as_ref().map(|(id, _)| *id),
-        image: look
-            .image
-            .as_ref()
-            .filter(|(id, _)| !images.contains(id))
-            .map(|(_, image)| (**image).clone()),
-    }
 }
 
 fn pick_display(displays: &[DisplayInfo], wanted: Option<DisplayId>) -> Option<&DisplayInfo> {
@@ -1055,37 +979,6 @@ mod tests {
         assert_eq!(pick_codec(H265, Some(&[Av1, H264])), Some(H264));
         assert_eq!(pick_codec(H265, Some(&[Av1])), Some(Av1));
         assert_eq!(pick_codec(H264, Some(&[])), None);
-    }
-
-    #[test]
-    fn custom_cursor_image_goes_once() {
-        let image = Arc::new(ws_proto::CursorImage {
-            width: 1,
-            height: 1,
-            hot_x: 0,
-            hot_y: 0,
-            rgba: vec![0; 4],
-        });
-        let look = CursorLook {
-            kind: CursorKind::Custom,
-            image: Some((4, image)),
-        };
-        let mut have = HashSet::new();
-        let first = shape_message(&look, &have);
-        assert_eq!(first.kind, CursorKind::Custom);
-        assert_eq!(first.id, Some(4));
-        assert!(first.image.is_some());
-        have.insert(4);
-        assert!(shape_message(&look, &have).image.is_none());
-        let text = CursorLook {
-            kind: CursorKind::Text,
-            image: None,
-        };
-        let text = shape_message(&text, &have);
-        assert_eq!(
-            (text.kind, text.id, text.image),
-            (CursorKind::Text, None, None)
-        );
     }
 
     #[test]

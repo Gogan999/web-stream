@@ -112,9 +112,9 @@ export function formatHost(h) {
   return [
     `host enc ${mb(h.encoderKbps)}/${mb(h.maxKbps)} Mb/s  bwe ${mb(h.bweKbps)}  sent ${mb(h.sentKbps)}`,
     `host fps ${f(h.fps)}  encode ${f(h.encodeMs, 1)} ms  keyframes ${h.keyframeRequests ?? '–'}  loss ${h.loss == null ? '–' : (h.loss * 100).toFixed(1) + '%'}`,
-    // Why: the browser lost a packet no resend repaired, the host's send
-    // queue fell behind, frames were dropped another way, or the host's
-    // socket refused packets.
-    `host keyframes: browser ${h.browserKeyframeRequests ?? '–'}  late ${h.lateFrames ?? '–'}  dropped ${h.lostFrames ?? '–'}  send drops ${h.sendDrops ?? '–'}`,
+    // Why keyframes happen: the browser lost a packet no resend repaired, the host's send queue fell
+    // behind, frames were dropped another way, or the host's socket refused packets. Late and dropped
+    // frames the encoder could skip over ("repaired") cost no keyframe.
+    `host keyframes: browser ${h.browserKeyframeRequests ?? '–'}  late ${h.lateFrames ?? '–'}  dropped ${h.lostFrames ?? '–'}  repaired ${h.recoveredFrames ?? '–'}  send drops ${h.sendDrops ?? '–'}`,
   ].join('\n');
 }

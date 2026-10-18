@@ -8,6 +8,11 @@
 //! except for Clarity, which lets a large frame (fast motion, a keyframe)
 //! take a little longer but never more than 20 ms on the wire, so the
 //! transport's late-frame cutoff (50 ms) is not hit by design.
+//!
+//! A keyframe may take [`VideoConfig::keyframe_scale`] times the VBV, but
+//! never more than 200 ms on the wire: the frames queued behind it are only
+//! exempt from the late-frame cutoff for 250 ms (the transport's
+//! `KEYFRAME_DRAIN_MAX`), so a longer one would cost the frames after it.
 
 use ws_proto::{VideoConfig, VideoQuality};
 
@@ -16,6 +21,8 @@ const P1440_60: u64 = 2560 * 1440 * 60;
 const P2160_60: u64 = 3840 * 2160 * 60;
 /// Longest a single frame may take to send at the target bitrate.
 const MAX_BURST_SECS: f64 = 0.020;
+/// Longest a keyframe may take to send at the target bitrate.
+const MAX_KEYFRAME_SECS: f64 = 0.200;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Tuning {
@@ -24,9 +31,23 @@ pub(crate) struct Tuning {
     /// VBV size in frames: the most one frame may take is `bitrate / fps *
     /// vbv_frames` bits.
     pub vbv_frames: f64,
+    /// A keyframe's VBV is this many times `vbv_frames`, 1..=4.
+    pub keyframe_scale: u8,
 }
 
 pub(crate) fn tuning(config: &VideoConfig) -> Tuning {
+    let (preset, vbv_frames) = effort(config);
+    let keyframe_frames = MAX_KEYFRAME_SECS * f64::from(config.fps.max(1));
+    let fits = (keyframe_frames / vbv_frames).floor().clamp(1.0, 4.0) as u8;
+    Tuning {
+        preset,
+        vbv_frames,
+        keyframe_scale: config.keyframe_scale.clamp(1, fits),
+    }
+}
+
+/// The preset and VBV for the config's quality.
+fn effort(config: &VideoConfig) -> (u8, f64) {
     let rate = u64::from(config.width) * u64::from(config.height) * u64::from(config.fps);
     let by_rate = |up_to_1440p60: u8, up_to_4k60: u8, above: u8| {
         if rate <= P1440_60 {
@@ -38,22 +59,19 @@ pub(crate) fn tuning(config: &VideoConfig) -> Tuning {
         }
     };
     match config.quality {
-        VideoQuality::Speed => Tuning {
-            preset: 1,
-            vbv_frames: 1.0,
-        },
-        VideoQuality::Balanced => Tuning {
-            preset: if rate <= P1080_60 {
+        VideoQuality::Speed => (1, 1.0),
+        VideoQuality::Balanced => (
+            if rate <= P1080_60 {
                 4
             } else {
                 by_rate(3, 2, 1)
             },
-            vbv_frames: 1.0,
-        },
-        VideoQuality::Clarity => Tuning {
-            preset: by_rate(6, 4, 2),
-            vbv_frames: (MAX_BURST_SECS * f64::from(config.fps.max(1))).clamp(1.0, 2.0),
-        },
+            1.0,
+        ),
+        VideoQuality::Clarity => (
+            by_rate(6, 4, 2),
+            (MAX_BURST_SECS * f64::from(config.fps.max(1))).clamp(1.0, 2.0),
+        ),
     }
 }
 
@@ -87,6 +105,38 @@ mod tests {
         assert_eq!(tuning(&cfg(1920, 1080, 60, Clarity)).preset, 6);
         assert_eq!(tuning(&cfg(3840, 2160, 60, Clarity)).preset, 4);
         assert_eq!(tuning(&cfg(3840, 2160, 144, Clarity)).preset, 2);
+    }
+
+    #[test]
+    fn keyframes_stay_under_200ms() {
+        let scale = |fps, keyframe_scale, quality| {
+            tuning(&VideoConfig {
+                fps,
+                keyframe_scale,
+                quality,
+                ..Default::default()
+            })
+            .keyframe_scale
+        };
+        use VideoQuality::*;
+        assert_eq!(scale(60, 4, Balanced), 4);
+        assert_eq!(scale(60, 4, Clarity), 4);
+        // 15 fps: 3 frames is 200 ms.
+        assert_eq!(scale(15, 4, Balanced), 3);
+        assert_eq!(scale(10, 4, Balanced), 2);
+        // Always allowed one frame's worth, and never more than asked.
+        assert_eq!(scale(1, 4, Balanced), 1);
+        assert_eq!(scale(60, 2, Speed), 2);
+        for fps in [1, 5, 10, 15, 30, 60, 144] {
+            for q in [Speed, Balanced, Clarity] {
+                let t = tuning(&cfg(1920, 1080, fps, q));
+                let secs = t.vbv_frames * f64::from(t.keyframe_scale) / f64::from(fps);
+                assert!(
+                    secs <= 0.2 || t.keyframe_scale == 1,
+                    "{fps} fps {q:?}: {secs} s"
+                );
+            }
+        }
     }
 
     #[test]

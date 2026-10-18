@@ -37,11 +37,12 @@ const RTX_CACHE_PACKETS: usize = 4096;
 pub enum VideoWrite {
     Sent,
     /// The send queue was too far behind, so the frame was dropped; the
-    /// encoder must send a keyframe.
+    /// encoder must send a frame that skips it, or a keyframe.
     Late,
     /// An earlier frame this one builds on never went out, so the browser
     /// would decode it against the wrong picture (smeared, ghosted motion).
-    /// Dropped; the encoder must send a keyframe.
+    /// Dropped; the encoder must send a frame that skips the gap, or a
+    /// keyframe.
     Broken,
     /// Not connected, or a codec the browser did not accept.
     Skipped,
@@ -288,7 +289,8 @@ impl Session {
         }
         // Every frame references the one before it, and the browser can't
         // tell one went missing (RTP sequence numbers stay continuous), so
-        // after any gap only a keyframe may go out.
+        // after any gap only a keyframe, or a frame the encoder built
+        // without the missing ones, may go out.
         if !follows(self.next_index, frame) {
             tracing::debug!(
                 index = frame.frame_index,
@@ -338,6 +340,12 @@ impl Session {
                 VideoWrite::Skipped
             }
         }
+    }
+
+    /// The first frame the browser has not been sent, once a keyframe has
+    /// gone out: a frame after a gap must not build on it or anything later.
+    pub fn next_index(&self) -> Option<u64> {
+        self.next_index
     }
 
     pub fn write_audio(&mut self, packet: &AudioPacket, now: Instant) {
@@ -487,7 +495,13 @@ impl Session {
 
 /// Whether `frame` can be decoded after the frames sent so far.
 fn follows(next_index: Option<u64>, frame: &EncodedFrame) -> bool {
-    frame.keyframe || next_index == Some(frame.frame_index)
+    frame.keyframe
+        || next_index.is_some_and(|next| {
+            next == frame.frame_index
+                || frame
+                    .recovers_from
+                    .is_some_and(|from| from <= next && next < frame.frame_index)
+        })
 }
 
 /// Pick the payload type for the encoder's codec. For H.264 prefer
@@ -567,6 +581,7 @@ mod tests {
             codec: VideoCodec::H264,
             frame_index,
             keyframe,
+            recovers_from: None,
             capture_time: 0,
             encode_done_time: 0,
             width: 1920,
@@ -586,5 +601,21 @@ mod tests {
         assert!(follows(Some(5), &frame(9, true)));
         // A new encoder session starts over at 0 with a keyframe.
         assert!(follows(Some(500), &frame(0, true)));
+    }
+
+    #[test]
+    fn a_frame_built_without_the_gap_follows_it() {
+        let repair = |index, from| EncodedFrame {
+            recovers_from: Some(from),
+            ..frame(index, false)
+        };
+        // 5..=7 never went out; 8 builds only on frames before 5.
+        assert!(follows(Some(5), &repair(8, 5)));
+        // ...or before 3, which the browser also has.
+        assert!(follows(Some(5), &repair(8, 3)));
+        // 8 may still use 6, which the browser lacks.
+        assert!(!follows(Some(5), &repair(8, 6)));
+        // Still nothing to build on before the first keyframe.
+        assert!(!follows(None, &repair(8, 0)));
     }
 }

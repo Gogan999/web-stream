@@ -1,9 +1,11 @@
-// Stream settings chosen in the browser: bitrate, resolution, frame rate and encoder quality,
-// turned into the host's VideoConfig. Pure functions so they can be tested; main.js owns the UI.
+// Stream settings chosen in the browser: bitrate, resolution, frame rate, encoder quality and keyframe
+// handling, turned into the host's VideoConfig. Pure functions so they can be tested; main.js owns the UI.
 
 export const QUALITIES = Object.freeze(['speed', 'balanced', 'clarity']);
 export const BITRATES_KBPS = Object.freeze([5000, 10000, 15000, 20000, 30000, 50000, 80000, 120000, 150000]);
 export const FRAME_RATES = Object.freeze([30, 60, 90, 120, 144]);
+// How many ordinary frames' worth of bits a keyframe may use: sharper keyframes, longer to send.
+export const KEYFRAME_SCALES = Object.freeze([1, 2, 3, 4]);
 // 'screen' fits this screen, 'native' is the host display's own size; the rest are fixed heights in the
 // display's shape (never above its own size).
 export const RESOLUTIONS = Object.freeze(['screen', 'native', '2160', '1440', '1080', '720']);
@@ -13,7 +15,8 @@ export const AUDIO_KBPS = Object.freeze(['host', '96', '128', '192', '256', '320
 export const AUDIO_FRAMES = Object.freeze(['host', '10', '20']);
 
 export const DEFAULTS = Object.freeze({
-  bitrate: 'auto', resolution: 'screen', fps: 60, quality: 'balanced', matchHost: false, mic: false,
+  bitrate: 'auto', resolution: 'screen', fps: 60, quality: 'balanced', keyframeScale: 2, recoverDrops: true,
+  matchHost: false, mic: false,
   audioKbps: 'host', audioFrame: 'host',
 });
 
@@ -58,7 +61,7 @@ export function videoConfig(settings, { screen, display, codec = 'h264', rotate 
   const fps = Number(settings.fps) || DEFAULTS.fps;
   const bitrateKbps = settings.bitrate === 'auto' ? autoKbps(width, height, fps) : Number(settings.bitrate);
   const quality = QUALITIES.includes(settings.quality) ? settings.quality : DEFAULTS.quality;
-  return { codec, width, height, fps, bitrateKbps, quality };
+  return { codec, width, height, fps, bitrateKbps, quality, keyframeScale: settings.keyframeScale, recoverDrops: settings.recoverDrops };
 }
 
 // The setAudioConfig message for the audio settings; null fields keep the host's own.
@@ -71,9 +74,12 @@ export function audioConfig(settings) {
   };
 }
 
+// A host that predates a field leaves it out: it runs that field's default.
+const HOST_DEFAULTS = { quality: 'balanced', keyframeScale: 2, recoverDrops: true };
+
 export function sameConfig(a, b) {
-  return !!a && !!b && ['codec', 'width', 'height', 'fps', 'bitrateKbps', 'quality']
-    .every((k) => a[k] === b[k] || (k === 'quality' && (a[k] ?? 'balanced') === (b[k] ?? 'balanced')));
+  return !!a && !!b && ['codec', 'width', 'height', 'fps', 'bitrateKbps', 'quality', 'keyframeScale', 'recoverDrops']
+    .every((k) => (a[k] ?? HOST_DEFAULTS[k]) === (b[k] ?? HOST_DEFAULTS[k]));
 }
 
 // This screen in device pixels (what a fullscreen stream is shown at).
@@ -92,6 +98,8 @@ export function sanitize(saved) {
     resolution: RESOLUTIONS.includes(v.resolution) ? v.resolution : DEFAULTS.resolution,
     fps: FRAME_RATES.includes(Number(v.fps)) ? Number(v.fps) : DEFAULTS.fps,
     quality: QUALITIES.includes(v.quality) ? v.quality : DEFAULTS.quality,
+    keyframeScale: KEYFRAME_SCALES.includes(Number(v.keyframeScale)) ? Number(v.keyframeScale) : DEFAULTS.keyframeScale,
+    recoverDrops: v.recoverDrops !== false,
     matchHost: v.matchHost === true,
     mic: v.mic === true,
     audioKbps: AUDIO_KBPS.includes(v.audioKbps) ? v.audioKbps : DEFAULTS.audioKbps,

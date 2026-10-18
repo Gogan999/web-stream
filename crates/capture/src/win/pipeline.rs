@@ -23,8 +23,14 @@ use crate::{CaptureError, Result};
 enum Command {
     Select(DisplayId, std_mpsc::Sender<Result<()>>),
     Keyframe,
+    Recover(u64),
     Bitrate(u32),
 }
+
+/// Frames further back than this are not invalidated one by one; a
+/// keyframe is sent instead. Comfortably more than the encoder keeps as
+/// references, so nothing in the gap can still be referenced.
+const MAX_INVALIDATE: u64 = 16;
 
 pub(crate) struct PipelineHandle {
     commands: Option<std_mpsc::Sender<Command>>,
@@ -83,6 +89,10 @@ impl PipelineHandle {
 
     pub(crate) fn request_keyframe(&self) {
         self.send(Command::Keyframe);
+    }
+
+    pub(crate) fn recover_from(&self, index: u64) {
+        self.send(Command::Recover(index));
     }
 
     pub(crate) fn set_bitrate(&self, kbps: u32) {
@@ -146,6 +156,10 @@ struct Session {
     frames: mpsc::Sender<EncodedFrame>,
     sched: Scheduler,
     frame_index: u64,
+    /// The next frame must not reference frames from this index on, which
+    /// were invalidated: it is tagged so the receiver can let it follow
+    /// the gap.
+    recovers_from: Option<u64>,
     /// Recent GPU/encoder rebuilds, to give up on a persistently broken
     /// device instead of looping.
     recoveries: Vec<Instant>,
@@ -170,6 +184,7 @@ impl Session {
             config,
             frames,
             frame_index: 0,
+            recovers_from: None,
             recoveries: Vec::new(),
             stats: Stats::default(),
         })
@@ -242,6 +257,7 @@ impl Session {
     fn handle(&mut self, cmd: Command) {
         match cmd {
             Command::Keyframe => self.sched.request_keyframe(),
+            Command::Recover(from) => self.recover_from(from),
             Command::Bitrate(kbps) => {
                 if let Err(e) = self.enc.encoder.set_bitrate(kbps) {
                     tracing::warn!("bitrate change to {kbps} kbps failed: {e}");
@@ -260,6 +276,27 @@ impl Session {
                 }
                 let _ = reply.send(result);
             }
+        }
+    }
+
+    /// Frames from `from` on never reached the browser. Invalidates every
+    /// one encoded so far, so the next frame builds only on frames the
+    /// browser has; falls back to a keyframe if the encoder can't, or the
+    /// gap is too long.
+    fn recover_from(&mut self, from: u64) {
+        let next = self.frame_index;
+        if from >= next {
+            return;
+        }
+        let invalidated = self.enc.encoder.can_invalidate()
+            && next - from <= MAX_INVALIDATE
+            && (from..next)
+                .try_for_each(|i| self.enc.encoder.invalidate(i))
+                .is_ok();
+        if invalidated {
+            self.recovers_from = Some(self.recovers_from.map_or(from, |r| r.min(from)));
+        } else {
+            self.sched.request_keyframe();
         }
     }
 
@@ -332,17 +369,18 @@ impl Session {
     /// once the consumer has gone away.
     fn encode(&mut self, now: Instant, job: EncodeJob) -> Result<bool> {
         let start = Instant::now();
-        let bits = self
-            .enc
-            .encoder
-            .encode(mono_micros(job.captured), job.idr)?;
+        let bits = self.enc.encoder.encode(self.frame_index, job.idr)?;
         let done = Instant::now();
 
+        // Only the first frame after an invalidation needs the tag; later
+        // ones build on it. A keyframe needs none.
+        let recovers_from = self.recovers_from.take().filter(|_| !bits.keyframe);
         let frame = EncodedFrame {
             display: self.display,
             codec: self.config.codec,
             frame_index: self.frame_index,
             keyframe: bits.keyframe,
+            recovers_from,
             capture_time: mono_micros(job.captured),
             encode_done_time: mono_now(),
             width: self.config.width,
@@ -358,11 +396,18 @@ impl Session {
                 stats.encoded += 1;
                 true
             }
-            Err(TrySendError::Full(_)) => {
-                // The receiver sees a gap in frame_index; the next paced
-                // frame is an IDR so it can resume.
+            Err(TrySendError::Full(frame)) => {
+                // The receiver sees a gap in frame_index. The next frame
+                // skips over it, or is an IDR if this was one (the browser
+                // may be waiting for it) or the encoder can't skip.
                 stats.dropped += 1;
-                false
+                if !frame.keyframe && self.enc.encoder.invalidate(frame.frame_index).is_ok() {
+                    let from = frame.recovers_from.unwrap_or(frame.frame_index);
+                    self.recovers_from = Some(self.recovers_from.map_or(from, |r| r.min(from)));
+                    true
+                } else {
+                    false
+                }
             }
             Err(TrySendError::Closed(_)) => return Ok(false),
         };

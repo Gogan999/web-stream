@@ -37,8 +37,8 @@ test('resends and keyframe requests are counted per interval', () => {
 });
 
 test('host line names why keyframes happened', () => {
-  const line = formatHost({ keyframeRequests: 3, browserKeyframeRequests: 1, lateFrames: 2, lostFrames: 0, sendDrops: 7 });
-  assert.match(line, /host keyframes: browser 1  late 2  dropped 0  send drops 7/);
+  const line = formatHost({ keyframeRequests: 3, browserKeyframeRequests: 1, lateFrames: 2, lostFrames: 0, recoveredFrames: 2, sendDrops: 7 });
+  assert.match(line, /host keyframes: browser 1  late 2  dropped 0  repaired 2  send drops 7/);
   assert.match(formatHost({ keyframeRequests: 1 }), /browser –/);
 });
 

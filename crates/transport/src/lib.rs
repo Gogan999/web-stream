@@ -9,9 +9,10 @@
 //! Late frames are dropped, never queued: if the send side is behind (a
 //! newer frame arrived before the last was sent, or the pacer queue is older
 //! than [`TransportConfig::max_send_delay`]) it skips to the newest frame and
-//! asks the encoder for a keyframe. Until that keyframe goes out, frames
-//! that build on the skipped one are dropped too, so the browser never
-//! decodes against a picture it doesn't have. NACKs are answered for packets
+//! raises [`TransportEvent::FramesLost`], so the encoder sends a frame that
+//! builds only on what the browser has (or a keyframe). Until that frame goes
+//! out, frames that build on the skipped one are dropped too, so the browser
+//! never decodes against a picture it doesn't have. NACKs are answered for packets
 //! younger than [`TransportConfig::max_resend_age`]: a late resend costs the
 //! browser a short wait, a keyframe costs a stall and a soft picture.
 //!
@@ -48,6 +49,9 @@ const CMD_QUEUE: usize = 64;
 /// A keyframe request is repeated only if no keyframe went out this long
 /// after the last one.
 const KEYFRAME_RETRY: Duration = Duration::from_millis(300);
+/// How long after a host-side drop a frame that skips the gap must go out
+/// before a keyframe is asked for instead.
+const RECOVERY_WAIT: Duration = Duration::from_millis(150);
 
 #[derive(Debug, Clone)]
 pub struct TransportConfig {
@@ -101,6 +105,13 @@ pub enum TransportEvent {
     /// send an IDR or intra refresh now. Not repeated until a keyframe has
     /// been sent (or a short retry interval passes).
     KeyframeNeeded,
+    /// The transport dropped frames from this `frame_index` on (sent too
+    /// late, or built on a dropped frame); the browser never saw them. The
+    /// next frame must build only on earlier ones
+    /// ([`ws_proto::EncodedFrame::recovers_from`]), or be a keyframe.
+    /// Raised again if that frame is dropped too; if none has gone out a
+    /// short while later, [`TransportEvent::KeyframeNeeded`] follows.
+    FramesLost(u64),
     /// Bandwidth estimate, in bits per second; drive the encoder bitrate.
     TargetBitrate(u64),
     ChannelOpen(&'static str),
@@ -141,6 +152,8 @@ pub struct Trouble {
     pub lost_frames: u32,
     /// Packets the host's socket refused (its buffer was full).
     pub send_drops: u32,
+    /// Dropped frames the encoder skipped over without a keyframe.
+    pub recovered: u32,
 }
 
 /// [`Trouble`], counted as it happens.
@@ -150,6 +163,7 @@ struct TroubleCounts {
     late_frames: AtomicU32,
     lost_frames: AtomicU32,
     send_drops: AtomicU32,
+    recovered: AtomicU32,
 }
 
 impl TroubleCounts {
@@ -160,6 +174,7 @@ impl TroubleCounts {
             late_frames: take(&self.late_frames),
             lost_frames: take(&self.lost_frames),
             send_drops: take(&self.send_drops),
+            recovered: take(&self.recovered),
         }
     }
 }
@@ -207,6 +222,10 @@ struct Shared {
     connected: AtomicBool,
     /// When the outstanding keyframe request was made.
     keyframe_asked: Mutex<Option<Instant>>,
+    /// The first frame index the browser is missing after a drop, and when
+    /// it went missing, until a frame skipping the gap or a keyframe goes
+    /// out.
+    recovering: Mutex<Option<(u64, Instant)>>,
     trouble: TroubleCounts,
     events: mpsc::Sender<TransportEvent>,
 }
@@ -231,6 +250,40 @@ impl Shared {
 
     fn keyframe_sent(&self) {
         *self.keyframe_asked.lock().expect("keyframe lock") = None;
+        self.recovered();
+    }
+
+    /// `dropped` did not go out, and the browser has every frame before
+    /// `next`. Asks the encoder to skip the gap, or for a keyframe once
+    /// that has taken too long (or before anything was sent).
+    fn frame_dropped(&self, next: Option<u64>, dropped: &EncodedFrame) {
+        let Some(from) = next else {
+            return self.keyframe_needed();
+        };
+        let now = Instant::now();
+        let mut recovering = self.recovering.lock().expect("recovery lock");
+        match *recovering {
+            Some((f, since)) if f == from => {
+                if now.duration_since(since) >= RECOVERY_WAIT {
+                    drop(recovering);
+                    self.keyframe_needed();
+                } else if dropped.recovers_from.is_some() {
+                    // The repair itself was dropped: skip it too.
+                    drop(recovering);
+                    self.emit(TransportEvent::FramesLost(from));
+                }
+            }
+            _ => {
+                *recovering = Some((from, now));
+                drop(recovering);
+                self.emit(TransportEvent::FramesLost(from));
+            }
+        }
+    }
+
+    /// A frame went out after a gap without a keyframe, or a keyframe did.
+    fn recovered(&self) {
+        self.recovering.lock().expect("recovery lock").take();
     }
 
     /// The keyframe answering a request never went out: ask again now
@@ -287,6 +340,7 @@ impl Transport {
             notify: Notify::new(),
             connected: AtomicBool::new(false),
             keyframe_asked: Mutex::new(None),
+            recovering: Mutex::new(None),
             trouble: TroubleCounts::default(),
             events: events_tx,
         });
@@ -359,9 +413,8 @@ impl Transport {
     /// Hand over the next encoded frame. Frames the send loop has not taken
     /// yet stay queued, so two arriving back to back (the encoder catching up
     /// after a stall) both go out. A keyframe supersedes the queue. Past
-    /// [`VIDEO_QUEUE`] frames the oldest is discarded and
-    /// [`TransportEvent::KeyframeNeeded`] raised (while connected), because
-    /// later frames reference it.
+    /// [`VIDEO_QUEUE`] frames the oldest is discarded; the frame after it
+    /// then can't go out, which raises [`TransportEvent::FramesLost`].
     pub fn send_video(&self, frame: EncodedFrame) {
         let keyframe = frame.keyframe;
         let dropped = {
@@ -382,8 +435,6 @@ impl Transport {
                 bump(&self.shared.trouble.lost_frames);
                 if old.keyframe {
                     self.shared.keyframe_lost();
-                } else {
-                    self.shared.keyframe_needed();
                 }
             }
         }
@@ -467,20 +518,26 @@ impl Driver {
                     let frames = std::mem::take(&mut *shared.frames.lock().expect("video queue lock"));
                     for frame in frames {
                         let Some(s) = &mut self.session else { break };
+                        let next = s.next_index();
                         match s.write_video(&frame, Instant::now()) {
                             VideoWrite::Sent if frame.keyframe => shared.keyframe_sent(),
-                            VideoWrite::Sent => {}
+                            VideoWrite::Sent => {
+                                if next != Some(frame.frame_index) {
+                                    bump(&shared.trouble.recovered);
+                                    shared.recovered();
+                                }
+                            }
                             VideoWrite::Skipped if frame.keyframe && s.is_connected() => {
                                 bump(&shared.trouble.lost_frames);
                                 shared.keyframe_lost()
                             }
                             VideoWrite::Late => {
                                 bump(&shared.trouble.late_frames);
-                                shared.keyframe_needed()
+                                shared.frame_dropped(next, &frame)
                             }
                             VideoWrite::Broken => {
                                 bump(&shared.trouble.lost_frames);
-                                shared.keyframe_needed()
+                                shared.frame_dropped(next, &frame)
                             }
                             VideoWrite::Skipped => {}
                         }

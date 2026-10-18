@@ -155,6 +155,9 @@ pub struct VideoStats {
     /// Packets the host's socket refused because its buffer was full.
     #[serde(default)]
     pub send_drops: u32,
+    /// Late or dropped frames the encoder skipped over without a keyframe.
+    #[serde(default)]
+    pub recovered_frames: u32,
 }
 
 #[cfg(test)]

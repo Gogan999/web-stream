@@ -196,6 +196,7 @@ fn encode_loop(transport: Transport, want_keyframe: Arc<AtomicBool>) {
                 codec: VideoCodec::Av1,
                 frame_index: pkt.input_frameno,
                 keyframe: pkt.frame_type == FrameType::KEY,
+                recovers_from: None,
                 capture_time: capture.as_micros() as u64,
                 encode_done_time: start.elapsed().as_micros() as u64,
                 width: W as u32,

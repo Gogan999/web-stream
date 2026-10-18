@@ -4,6 +4,14 @@
 //! parameter sets repeated on every IDR so a decoder can join at any
 //! keyframe.
 //!
+//! Keyframes get [`VideoConfig::keyframe_scale`] frames' worth of bits, so
+//! the picture doesn't turn to mush every time the stream has to restart
+//! from one. Where the GPU supports it, a frame that never reached the
+//! browser is invalidated instead ([`NvEncoder::invalidate`]): the encoder
+//! goes back to an older reference the browser does have, and no keyframe
+//! is needed. Frames are tagged with their `frame_index` as NVENC's input
+//! timestamp so they can be named.
+//!
 //! Runs synchronously: one frame in flight, and `encode` returns once the
 //! bitstream is ready. That is the lowest-latency mode for a single stream.
 
@@ -111,6 +119,9 @@ pub(crate) struct NvEncoder {
     config: Box<nv::NV_ENC_CONFIG>,
     fps: u32,
     vbv_frames: f64,
+    keyframe_scale: u8,
+    /// The GPU can invalidate reference frames, and the config asks for it.
+    can_invalidate: bool,
     input: nv::NV_ENC_REGISTERED_PTR,
     bitstream: nv::NV_ENC_OUTPUT_PTR,
 }
@@ -145,6 +156,8 @@ impl NvEncoder {
             config: Box::default(),
             fps: cfg.fps,
             vbv_frames: 1.0,
+            keyframe_scale: cfg.keyframe_scale.clamp(1, 4),
+            can_invalidate: false,
             input: ptr::null_mut(),
             bitstream: ptr::null_mut(),
         };
@@ -160,7 +173,7 @@ impl NvEncoder {
             "nvEncCreateBitstreamBuffer",
         )?;
         this.bitstream = bs.bitstreamBuffer;
-        tracing::info!(codec = ?cfg.codec, cfg.width, cfg.height, cfg.fps, cfg.bitrate_kbps, quality = ?cfg.quality, "NVENC ready");
+        tracing::info!(codec = ?cfg.codec, cfg.width, cfg.height, cfg.fps, cfg.bitrate_kbps, quality = ?cfg.quality, cfg.keyframe_scale, invalidation = this.can_invalidate, "NVENC ready");
         Ok(this)
     }
 
@@ -211,6 +224,17 @@ impl NvEncoder {
             )));
         }
 
+        self.can_invalidate = cfg.recover_drops
+            && self
+                .cap(
+                    codec_guid,
+                    nv::NV_ENC_CAPS::NV_ENC_CAPS_SUPPORT_REF_PIC_INVALIDATION,
+                )
+                .is_ok_and(|v| v > 0);
+        // With invalidation the encoder needs older pictures to fall back
+        // on; one reference (the ultra-low-latency default) leaves it none.
+        let refs = if self.can_invalidate { DPB_FRAMES } else { 0 };
+
         let mut config = preset.presetCfg;
         config.gopLength = nv::NVENC_INFINITE_GOPLENGTH;
         config.frameIntervalP = 1;
@@ -232,6 +256,9 @@ impl NvEncoder {
                 VideoCodec::H264 => {
                     let h = &mut codec.h264Config;
                     h.idrPeriod = nv::NVENC_INFINITE_GOPLENGTH;
+                    if refs > 0 {
+                        h.maxNumRefFrames = refs;
+                    }
                     h.level = nv::NV_ENC_LEVEL::NV_ENC_LEVEL_H264_52.0;
                     h.set_repeatSPSPPS(1);
                     set_vui_bt709(&mut h.h264VUIParameters);
@@ -239,6 +266,9 @@ impl NvEncoder {
                 VideoCodec::H265 => {
                     let h = &mut codec.hevcConfig;
                     h.idrPeriod = nv::NVENC_INFINITE_GOPLENGTH;
+                    if refs > 0 {
+                        h.maxNumRefFramesInDPB = refs;
+                    }
                     h.level = nv::NV_ENC_LEVEL::NV_ENC_LEVEL_HEVC_51.0;
                     h.tier = nv::NV_ENC_LEVEL::NV_ENC_TIER_HEVC_MAIN.0;
                     h.set_repeatSPSPPS(1);
@@ -247,6 +277,9 @@ impl NvEncoder {
                 VideoCodec::Av1 => {
                     let a = &mut codec.av1Config;
                     a.idrPeriod = nv::NVENC_INFINITE_GOPLENGTH;
+                    if refs > 0 {
+                        a.maxNumRefFramesInDPB = refs;
+                    }
                     a.level = nv::NV_ENC_LEVEL::NV_ENC_LEVEL_AV1_51.0;
                     a.tier = 0;
                     a.set_repeatSeqHdr(1);
@@ -316,7 +349,27 @@ impl NvEncoder {
     }
 
     /// Encodes the current contents of the registered input texture.
+    /// `timestamp` names the frame for [`Self::invalidate`].
     pub(crate) fn encode(&mut self, timestamp: u64, force_idr: bool) -> Result<EncodedBits> {
+        // Let the keyframe take a few frames' worth of bits, then go back.
+        // A failed change only costs keyframe sharpness.
+        let big_keyframe = force_idr && self.keyframe_scale > 1;
+        if big_keyframe {
+            let vbv = self.vbv_frames * f64::from(self.keyframe_scale);
+            if let Err(e) = self.reconfigure_rate(self.kbps(), vbv, self.keyframe_scale) {
+                tracing::debug!("larger keyframe budget refused: {e}");
+            }
+        }
+        let bits = self.encode_input(timestamp, force_idr);
+        if big_keyframe {
+            if let Err(e) = self.reconfigure_rate(self.kbps(), self.vbv_frames, 1) {
+                tracing::warn!("restoring the frame budget after a keyframe failed: {e}");
+            }
+        }
+        bits
+    }
+
+    fn encode_input(&mut self, timestamp: u64, force_idr: bool) -> Result<EncodedBits> {
         let mut map = nv::NV_ENC_MAP_INPUT_RESOURCE {
             version: nv::NV_ENC_MAP_INPUT_RESOURCE_VER,
             registeredResource: self.input,
@@ -390,10 +443,38 @@ impl NvEncoder {
         Ok(bits)
     }
 
+    /// Stops the encoder referencing the frame encoded with `timestamp`, and
+    /// every frame built on it. The next frame uses an older reference, or
+    /// is coded intra (but is not an IDR) if none is left.
+    pub(crate) fn invalidate(&mut self, timestamp: u64) -> Result<()> {
+        if !self.can_invalidate {
+            return Err(CaptureError::Platform(
+                "reference invalidation not available".into(),
+            ));
+        }
+        let status = unsafe { call!(self.api, nvEncInvalidateRefFrames(self.encoder, timestamp)) };
+        self.check(status, "nvEncInvalidateRefFrames")
+    }
+
+    pub(crate) fn can_invalidate(&self) -> bool {
+        self.can_invalidate
+    }
+
     /// Changes the bitrate in place; takes effect on the next frame.
     pub(crate) fn set_bitrate(&mut self, kbps: u32) -> Result<()> {
+        self.reconfigure_rate(kbps, self.vbv_frames, 1)
+    }
+
+    fn kbps(&self) -> u32 {
+        self.config.rcParams.averageBitRate / 1000
+    }
+
+    fn reconfigure_rate(&mut self, kbps: u32, vbv_frames: f64, keyframe_scale: u8) -> Result<()> {
         let previous = self.config.rcParams;
-        apply_rate(&mut self.config, kbps, self.fps, self.vbv_frames);
+        apply_rate(&mut self.config, kbps, self.fps, vbv_frames);
+        // The ratio of keyframe to ordinary frame bits rate control aims for
+        // (ultra-low latency defaults to 1).
+        self.config.rcParams.lowDelayKeyFrameScale = keyframe_scale;
         let mut params = nv::NV_ENC_RECONFIGURE_PARAMS {
             version: nv::NV_ENC_RECONFIGURE_PARAMS_VER,
             reInitEncodeParams: *self.init,
@@ -417,6 +498,24 @@ impl NvEncoder {
                 self.last_error(status)
             )))
         }
+    }
+
+    /// One capability of this GPU's encoder for `codec`.
+    fn cap(&self, codec: nv::GUID, cap: nv::NV_ENC_CAPS) -> Result<i32> {
+        let mut param = nv::NV_ENC_CAPS_PARAM {
+            version: nv::NV_ENC_CAPS_PARAM_VER,
+            capsToQuery: cap,
+            ..Default::default()
+        };
+        let mut value = 0;
+        let status = unsafe {
+            call!(
+                self.api,
+                nvEncGetEncodeCaps(self.encoder, codec, &mut param, &mut value)
+            )
+        };
+        self.check(status, "nvEncGetEncodeCaps")?;
+        Ok(value)
     }
 
     fn last_error(&self, status: nv::NVENCSTATUS) -> String {
@@ -451,6 +550,10 @@ impl Drop for NvEncoder {
         }
     }
 }
+
+/// Reference pictures kept when invalidation is on: how far back the encoder
+/// can reach for a picture the browser has.
+const DPB_FRAMES: u32 = 4;
 
 /// CBR at `kbps` with a VBV of `vbv_frames` frames: every frame fits in
 /// about one frame time on the wire, so the network never has to buffer a

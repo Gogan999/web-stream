@@ -85,6 +85,11 @@ pub enum HostControl {
     /// Sent about once a second while video runs, for the browser's stats
     /// overlay and auto-tune.
     VideoStats(VideoStats),
+    /// The mic the browser turned on can't play on the host (`--no-mic`, or
+    /// no such device). The browser should stop sending it.
+    MicUnavailable {
+        message: String,
+    },
     Error {
         message: String,
     },

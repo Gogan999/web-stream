@@ -15,7 +15,7 @@ const ui = {
   unpair: $('unpair'), pair: $('pair'), deviceName: $('device-name'), pairStart: $('pair-start'),
   pairCode: $('pair-code'), pairConfirm: $('pair-confirm'), pairMsg: $('pair-msg'),
   resolution: $('resolution'), bitrate: $('bitrate'), fps: $('fps'), quality: $('quality'),
-  matchHost: $('match-host'), autotune: $('autotune'),
+  matchHost: $('match-host'), autotune: $('autotune'), mic: $('mic'),
   moreToggle: $('more-toggle'), kbdToggle: $('kbd-toggle'), keysToggle: $('keys-toggle'), keys: $('keys'),
   kbdInput: $('kbd-input'), touchFullscreen: $('touch-fullscreen'),
 };
@@ -35,6 +35,7 @@ let host = null; // { displays, active, config, stats } for the current session
 let lastSent = null;
 let tuning = null; // running AutoTune
 let tuneWindow = null; // host stats gathered while auto-tune measures
+let micTrack = null; // this browser's microphone while the Mic setting is on and a session runs
 
 function setStatus(text, state) {
   ui.status.textContent = text;
@@ -46,7 +47,11 @@ async function connect() {
   session = new Session({ signalUrl, video: ui.video });
   session.addEventListener('status', (e) => setStatus(e.detail.text, e.detail.state));
   session.addEventListener('control', (e) => onControl(e.detail));
-  session.addEventListener('control-open', () => session.sendControl({ type: 'listDisplays' }));
+  session.addEventListener('control-open', () => {
+    session.sendControl({ type: 'listDisplays' });
+    // The host keeps the last choice across sessions; tell it this browser's.
+    session.sendControl({ type: 'setMicEnabled', enabled: settings.mic });
+  });
   session.addEventListener('closed', () => {
     ui.connect.textContent = 'Connect';
     ui.display.disabled = true;
@@ -66,6 +71,7 @@ async function connect() {
   input.start();
   ui.connect.textContent = 'Disconnect';
   if (!ui.stats.hidden) startStats();
+  if (settings.mic) setMic(true);
   try {
     await session.start();
   } catch (err) {
@@ -78,6 +84,8 @@ async function connect() {
 function disconnect() {
   if (input) input.stop();
   if (session) session.close();
+  micTrack?.stop();
+  micTrack = null;
   input = null;
   session = null;
   stopStats();
@@ -115,6 +123,13 @@ function onControl(msg) {
   } else if (msg.type === 'videoStats' && host) {
     host.stats = msg;
     if (tuneWindow) tuneWindow.push(msg);
+  } else if (msg.type === 'micUnavailable') {
+    // The host can't play the mic: stop sending it.
+    setStatus(`Host: ${msg.message}`, ui.status.dataset.state);
+    settings.mic = false;
+    ui.mic.checked = false;
+    settingsStore.save(settings);
+    setMic(false);
   } else if (msg.type === 'error' && typeof msg.message === 'string') {
     setStatus(`Host: ${msg.message}`, ui.status.dataset.state);
     if (host) {
@@ -182,6 +197,7 @@ function showSettings() {
   ui.fps.value = String(settings.fps);
   ui.quality.value = settings.quality;
   ui.matchHost.checked = !!settings.matchHost;
+  ui.mic.checked = !!settings.mic;
 }
 showSettings();
 
@@ -204,6 +220,46 @@ ui.matchHost.addEventListener('change', () => {
     host.matched = false;
     session?.sendControl({ type: 'restoreHostResolution' });
   }
+});
+
+// Starts or stops sending the mic. The host plays it into its virtual cable (see docs/host-setup.md).
+let micGen = 0;
+async function setMic(on) {
+  const s = session;
+  const gen = ++micGen;
+  micTrack?.stop();
+  micTrack = null;
+  if (!s) return;
+  let track = null;
+  if (on) {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      });
+      track = stream.getAudioTracks()[0];
+    } catch (err) {
+      if (gen !== micGen || s !== session) return;
+      setStatus(`Mic unavailable: ${err.message}`, ui.status.dataset.state);
+      on = false;
+      settings.mic = false;
+      ui.mic.checked = false;
+      settingsStore.save(settings);
+    }
+    // Disconnected, or toggled again, while the browser asked for permission.
+    if (gen !== micGen || s !== session) {
+      track?.stop();
+      return;
+    }
+  }
+  micTrack = track;
+  await s.setMicTrack(track);
+  s.sendControl({ type: 'setMicEnabled', enabled: on });
+}
+
+ui.mic.addEventListener('change', () => {
+  settings.mic = ui.mic.checked;
+  settingsStore.save(settings);
+  setMic(settings.mic);
 });
 
 // Health of the stream over `ms`, from the browser's stats and the host's videoStats.

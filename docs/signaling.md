@@ -100,10 +100,11 @@ The host is always the offerer.
   NACK, PLI and transport-cc feedback, plus the `playout-delay` header
   extension set to 0/0 so Chromium renders each frame as soon as it decodes.
   The browser should also set `receiver.jitterBufferTarget = 0`.
-- **Audio** (`sendrecv`): Opus 48 kHz, game audio from the host. For the
-  microphone, before `createAnswer` find this transceiver and call
-  `transceiver.sender.replaceTrack(micTrack)` and set
-  `transceiver.direction = "sendrecv"`; otherwise leave it `recvonly`.
+- **Audio** (`sendrecv`): Opus 48 kHz, game audio from the host and the
+  browser microphone back. The web client sets this transceiver's direction
+  to `sendrecv` before `createAnswer` and adds or removes the mic later with
+  `transceiver.sender.replaceTrack(micTrack | null)`, so no new offer is
+  needed.
 - **Data channels**, opened by the host (handle them in `ondatachannel` by
   label):
 

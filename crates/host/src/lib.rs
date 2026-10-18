@@ -6,3 +6,5 @@ mod media;
 pub mod options;
 mod platform;
 pub mod serve;
+
+pub use platform::audio_devices;

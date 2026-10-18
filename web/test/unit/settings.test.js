@@ -66,10 +66,12 @@ test('settings survive broken storage', () => {
   // Auto-tune picks off the list are kept.
   save({ ...DEFAULTS, bitrate: '42500' }, mem);
   assert.equal(load(mem).bitrate, '42500');
+  save({ ...DEFAULTS, mic: true }, mem);
+  assert.equal(load(mem).mic, true);
 });
 
 test('junk in storage falls back field by field', () => {
-  const map = new Map([['ws-stream-settings', JSON.stringify({ bitrate: 'abc', resolution: 'foo', fps: 59.5, quality: 'max', matchHost: 'yes' })]]);
+  const map = new Map([['ws-stream-settings', JSON.stringify({ bitrate: 'abc', resolution: 'foo', fps: 59.5, quality: 'max', matchHost: 'yes', mic: 1 })]]);
   const mem = { getItem: (k) => map.get(k) ?? null, setItem: (k, v) => map.set(k, v) };
   assert.deepEqual(load(mem), { ...DEFAULTS });
   map.set('ws-stream-settings', JSON.stringify({ bitrate: '999999', fps: '120', quality: 'clarity' }));

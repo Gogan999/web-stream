@@ -77,7 +77,10 @@ code to type in the browser is printed here), `drop` ends the session,
 pairing at startup. `ws-host --help` lists the options: ports, public IPs for
 port forwarding, a real certificate, the starting display and stream
 settings, and turning the mic or game audio off. The tray app's settings
-are the same options.
+are the same options. A paired browser that hasn't connected for 30 days is
+unpaired (`--forget-after DAYS`). Behind a reverse proxy that rewrites the
+Host header, pass its address with `--allow-origin https://name` or the
+browser's requests are refused as cross-site.
 
 ## Connecting from outside your network
 
@@ -175,17 +178,21 @@ script does not install it.
 
 ### Either way
 
+In the browser, tick **Mic**; the host plays nothing until a browser asks.
 Game audio capture follows the default output, so a mic cable must never be
 the default output or the browser hears its own mic; the host logs a warning
 if it is. Another cable works too: pass part of its playback device name to
-`--mic-device`. If no device matches, the error lists the playback devices
-the host can see.
+`--mic-device` (`ws-host audio-devices` lists them). If no device matches,
+the browser shows an error listing the playback devices the host can see and
+unticks Mic. `--no-mic` turns the mic off on the host whatever the browser
+asks.
 
 ## Game audio
 
 Loopback capture follows the default output device, including when it changes
-mid-session. Any device format is accepted; it is converted to 48 kHz stereo
-and sent as 10 ms Opus packets at 128 kb/s.
+mid-session; `--audio-device NAME` captures a named output instead. Any device
+format is accepted; it is converted to 48 kHz stereo and sent as 10 ms Opus
+packets at 128 kb/s (`--audio-kbps` changes that, 32 to 510).
 
 ## Elevated windows and the secure desktop
 

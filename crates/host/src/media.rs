@@ -66,7 +66,8 @@ pub async fn run(
         transport,
         config: opts.video.clone(),
         display: opts.display,
-        mic_enabled: opts.mic_device.is_some(),
+        // Off until the browser turns it on.
+        mic_enabled: false,
         opts,
         control_tx,
         control_open: false,
@@ -316,7 +317,11 @@ impl Media {
 
         let audio = if self.opts.game_audio {
             let (tx, rx) = mpsc::channel(AUDIO_QUEUE);
-            match block_in_place(|| platform::start_loopback(LoopbackConfig::default(), tx)) {
+            let config = LoopbackConfig {
+                device: self.opts.audio_device.clone(),
+                bitrate: self.opts.audio_kbps * 1000,
+            };
+            match block_in_place(|| platform::start_loopback(config, tx)) {
                 Ok(capture) => {
                     tokio::spawn(forward_audio(rx, self.transport.clone()));
                     Some(capture)
@@ -353,6 +358,8 @@ impl Media {
         self.rebuild_pending = false;
         self.session += 1;
         self.keyframe_requests = 0;
+        // The next browser turns the mic on if it wants it.
+        self.mic_enabled = false;
         *self.sent.lock().expect("sent stats lock") = SentFrames::default();
         if let Some(live) = self.live.take() {
             drop_blocking(live);
@@ -374,7 +381,13 @@ impl Media {
         };
         match block_in_place(|| platform::start_mic(config)) {
             Ok(mic) => live.mic = Some(mic),
-            Err(e) => tracing::warn!("browser mic off: {e}"),
+            Err(e) => {
+                tracing::warn!("browser mic off: {e}");
+                self.mic_enabled = false;
+                self.reply(HostControl::MicUnavailable {
+                    message: format!("the mic can't play on the host: {e}"),
+                });
+            }
         }
     }
 
@@ -548,6 +561,12 @@ impl Media {
             }
             ClientControl::SetVideoConfig { config } => self.set_video_config(config.clamped()),
             ClientControl::SetMicEnabled { enabled } => {
+                if enabled && self.opts.mic_device.is_none() {
+                    self.reply(HostControl::MicUnavailable {
+                        message: "the host has the mic turned off (--no-mic)".into(),
+                    });
+                    return;
+                }
                 self.mic_enabled = enabled;
                 if enabled {
                     self.start_mic();

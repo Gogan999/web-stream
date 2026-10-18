@@ -33,6 +33,10 @@ mod imp {
     pub fn start_mic(config: MicConfig) -> ws_audio::Result<(Mic, MicReceiver)> {
         ws_audio::MicPlayback::start(config)
     }
+
+    pub fn audio_devices() -> ws_audio::Result<Vec<String>> {
+        ws_audio::list_render_devices()
+    }
 }
 
 #[cfg(not(windows))]
@@ -96,6 +100,10 @@ mod imp {
     }
 
     pub fn start_mic(_: MicConfig) -> ws_audio::Result<(Mic, MicReceiver)> {
+        Err(unsupported())
+    }
+
+    pub fn audio_devices() -> ws_audio::Result<Vec<String>> {
         Err(unsupported())
     }
 

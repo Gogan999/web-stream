@@ -95,6 +95,7 @@ async function offer() {
   pc.onconnectionstatechange = () => write({ ev: 'pc', state: pc.connectionState });
   pc.addTransceiver(videoTrack, { direction: 'sendonly' });
   pc.addTransceiver(audioTrack, { direction: 'sendrecv' });
+  window.__hostPc = pc;
   // Keep the "display" resolution fixed, as the real host's encoder does, so the client sees it change on a switch.
   for (const s of pc.getSenders()) {
     if (s.track?.kind !== 'video') continue;
@@ -130,6 +131,9 @@ async function offer() {
           config = { ...config, ...c.config };
           sendConfig(channel);
         }
+        if (c.type === 'setMicEnabled' && c.enabled && window.mockNoMic) {
+          channel.send(JSON.stringify({ type: 'micUnavailable', message: 'the host has the mic turned off (--no-mic)' }));
+        }
         if (c.type === 'setHostResolution') {
           channel.send(JSON.stringify({ type: 'error', message: "the host doesn't allow changing its resolution; start it with --allow-resolution-change" }));
         }
@@ -147,6 +151,15 @@ async function offer() {
   });
   send({ type: 'offer', sdp: pc.localDescription.sdp });
 }
+
+// Mic audio packets received from the client so far.
+window.mockMicPackets = async () => {
+  let n = 0;
+  for (const s of (await window.__hostPc?.getStats())?.values() ?? []) {
+    if (s.type === 'inbound-rtp' && s.kind === 'audio') n += s.packetsReceived;
+  }
+  return n;
+};
 
 let config = { codec: 'h264', width: 1920, height: 1080, fps: 60, bitrateKbps: 20000, quality: 'balanced' };
 

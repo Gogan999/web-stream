@@ -1,5 +1,31 @@
 # Host setup (Windows)
 
+## Running the host
+
+```
+cargo build --release -p ws-host
+target\release\ws-host.exe --pair --web-root web
+```
+
+`ws-host` (or `ws-host serve`) starts everything: the HTTPS server with the
+web client, pairing and signaling on TCP 8443, WebRTC media on UDP 8443 and
+the ICE-TCP fallback on TCP 8444. It serves the web client from `web\` next
+to the executable only (copy the repository's `web` folder there, or pass
+`--web-root web` when running from a checkout) and keeps its certificate and paired browsers in `%LOCALAPPDATA%\web-stream`.
+
+The console takes a few commands: `pair` opens pairing for two minutes (the
+code to type in the browser is printed here), `drop` ends the session,
+`unpair-all` forgets every paired browser, `quit` exits. `--pair` opens
+pairing at startup. `ws-host --help` lists the options: ports, public IPs for
+port forwarding, a real certificate, the starting display and stream
+settings, and turning the mic or game audio off.
+
+Capture, game audio, the mic and input start when a browser connects and
+stop when it leaves; dropping the session releases every held key and
+unplugs the virtual gamepads. The encoder follows the connection's bandwidth
+estimate, up to `--kbps`. If the browser can't decode `--codec`, the host
+falls back to H.264 and says so in the browser.
+
 Two drivers are needed on the host for gamepads and the microphone. Keyboard,
 mouse and game audio need nothing extra.
 

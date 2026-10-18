@@ -1,8 +1,8 @@
 //! Host agent entry point.
 //!
-//! Until the transport lands this only exercises the video pipeline:
-//!
 //! ```text
+//! ws-host [serve] [options]   run the host: web client, pairing, signaling,
+//!                             WebRTC, capture, audio and input (see --help)
 //! ws-host displays
 //! ws-host capture-test [--display N] [--seconds S] [--fps F] [--kbps K]
 //!                      [--size WxH] [--codec h264|h265|av1] [--out FILE]
@@ -11,6 +11,12 @@
 //! `capture-test` writes the raw bitstream (play it with `ffplay FILE`) and
 //! prints frame rate, drops and capture-to-encoded latency once a second.
 
+mod input;
+mod media;
+mod options;
+mod platform;
+mod serve;
+
 use std::io::Write;
 use std::time::{Duration, Instant};
 
@@ -18,19 +24,37 @@ use anyhow::{Context, bail};
 use tokio::sync::mpsc;
 use ws_proto::{DisplayId, VideoCodec, VideoConfig, mono_now};
 
+use crate::options::{ServeOptions, parse_codec, parse_size};
+
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info,str0m=warn".into()),
         )
         .init();
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
-        None | Some("displays") => list_displays(),
+        Some("displays") => list_displays(),
         Some("capture-test") => capture_test(&args[1..]),
-        Some(other) => bail!("unknown command {other:?}; try `displays` or `capture-test`"),
+        Some("serve") => run_serve(&args[1..]),
+        Some(flag) if flag.starts_with('-') => run_serve(&args),
+        None => run_serve(&[]),
+        Some(other) => bail!("unknown command {other:?}\n\n{}", options::USAGE),
     }
+}
+
+fn run_serve(args: &[String]) -> anyhow::Result<()> {
+    if args.iter().any(|a| a == "-h" || a == "--help") {
+        print!("{}", options::USAGE);
+        return Ok(());
+    }
+    let opts = ServeOptions::parse(args)?;
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(serve::serve(opts))
 }
 
 fn list_displays() -> anyhow::Result<()> {
@@ -64,20 +88,8 @@ fn capture_test(args: &[String]) -> anyhow::Result<()> {
             "--fps" => config.fps = value()?.parse()?,
             "--kbps" => config.bitrate_kbps = value()?.parse()?,
             "--out" => out = Some(value()?.clone()),
-            "--size" => {
-                let v = value()?;
-                let (w, h) = v.split_once('x').context("--size is WxH")?;
-                config.width = w.parse()?;
-                config.height = h.parse()?;
-            }
-            "--codec" => {
-                config.codec = match value()?.as_str() {
-                    "h264" => VideoCodec::H264,
-                    "h265" | "hevc" => VideoCodec::H265,
-                    "av1" => VideoCodec::Av1,
-                    c => bail!("unknown codec {c}"),
-                }
-            }
+            "--size" => (config.width, config.height) = parse_size(value()?)?,
+            "--codec" => config.codec = parse_codec(value()?)?,
             f => bail!("unknown flag {f}"),
         }
     }

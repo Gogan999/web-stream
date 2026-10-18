@@ -44,8 +44,10 @@ export async function unpair() {
 }
 
 export function defaultDeviceName(ua = navigator.userAgent) {
-  const browser = /Edg\//.test(ua) ? 'Edge' : /OPR\//.test(ua) ? 'Opera' : /Chrome\//.test(ua) ? 'Chrome' : 'Browser';
-  const os = /Windows/.test(ua) ? 'Windows' : /Mac OS X/.test(ua) ? 'macOS' : /Android/.test(ua) ? 'Android'
+  const browser = /Edg\//.test(ua) ? 'Edge' : /OPR\//.test(ua) ? 'Opera' : /Chrome\/|CriOS\//.test(ua) ? 'Chrome'
+    : /Safari\//.test(ua) ? 'Safari' : 'Browser';
+  const os = /Windows/.test(ua) ? 'Windows' : /iPhone/.test(ua) ? 'iPhone' : /iPad/.test(ua) ? 'iPad'
+    : /Mac OS X/.test(ua) ? 'macOS' : /Android/.test(ua) ? 'Android'
     : /CrOS/.test(ua) ? 'ChromeOS' : /Linux/.test(ua) ? 'Linux' : 'unknown OS';
   return `${browser} on ${os}`;
 }

@@ -35,7 +35,12 @@ export function streamSize(resolution, screen, display) {
   const dw = display?.width ?? 1920;
   const dh = display?.height ?? 1080;
   if (resolution === 'native') return { width: even(dw), height: even(dh) };
-  if (resolution === 'screen') return fitToDisplay(screen.width, screen.height, dw, dh);
+  if (resolution === 'screen') {
+    // A phone held upright gets turned sideways to watch a landscape display (fullscreen locks it so),
+    // so the screen is fitted the same way round as the display.
+    const turn = (screen.width >= screen.height) !== (dw >= dh);
+    return turn ? fitToDisplay(screen.height, screen.width, dw, dh) : fitToDisplay(screen.width, screen.height, dw, dh);
+  }
   // A fixed height keeps the display's shape: 1080p on a 3440x1440 display is 2580x1080.
   const scale = Math.min(Number(resolution) / dh, 1);
   return { width: even(dw * scale), height: even(dh * scale) };

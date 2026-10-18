@@ -8,12 +8,15 @@ Pairing and signaling: `docs/signaling.md` (transport). Data channel messages: [
 
 | File | What it does |
 |---|---|
-| `index.html`, `style.css` | Toolbar plus a full-size `<video>` and stats overlay |
+| `index.html`, `style.css` | Toolbar plus a full-size `<video>`, stats overlay and touch overlay |
+| `manifest.webmanifest` | Lets a phone add the client to its home screen, opening fullscreen and landscape |
 | `js/main.js` | UI wiring, hotkeys, fullscreen + Keyboard Lock, stats polling |
 | `js/session.js` | Signaling + `RTCPeerConnection`, data channels, low playout delay |
 | `js/signaling.js` | WebSocket signaling client |
 | `js/pairing.js` | Pairing API client (`/api/session`, `/api/pair/*`) |
-| `js/input.js` | Keyboard, mouse (pointer lock or absolute) and gamepad capture |
+| `js/input.js` | Keyboard, mouse (pointer lock or absolute), touch and gamepad capture |
+| `js/touch.js` | Touch gestures → mouse actions (trackpad and direct modes) |
+| `js/softkeys.js` | On-screen keyboard: typed text → key presses, extra keys row |
 | `js/protocol.js` | Binary input message encoder/decoder |
 | `js/keymap.js` | `KeyboardEvent.code` → USB HID usage |
 | `js/gamepad.js` | Gamepad API standard mapping → XInput state |
@@ -36,6 +39,19 @@ Pairing and signaling: `docs/signaling.md` (transport). Data channel messages: [
   - **Auto-tune (test)** tries bitrates from 10 to 150 Mb/s, then Clarity and Balanced, about 7 s each, and keeps the best that streams without freezes, drops, loss, or slow encode/decode, minus 15% headroom. Run it while something moves on screen. Click again to stop.
 - The stats overlay's last two lines are the host's side: encoder bitrate / ceiling, bandwidth estimate, encode time and keyframe requests.
 - URL option: `?autoconnect` connects on load when paired.
+
+## Phones and tablets
+
+Chrome on Android is the target; iPhone and iPad Safari work with the limits below.
+
+- The settings fold behind **Settings** on small or touch screens. Buttons over the stream (top right) stay there in fullscreen: **Keyboard**, **Keys** and **Fullscreen**.
+- **Mouse: Relative** works as a trackpad: drag moves the cursor, tap clicks, hold then drag drags with the left button, two-finger tap right-clicks, two-finger drag scrolls.
+- **Mouse: Absolute** is direct touch: the cursor goes where the finger is; tap clicks there, drag drags, hold right-clicks, two-finger tap right-clicks, two-finger drag scrolls.
+- **Keyboard** opens the phone's keyboard. What it types is sent as key presses on a US layout (the host's layout decides what they produce); characters a US keyboard can't type are skipped. Autocorrect is off, but some keyboards still send a word only when it's finished.
+- **Keys** shows Esc, Tab, Ctrl, Alt, Shift, Win, arrows, Del, Backspace and Enter. Ctrl, Alt, Shift and Win stay down until the next other key (tap again to let go), so Ctrl+Esc is Ctrl then Esc.
+- **Fullscreen** on Android also turns the phone to the host display's shape. iPhone Safari can't fullscreen a page, so the stream fills the window instead; adding the page to the home screen gets closest to fullscreen there. *Match this screen* sizes the stream for the phone turned sideways.
+- If the browser blocks sound until the page is touched (iOS), the first touch on the stream starts it.
+- Not yet: an on-screen gamepad. Bluetooth controllers work through the Gamepad API as on desktop.
 
 ## Developing without a host
 

@@ -16,7 +16,7 @@ import { WebSocketServer } from 'ws';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const port = Number(process.argv[2] || process.env.PORT || 8080);
-const types = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml' };
+const types = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.webmanifest': 'application/manifest+json' };
 
 const devices = new Map(); // cookie token -> device name
 const pairings = new Map(); // pairing_id -> { code, name, expires, attempts }

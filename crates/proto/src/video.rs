@@ -3,6 +3,21 @@ use serde::{Deserialize, Serialize};
 
 use crate::{DisplayId, MicrosMono};
 
+static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
+/// Converts an [`Instant`](std::time::Instant) to [`MicrosMono`]. The epoch is
+/// fixed the first time this (or [`mono_now`]) is called; earlier instants
+/// clamp to 0.
+pub fn mono_micros(at: std::time::Instant) -> MicrosMono {
+    let epoch = *EPOCH.get_or_init(std::time::Instant::now);
+    at.saturating_duration_since(epoch).as_micros() as MicrosMono
+}
+
+/// The current time as [`MicrosMono`].
+pub fn mono_now() -> MicrosMono {
+    mono_micros(std::time::Instant::now())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum VideoCodec {

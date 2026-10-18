@@ -2944,9 +2944,12 @@ dependencies = [
 name = "ws-capture"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "thiserror",
  "tokio",
  "tracing",
+ "windows",
+ "ws-nvenc-sys",
  "ws-proto",
 ]
 
@@ -2975,6 +2978,10 @@ dependencies = [
  "windows",
  "ws-proto",
 ]
+
+[[package]]
+name = "ws-nvenc-sys"
+version = "0.1.0"
 
 [[package]]
 name = "ws-proto"

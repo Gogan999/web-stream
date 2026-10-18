@@ -1,0 +1,9 @@
+[package]
+name = "ws-nvenc-sys"
+description = "Raw NVENC (NVIDIA Video Codec SDK 12.1) bindings, loaded at runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "MIT"
+
+[dependencies]

@@ -4,8 +4,8 @@
 use std::io::BufRead;
 
 use anyhow::Context;
-use tokio::sync::{mpsc, oneshot};
-use ws_proto::{ClientSignal, HostSignal};
+use tokio::sync::{mpsc, oneshot, watch};
+use ws_proto::{ClientSignal, HostSignal, VideoCodec};
 use ws_signaling::{
     Notice, SignalingConfig, SignalingHandle, SignalingServer, SignalingSession, TlsSource,
 };
@@ -45,14 +45,16 @@ pub async fn serve(opts: ServeOptions) -> anyhow::Result<()> {
 
     let mut server_task = tokio::spawn(server.serve());
     let (media_stop, media_stop_rx) = oneshot::channel();
+    let (codecs_tx, codecs) = watch::channel(None);
     let media_task = tokio::spawn(media::run(
         transport.clone(),
         transport_events,
         opts.media.clone(),
+        codecs,
         media_stop_rx,
     ));
     tokio::spawn(print_notices(events.notices));
-    let sessions = tokio::spawn(run_signaling(events.sessions, transport.clone()));
+    let sessions = tokio::spawn(run_signaling(events.sessions, transport.clone(), codecs_tx));
 
     println!("web-stream host on https://<this PC>:{}/", opts.port);
     println!("certificate SHA-256 {fingerprint}");
@@ -150,7 +152,11 @@ fn console() -> mpsc::Receiver<String> {
 /// Signaling for one browser at a time: offer on connect, apply the answer,
 /// pass candidates through, re-offer on restart. A new session replaces the
 /// current one (the server has already told the old browser).
-async fn run_signaling(mut sessions: mpsc::Receiver<SignalingSession>, transport: Transport) {
+async fn run_signaling(
+    mut sessions: mpsc::Receiver<SignalingSession>,
+    transport: Transport,
+    codecs: watch::Sender<Option<Vec<VideoCodec>>>,
+) {
     let mut current: Option<SignalingSession> = None;
     loop {
         let msg = tokio::select! {
@@ -167,6 +173,8 @@ async fn run_signaling(mut sessions: mpsc::Receiver<SignalingSession>, transport
         };
         match msg {
             Some(ClientSignal::Answer { sdp }) => {
+                let accepted = answer_video_codecs(&sdp);
+                tracing::debug!(?accepted, "browser video codecs");
                 if let Err(e) = transport.accept_answer(sdp).await {
                     tracing::warn!("bad answer: {e}");
                     send(
@@ -177,6 +185,8 @@ async fn run_signaling(mut sessions: mpsc::Receiver<SignalingSession>, transport
                         },
                     )
                     .await;
+                } else {
+                    codecs.send_replace(Some(accepted));
                 }
             }
             Some(ClientSignal::Candidate { candidate, .. }) => {
@@ -226,5 +236,59 @@ async fn send(session: Option<&SignalingSession>, msg: HostSignal) -> bool {
     match session {
         Some(s) => s.send(msg).await,
         None => false,
+    }
+}
+
+/// The video codecs in an SDP answer's video section (empty if the browser
+/// rejected video).
+fn answer_video_codecs(sdp: &str) -> Vec<VideoCodec> {
+    let mut codecs = Vec::new();
+    let mut in_video = false;
+    for line in sdp.lines().map(str::trim) {
+        if let Some(media) = line.strip_prefix("m=") {
+            let mut parts = media.split_whitespace();
+            in_video = parts.next() == Some("video") && parts.next() != Some("0");
+            continue;
+        }
+        if !in_video {
+            continue;
+        }
+        let Some(rtpmap) = line.strip_prefix("a=rtpmap:") else {
+            continue;
+        };
+        let name = rtpmap
+            .split_whitespace()
+            .nth(1)
+            .and_then(|enc| enc.split('/').next())
+            .unwrap_or("");
+        let codec = match name.to_ascii_uppercase().as_str() {
+            "H264" => VideoCodec::H264,
+            "H265" => VideoCodec::H265,
+            "AV1" => VideoCodec::Av1,
+            _ => continue,
+        };
+        if !codecs.contains(&codec) {
+            codecs.push(codec);
+        }
+    }
+    codecs
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_video_codecs_from_answer() {
+        let sdp = "v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96 98 45\r\n\
+                   a=rtpmap:96 H264/90000\r\na=rtpmap:97 rtx/90000\r\n\
+                   a=rtpmap:98 H264/90000\r\na=rtpmap:45 AV1/90000\r\n\
+                   m=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=rtpmap:111 opus/48000/2\r\n";
+        assert_eq!(
+            answer_video_codecs(sdp),
+            vec![VideoCodec::H264, VideoCodec::Av1]
+        );
+        let rejected = "v=0\r\nm=video 0 UDP/TLS/RTP/SAVPF 96\r\na=rtpmap:96 H264/90000\r\n";
+        assert!(answer_video_codecs(rejected).is_empty());
     }
 }

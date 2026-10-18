@@ -20,7 +20,7 @@ serve options:
   --hostname NAME      extra name or IP for the self-signed certificate (repeatable)
   --cert FILE --key FILE   PEM certificate instead of a self-signed one
   --data-dir DIR       certificate and paired devices
-  --web-root DIR       web client to serve, default ./web or <exe dir>/web
+  --web-root DIR       web client to serve, default <exe dir>/web
   --display N          display to stream first, default the primary
   --codec h264|h265|av1  --size WxH  --fps F  --kbps K   stream settings
   --mic-device NAME    playback device the browser mic plays into, default \"CABLE Input\"
@@ -108,7 +108,6 @@ impl ServeOptions {
                 "--no-mic" => no_mic = true,
                 "--no-audio" => media.game_audio = false,
                 "--pair" => pair_at_start = true,
-                "-h" | "--help" => bail!("{USAGE}"),
                 f => bail!("unknown flag {f}\n\n{USAGE}"),
             }
         }
@@ -178,16 +177,12 @@ fn default_data_dir() -> PathBuf {
     }
 }
 
-/// `web/` next to the executable (an installed copy), else in the working
-/// directory (running from a checkout).
+/// `web/` next to the executable. Never the working directory: whatever is
+/// served there runs as the host's own origin, with the paired cookie.
 fn default_web_root() -> Option<PathBuf> {
-    let beside_exe = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|d| d.join("web")));
-    beside_exe
-        .into_iter()
-        .chain(std::iter::once(PathBuf::from("web")))
-        .find(|d| d.join("index.html").is_file())
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?.join("web");
+    dir.join("index.html").is_file().then_some(dir)
 }
 
 #[cfg(test)]

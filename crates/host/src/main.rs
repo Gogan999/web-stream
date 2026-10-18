@@ -46,6 +46,10 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn run_serve(args: &[String]) -> anyhow::Result<()> {
+    if args.iter().any(|a| a == "-h" || a == "--help") {
+        print!("{}", options::USAGE);
+        return Ok(());
+    }
     let opts = ServeOptions::parse(args)?;
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()

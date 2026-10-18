@@ -4,19 +4,21 @@
 //!
 //! Everything here reacts to [`TransportEvent`]s on one task. Starting and
 //! switching the capture pipeline blocks for tens of milliseconds, which is
-//! done in place (`block_in_place`); events queue in the transport meanwhile.
+//! done in place (`block_in_place`), as are the thread joins when a pipeline
+//! stops; events queue in the transport meanwhile.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::block_in_place;
 use ws_audio::{LoopbackConfig, MicConfig, MicReceiver};
 use ws_capture::VideoPipeline;
 use ws_input::DisplayRect;
 use ws_proto::{
-    ClientControl, DisplayId, DisplayInfo, EncodedFrame, HostControl, VideoConfig, channels,
+    ClientControl, DisplayId, DisplayInfo, EncodedFrame, HostControl, VideoCodec, VideoConfig,
+    channels,
 };
-use ws_transport::{Transport, TransportEvent};
+use ws_transport::{Transport, TransportConfig, TransportEvent};
 
 use crate::input::InputThread;
 use crate::options::MediaOptions;
@@ -25,7 +27,7 @@ use crate::platform;
 /// Encoded frames waiting for the transport. The transport keeps only the
 /// newest frame anyway; a full channel makes the encoder drop and send a
 /// keyframe next.
-const FRAME_QUEUE: usize = 2;
+const FRAME_QUEUE: usize = 1;
 /// About 40 ms of 10 ms Opus packets.
 const AUDIO_QUEUE: usize = 4;
 const CONTROL_QUEUE: usize = 64;
@@ -39,11 +41,18 @@ const BITRATE_STEP: f64 = 0.1;
 const MIN_KBPS: u32 = 500;
 /// Replies kept while the `control` channel is not open yet.
 const UNSENT_MAX: usize = 16;
+/// A `setVideoConfig` that needs a new pipeline is refused if the last one
+/// was less than this long ago.
+const MIN_RESTART_GAP: Duration = Duration::from_secs(1);
+
+/// Video codecs the browser's answer accepted; `None` until known.
+pub type AcceptedCodecs = watch::Receiver<Option<Vec<VideoCodec>>>;
 
 pub async fn run(
     transport: Transport,
     mut events: mpsc::Receiver<TransportEvent>,
     opts: MediaOptions,
+    codecs: AcceptedCodecs,
     mut shutdown: oneshot::Receiver<()>,
 ) {
     let (control_tx, mut control_rx) = mpsc::channel(CONTROL_QUEUE);
@@ -59,12 +68,20 @@ pub async fn run(
         unsent: Vec::new(),
         stopped_tx,
         generation: 0,
+        last_bwe: None,
+        last_restart: None,
+        codecs,
         live: None,
     };
     loop {
         tokio::select! {
             ev = events.recv() => match ev {
-                Some(ev) => media.event(ev),
+                Some(ev) => {
+                    let down = matches!(ev, TransportEvent::Disconnected);
+                    media.event(ev);
+                    // Replies meant for the browser that just left.
+                    while down && control_rx.try_recv().is_ok() {}
+                }
                 None => break,
             },
             Some(msg) = control_rx.recv() => media.send_control(msg).await,
@@ -90,6 +107,10 @@ struct Media {
     stopped_tx: mpsc::Sender<u64>,
     /// Bumped for every pipeline started, so a stale "stopped" is ignored.
     generation: u64,
+    /// Latest bandwidth estimate of this connection, in bits per second.
+    last_bwe: Option<u64>,
+    last_restart: Option<Instant>,
+    codecs: AcceptedCodecs,
     live: Option<Live>,
 }
 
@@ -128,7 +149,7 @@ impl Media {
                 channels::CONTROL if !binary => self.control(&data),
                 channels::INPUT | channels::INPUT_MOTION => {
                     if let Some(input) = self.live.as_ref().and_then(|l| l.input.as_ref()) {
-                        input.send(data);
+                        input.send(&data);
                     }
                 }
                 other => tracing::debug!(channel = other, binary, "ignoring data channel message"),
@@ -201,7 +222,7 @@ impl Media {
             video: None,
             _audio: audio,
             mic: None,
-            bitrate_kbps: self.config.bitrate_kbps,
+            bitrate_kbps: self.start_kbps(),
         });
         if self.mic_enabled {
             self.start_mic();
@@ -215,7 +236,9 @@ impl Media {
     fn stop(&mut self) {
         self.control_open = false;
         self.unsent.clear();
-        if self.live.take().is_some() {
+        self.last_bwe = None;
+        if let Some(live) = self.live.take() {
+            drop_blocking(live);
             tracing::info!("browser disconnected; media stopped");
         }
     }
@@ -251,14 +274,36 @@ impl Media {
         let Some(live) = &mut self.live else {
             return Ok(());
         };
-        live.video = None;
+        if let Some(video) = live.video.take() {
+            drop_blocking(video);
+        }
         let displays = ws_capture::list_displays()?;
         let info = pick_display(&displays, self.display)
             .ok_or_else(|| anyhow::anyhow!("no display to capture"))?
             .clone();
+        let accepted = self.codecs.borrow().clone();
+        let codec = pick_codec(self.config.codec, accepted.as_deref()).ok_or_else(|| {
+            anyhow::anyhow!("the browser accepted none of the video codecs the host encodes")
+        })?;
+        if codec != self.config.codec {
+            let msg = format!(
+                "the browser can't decode {:?}; streaming {codec:?} instead",
+                self.config.codec
+            );
+            tracing::warn!("{msg}");
+            self.error(msg);
+        }
+        let start_kbps = self.start_kbps();
+        let config = VideoConfig {
+            codec,
+            bitrate_kbps: start_kbps,
+            ..self.config.clone()
+        };
         let (tx, rx) = mpsc::channel(FRAME_QUEUE);
-        let config = self.config.clone();
-        let pipeline = block_in_place(|| VideoPipeline::start(info.id, config, tx))?;
+        let Some(live) = &mut self.live else {
+            return Ok(());
+        };
+        let pipeline = block_in_place(|| VideoPipeline::start(info.id, config.clone(), tx))?;
         self.generation += 1;
         tokio::spawn(forward_video(
             rx,
@@ -270,12 +315,13 @@ impl Media {
             pipeline,
             generation: self.generation,
         });
-        live.bitrate_kbps = self.config.bitrate_kbps;
+        live.bitrate_kbps = start_kbps;
+        self.last_restart = Some(Instant::now());
         if let Some(input) = &live.input {
             input.set_display(rect(&info));
         }
         self.display = Some(info.id);
-        tracing::info!(display = info.id.0, config = ?self.config, "streaming");
+        tracing::info!(display = info.id.0, ?config, "streaming");
         Ok(())
     }
 
@@ -295,12 +341,28 @@ impl Media {
         }
     }
 
+    /// Where the encoder starts: under the current estimate (or the
+    /// transport's starting estimate), never above the configured rate.
+    fn start_kbps(&self) -> u32 {
+        let bwe = self
+            .last_bwe
+            .unwrap_or_else(|| TransportConfig::default().initial_bitrate_bps);
+        target_kbps(bwe, self.config.bitrate_kbps)
+    }
+
     fn target_bitrate(&mut self, bps: u64) {
+        self.last_bwe = Some(bps);
+        self.apply_bitrate(false);
+    }
+
+    /// Moves the encoder to the target for the latest estimate, unless the
+    /// change is too small to matter.
+    fn apply_bitrate(&mut self, force: bool) {
+        let kbps = self.start_kbps();
         let Some(live) = &mut self.live else { return };
         let Some(video) = &live.video else { return };
-        let kbps = target_kbps(bps, self.config.bitrate_kbps);
         let step = f64::from(live.bitrate_kbps) * BITRATE_STEP;
-        if f64::from(kbps.abs_diff(live.bitrate_kbps)) >= step {
+        if force || f64::from(kbps.abs_diff(live.bitrate_kbps)) >= step {
             tracing::debug!(kbps, "encoder bitrate");
             video.pipeline.set_bitrate(kbps);
             live.bitrate_kbps = kbps;
@@ -331,23 +393,13 @@ impl Media {
                     v.pipeline.request_keyframe();
                 }
             }
-            ClientControl::SetVideoConfig { config } => {
-                self.config = config.clamped();
-                if self.live.is_some() {
-                    if let Err(e) = self.start_video() {
-                        tracing::error!("video: {e}");
-                        self.error(format!("could not apply video settings: {e}"));
-                        return;
-                    }
-                }
-                self.display_changed();
-            }
+            ClientControl::SetVideoConfig { config } => self.set_video_config(config.clamped()),
             ClientControl::SetMicEnabled { enabled } => {
                 self.mic_enabled = enabled;
                 if enabled {
                     self.start_mic();
-                } else if let Some(live) = &mut self.live {
-                    live.mic = None;
+                } else if let Some(mic) = self.live.as_mut().and_then(|l| l.mic.take()) {
+                    drop_blocking(mic);
                 }
             }
             ClientControl::RequestFile { .. } => {
@@ -357,6 +409,39 @@ impl Media {
                 self.reply(HostControl::Pong { client_time_ms });
             }
         }
+    }
+
+    fn set_video_config(&mut self, config: VideoConfig) {
+        let same_but_bitrate = VideoConfig {
+            bitrate_kbps: self.config.bitrate_kbps,
+            ..config.clone()
+        } == self.config;
+        let video_running = self.live.as_ref().is_some_and(|l| l.video.is_some());
+        if same_but_bitrate || !video_running {
+            // Nothing to rebuild: the bitrate changes in place, and anything
+            // else applies when the pipeline next starts.
+            let bitrate_changed = config.bitrate_kbps != self.config.bitrate_kbps;
+            self.config = config;
+            if bitrate_changed {
+                self.apply_bitrate(true);
+            }
+            self.display_changed();
+            return;
+        }
+        if self
+            .last_restart
+            .is_some_and(|t| t.elapsed() < MIN_RESTART_GAP)
+        {
+            self.error("video settings are changing too fast; try again in a moment".into());
+            return;
+        }
+        self.config = config;
+        if let Err(e) = self.start_video() {
+            tracing::error!("video: {e}");
+            self.error(format!("could not apply video settings: {e}"));
+            return;
+        }
+        self.display_changed();
     }
 
     fn select_display(&mut self, id: DisplayId) {
@@ -384,9 +469,14 @@ impl Media {
 
     fn display_changed(&self) {
         if let Some(id) = self.display {
+            let accepted = self.codecs.borrow().clone();
+            let codec = pick_codec(self.config.codec, accepted.as_deref());
             self.reply(HostControl::DisplayChanged {
                 id,
-                config: self.config.clone(),
+                config: VideoConfig {
+                    codec: codec.unwrap_or(self.config.codec),
+                    ..self.config.clone()
+                },
             });
         }
     }
@@ -448,6 +538,24 @@ async fn forward_audio(mut packets: mpsc::Receiver<ws_proto::AudioPacket>, trans
     }
 }
 
+/// Joins whatever threads `value` owns without stalling other tasks on this
+/// worker.
+fn drop_blocking<T>(value: T) {
+    block_in_place(|| drop(value));
+}
+
+/// The configured codec if the browser accepted it, else H.264, else
+/// anything it accepted. `None` (not known yet) trusts the configuration.
+fn pick_codec(wanted: VideoCodec, accepted: Option<&[VideoCodec]>) -> Option<VideoCodec> {
+    let Some(accepted) = accepted else {
+        return Some(wanted);
+    };
+    [wanted, VideoCodec::H264]
+        .into_iter()
+        .find(|c| accepted.contains(c))
+        .or_else(|| accepted.first().copied())
+}
+
 fn pick_display(displays: &[DisplayInfo], wanted: Option<DisplayId>) -> Option<&DisplayInfo> {
     wanted
         .and_then(|id| displays.iter().find(|d| d.id == id))
@@ -501,6 +609,16 @@ mod tests {
         assert_eq!(pick_display(&ds, None).unwrap().id, DisplayId(1));
         assert_eq!(pick_display(&ds[..1], None).unwrap().id, DisplayId(0));
         assert!(pick_display(&[], None).is_none());
+    }
+
+    #[test]
+    fn codec_falls_back_to_h264_then_anything() {
+        use VideoCodec::*;
+        assert_eq!(pick_codec(Av1, None), Some(Av1));
+        assert_eq!(pick_codec(Av1, Some(&[H264, Av1])), Some(Av1));
+        assert_eq!(pick_codec(H265, Some(&[Av1, H264])), Some(H264));
+        assert_eq!(pick_codec(H265, Some(&[Av1])), Some(Av1));
+        assert_eq!(pick_codec(H264, Some(&[])), None);
     }
 
     #[test]

@@ -123,6 +123,13 @@ function onControl(msg) {
   } else if (msg.type === 'videoStats' && host) {
     host.stats = msg;
     if (tuneWindow) tuneWindow.push(msg);
+  } else if (msg.type === 'micUnavailable') {
+    // The host can't play the mic: stop sending it.
+    setStatus(`Host: ${msg.message}`, ui.status.dataset.state);
+    settings.mic = false;
+    ui.mic.checked = false;
+    settingsStore.save(settings);
+    setMic(false);
   } else if (msg.type === 'error' && typeof msg.message === 'string') {
     setStatus(`Host: ${msg.message}`, ui.status.dataset.state);
     if (host) {
@@ -231,6 +238,7 @@ async function setMic(on) {
       });
       track = stream.getAudioTracks()[0];
     } catch (err) {
+      if (gen !== micGen || s !== session) return;
       setStatus(`Mic unavailable: ${err.message}`, ui.status.dataset.state);
       on = false;
       settings.mic = false;

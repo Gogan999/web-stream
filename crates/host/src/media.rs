@@ -66,7 +66,8 @@ pub async fn run(
         transport,
         config: opts.video.clone(),
         display: opts.display,
-        mic_enabled: opts.mic_device.is_some(),
+        // Off until the browser turns it on.
+        mic_enabled: false,
         opts,
         control_tx,
         control_open: false,
@@ -336,6 +337,8 @@ impl Media {
         self.rebuild_pending = false;
         self.session += 1;
         self.keyframe_requests = 0;
+        // The next browser turns the mic on if it wants it.
+        self.mic_enabled = false;
         *self.sent.lock().expect("sent stats lock") = SentFrames::default();
         if let Some(live) = self.live.take() {
             drop_blocking(live);
@@ -359,7 +362,10 @@ impl Media {
             Ok(mic) => live.mic = Some(mic),
             Err(e) => {
                 tracing::warn!("browser mic off: {e}");
-                self.error(format!("the mic can't play on the host: {e}"));
+                self.mic_enabled = false;
+                self.reply(HostControl::MicUnavailable {
+                    message: format!("the mic can't play on the host: {e}"),
+                });
             }
         }
     }
@@ -535,7 +541,9 @@ impl Media {
             ClientControl::SetVideoConfig { config } => self.set_video_config(config.clamped()),
             ClientControl::SetMicEnabled { enabled } => {
                 if enabled && self.opts.mic_device.is_none() {
-                    self.error("the host has the mic turned off (--no-mic)".into());
+                    self.reply(HostControl::MicUnavailable {
+                        message: "the host has the mic turned off (--no-mic)".into(),
+                    });
                     return;
                 }
                 self.mic_enabled = enabled;

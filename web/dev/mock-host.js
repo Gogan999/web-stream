@@ -131,6 +131,9 @@ async function offer() {
           config = { ...config, ...c.config };
           sendConfig(channel);
         }
+        if (c.type === 'setMicEnabled' && c.enabled && window.mockNoMic) {
+          channel.send(JSON.stringify({ type: 'micUnavailable', message: 'the host has the mic turned off (--no-mic)' }));
+        }
         if (c.type === 'setHostResolution') {
           channel.send(JSON.stringify({ type: 'error', message: "the host doesn't allow changing its resolution; start it with --allow-resolution-change" }));
         }

@@ -424,6 +424,151 @@ async fn full_frames_at_the_target_bitrate_need_almost_no_keyframes() {
     );
 }
 
+/// Packet loss is repaired by resends (NACK/RTX), so it costs neither a
+/// keyframe nor a frame.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lost_packets_are_resent_not_keyframed() {
+    // On failure, the transport's debug log says why each keyframe was asked for.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("ws_transport=debug")
+        .with_test_writer()
+        .try_init();
+    const FPS: u64 = 60;
+    // The host's BWE_HEADROOM. At 90 this forced 20-50 keyframes here.
+    const HEADROOM_PCT: u64 = 75;
+    const MAX_KEYFRAMES: u32 = 2;
+    const FRAME: Duration = Duration::from_micros(1_000_000 / FPS);
+    let (transport, mut events) = Transport::start(TransportConfig {
+        ips: vec![[127, 0, 0, 1].into()],
+        udp_port: 0,
+        tcp_port: None,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let offer = transport.offer().await.unwrap();
+    let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let local = sock.local_addr().unwrap();
+    let mut rtc = Rtc::builder().build(Instant::now());
+    rtc.add_local_candidate(Candidate::host(local, "udp").unwrap());
+    let answer = rtc
+        .sdp_api()
+        .accept_offer(SdpOffer::from_sdp_string(&offer).unwrap())
+        .unwrap();
+    transport
+        .accept_answer(answer.to_sdp_string())
+        .await
+        .unwrap();
+
+    let mut buf = vec![0u8; 2048];
+    let mut connected_at = None;
+    // What the host's encoder would be set to: under the estimate.
+    let mut encoder_bps = TransportConfig::default().initial_bitrate_bps * HEADROOM_PCT / 100;
+    let mut keyframe_requests = 0u32;
+    let mut index = 0u64;
+    let mut next_frame = Instant::now();
+    let mut keyframe_due = true;
+    let mut held = None;
+    let mut got_video = 0usize;
+    let mut broken = 0usize;
+    let mut dropped = 0usize;
+    let mut big = 0usize;
+    // Every 50th media packet (2%) never arrives, resends included.
+    let every = 50;
+
+    loop {
+        let timeout = loop {
+            match rtc.poll_output().unwrap() {
+                Output::Timeout(t) => break t,
+                Output::Transmit(t) => {
+                    sock.send_to(&t.contents, t.destination).await.unwrap();
+                }
+                Output::Event(Event::MediaData(d)) => {
+                    got_video += 1;
+                    if !d.contiguous {
+                        broken += 1;
+                    }
+                }
+                Output::Event(_) => {}
+            }
+        };
+        while let Ok(ev) = events.try_recv() {
+            match ev {
+                TransportEvent::Connected => connected_at = Some(Instant::now()),
+                TransportEvent::KeyframeNeeded => {
+                    keyframe_due = true;
+                    // The one that starts the stream doesn't count.
+                    if connected_at.is_some_and(|t| t.elapsed() > Duration::from_millis(500)) {
+                        keyframe_requests += 1;
+                    }
+                }
+                TransportEvent::TargetBitrate(bps) => {
+                    // As the host (media.rs worth_changing): follow the
+                    // estimate down in steps of at least 2%, up in 10%.
+                    let target = bps * HEADROOM_PCT / 100;
+                    let step = if target < encoder_bps { 50 } else { 10 };
+                    if target.abs_diff(encoder_bps) * step >= encoder_bps {
+                        encoder_bps = target;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(started) = connected_at else {
+            // Wait for the connection first.
+            let got = recv_until(&sock, &mut buf, timeout).await;
+            rtc.handle_input(input(got, &buf, local)).unwrap();
+            continue;
+        };
+        if started.elapsed() > Duration::from_secs(4) {
+            break;
+        }
+        let now = Instant::now();
+        if now >= next_frame {
+            // A capture clock: never two frames back to back because this
+            // loop woke late (Windows timers are coarse). Those come only from
+            // the stalls below.
+            next_frame = (next_frame + FRAME).max(now + FRAME / 2);
+            let budget = (encoder_bps / FPS / 8) as usize;
+            // Constant bitrate with fast motion fills every frame; a
+            // keyframe overshoots the one-frame VBV to about twice it.
+            let bytes = if keyframe_due { budget * 2 } else { budget };
+            let frame = sized_frame(index, keyframe_due, bytes);
+            keyframe_due = false;
+            index += 1;
+            // Once a second a frame is held back and handed over with the
+            // next one, as from an encoder catching up after a stall: both
+            // must go out.
+            if index % FPS == 30 {
+                held = Some(frame);
+            } else {
+                if let Some(held) = held.take() {
+                    transport.send_video(held);
+                }
+                transport.send_video(frame);
+            }
+        }
+        let got = recv_until(&sock, &mut buf, timeout).await;
+        if let Some((n, _)) = got {
+            if n > 600 {
+                big += 1;
+                if big % every == 0 {
+                    dropped += 1;
+                    continue;
+                }
+            }
+        }
+        rtc.handle_input(input(got, &buf, local)).unwrap();
+    }
+    assert!(dropped > 20, "only {dropped} packets dropped");
+    assert_eq!(broken, 0, "{broken} frames arrived with packets missing");
+    assert!(
+        keyframe_requests <= MAX_KEYFRAMES,
+        "losing {dropped} packets forced {keyframe_requests} keyframes"
+    );
+    assert!(got_video > 200, "only {got_video} frames arrived");
+}
+
 /// Waits for one datagram until `timeout` (at most 2 ms) and returns its
 /// length and source.
 async fn recv_until(

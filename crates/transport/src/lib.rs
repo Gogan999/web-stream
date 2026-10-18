@@ -11,8 +11,9 @@
 //! than [`TransportConfig::max_send_delay`]) it skips to the newest frame and
 //! asks the encoder for a keyframe. Until that keyframe goes out, frames
 //! that build on the skipped one are dropped too, so the browser never
-//! decodes against a picture it doesn't have. NACKs are answered only for packets
-//! younger than [`TransportConfig::max_resend_age`].
+//! decodes against a picture it doesn't have. NACKs are answered for packets
+//! younger than [`TransportConfig::max_resend_age`]: a late resend costs the
+//! browser a short wait, a keyframe costs a stall and a soft picture.
 //!
 //! The host is ICE-lite and reachable directly: one UDP port (and optionally
 //! one ICE-TCP port for networks that block UDP) on each LAN address, plus any
@@ -26,7 +27,7 @@ pub use net::lan_ips;
 
 use std::collections::{HashSet, VecDeque};
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -60,10 +61,15 @@ pub struct TransportConfig {
     /// ICE-TCP port, or `None` to disable the TCP fallback.
     pub tcp_port: Option<u16>,
     /// Don't resend packets older than this; a keyframe repairs the loss
-    /// instead.
+    /// instead. Long enough for a lost resend to be asked for again: the
+    /// browser repeats a NACK about once a round trip, and until it knows the
+    /// round trip (a receive-only peer rarely does) it assumes 100 ms.
     pub max_resend_age: Duration,
     /// Drop a (non-key) frame instead of queueing it when the oldest unsent
-    /// video packet has waited longer than this.
+    /// video packet has waited longer than this. A drop costs a keyframe (a
+    /// stall and a soft picture), so this only catches a queue that has truly
+    /// fallen behind: a burst can sit a few milliseconds past two frame times,
+    /// on Windows especially, and is better sent a little late.
     pub max_send_delay: Duration,
     /// Starting point for bandwidth estimation.
     pub initial_bitrate_bps: u64,
@@ -78,8 +84,8 @@ impl Default for TransportConfig {
             public_ips: Vec::new(),
             udp_port: 8443,
             tcp_port: Some(8444),
-            max_resend_age: Duration::from_millis(50),
-            max_send_delay: Duration::from_millis(25),
+            max_resend_age: Duration::from_millis(250),
+            max_send_delay: Duration::from_millis(50),
             initial_bitrate_bps: 10_000_000,
             max_bitrate_bps: 50_000_000,
         }
@@ -111,12 +117,55 @@ pub enum TransportEvent {
     Stats(TransportStats),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct TransportStats {
     pub rtt: Option<Duration>,
     pub egress_loss: Option<f32>,
     pub bwe: Option<u64>,
     pub bytes_tx: u64,
+    /// What went wrong since the last stats.
+    pub trouble: Trouble,
+}
+
+/// Counts, since the last [`TransportStats`], of what costs the browser a
+/// keyframe or a packet: to tell a bad network from a host that can't keep up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Trouble {
+    /// Keyframe requests from the browser (PLI/FIR): it lost a packet that
+    /// no resend repaired.
+    pub browser_keyframe_requests: u32,
+    /// Frames dropped because the send queue was too far behind.
+    pub late_frames: u32,
+    /// Frames dropped for another reason (the encoder got too far ahead, or
+    /// they built on a dropped frame).
+    pub lost_frames: u32,
+    /// Packets the host's socket refused (its buffer was full).
+    pub send_drops: u32,
+}
+
+/// [`Trouble`], counted as it happens.
+#[derive(Default)]
+struct TroubleCounts {
+    browser_keyframe_requests: AtomicU32,
+    late_frames: AtomicU32,
+    lost_frames: AtomicU32,
+    send_drops: AtomicU32,
+}
+
+impl TroubleCounts {
+    fn take(&self) -> Trouble {
+        let take = |c: &AtomicU32| c.swap(0, Ordering::Relaxed);
+        Trouble {
+            browser_keyframe_requests: take(&self.browser_keyframe_requests),
+            late_frames: take(&self.late_frames),
+            lost_frames: take(&self.lost_frames),
+            send_drops: take(&self.send_drops),
+        }
+    }
+}
+
+fn bump(c: &AtomicU32) {
+    c.fetch_add(1, Ordering::Relaxed);
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -158,6 +207,7 @@ struct Shared {
     connected: AtomicBool,
     /// When the outstanding keyframe request was made.
     keyframe_asked: Mutex<Option<Instant>>,
+    trouble: TroubleCounts,
     events: mpsc::Sender<TransportEvent>,
 }
 
@@ -237,6 +287,7 @@ impl Transport {
             notify: Notify::new(),
             connected: AtomicBool::new(false),
             keyframe_asked: Mutex::new(None),
+            trouble: TroubleCounts::default(),
             events: events_tx,
         });
         let driver = Driver {
@@ -328,6 +379,7 @@ impl Transport {
         if let Some(old) = dropped {
             tracing::debug!(index = old.frame_index, "video queue full; frame dropped");
             if self.shared.connected.load(Ordering::Relaxed) {
+                bump(&self.shared.trouble.lost_frames);
                 if old.keyframe {
                     self.shared.keyframe_lost();
                 } else {
@@ -419,9 +471,17 @@ impl Driver {
                             VideoWrite::Sent if frame.keyframe => shared.keyframe_sent(),
                             VideoWrite::Sent => {}
                             VideoWrite::Skipped if frame.keyframe && s.is_connected() => {
+                                bump(&shared.trouble.lost_frames);
                                 shared.keyframe_lost()
                             }
-                            VideoWrite::Late | VideoWrite::Broken => shared.keyframe_needed(),
+                            VideoWrite::Late => {
+                                bump(&shared.trouble.late_frames);
+                                shared.keyframe_needed()
+                            }
+                            VideoWrite::Broken => {
+                                bump(&shared.trouble.lost_frames);
+                                shared.keyframe_needed()
+                            }
                             VideoWrite::Skipped => {}
                         }
                     }
@@ -461,7 +521,9 @@ impl Driver {
                             .expect("filter lock")
                             .confirm(destination);
                     }
-                    self.net.send(proto, source, destination, &data);
+                    if !self.net.send(proto, source, destination, &data) {
+                        bump(&self.shared.trouble.send_drops);
+                    }
                 }
                 Step::Event(ev) => match ev {
                     TransportEvent::Connected => {
@@ -471,7 +533,14 @@ impl Driver {
                         self.shared.keyframe_sent();
                         self.shared.keyframe_needed();
                     }
-                    TransportEvent::KeyframeNeeded => self.shared.keyframe_needed(),
+                    TransportEvent::KeyframeNeeded => {
+                        bump(&self.shared.trouble.browser_keyframe_requests);
+                        self.shared.keyframe_needed()
+                    }
+                    TransportEvent::Stats(mut stats) => {
+                        stats.trouble = self.shared.trouble.take();
+                        self.shared.emit(TransportEvent::Stats(stats))
+                    }
                     ev => self.shared.emit(ev),
                 },
             }

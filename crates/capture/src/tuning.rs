@@ -7,7 +7,7 @@
 //! up. The VBV (how many bits one frame may take) stays at one frame time
 //! except for Clarity, which lets a large frame (fast motion, a keyframe)
 //! take a little longer but never more than 20 ms on the wire, so the
-//! transport's late-frame cutoff (25 ms) is not hit by design.
+//! transport's late-frame cutoff (50 ms) is not hit by design.
 
 use ws_proto::{VideoConfig, VideoQuality};
 

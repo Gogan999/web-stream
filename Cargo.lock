@@ -3029,6 +3029,7 @@ dependencies = [
  "bytes",
  "local-ip-address",
  "rav1e",
+ "socket2",
  "str0m",
  "thiserror",
  "tokio",

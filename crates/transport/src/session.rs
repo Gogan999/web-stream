@@ -19,6 +19,22 @@ use crate::{Error, TransportConfig, TransportEvent, TransportStats};
 /// RTP header extension id for playout-delay. Any free id works; str0m's
 /// standard map leaves 5 unused.
 const PLAYOUT_DELAY_EXT_ID: u8 = 5;
+/// The file channel may hold at most this much unsent data, so transfers
+/// leave room in the shared SCTP buffer (128 KiB) for control and input.
+const FILE_MAX_BUFFERED: usize = 64 * 1024;
+/// When the file channel drains below this, [`TransportEvent::ChannelLow`].
+const FILE_LOW: usize = 16 * 1024;
+
+/// What happened to a frame handed to [`Session::write_video`].
+#[derive(Debug, PartialEq, Eq)]
+pub enum VideoWrite {
+    Sent,
+    /// The send queue was too far behind, so the frame was dropped; the
+    /// encoder must send a keyframe.
+    Late,
+    /// Not connected, or a codec the browser did not accept.
+    Skipped,
+}
 
 pub struct Session {
     rtc: Rtc,
@@ -26,8 +42,16 @@ pub struct Session {
     video: Mid,
     audio: Mid,
     channels: HashMap<ChannelId, &'static str>,
+    /// Media can flow: DTLS is up and ICE is not disconnected.
     connected: bool,
+    dtls_up: bool,
+    /// Disconnected has been reported since the last Connected.
+    down: bool,
     max_resend_age: Duration,
+    max_send_delay: Duration,
+    max_bitrate_bps: u64,
+    /// When the last keyframe went into the send queue.
+    keyframe_at: Option<Instant>,
     /// Codec of the last frame we could not send, to log once.
     unsupported_codec: Option<VideoCodec>,
 }
@@ -97,7 +121,12 @@ impl Session {
             audio,
             channels: chans,
             connected: false,
+            dtls_up: false,
+            down: false,
             max_resend_age: config.max_resend_age,
+            max_send_delay: config.max_send_delay,
+            max_bitrate_bps: config.max_bitrate_bps,
+            keyframe_at: None,
             unsupported_codec: None,
         };
         Ok((session, offer.to_sdp_string()))
@@ -119,7 +148,27 @@ impl Session {
         if let Some(tx) = self.rtc.direct_api().stream_tx_by_mid(self.video, None) {
             tx.set_rtx_cache(2048, self.max_resend_age, Some(0.15));
         }
+        // Probe up towards what the encoder can use, not just the start rate.
+        self.rtc
+            .bwe()
+            .set_desired_bitrate(Bitrate::bps(self.max_bitrate_bps));
         Ok(())
+    }
+
+    /// The local ICE ufrag, which the browser's checks must name.
+    pub fn local_ufrag(&mut self) -> String {
+        self.rtc.direct_api().local_ice_credentials().ufrag
+    }
+
+    /// Mark the session down; true if that is news (Disconnected not yet
+    /// reported).
+    pub fn mark_down(&mut self) -> bool {
+        self.connected = false;
+        !std::mem::replace(&mut self.down, true)
+    }
+
+    pub fn is_connected(&self) -> bool {
+        self.connected
     }
 
     pub fn add_remote_candidate(&mut self, candidate: &str) {
@@ -185,21 +234,42 @@ impl Session {
         }
     }
 
-    /// Returns false if the frame could not be sent (not connected yet, or a
-    /// codec the browser did not accept).
-    pub fn write_video(&mut self, frame: &EncodedFrame, now: Instant) -> bool {
+    /// How long the oldest unsent video packet has waited in the pacer, if
+    /// that backlog is from frames after the last keyframe. A keyframe is
+    /// big and is allowed to drain; the frames right behind it need it.
+    fn video_backlog(&mut self, now: Instant) -> Duration {
+        let keyframe_at = self.keyframe_at;
+        let mut api = self.rtc.direct_api();
+        let Some(tx) = api.stream_tx_by_mid(self.video, None) else {
+            return Duration::ZERO;
+        };
+        let Some(first_unsent) = tx.queue_info().and_then(|q| q.first_unsent()) else {
+            return Duration::ZERO;
+        };
+        if keyframe_at.is_some_and(|k| first_unsent <= k) {
+            return Duration::ZERO;
+        }
+        now.saturating_duration_since(first_unsent)
+    }
+
+    pub fn write_video(&mut self, frame: &EncodedFrame, now: Instant) -> VideoWrite {
         if !self.connected {
-            return false;
+            return VideoWrite::Skipped;
+        }
+        // Drop rather than queue: a frame that would wait behind older ones
+        // arrives late, and every frame after it would too.
+        if !frame.keyframe && self.video_backlog(now) > self.max_send_delay {
+            return VideoWrite::Late;
         }
         let Some(writer) = self.rtc.writer(self.video) else {
-            return false;
+            return VideoWrite::Skipped;
         };
         let Some(pt) = video_pt(writer.payload_params(), frame.codec) else {
             if self.unsupported_codec != Some(frame.codec) {
                 tracing::warn!(codec = ?frame.codec, "browser did not negotiate this codec; dropping video");
                 self.unsupported_codec = Some(frame.codec);
             }
-            return false;
+            return VideoWrite::Skipped;
         };
         let rtp_time = MediaTime::from_micros(frame.capture_time).rebase(Frequency::NINETY_KHZ);
         // Wallclock is when the image was captured: now, minus the time the
@@ -212,10 +282,15 @@ impl Session {
             .playout_delay(zero, zero)
             .write(pt, wallclock, rtp_time, frame.data.to_vec())
         {
-            Ok(()) => true,
+            Ok(()) => {
+                if frame.keyframe {
+                    self.keyframe_at = Some(now);
+                }
+                VideoWrite::Sent
+            }
             Err(e) => {
                 tracing::debug!("video write: {e}");
-                false
+                VideoWrite::Skipped
             }
         }
     }
@@ -253,6 +328,9 @@ impl Session {
             .rtc
             .channel(id)
             .ok_or(Error::ChannelNotOpen(label.to_string()))?;
+        if label == channels::FILE && ch.buffered_amount() + data.len() > FILE_MAX_BUFFERED {
+            return Ok(false);
+        }
         ch.write(binary, data)
             .map_err(|e| Error::Negotiation(e.to_string()))
     }
@@ -276,7 +354,9 @@ impl Session {
                 Err(e) => {
                     tracing::warn!("rtc failed: {e}");
                     self.rtc.disconnect();
-                    out.push(Step::Event(TransportEvent::Disconnected));
+                    if self.mark_down() {
+                        out.push(Step::Event(TransportEvent::Disconnected));
+                    }
                     return Instant::now() + Duration::from_secs(1);
                 }
             }
@@ -286,12 +366,30 @@ impl Session {
     fn translate(&mut self, event: Event) -> Option<TransportEvent> {
         Some(match event {
             Event::Connected => {
+                self.dtls_up = true;
                 self.connected = true;
-                // The first frame the browser sees must be decodable.
-                return Some(TransportEvent::Connected);
+                self.down = false;
+                TransportEvent::Connected
             }
             Event::IceConnectionStateChange(IceConnectionState::Disconnected) => {
-                self.connected = false;
+                if !self.mark_down() {
+                    return None;
+                }
+                TransportEvent::Disconnected
+            }
+            // ICE came back (consent restored, or a new pair) after a
+            // disconnect; DTLS state survived it.
+            Event::IceConnectionStateChange(
+                IceConnectionState::Connected | IceConnectionState::Completed,
+            ) if self.dtls_up && !self.connected => {
+                self.connected = true;
+                self.down = false;
+                TransportEvent::Connected
+            }
+            Event::Closed => {
+                if !self.mark_down() {
+                    return None;
+                }
                 TransportEvent::Disconnected
             }
             Event::KeyframeRequest(req) if req.mid == self.video => TransportEvent::KeyframeNeeded,
@@ -299,7 +397,15 @@ impl Session {
             | Event::EgressBitrateEstimate(BweKind::Remb { estimate, .. }) => {
                 TransportEvent::TargetBitrate(estimate.as_u64())
             }
-            Event::ChannelOpen(id, _) => TransportEvent::ChannelOpen(self.label(id)?),
+            Event::ChannelOpen(id, _) => {
+                let label = self.label(id)?;
+                if label == channels::FILE {
+                    if let Some(mut ch) = self.rtc.channel(id) {
+                        ch.set_buffered_amount_low_threshold(FILE_LOW);
+                    }
+                }
+                TransportEvent::ChannelOpen(label)
+            }
             Event::ChannelClose(id) => TransportEvent::ChannelClosed(self.label(id)?),
             Event::ChannelBufferedAmountLow(id) => TransportEvent::ChannelLow(self.label(id)?),
             Event::ChannelData(d) => TransportEvent::Data {

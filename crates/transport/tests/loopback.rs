@@ -176,7 +176,7 @@ async fn browser_peer_gets_video_and_data() {
 }
 
 #[tokio::test]
-async fn superseded_frame_asks_for_keyframe() {
+async fn no_keyframe_requests_without_a_session() {
     let (transport, mut events) = Transport::start(TransportConfig {
         ips: vec![[127, 0, 0, 1].into()],
         udp_port: 0,
@@ -185,11 +185,54 @@ async fn superseded_frame_asks_for_keyframe() {
     })
     .await
     .unwrap();
-    // Back-to-back frames without yielding: the first is still in the slot.
+    // Back-to-back frames without yielding supersede each other, but with
+    // nobody connected there is no one to send a keyframe to.
     transport.send_video(frame(0, true));
     transport.send_video(frame(1, false));
-    let ev = tokio::time::timeout(Duration::from_secs(1), events.recv())
+    let ev = tokio::time::timeout(Duration::from_millis(200), events.recv()).await;
+    assert!(ev.is_err(), "unexpected event: {ev:?}");
+}
+
+#[tokio::test]
+async fn junk_and_bad_tcp_are_ignored() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (transport, mut events) = Transport::start(TransportConfig {
+        ips: vec![[127, 0, 0, 1].into()],
+        udp_port: 0,
+        tcp_port: Some(0),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let offer = transport.offer().await.unwrap();
+    let port = |proto: &str| -> u16 {
+        offer
+            .lines()
+            .find(|l| {
+                l.starts_with("a=candidate")
+                    && l.split_whitespace().nth(2).map(str::to_lowercase) == Some(proto.into())
+            })
+            .and_then(|l| l.split_whitespace().nth(5))
+            .unwrap()
+            .parse()
+            .unwrap()
+    };
+    // A UDP flood of junk.
+    let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    for _ in 0..5_000 {
+        let _ = sock.send_to(&[0x80; 200], ("127.0.0.1", port("udp"))).await;
+    }
+    // A TCP connection that sends junk instead of a STUN check is closed.
+    let mut tcp = tokio::net::TcpStream::connect(("127.0.0.1", port("tcp")))
         .await
         .unwrap();
-    assert_eq!(ev, Some(TransportEvent::KeyframeNeeded));
+    tcp.write_all(&[0, 4, 1, 2, 3, 4]).await.unwrap();
+    let mut b = [0u8; 1];
+    let read = tokio::time::timeout(Duration::from_secs(1), tcp.read(&mut b)).await;
+    assert!(matches!(read, Ok(Ok(0)) | Ok(Err(_))), "{read:?}");
+    // The transport is still responsive.
+    assert!(transport.offer().await.is_ok());
+    while let Ok(ev) = events.try_recv() {
+        assert_ne!(ev, TransportEvent::Connected);
+    }
 }

@@ -45,8 +45,8 @@ const MIN_KBPS: u32 = 500;
 const NON_VIDEO_BPS: u64 = 500_000;
 /// Replies kept while the `control` channel is not open yet.
 const UNSENT_MAX: usize = 16;
-/// A `setVideoConfig` that needs a new pipeline is refused if the last one
-/// was less than this long ago.
+/// A `setVideoConfig` that needs a new pipeline waits until the last one is
+/// at least this old.
 const MIN_RESTART_GAP: Duration = Duration::from_secs(1);
 
 /// Video codecs the browser's answer accepted; `None` until known.
@@ -61,6 +61,7 @@ pub async fn run(
 ) {
     let (control_tx, mut control_rx) = mpsc::channel(CONTROL_QUEUE);
     let (stopped_tx, mut stopped_rx) = mpsc::channel(4);
+    let (rebuild_tx, mut rebuild_rx) = mpsc::channel(1);
     let mut media = Media {
         transport,
         config: opts.video.clone(),
@@ -71,6 +72,8 @@ pub async fn run(
         control_open: false,
         unsent: Vec::new(),
         stopped_tx,
+        rebuild_tx,
+        rebuild_pending: false,
         generation: 0,
         last_bwe: None,
         last_restart: None,
@@ -94,6 +97,7 @@ pub async fn run(
             },
             Some(msg) = control_rx.recv() => media.send_control(msg).await,
             Some(generation) = stopped_rx.recv() => media.video_stopped(generation),
+            Some(()) = rebuild_rx.recv() => media.rebuild_due(),
             _ = &mut shutdown => break,
         }
     }
@@ -113,6 +117,11 @@ struct Media {
     control_open: bool,
     unsent: Vec<HostControl>,
     stopped_tx: mpsc::Sender<u64>,
+    /// Wakes the loop when a deferred pipeline rebuild may run.
+    rebuild_tx: mpsc::Sender<()>,
+    /// `config` changed while the last rebuild was too recent; rebuild once
+    /// `rebuild_tx` fires.
+    rebuild_pending: bool,
     /// Bumped for every pipeline started, so a stale "stopped" is ignored.
     generation: u64,
     /// Latest bandwidth estimate of this connection, in bits per second.
@@ -262,6 +271,7 @@ impl Media {
         self.control_open = false;
         self.unsent.clear();
         self.last_bwe = None;
+        self.rebuild_pending = false;
         self.keyframe_requests = 0;
         *self.sent.lock().expect("sent stats lock") = SentFrames::default();
         if let Some(live) = self.live.take() {
@@ -445,7 +455,12 @@ impl Media {
         };
         tracing::debug!(?msg, "control");
         match msg {
-            ClientControl::ListDisplays => self.send_displays(),
+            ClientControl::ListDisplays => {
+                self.send_displays();
+                // And what is streaming, so the browser's settings start
+                // from the host's.
+                self.display_changed();
+            }
             ClientControl::SetHostResolution { width, height } => {
                 self.set_host_resolution(width, height)
             }
@@ -562,15 +577,37 @@ impl Media {
             self.display_changed();
             return;
         }
-        if self
-            .last_restart
-            .is_some_and(|t| t.elapsed() < MIN_RESTART_GAP)
-        {
-            self.error("video settings are changing too fast; try again in a moment".into());
-            return;
-        }
         self.config = config;
         self.set_ceiling();
+        if let Some(wait) = self
+            .last_restart
+            .and_then(|t| MIN_RESTART_GAP.checked_sub(t.elapsed()))
+        {
+            // Too soon after the last rebuild: apply the newest settings
+            // once the gap is over.
+            if !self.rebuild_pending {
+                self.rebuild_pending = true;
+                let tx = self.rebuild_tx.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(wait).await;
+                    let _ = tx.send(()).await;
+                });
+            }
+            return;
+        }
+        self.rebuild();
+    }
+
+    fn rebuild_due(&mut self) {
+        if std::mem::take(&mut self.rebuild_pending)
+            && self.live.as_ref().is_some_and(|l| l.video.is_some())
+        {
+            self.rebuild();
+        }
+    }
+
+    /// Restarts the pipeline with the current config.
+    fn rebuild(&mut self) {
         if let Err(e) = self.start_video() {
             tracing::error!("video: {e}");
             self.error(format!("could not apply video settings: {e}"));

@@ -110,16 +110,28 @@ async function offer() {
   ];
   for (const channel of channels) {
     channel.binaryType = 'arraybuffer';
+    if (channel.label === 'control') window.__control = channel;
     channel.onopen = () => write({ ev: 'channel', label: channel.label, ordered: channel.ordered, maxRetransmits: channel.maxRetransmits });
     channel.onmessage = (m) => {
       if (channel.label === 'control') {
         const c = JSON.parse(m.data);
         write({ ev: 'control', ...c });
-        if (c.type === 'listDisplays') sendDisplays(channel);
+        // Like the real host: the stream keeps its configured size whatever the display (the canvas
+        // resizes here only so the client sees a switch), and settings come back in displayChanged.
+        if (c.type === 'listDisplays') {
+          sendDisplays(channel);
+          sendConfig(channel);
+        }
         if (c.type === 'selectDisplay') {
           setDisplay(c.id);
-          const { width, height } = active;
-          channel.send(JSON.stringify({ type: 'displayChanged', id: active.id, config: { codec: 'h264', width, height, fps: 60, bitrateKbps: 20000 } }));
+          sendConfig(channel);
+        }
+        if (c.type === 'setVideoConfig') {
+          config = { ...config, ...c.config };
+          sendConfig(channel);
+        }
+        if (c.type === 'setHostResolution') {
+          channel.send(JSON.stringify({ type: 'error', message: "the host doesn't allow changing its resolution; start it with --allow-resolution-change" }));
         }
       } else {
         write({ ev: 'input', ch: channel.label, ...decode(m.data) });
@@ -135,6 +147,22 @@ async function offer() {
   });
   send({ type: 'offer', sdp: pc.localDescription.sdp });
 }
+
+let config = { codec: 'h264', width: 1920, height: 1080, fps: 60, bitrateKbps: 20000, quality: 'balanced' };
+
+function sendConfig(channel) {
+  channel.send(JSON.stringify({ type: 'displayChanged', id: active.id, config }));
+}
+
+// A rough videoStats once a second, so the client's host line and auto-tune have something to read.
+setInterval(() => {
+  const ch = window.__control;
+  if (ch?.readyState !== 'open') return;
+  ch.send(JSON.stringify({
+    type: 'videoStats', encoderKbps: config.bitrateKbps, maxKbps: config.bitrateKbps, bweKbps: config.bitrateKbps,
+    fps: 60, sentKbps: config.bitrateKbps, encodeMs: 2, keyframeRequests: 0, loss: 0,
+  }));
+}, 1000);
 
 function sendDisplays(channel) {
   channel.send(JSON.stringify({

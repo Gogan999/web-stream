@@ -17,7 +17,9 @@ Pairing and signaling: `docs/signaling.md` (transport). Data channel messages: [
 | `js/protocol.js` | Binary input message encoder/decoder |
 | `js/keymap.js` | `KeyboardEvent.code` → USB HID usage |
 | `js/gamepad.js` | Gamepad API standard mapping → XInput state |
-| `js/stats.js` | Stats overlay numbers from `getStats()` and `requestVideoFrameCallback` |
+| `js/stats.js` | Stats overlay numbers from `getStats()`, `requestVideoFrameCallback` and the host's `videoStats` |
+| `js/settings.js` | Resolution, bitrate, fps and quality settings → the host's `VideoConfig`; kept in `localStorage` |
+| `js/autotune.js` | Auto-tune (test): bitrate ladder, then encoder quality, keeping the best that streams cleanly |
 | `dev/` | Dev server (pairing API + `/ws` relay) and a mock host page (canvas + tone over real WebRTC) |
 
 ## Using it
@@ -26,6 +28,13 @@ Pairing and signaling: `docs/signaling.md` (transport). Data channel messages: [
 - Click **Connect**. Click the video to capture the mouse (relative mode); **Ctrl+Alt+Shift+Q** releases it.
 - **Fullscreen** also turns on Keyboard Lock so Esc, Alt+Tab and the Windows key go to the host. Hold Esc to leave fullscreen.
 - Hotkeys, all Ctrl+Alt+Shift +: **1–9** switch display, **S** stats, **F** fullscreen, **M** relative/absolute mouse, **Q** release mouse.
+- Stream settings (toolbar), remembered in this browser:
+  - **Resolution**: *Match this screen* (default) streams at this screen's size in device pixels, fitted to the host display's shape and never larger than it. *Host native* is the display's own size; the others are fixed heights.
+  - **Bitrate**: *Auto* picks from resolution and fps (20 Mb/s at 1080p60). It is a ceiling: the host follows the network's estimate below it.
+  - **FPS**, and **Quality**: *Speed* (fastest encode, softest), *Balanced*, *Clarity* (slowest encode the frame rate allows, more room for fast motion).
+  - **Match host resolution** switches the host display to the largest resolution that fits this screen. Off by default; the host must also be started with `--allow-resolution-change`, and it is undone on disconnect.
+  - **Auto-tune (test)** tries bitrates from 10 to 150 Mb/s, then Clarity and Balanced, about 7 s each, and keeps the best that streams without freezes, drops, loss, or slow encode/decode, minus 15% headroom. Run it while something moves on screen. Click again to stop.
+- The stats overlay's last two lines are the host's side: encoder bitrate / ceiling, bandwidth estimate, encode time and keyframe requests.
 - URL option: `?autoconnect` connects on load when paired.
 
 ## Developing without a host

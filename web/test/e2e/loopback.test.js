@@ -54,11 +54,15 @@ test('client streams from mock host, sends input and switches display', { timeou
   const pcInfo = await client.evaluate(() => {
     const pc = window.__pcs.at(-1);
     return {
-      jbt: pc.getReceivers().map((r) => r.jitterBufferTarget),
+      jbt: Object.fromEntries(pc.getReceivers().map((r) => [r.track.kind, r.jitterBufferTarget])),
+      stereo: /a=fmtp:\d+ .*stereo=1/.test(pc.localDescription.sdp),
       audioDir: pc.getTransceivers().find((t) => t.receiver.track.kind === 'audio').direction,
     };
   });
-  assert.deepEqual(pcInfo.jbt, [0, 0]);
+  // Video plays with no jitter buffer; audio keeps Chrome's adaptive one, and asks for stereo.
+  assert.equal(pcInfo.jbt.video, 0);
+  assert.equal(pcInfo.jbt.audio, null);
+  assert.ok(pcInfo.stereo);
   assert.equal(pcInfo.audioDir, 'recvonly');
 
   // Host-opened channels with the agreed reliability.
@@ -72,6 +76,24 @@ test('client streams from mock host, sends input and switches display', { timeou
 
   // Display list arrives and populates the picker.
   await client.waitForFunction(() => document.getElementById('display').options.length === 2);
+
+  // Once the host says what it streams, the client asks for its settings: the screen size fitted
+  // to the 1280x720 display, at the matching auto bitrate.
+  await host.waitForFunction(() => window.mockLog.some((e) => e.ev === 'control' && e.type === 'setVideoConfig'));
+  const asked = (await hostLog()).find((e) => e.type === 'setVideoConfig').config;
+  assert.deepEqual(
+    [asked.width, asked.height, asked.fps, asked.quality, asked.codec],
+    [1280, 720, 60, 'balanced', 'h264'],
+  );
+  assert.ok(asked.bitrateKbps > 5000 && asked.bitrateKbps < 20000, String(asked.bitrateKbps));
+  // A bitrate pick goes straight to the host.
+  await client.selectOption('#bitrate', '30000');
+  await host.waitForFunction(() => window.mockLog.some((e) => e.type === 'setVideoConfig' && e.config.bitrateKbps === 30000));
+  // Matching the host resolution asks the host, which refuses unless allowed; the refusal shows.
+  await client.check('#match-host');
+  await host.waitForFunction(() => window.mockLog.some((e) => e.type === 'setHostResolution'));
+  await client.waitForFunction(() => /allow-resolution-change/.test(document.getElementById('status').textContent));
+  await client.uncheck('#match-host');
 
   // Absolute mouse + keyboard.
   await client.selectOption('#mouse-mode', 'absolute');
@@ -107,6 +129,7 @@ test('client streams from mock host, sends input and switches display', { timeou
   // Stats overlay fills in.
   await client.click('#stats-toggle');
   await client.waitForFunction(() => /fps \d+/.test(document.getElementById('stats').textContent), null, { timeout: 5000 });
+  await client.waitForFunction(() => /host enc 30\.0\/30\.0 Mb\/s/.test(document.getElementById('stats').textContent), null, { timeout: 5000 });
   console.log(await client.textContent('#stats'));
 
   // Reload: the pairing cookie persists, so it connects straight away.

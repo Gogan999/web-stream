@@ -90,7 +90,7 @@ pub(crate) struct EncodeJob {
 /// The capture thread's encode decisions, kept free of GPU calls so they can
 /// be tested.
 ///
-/// Only an explicit keyframe request bypasses pacing. A frame dropped
+/// Only an explicit keyframe or repair request bypasses pacing. A frame dropped
 /// because the consumer's channel was full makes the *next paced* encode an
 /// IDR; it never triggers an immediate re-encode, so a stalled consumer
 /// can't make the thread spin on the same image.
@@ -100,6 +100,9 @@ pub(crate) struct Scheduler {
     has_image: bool,
     pending: Option<Instant>,
     keyframe_requested: bool,
+    /// Frames were invalidated: encode the frame that skips them now, so
+    /// the picture moves again without waiting for a frame slot.
+    repair_requested: bool,
     idr_next: bool,
 }
 
@@ -110,6 +113,7 @@ impl Scheduler {
             has_image: false,
             pending: None,
             keyframe_requested: false,
+            repair_requested: false,
             idr_next: true,
         }
     }
@@ -118,6 +122,13 @@ impl Scheduler {
     /// image, ignoring the frame-rate cap.
     pub(crate) fn request_keyframe(&mut self) {
         self.keyframe_requested = true;
+    }
+
+    /// Frames the browser never got were invalidated: encode the next frame
+    /// (not a keyframe) as soon as there is an image, ignoring the
+    /// frame-rate cap.
+    pub(crate) fn request_repair(&mut self) {
+        self.repair_requested = true;
     }
 
     /// A new desktop image was converted and is waiting to be encoded.
@@ -142,7 +153,7 @@ impl Scheduler {
             Some(_) => self.pacer.ready(now),
             None => self.pacer.idle_repeat_due(now),
         };
-        if !due && !self.keyframe_requested {
+        if !due && !self.keyframe_requested && !self.repair_requested {
             return None;
         }
         Some(EncodeJob {
@@ -155,6 +166,7 @@ impl Scheduler {
     /// dropped because the consumer's channel was full.
     pub(crate) fn encoded(&mut self, now: Instant, job: EncodeJob, delivered: bool) {
         self.pacer.encoded(now);
+        self.repair_requested = false;
         if job.idr {
             self.keyframe_requested = false;
             self.idr_next = false;
@@ -166,7 +178,7 @@ impl Scheduler {
 
     /// How long to wait for the next desktop update.
     pub(crate) fn wait(&self, now: Instant) -> Duration {
-        if self.has_image && self.keyframe_requested {
+        if self.has_image && (self.keyframe_requested || self.repair_requested) {
             return Duration::ZERO;
         }
         self.pacer.wait(now, self.pending.is_some())
@@ -297,6 +309,23 @@ mod scheduler_tests {
         assert_eq!(s.wait(t1), Duration::ZERO);
         let job = s.poll(t1).unwrap();
         assert!(job.idr);
+        s.encoded(t1, job, true);
+        assert_eq!(s.poll(t1), None);
+    }
+
+    #[test]
+    fn repair_request_bypasses_pacing_once_without_an_idr() {
+        let t0 = Instant::now();
+        let mut s = Scheduler::new(60);
+        s.new_image(t0);
+        let job = s.poll(t0).unwrap();
+        s.encoded(t0, job, true);
+        let t1 = t0 + Duration::from_millis(2);
+        assert_eq!(s.poll(t1), None);
+        s.request_repair();
+        assert_eq!(s.wait(t1), Duration::ZERO);
+        let job = s.poll(t1).unwrap();
+        assert!(!job.idr);
         s.encoded(t1, job, true);
         assert_eq!(s.poll(t1), None);
     }

@@ -76,7 +76,7 @@ test('settings survive broken storage', () => {
 });
 
 test('junk in storage falls back field by field', () => {
-  const map = new Map([['ws-stream-settings', JSON.stringify({ bitrate: 'abc', resolution: 'foo', fps: 59.5, quality: 'max', keyframeScale: 9, matchHost: 'yes', mic: 1 })]]);
+  const map = new Map([['ws-stream-settings', JSON.stringify({ bitrate: 'abc', resolution: 'foo', fps: 59.5, quality: 'max', keyframeScale: 9, recoverDrops: 'no', matchHost: 'yes', mic: 1 })]]);
   const mem = { getItem: (k) => map.get(k) ?? null, setItem: (k, v) => map.set(k, v) };
   assert.deepEqual(load(mem), { ...DEFAULTS });
   map.set('ws-stream-settings', JSON.stringify({ bitrate: '999999', fps: '120', quality: 'clarity' }));

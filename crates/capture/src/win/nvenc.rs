@@ -156,7 +156,7 @@ impl NvEncoder {
             config: Box::default(),
             fps: cfg.fps,
             vbv_frames: 1.0,
-            keyframe_scale: cfg.keyframe_scale.clamp(1, 4),
+            keyframe_scale: 1,
             can_invalidate: false,
             input: ptr::null_mut(),
             bitstream: ptr::null_mut(),
@@ -173,7 +173,7 @@ impl NvEncoder {
             "nvEncCreateBitstreamBuffer",
         )?;
         this.bitstream = bs.bitstreamBuffer;
-        tracing::info!(codec = ?cfg.codec, cfg.width, cfg.height, cfg.fps, cfg.bitrate_kbps, quality = ?cfg.quality, cfg.keyframe_scale, invalidation = this.can_invalidate, "NVENC ready");
+        tracing::info!(codec = ?cfg.codec, cfg.width, cfg.height, cfg.fps, cfg.bitrate_kbps, quality = ?cfg.quality, keyframe_scale = this.keyframe_scale, invalidation = this.can_invalidate, "NVENC ready");
         Ok(this)
     }
 
@@ -185,6 +185,7 @@ impl NvEncoder {
         };
         let effort = crate::tuning::tuning(cfg);
         self.vbv_frames = effort.vbv_frames;
+        self.keyframe_scale = effort.keyframe_scale;
         let preset_guid = match effort.preset {
             1 => nv::NV_ENC_PRESET_P1_GUID,
             2 => nv::NV_ENC_PRESET_P2_GUID,
@@ -349,11 +350,18 @@ impl NvEncoder {
     }
 
     /// Encodes the current contents of the registered input texture.
-    /// `timestamp` names the frame for [`Self::invalidate`].
-    pub(crate) fn encode(&mut self, timestamp: u64, force_idr: bool) -> Result<EncodedBits> {
+    /// `timestamp` names the frame for [`Self::invalidate`]. `intra` says
+    /// the frame will be coded from scratch without being an IDR (every
+    /// reference was invalidated), so it gets a keyframe's budget too.
+    pub(crate) fn encode(
+        &mut self,
+        timestamp: u64,
+        force_idr: bool,
+        intra: bool,
+    ) -> Result<EncodedBits> {
         // Let the keyframe take a few frames' worth of bits, then go back.
         // A failed change only costs keyframe sharpness.
-        let big_keyframe = force_idr && self.keyframe_scale > 1;
+        let big_keyframe = (force_idr || intra) && self.keyframe_scale > 1;
         if big_keyframe {
             let vbv = self.vbv_frames * f64::from(self.keyframe_scale);
             if let Err(e) = self.reconfigure_rate(self.kbps(), vbv, self.keyframe_scale) {
@@ -443,9 +451,10 @@ impl NvEncoder {
         Ok(bits)
     }
 
-    /// Stops the encoder referencing the frame encoded with `timestamp`, and
-    /// every frame built on it. The next frame uses an older reference, or
-    /// is coded intra (but is not an IDR) if none is left.
+    /// Stops the encoder referencing the frame encoded with `timestamp`.
+    /// Only that frame: to drop a run of frames, invalidate each one. The
+    /// next frame uses an older reference, or is coded intra (but is not an
+    /// IDR) if none is left.
     pub(crate) fn invalidate(&mut self, timestamp: u64) -> Result<()> {
         if !self.can_invalidate {
             return Err(CaptureError::Platform(
@@ -553,7 +562,7 @@ impl Drop for NvEncoder {
 
 /// Reference pictures kept when invalidation is on: how far back the encoder
 /// can reach for a picture the browser has.
-const DPB_FRAMES: u32 = 4;
+pub(crate) const DPB_FRAMES: u32 = 4;
 
 /// CBR at `kbps` with a VBV of `vbv_frames` frames: every frame fits in
 /// about one frame time on the wire, so the network never has to buffer a

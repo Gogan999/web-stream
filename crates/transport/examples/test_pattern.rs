@@ -83,7 +83,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::spawn(async move {
         while let Some(ev) = transport_events.recv().await {
             match ev {
-                TransportEvent::KeyframeNeeded => want_keyframe.store(true, Ordering::Relaxed),
+                // rav1e can't skip a dropped frame; restart from a keyframe.
+                TransportEvent::KeyframeNeeded | TransportEvent::FramesLost(_) => {
+                    want_keyframe.store(true, Ordering::Relaxed)
+                }
                 TransportEvent::Data {
                     channel,
                     binary,

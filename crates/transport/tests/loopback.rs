@@ -587,7 +587,8 @@ async fn lost_packets_are_resent_not_keyframed() {
 /// for a keyframe instead.
 #[tokio::test]
 async fn a_dropped_frame_is_skipped_over_without_a_keyframe() {
-    let _shared = REAL_TIME.read().await;
+    // Timed: an unrepaired gap gets a keyframe after the recovery wait.
+    let _alone = REAL_TIME.write().await;
     let (transport, mut events) = Transport::start(TransportConfig {
         ips: vec![[127, 0, 0, 1].into()],
         udp_port: 0,

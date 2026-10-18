@@ -281,6 +281,15 @@ impl Shared {
         }
     }
 
+    /// A frame skipping the gap was discarded before it reached the send
+    /// loop: ask for another, since the frames after it build on it.
+    fn repair_lost(&self) {
+        let recovering = *self.recovering.lock().expect("recovery lock");
+        if let Some((from, _)) = recovering {
+            self.emit(TransportEvent::FramesLost(from));
+        }
+    }
+
     /// A frame went out after a gap without a keyframe, or a keyframe did.
     fn recovered(&self) {
         self.recovering.lock().expect("recovery lock").take();
@@ -435,6 +444,8 @@ impl Transport {
                 bump(&self.shared.trouble.lost_frames);
                 if old.keyframe {
                     self.shared.keyframe_lost();
+                } else if old.recovers_from.is_some() {
+                    self.shared.repair_lost();
                 }
             }
         }

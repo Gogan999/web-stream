@@ -15,7 +15,7 @@ use ws_proto::{DisplayId, EncodedFrame, VideoConfig, mono_micros, mono_now};
 use super::convert::Converter;
 use super::display::{self, Output};
 use super::duplication::{Acquired, Duplicator};
-use super::nvenc::NvEncoder;
+use super::nvenc::{DPB_FRAMES, NvEncoder};
 use super::{Gpu, init_process};
 use crate::pacing::{EncodeJob, Scheduler};
 use crate::{CaptureError, Result};
@@ -160,6 +160,9 @@ struct Session {
     /// were invalidated: it is tagged so the receiver can let it follow
     /// the gap.
     recovers_from: Option<u64>,
+    /// Every reference the encoder kept was invalidated, so the next frame
+    /// is coded from scratch: give it a keyframe's budget.
+    intra_next: bool,
     /// Recent GPU/encoder rebuilds, to give up on a persistently broken
     /// device instead of looping.
     recoveries: Vec<Instant>,
@@ -185,6 +188,7 @@ impl Session {
             frames,
             frame_index: 0,
             recovers_from: None,
+            intra_next: false,
             recoveries: Vec::new(),
             stats: Stats::default(),
         })
@@ -295,6 +299,8 @@ impl Session {
                 .is_ok();
         if invalidated {
             self.recovers_from = Some(self.recovers_from.map_or(from, |r| r.min(from)));
+            self.intra_next |= next - from >= u64::from(DPB_FRAMES);
+            self.sched.request_repair();
         } else {
             self.sched.request_keyframe();
         }
@@ -369,7 +375,8 @@ impl Session {
     /// once the consumer has gone away.
     fn encode(&mut self, now: Instant, job: EncodeJob) -> Result<bool> {
         let start = Instant::now();
-        let bits = self.enc.encoder.encode(self.frame_index, job.idr)?;
+        let intra = std::mem::take(&mut self.intra_next);
+        let bits = self.enc.encoder.encode(self.frame_index, job.idr, intra)?;
         let done = Instant::now();
 
         // Only the first frame after an invalidation needs the tag; later

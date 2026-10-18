@@ -67,6 +67,11 @@ pub enum Notice {
 /// socket.
 pub struct SignalingSession {
     pub device_name: String,
+    /// The host name or address the browser used to reach us (its URL's
+    /// host, from the `Host` header, without the port). From outside the
+    /// LAN this is the WAN address or DDNS name, which the media
+    /// candidates must include.
+    pub host: Option<String>,
     incoming: mpsc::Receiver<ClientSignal>,
     outgoing: mpsc::Sender<HostSignal>,
 }
@@ -494,9 +499,21 @@ async fn ws_upgrade(
             );
         }
     };
+    let host = request_host(&headers);
     ws.max_message_size(MAX_WS_MESSAGE)
         .max_frame_size(MAX_WS_MESSAGE)
-        .on_upgrade(move |socket| run_socket(shared, socket, token, device.name))
+        .on_upgrade(move |socket| run_socket(shared, socket, token, device.name, host))
+}
+
+/// The host part of a `Host` header: `example.com:8443` → `example.com`,
+/// `[::1]:8443` → `::1`.
+fn request_host(headers: &HeaderMap) -> Option<String> {
+    let value = headers.get(header::HOST)?.to_str().ok()?.trim();
+    let host = match value.strip_prefix('[') {
+        Some(rest) => rest.split_once(']')?.0,
+        None => value.split(':').next()?,
+    };
+    (!host.is_empty()).then(|| host.to_ascii_lowercase())
 }
 
 async fn run_socket(
@@ -504,6 +521,7 @@ async fn run_socket(
     mut socket: WebSocket,
     token: String,
     device_name: String,
+    host: Option<String>,
 ) {
     let id = shared.next_id.fetch_add(1, Ordering::Relaxed);
     let (kick_tx, mut kick_rx) = oneshot::channel();
@@ -550,6 +568,7 @@ async fn run_socket(
     }
     let session = SignalingSession {
         device_name: device_name.clone(),
+        host,
         incoming: in_rx,
         outgoing: out_tx,
     };
@@ -637,5 +656,32 @@ async fn send(socket: &mut WebSocket, msg: Message) -> Result<(), ()> {
     match tokio::time::timeout(WS_SEND_TIMEOUT, socket.send(msg)).await {
         Ok(Ok(())) => Ok(()),
         _ => Err(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn host(value: &str) -> Option<String> {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_str(value).unwrap());
+        request_host(&headers)
+    }
+
+    #[test]
+    fn host_header_without_port() {
+        assert_eq!(host("203.0.113.9:8443").as_deref(), Some("203.0.113.9"));
+        assert_eq!(
+            host("Home.Example.net:8443").as_deref(),
+            Some("home.example.net")
+        );
+        assert_eq!(
+            host("home.example.net").as_deref(),
+            Some("home.example.net")
+        );
+        assert_eq!(host("[2001:db8::1]:8443").as_deref(), Some("2001:db8::1"));
+        assert_eq!(host(":8443"), None);
+        assert_eq!(request_host(&HeaderMap::new()), None);
     }
 }

@@ -219,7 +219,11 @@ async fn next_signal(session: &mut Option<SignalingSession>) -> Option<ClientSig
 /// Starts a fresh peer connection and sends its offer. False if the browser
 /// is gone.
 async fn send_offer(transport: &Transport, session: Option<&SignalingSession>) -> bool {
-    match transport.offer().await {
+    let public = reachable_at(session.and_then(|s| s.host.as_deref())).await;
+    if !public.is_empty() {
+        tracing::info!(?public, "advertising the address the browser used");
+    }
+    match transport.offer_reachable_at(public).await {
         Ok(sdp) => send(session, HostSignal::Offer { sdp }).await,
         Err(e) => {
             tracing::error!("offer failed: {e}");
@@ -231,6 +235,34 @@ async fn send_offer(transport: &Transport, session: Option<&SignalingSession>) -
                 },
             )
             .await
+        }
+    }
+}
+
+/// The IPv4 addresses behind the host name the browser used (an address
+/// already, or a DDNS name to resolve), so the offer advertises where the
+/// browser can actually reach us. The transport skips local ones.
+async fn reachable_at(host: Option<&str>) -> Vec<std::net::IpAddr> {
+    let Some(host) = host else {
+        return Vec::new();
+    };
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return vec![ip];
+    }
+    let lookup = tokio::net::lookup_host((host, 0));
+    match tokio::time::timeout(std::time::Duration::from_secs(2), lookup).await {
+        Ok(Ok(addrs)) => {
+            let mut ips: Vec<_> = addrs.map(|a| a.ip()).filter(|ip| ip.is_ipv4()).collect();
+            ips.dedup();
+            ips
+        }
+        Ok(Err(e)) => {
+            tracing::debug!(%host, "could not resolve: {e}");
+            Vec::new()
+        }
+        Err(_) => {
+            tracing::debug!(%host, "resolving timed out");
+            Vec::new()
         }
     }
 }

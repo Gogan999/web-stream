@@ -49,10 +49,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     tokio::spawn(server.serve());
 
+    // Fixed media ports (UDP n, ICE-TCP n+1) let a test forward them from
+    // a fake public address; 0 picks free ones.
+    let media_port: u16 = std::env::var("TEST_MEDIA_PORT")
+        .ok()
+        .map(|p| p.parse())
+        .transpose()?
+        .unwrap_or(0);
     let (transport, mut transport_events) = Transport::start(TransportConfig {
         ips: vec![[127, 0, 0, 1].into()],
-        udp_port: 0,
-        tcp_port: Some(0),
+        udp_port: media_port,
+        tcp_port: Some(if media_port == 0 { 0 } else { media_port + 1 }),
         ..Default::default()
     })
     .await?;
@@ -99,14 +106,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// The glue the host agent needs: offer on connect, apply the answer, pass
-/// candidates through, re-offer on restart.
+/// The glue the host agent needs: offer on connect (advertising the address
+/// the browser reached us at), apply the answer, pass candidates through,
+/// re-offer on restart.
 async fn run_session(mut session: SignalingSession, transport: Transport) {
     let mut send_offer = true;
     loop {
         if send_offer {
             send_offer = false;
-            match transport.offer().await {
+            let public = session.host.iter().filter_map(|h| h.parse().ok()).collect();
+            match transport.offer_reachable_at(public).await {
                 Ok(sdp) => {
                     if !session.send(HostSignal::Offer { sdp }).await {
                         break;

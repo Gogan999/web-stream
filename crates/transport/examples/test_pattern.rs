@@ -83,7 +83,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::spawn(async move {
         while let Some(ev) = transport_events.recv().await {
             match ev {
-                TransportEvent::KeyframeNeeded => want_keyframe.store(true, Ordering::Relaxed),
+                // rav1e can't skip a dropped frame; restart from a keyframe.
+                TransportEvent::KeyframeNeeded | TransportEvent::FramesLost(_) => {
+                    want_keyframe.store(true, Ordering::Relaxed)
+                }
                 TransportEvent::Data {
                     channel,
                     binary,
@@ -196,6 +199,7 @@ fn encode_loop(transport: Transport, want_keyframe: Arc<AtomicBool>) {
                 codec: VideoCodec::Av1,
                 frame_index: pkt.input_frameno,
                 keyframe: pkt.frame_type == FrameType::KEY,
+                recovers_from: None,
                 capture_time: capture.as_micros() as u64,
                 encode_done_time: start.elapsed().as_micros() as u64,
                 width: W as u32,

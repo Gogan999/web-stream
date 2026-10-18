@@ -8,8 +8,9 @@
 //! Frames leave this crate as [`ws_proto::EncodedFrame`] on a bounded
 //! channel. The pipeline never queues: it encodes the newest desktop image
 //! when a frame slot comes up, and if the channel is full the encoded frame
-//! is dropped (`frame_index` still advances) and the next paced frame is a
-//! keyframe so the decoder can resume.
+//! is dropped (`frame_index` still advances) and the next frame skips over
+//! it (see [`ws_proto::EncodedFrame::recovers_from`]), or is a keyframe
+//! where the encoder can't, so the decoder can resume.
 //!
 //! The mouse cursor is not drawn into the video. DXGI excludes it; the host
 //! sends its shape and position over the control channel instead
@@ -191,6 +192,17 @@ impl VideoPipeline {
     pub fn request_keyframe(&self) {
         #[cfg(windows)]
         self.inner.request_keyframe();
+    }
+
+    /// Frames from `index` on never reached the browser: the next frame
+    /// must build only on frames before it. Invalidates them in the encoder
+    /// where it can ([`ws_proto::VideoConfig::recover_drops`]), and sends a
+    /// keyframe otherwise.
+    pub fn recover_from(&self, index: u64) {
+        #[cfg(windows)]
+        self.inner.recover_from(index);
+        #[cfg(not(windows))]
+        let _ = index;
     }
 
     /// Changes the target bitrate without restarting the encoder.

@@ -18,6 +18,7 @@ const ui = {
   unpair: $('unpair'), pair: $('pair'), deviceName: $('device-name'), pairStart: $('pair-start'),
   pairCode: $('pair-code'), pairConfirm: $('pair-confirm'), pairMsg: $('pair-msg'),
   resolution: $('resolution'), bitrate: $('bitrate'), fps: $('fps'), quality: $('quality'),
+  keyframeScale: $('keyframe-scale'), recoverDrops: $('recover-drops'),
   matchHost: $('match-host'), autotune: $('autotune'), mic: $('mic'),
   audioKbps: $('audio-kbps'), audioFrame: $('audio-frame'),
   moreToggle: $('more-toggle'), more: $('more'), kbdToggle: $('kbd-toggle'), keysToggle: $('keys-toggle'), keys: $('keys'),
@@ -207,6 +208,7 @@ fillSelect(ui.resolution, settingsStore.RESOLUTIONS, (v) => RES_LABELS[v]);
 fillSelect(ui.bitrate, ['auto', ...settingsStore.BITRATES_KBPS], (v) => (v === 'auto' ? 'Auto' : `${v / 1000} Mb/s`));
 fillSelect(ui.fps, settingsStore.FRAME_RATES, (v) => String(v));
 fillSelect(ui.quality, settingsStore.QUALITIES, (v) => v[0].toUpperCase() + v.slice(1));
+fillSelect(ui.keyframeScale, settingsStore.KEYFRAME_SCALES, (v) => (v === 1 ? '1x (fastest)' : v === 4 ? '4x (sharpest)' : `${v}x`));
 fillSelect(ui.audioKbps, settingsStore.AUDIO_KBPS, (v) => (v === 'host' ? 'Host setting' : `${v} kb/s`));
 fillSelect(ui.audioFrame, settingsStore.AUDIO_FRAMES, (v) => (v === 'host' ? 'Host setting' : v === '10' ? '10 ms (lowest delay)' : '20 ms (better sound)'));
 
@@ -222,6 +224,8 @@ function showSettings() {
   ui.bitrate.value = String(settings.bitrate);
   ui.fps.value = String(settings.fps);
   ui.quality.value = settings.quality;
+  ui.keyframeScale.value = String(settings.keyframeScale);
+  ui.recoverDrops.checked = !!settings.recoverDrops;
   ui.matchHost.checked = !!settings.matchHost;
   ui.mic.checked = !!settings.mic;
   ui.audioKbps.value = settings.audioKbps;
@@ -229,13 +233,19 @@ function showSettings() {
 }
 showSettings();
 
-for (const [el, key] of [[ui.resolution, 'resolution'], [ui.bitrate, 'bitrate'], [ui.fps, 'fps'], [ui.quality, 'quality']]) {
+for (const [el, key] of [[ui.resolution, 'resolution'], [ui.bitrate, 'bitrate'], [ui.fps, 'fps'], [ui.quality, 'quality'], [ui.keyframeScale, 'keyframeScale']]) {
   el.addEventListener('change', () => {
-    settings[key] = key === 'fps' ? Number(el.value) : el.value;
+    settings[key] = key === 'fps' || key === 'keyframeScale' ? Number(el.value) : el.value;
     settingsStore.save(settings);
     applySettings();
   });
 }
+
+ui.recoverDrops.addEventListener('change', () => {
+  settings.recoverDrops = ui.recoverDrops.checked;
+  settingsStore.save(settings);
+  applySettings();
+});
 
 ui.matchHost.addEventListener('change', () => {
   settings.matchHost = ui.matchHost.checked;
@@ -347,7 +357,7 @@ async function autoTune() {
     onProgress: (text) => setStatus(text, 'connecting'),
   });
   ui.autotune.textContent = 'Stop auto-tune';
-  for (const el of [ui.resolution, ui.bitrate, ui.fps, ui.quality, ui.display, ui.matchHost]) el.disabled = true;
+  for (const el of [ui.resolution, ui.bitrate, ui.fps, ui.quality, ui.keyframeScale, ui.recoverDrops, ui.display, ui.matchHost]) el.disabled = true;
   try {
     const { config, summary } = await tuning.run();
     settings.bitrate = String(config.bitrateKbps);
@@ -361,7 +371,7 @@ async function autoTune() {
     tuning = null;
     tuneWindow = null;
     ui.autotune.textContent = 'Auto-tune (test)';
-    for (const el of [ui.resolution, ui.bitrate, ui.fps, ui.quality, ui.matchHost]) el.disabled = false;
+    for (const el of [ui.resolution, ui.bitrate, ui.fps, ui.quality, ui.keyframeScale, ui.recoverDrops, ui.matchHost]) el.disabled = false;
     ui.display.disabled = ui.display.options.length < 2;
     showSettings();
     if (session) applySettings();

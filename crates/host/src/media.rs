@@ -283,6 +283,11 @@ impl Media {
                     v.pipeline.request_keyframe();
                 }
             }
+            TransportEvent::FramesLost(from) => {
+                if let Some(v) = self.live.as_ref().and_then(|l| l.video.as_ref()) {
+                    v.pipeline.recover_from(from);
+                }
+            }
             TransportEvent::TargetBitrate(bps) => {
                 let video = self.live.as_ref().is_some_and(|l| l.video.is_some());
                 self.to_files(FileMsg::Bitrate(video.then_some(bps)));
@@ -582,6 +587,7 @@ impl Media {
             late_frames: s.trouble.late_frames,
             lost_frames: s.trouble.lost_frames,
             send_drops: s.trouble.send_drops,
+            recovered_frames: s.trouble.recovered,
         }));
     }
 

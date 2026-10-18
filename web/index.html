@@ -42,6 +42,8 @@
       <label>Bitrate <select id="bitrate"></select></label>
       <label>FPS <select id="fps"></select></label>
       <label>Quality <select id="quality"></select></label>
+      <label title="How many ordinary frames' worth of data a keyframe may use. Keyframes restart the picture (on connect, or after a packet is lost for good); bigger ones look sharper straight away but take that many frames to send.">Keyframe size <select id="keyframe-scale"></select></label>
+      <label title="When the host drops a frame (it fell behind sending), have the encoder skip over it instead of sending a keyframe. Turn off if the picture smears or streaks after a hitch."><input type="checkbox" id="recover-drops"> Skip dropped frames</label>
       <button id="autotune" type="button" title="Steps through bitrates and encoder qualities and keeps the best that streams cleanly. Run it while something moves on screen.">Auto-tune (test)</button>
     </section>
     <section>

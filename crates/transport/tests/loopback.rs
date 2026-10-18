@@ -25,6 +25,7 @@ fn frame(index: u64, keyframe: bool) -> EncodedFrame {
         codec: VideoCodec::H264,
         frame_index: index,
         keyframe,
+        recovers_from: None,
         capture_time: index * 16_667,
         encode_done_time: index * 16_667 + 2_000,
         width: 1920,
@@ -578,6 +579,100 @@ async fn lost_packets_are_resent_not_keyframed() {
         "losing {dropped} packets forced {keyframe_requests} keyframes"
     );
     assert!(got_video > 200, "only {got_video} frames arrived");
+}
+
+/// A frame the transport could not send is skipped over: it asks the
+/// encoder for a frame built without it ([`TransportEvent::FramesLost`]),
+/// sends that frame, and needs no keyframe. If no such frame comes, it asks
+/// for a keyframe instead.
+#[tokio::test]
+async fn a_dropped_frame_is_skipped_over_without_a_keyframe() {
+    // Timed: an unrepaired gap gets a keyframe after the recovery wait.
+    let _alone = REAL_TIME.write().await;
+    let (transport, mut events) = Transport::start(TransportConfig {
+        ips: vec![[127, 0, 0, 1].into()],
+        udp_port: 0,
+        tcp_port: None,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let offer = transport.offer().await.unwrap();
+    let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let local = sock.local_addr().unwrap();
+    let mut rtc = Rtc::builder().build(Instant::now());
+    rtc.add_local_candidate(Candidate::host(local, "udp").unwrap());
+    let answer = rtc
+        .sdp_api()
+        .accept_offer(SdpOffer::from_sdp_string(&offer).unwrap())
+        .unwrap();
+    transport
+        .accept_answer(answer.to_sdp_string())
+        .await
+        .unwrap();
+
+    // Frame 10 never reaches the transport, as if dropped on the host. The
+    // encoder answers the first FramesLost by skipping the gap; frame 30 is
+    // dropped too, and that request goes unanswered.
+    const SKIPPED: u64 = 10;
+    const UNREPAIRED: u64 = 30;
+    let mut buf = vec![0u8; 2048];
+    let mut connected = false;
+    let mut lost = Vec::new();
+    let mut keyframe_requests = 0;
+    let mut repair_due = None;
+    let mut got_video = 0usize;
+    let mut index = 0u64;
+    let mut next_frame = Instant::now();
+    let deadline = Instant::now() + Duration::from_secs(10);
+
+    while Instant::now() < deadline && keyframe_requests < 2 {
+        let timeout = loop {
+            match rtc.poll_output().unwrap() {
+                Output::Timeout(t) => break t,
+                Output::Transmit(t) => {
+                    sock.send_to(&t.contents, t.destination).await.unwrap();
+                }
+                Output::Event(Event::MediaData(_)) => got_video += 1,
+                Output::Event(_) => {}
+            }
+        };
+        while let Ok(ev) = events.try_recv() {
+            match ev {
+                TransportEvent::Connected => connected = true,
+                TransportEvent::KeyframeNeeded => keyframe_requests += 1,
+                TransportEvent::FramesLost(from) => {
+                    if lost.is_empty() {
+                        repair_due = Some(from);
+                    }
+                    lost.push(from);
+                }
+                _ => {}
+            }
+        }
+        let now = Instant::now();
+        if connected && now >= next_frame {
+            next_frame = now + Duration::from_millis(10);
+            let mut f = frame(index, index == 0);
+            f.recovers_from = repair_due.take();
+            if index != SKIPPED && index != UNREPAIRED {
+                transport.send_video(f);
+            }
+            index += 1;
+        }
+        let got = recv_until(&sock, &mut buf, timeout).await;
+        rtc.handle_input(input(got, &buf, local)).unwrap();
+    }
+
+    assert_eq!(lost, [SKIPPED, UNREPAIRED], "frames lost");
+    // One to start, one once the second gap went unrepaired.
+    assert_eq!(keyframe_requests, 2);
+    // Everything up to the second gap arrived but the skipped frame and the
+    // one that built on it before the repair came.
+    assert!(
+        got_video >= UNREPAIRED as usize - 3,
+        "{got_video} frames arrived"
+    );
 }
 
 /// Waits for one datagram until `timeout` (at most 2 ms) and returns its

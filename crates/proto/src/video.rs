@@ -52,11 +52,32 @@ pub struct VideoConfig {
     /// Older clients leave this out and get the default.
     #[serde(default)]
     pub quality: VideoQuality,
+    /// How many times an ordinary frame's bits a keyframe may use, 1..=4.
+    /// A bigger keyframe looks sharper the moment it arrives but takes that
+    /// many frame times to send.
+    #[serde(default = "default_keyframe_scale")]
+    pub keyframe_scale: u8,
+    /// Repair a frame the host itself dropped (sent too late, queue full)
+    /// by telling the encoder to stop referencing it, instead of sending a
+    /// keyframe. Loss on the network still needs a keyframe.
+    #[serde(default = "default_true")]
+    pub recover_drops: bool,
+}
+
+pub const DEFAULT_KEYFRAME_SCALE: u8 = 2;
+
+fn default_keyframe_scale() -> u8 {
+    DEFAULT_KEYFRAME_SCALE
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl VideoConfig {
     /// Clamps a client-supplied config to values the host will run: even
-    /// sizes from 320x180 to 7680x4320, 1..=240 fps, 500..=200000 kbps.
+    /// sizes from 320x180 to 7680x4320, 1..=240 fps, 500..=200000 kbps,
+    /// keyframes 1..=4 frames' worth of bits.
     pub fn clamped(&self) -> Self {
         let even = |v: u32, lo: u32, hi: u32| v.clamp(lo, hi) & !1;
         Self {
@@ -66,6 +87,8 @@ impl VideoConfig {
             fps: self.fps.clamp(1, 240),
             bitrate_kbps: self.bitrate_kbps.clamp(500, 200_000),
             quality: self.quality,
+            keyframe_scale: self.keyframe_scale.clamp(1, 4),
+            recover_drops: self.recover_drops,
         }
     }
 }
@@ -79,6 +102,8 @@ impl Default for VideoConfig {
             fps: 60,
             bitrate_kbps: 20_000,
             quality: VideoQuality::Balanced,
+            keyframe_scale: DEFAULT_KEYFRAME_SCALE,
+            recover_drops: true,
         }
     }
 }
@@ -90,8 +115,9 @@ impl Default for VideoConfig {
 /// Nothing queues frames. If the transport's channel is full when a frame
 /// finishes encoding, the capture side drops that frame, keeps
 /// `frame_index` advancing (so the drop shows as a gap) and makes the next
-/// frame a keyframe. If the transport itself falls behind it skips to the
-/// newest frame and asks for a keyframe.
+/// frame a keyframe, or a frame that references nothing from the gap (see
+/// [`EncodedFrame::recovers_from`]). If the transport itself falls behind
+/// it skips to the newest frame and asks for one of those.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncodedFrame {
     pub display: DisplayId,
@@ -100,6 +126,11 @@ pub struct EncodedFrame {
     /// means a frame was dropped.
     pub frame_index: u64,
     pub keyframe: bool,
+    /// Set on the first frame encoded after the encoder was told to stop
+    /// referencing frames from this index on: it builds only on frames
+    /// before it, so it can follow a gap that starts there without a
+    /// keyframe.
+    pub recovers_from: Option<u64>,
     /// When the desktop image was captured.
     pub capture_time: MicrosMono,
     /// When the encoder returned the bitstream.
@@ -122,11 +153,13 @@ mod tests {
             fps: 0,
             bitrate_kbps: u32::MAX,
             quality: VideoQuality::Speed,
+            keyframe_scale: 200,
+            recover_drops: false,
         }
         .clamped();
         assert_eq!(
-            (c.width, c.height, c.fps, c.bitrate_kbps),
-            (7680, 180, 1, 200_000)
+            (c.width, c.height, c.fps, c.bitrate_kbps, c.keyframe_scale),
+            (7680, 180, 1, 200_000, 4)
         );
         let odd = VideoConfig {
             width: 1921,
@@ -142,6 +175,8 @@ mod tests {
         let json = r#"{"codec":"h264","width":1280,"height":720,"fps":60,"bitrateKbps":8000}"#;
         let c: VideoConfig = serde_json::from_str(json).unwrap();
         assert_eq!(c.quality, VideoQuality::Balanced);
+        assert_eq!(c.keyframe_scale, DEFAULT_KEYFRAME_SCALE);
+        assert!(c.recover_drops);
         let c = VideoConfig {
             quality: VideoQuality::Clarity,
             ..Default::default()

@@ -48,3 +48,9 @@ all = { level = "warn", priority = -1 }
 lto = "thin"
 codegen-units = 1
 debug = "line-tables-only"
+
+# Dependencies (WebRTC, crypto, codecs) optimized in debug builds too: the
+# real-time transport tests stream at full rate, and unoptimized SRTP and
+# packetizing take a whole CPU core, which a CI runner doesn't have to spare.
+[profile.dev.package."*"]
+opt-level = 2

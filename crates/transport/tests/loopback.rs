@@ -35,6 +35,7 @@ fn frame(index: u64, keyframe: bool) -> EncodedFrame {
 
 #[tokio::test]
 async fn browser_peer_gets_video_and_data() {
+    let _shared = REAL_TIME.read().await;
     let (transport, mut events) = Transport::start(TransportConfig {
         ips: vec![[127, 0, 0, 1].into()],
         udp_port: 0,
@@ -177,6 +178,7 @@ async fn browser_peer_gets_video_and_data() {
 
 #[tokio::test]
 async fn no_keyframe_requests_without_a_session() {
+    let _shared = REAL_TIME.read().await;
     let (transport, mut events) = Transport::start(TransportConfig {
         ips: vec![[127, 0, 0, 1].into()],
         udp_port: 0,
@@ -196,6 +198,7 @@ async fn no_keyframe_requests_without_a_session() {
 
 #[tokio::test]
 async fn junk_and_bad_tcp_are_ignored() {
+    let _shared = REAL_TIME.read().await;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let (transport, mut events) = Transport::start(TransportConfig {
         ips: vec![[127, 0, 0, 1].into()],
@@ -240,6 +243,7 @@ async fn junk_and_bad_tcp_are_ignored() {
 
 #[tokio::test]
 async fn offer_advertises_public_addresses() {
+    let _shared = REAL_TIME.read().await;
     let (transport, _events) = Transport::start(TransportConfig {
         ips: vec![[127, 0, 0, 1].into()],
         public_ips: vec![[198, 51, 100, 7].into()],
@@ -293,9 +297,10 @@ fn sized_frame(index: u64, keyframe: bool, bytes: usize) -> EncodedFrame {
     f
 }
 
-/// The real-time tests stream at full rate for seconds and check timing;
-/// run together they starve each other on a small CI runner.
-static REAL_TIME: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// The real-time tests stream at full rate for seconds and check timing, so
+/// each runs alone: with any other test in this file running, they get too
+/// little CPU on a small CI runner. The other tests share the lock.
+static REAL_TIME: tokio::sync::RwLock<()> = tokio::sync::RwLock::const_new(());
 
 /// Heavy motion: a constant-bitrate encoder fills every frame to its budget
 /// (bitrate / fps), following the bandwidth estimate as the host does. Each keyframe request
@@ -308,7 +313,7 @@ static REAL_TIME: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 // transport's sends.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn full_frames_at_the_target_bitrate_need_almost_no_keyframes() {
-    let _alone = REAL_TIME.lock().await;
+    let _alone = REAL_TIME.write().await;
     // On failure, the transport's debug log says why each keyframe was asked for.
     let _ = tracing_subscriber::fmt()
         .with_env_filter("ws_transport=debug")
@@ -433,7 +438,7 @@ async fn full_frames_at_the_target_bitrate_need_almost_no_keyframes() {
 /// keyframe nor a frame.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn lost_packets_are_resent_not_keyframed() {
-    let _alone = REAL_TIME.lock().await;
+    let _alone = REAL_TIME.write().await;
     // On failure, the transport's debug log says why each keyframe was asked for.
     let _ = tracing_subscriber::fmt()
         .with_env_filter("ws_transport=debug")

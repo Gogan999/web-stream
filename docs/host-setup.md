@@ -279,12 +279,22 @@ What this changes for security:
   only an administrator can see it: the service's host is controlled only
   through a pipe that takes an elevated prompt, so a program running as a
   normal user can't open pairing.
-- The host runs as SYSTEM with nearly all of SYSTEM's privileges removed (it
-  can't load drivers, debug other processes or take ownership of files).
-  That narrows what a bug in it could be used for, but it is still the
-  SYSTEM account.
+- The host runs as SYSTEM, which is effectively full control of the PC.
+  Its privileges are removed (it can't load drivers, debug other processes
+  or take ownership of files), but it keeps the SYSTEM account itself:
+  anyone who got code running in it through a bug could still write to
+  System32 and the registry, or install a service of their own. Treat a
+  bug in the network-facing host as a full compromise of the PC.
 - What runs as SYSTEM is the copy in Program Files, which only
   administrators can change, never the build folder in your checkout.
+- `--cert` and `--key` are copied into the service's data folder when you
+  install, so a user who can write where they came from can't swap them.
+- The service picks a new random name for its control pipe each time it
+  starts the host, kept in its data folder, so a program running as a
+  normal user can't take the name first.
+- While the host restarts (signing out, switching users) the ports are
+  briefly free, and any local program could listen on them. A browser that
+  connects then sees a certificate other than the one it trusts and warns.
 - The service refuses `--web-root` (a folder a user could change would run
   their code in a browser that controls the PC), `--data-dir`, and receiving
   files from the browser (`--allow-upload`), which would write as SYSTEM into

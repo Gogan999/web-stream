@@ -191,7 +191,11 @@ pub fn spawn(session: u32, exe: &Path, args: &[String], log: &Path) -> anyhow::R
             let _ = TerminateProcess(process.0, 1);
             return Err(e).context("job object");
         }
-        ResumeThread(thread.0);
+        if ResumeThread(thread.0) == u32::MAX {
+            let e = windows::core::Error::from_thread();
+            let _ = TerminateProcess(process.0, 1);
+            return Err(e).context("ResumeThread");
+        }
     }
     Ok(Child {
         process,
@@ -318,11 +322,13 @@ impl AttributeList {
         let mut size = 0usize;
         // SAFETY: a size query; fails with the size needed.
         let _ = unsafe { InitializeProcThreadAttributeList(None, count, None, &mut size) };
-        let list = Self(vec![0u64; size.div_ceil(8)]);
-        // SAFETY: the buffer is `size` bytes, aligned.
-        unsafe { InitializeProcThreadAttributeList(Some(list.list()), count, None, &mut size) }
+        let buf = vec![0u64; size.div_ceil(8)];
+        let list = LPPROC_THREAD_ATTRIBUTE_LIST(buf.as_ptr().cast_mut().cast());
+        // SAFETY: the buffer is `size` bytes, aligned. Only wrapped (and so
+        // deleted on drop) once initialized.
+        unsafe { InitializeProcThreadAttributeList(Some(list), count, None, &mut size) }
             .context("InitializeProcThreadAttributeList")?;
-        Ok(list)
+        Ok(Self(buf))
     }
 
     fn list(&self) -> LPPROC_THREAD_ATTRIBUTE_LIST {

@@ -114,7 +114,9 @@ function Update-Service {
     } catch {
         $code = 'declined'
     }
-    if ($code -ne 0) {
+    if ($null -eq $code) {
+        Write-Host 'Could not tell whether the service was updated; check with: sc query web-stream' -ForegroundColor Yellow
+    } elseif ($code -ne 0) {
         Write-Host "The service was not updated ($code). Run `"$exe`" service update as administrator." -ForegroundColor Yellow
     }
 }
@@ -124,7 +126,12 @@ function Restart-Host {
     $gui = Join-Path $bin 'ws-host-gui.exe'
     $running = Get-HostProcess 'ws-host-gui'
     # With the service hosting, the tray app would only fight it for the ports.
-    if (-not $running -and (Get-Service -Name 'web-stream' -ErrorAction SilentlyContinue)) { return }
+    if (Get-Service -Name 'web-stream' -ErrorAction SilentlyContinue) {
+        if ($running) {
+            Write-Host 'The tray app is running alongside the web-stream service; they use the same ports. Quit the tray app.' -ForegroundColor Yellow
+        }
+        return
+    }
     if ($NoRestart) {
         if ($running) { Write-Host 'The host keeps running the old build until it is restarted.' }
         return

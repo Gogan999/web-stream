@@ -83,7 +83,14 @@ mod imp {
         // SAFETY: the current thread's desktop handle needs no closing.
         let current = unsafe { GetThreadDesktop(GetCurrentThreadId()) }.ok();
         let input_name = name(input);
-        if input_name.is_none() || current.and_then(name) == input_name {
+        // Without the current desktop there is nothing to move back to (or
+        // to compare with): stay put.
+        let Some(current) = current else {
+            // SAFETY: we opened `input` and nothing uses it.
+            let _ = unsafe { CloseDesktop(input) };
+            return false;
+        };
+        if input_name.is_none() || name(current) == input_name {
             // SAFETY: we opened `input` and nothing uses it.
             let _ = unsafe { CloseDesktop(input) };
             return false;
@@ -108,9 +115,9 @@ mod imp {
                     let _ = unsafe { CloseDesktop(std::mem::replace(&mut prev.opened, input)) };
                 }
                 None => {
-                    *a = current.map(|original| Attached {
+                    *a = Some(Attached {
                         opened: input,
-                        original,
+                        original: current,
                     })
                 }
             }

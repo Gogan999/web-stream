@@ -10,8 +10,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, bail};
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::UI::Shell::{
-    FOLDERID_LocalAppData, FOLDERID_ProgramFiles, FOLDERID_Windows, KF_FLAG_DEFAULT,
-    SHGetKnownFolderPath,
+    FOLDERID_ProgramFiles, FOLDERID_Windows, KF_FLAG_DEFAULT, SHGetKnownFolderPath,
 };
 use windows::core::GUID;
 use windows_service::service::{
@@ -41,9 +40,6 @@ const POLL: Duration = Duration::from_millis(500);
 /// How long the host gets to quit (putting back a changed resolution)
 /// before it is killed.
 const QUIT_TIMEOUT: Duration = Duration::from_secs(10);
-/// A host that ran at least this long was healthy: restart it right away.
-const HEALTHY_RUN: Duration = Duration::from_secs(30);
-const MAX_BACKOFF: Duration = Duration::from_secs(60);
 
 fn known_folder(id: &GUID) -> anyhow::Result<PathBuf> {
     // SAFETY: the returned string is freed below.
@@ -63,10 +59,13 @@ fn install_dir() -> anyhow::Result<PathBuf> {
     Ok(known_folder(&FOLDERID_ProgramFiles)?.join("web-stream"))
 }
 
-/// The service's data: certificate, paired browsers, logs. Run as SYSTEM,
-/// this is SYSTEM's own profile, which only administrators can read.
+/// The service's data: certificate, paired browsers, logs, the control
+/// pipe's name. SYSTEM's own profile, which only SYSTEM and administrators
+/// can read; the same folder whoever asks (the service, or an
+/// administrator's `install` or `console`).
 pub fn data_dir() -> anyhow::Result<PathBuf> {
-    Ok(known_folder(&FOLDERID_LocalAppData)?.join("web-stream"))
+    Ok(known_folder(&FOLDERID_Windows)?
+        .join(r"System32\config\systemprofile\AppData\Local\web-stream"))
 }
 
 fn manager(access: ServiceManagerAccess) -> anyhow::Result<ServiceManager> {
@@ -94,7 +93,8 @@ fn open_installed(manager: &ServiceManager) -> anyhow::Result<Option<Service>> {
 }
 
 pub fn install(args: &[String]) -> anyhow::Result<()> {
-    super::check_install_args(args)?;
+    let opts = super::check_install_args(args)?;
+    let args = &copy_certificate(args, &opts)?;
     let manager = manager(ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE)?;
     let existing = open_installed(&manager)?;
     if let Some(s) = &existing {
@@ -148,13 +148,38 @@ pub fn install(args: &[String]) -> anyhow::Result<()> {
     );
     println!(
         "data (certificate, paired browsers, logs) in {}",
-        data_dir_hint()
+        data_dir()?.display()
     );
     println!();
     println!("It uses the same ports as the tray app: quit the tray app and turn off its");
     println!("\"Start with Windows\". The service has its own certificate and paired browsers,");
     println!("so pair again: run `ws-host service pair` from an administrator prompt.");
     Ok(())
+}
+
+/// The host reads `--cert` and `--key` as SYSTEM: copies them into the
+/// service's data folder, which only administrators can change, so a user
+/// who can write where they came from can't swap them later.
+fn copy_certificate(
+    args: &[String],
+    opts: &ws_host::options::ServeOptions,
+) -> anyhow::Result<Vec<String>> {
+    let Some((cert, key)) = &opts.cert else {
+        return Ok(args.to_vec());
+    };
+    let dir = data_dir()?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    let mut args = args.to_vec();
+    for (flag, src, name) in [
+        ("--cert", cert, "service-cert.pem"),
+        ("--key", key, "service-key.pem"),
+    ] {
+        let dest = dir.join(name);
+        std::fs::copy(src, &dest)
+            .with_context(|| format!("copy {} to {}", src.display(), dest.display()))?;
+        args = super::replace_value(&args, flag, &dest.display().to_string());
+    }
+    Ok(args)
 }
 
 pub fn update() -> anyhow::Result<()> {
@@ -181,19 +206,11 @@ pub fn uninstall() -> anyhow::Result<()> {
     let dir = install_dir()?;
     let _ = std::fs::remove_file(dir.join(EXE_NAME));
     let _ = std::fs::remove_dir(&dir);
-    println!("removed the service; its data stays in {}", data_dir_hint());
+    println!(
+        "removed the service; its data stays in {}",
+        data_dir()?.display()
+    );
     Ok(())
-}
-
-/// The data folder as the service sees it (SYSTEM's profile), whoever asks.
-fn data_dir_hint() -> String {
-    match known_folder(&FOLDERID_Windows) {
-        Ok(w) => w
-            .join(r"System32\config\systemprofile\AppData\Local\web-stream")
-            .display()
-            .to_string(),
-        Err(_) => "SYSTEM's AppData\\Local\\web-stream".into(),
-    }
 }
 
 fn stop_and_wait(service: &Service) -> anyhow::Result<()> {
@@ -254,6 +271,7 @@ define_windows_service!(ffi_service_main, service_main);
 
 /// Runs as the service; started by the service control manager.
 pub fn run(args: &[String]) -> anyhow::Result<()> {
+    super::imp::harden_dll_search();
     let _ = SERVE_ARGS.set(args.to_vec());
     service_dispatcher::start(SERVICE_NAME, ffi_service_main)
         .context("not started by the service control manager (use `ws-host service install`)")?;
@@ -330,12 +348,18 @@ fn run_service() -> anyhow::Result<()> {
     result
 }
 
+struct Host {
+    child: launch::Child,
+    pipe: String,
+    started: Instant,
+}
+
 /// Keeps one session host running in the console session.
 struct Supervisor {
     exe: PathBuf,
     args: Vec<String>,
     data_dir: PathBuf,
-    host: Option<(launch::Child, Instant)>,
+    host: Option<Host>,
     backoff: Duration,
     next_start: Instant,
 }
@@ -361,10 +385,10 @@ impl Supervisor {
         loop {
             self.reap();
             let console = launch::console_session();
-            if let (Some((host, _)), Some(session)) = (&self.host, console) {
-                if host.session != session {
+            if let (Some(host), Some(session)) = (&self.host, console) {
+                if host.child.session != session {
                     tracing::info!(
-                        from = host.session,
+                        from = host.child.session,
                         to = session,
                         "the screen moved to another session, moving the host"
                     );
@@ -384,14 +408,22 @@ impl Supervisor {
     }
 
     fn start_host(&mut self, session: u32) {
-        let mut args: Vec<String> = vec!["service".into(), "session-host".into()];
-        args.extend(self.args.iter().cloned());
-        args.push("--data-dir".into());
-        args.push(self.data_dir.display().to_string());
-        match launch::spawn(session, &self.exe, &args, &self.data_dir.join("host.log")) {
-            Ok(child) => {
+        let started = super::random_pipe_name().and_then(|pipe| {
+            // Written before the host creates the pipe, for `console`.
+            let file = self.data_dir.join(super::PIPE_FILE);
+            std::fs::write(&file, &pipe).with_context(|| format!("write {}", file.display()))?;
+            let args = super::session_host_args(&pipe, &self.args, &self.data_dir);
+            let child = launch::spawn(session, &self.exe, &args, &self.data_dir.join("host.log"))?;
+            Ok((child, pipe))
+        });
+        match started {
+            Ok((child, pipe)) => {
                 tracing::info!(session, pid = child.pid, "started the host");
-                self.host = Some((child, Instant::now()));
+                self.host = Some(Host {
+                    child,
+                    pipe,
+                    started: Instant::now(),
+                });
             }
             Err(e) => {
                 tracing::error!(session, "could not start the host: {e:#}");
@@ -404,13 +436,13 @@ impl Supervisor {
     /// after a long run, backing off while it keeps failing (say, the tray
     /// app holds the port).
     fn reap(&mut self) {
-        let Some((host, started)) = &self.host else {
+        let Some(host) = &self.host else {
             return;
         };
-        let Some(code) = host.exit_code() else {
+        let Some(code) = host.child.exit_code() else {
             return;
         };
-        let ran = started.elapsed();
+        let ran = host.started.elapsed();
         tracing::warn!(
             code,
             ran_secs = ran.as_secs(),
@@ -421,27 +453,26 @@ impl Supervisor {
     }
 
     fn retry_later(&mut self, ran: Duration) {
-        self.backoff = if ran >= HEALTHY_RUN {
-            Duration::from_secs(1)
-        } else {
-            (self.backoff * 2).clamp(Duration::from_secs(1), MAX_BACKOFF)
-        };
+        self.backoff = super::next_backoff(self.backoff, ran);
         self.next_start = Instant::now() + self.backoff;
     }
 
     /// Asks the host to quit, so it puts back a changed resolution, and
     /// kills it if it doesn't.
+    /// Starts the next host right away with a fresh backoff: a stop is not
+    /// a failure.
     fn stop_host(&mut self) {
-        let Some((host, _)) = self.host.take() else {
+        let Some(host) = self.host.take() else {
             return;
         };
-        if let Err(e) = control::request_quit() {
-            tracing::debug!("could not ask the host to quit: {e:#}");
+        if let Err(e) = control::request_quit(&host.pipe, host.child.pid) {
+            tracing::warn!("could not ask the host to quit: {e:#}");
         }
-        if !host.wait(QUIT_TIMEOUT) {
+        if !host.child.wait(QUIT_TIMEOUT) {
             tracing::warn!("the host did not quit, killing it");
-            host.kill();
+            host.child.kill();
         }
+        self.backoff = Duration::ZERO;
         self.next_start = Instant::now();
     }
 }

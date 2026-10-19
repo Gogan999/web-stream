@@ -8,14 +8,16 @@
 //! ws-host capture-test [--display N] [--seconds S] [--fps F] [--kbps K]
 //!                      [--size WxH] [--codec h264|h265|av1]
 //!                      [--quality speed|balanced|clarity] [--out FILE]
+//! ws-host service install|update|uninstall|pair|console   (Windows, see service)
 //! ```
 //!
 //! `capture-test` writes the raw bitstream (play it with `ffplay FILE`) and
 //! prints frame rate, drops and capture-to-encoded latency once a second.
 
 mod console;
+mod service;
 
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, bail};
@@ -35,23 +37,45 @@ ws-host capture-test [options]   encode a display to a file and print fps,
 ";
 
 fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,str0m=warn".into()),
-        )
-        .init();
-
     let args: Vec<String> = std::env::args().skip(1).collect();
+    init_logging(&args);
     match args.first().map(String::as_str) {
         Some("displays") => list_displays(),
         Some("audio-devices") => list_audio_devices(),
         Some("capture-test") => capture_test(&args[1..]),
         Some("serve") => run_serve(&args[1..]),
+        Some("service") => service::main(&args[1..]),
         Some(flag) if flag.starts_with('-') => run_serve(&args),
         None => run_serve(&[]),
-        Some(other) => bail!("unknown command {other:?}\n\n{}", options::USAGE),
+        Some(other) => bail!(
+            "unknown command {other:?}\n\n{}\n{}",
+            options::USAGE,
+            service::USAGE
+        ),
     }
+}
+
+fn init_logging(args: &[String]) {
+    let logs = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info,str0m=warn".into()),
+        )
+        // No colour codes in a log file (the service's host writes to one).
+        .with_ansi(std::io::stdout().is_terminal());
+    // The service itself has no stdout: it logs to service.log.
+    #[cfg(windows)]
+    if args.len() >= 2 && args[0] == "service" && args[1] == "run" {
+        if let Some(file) = service::service_log() {
+            return logs
+                .with_ansi(false)
+                .with_writer(std::sync::Mutex::new(file))
+                .init();
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = args;
+    logs.init();
 }
 
 fn run_serve(args: &[String]) -> anyhow::Result<()> {

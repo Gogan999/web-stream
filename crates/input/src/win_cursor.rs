@@ -23,6 +23,9 @@ const MAX_READ_SIDE: u32 = 512;
 /// An unchanged handle is read again this often: a handle can be destroyed
 /// and reused for another image, and an animated cursor keeps its handle.
 const REREAD: Duration = Duration::from_secs(1);
+/// How often the reader checks it is on the desktop that shows (the lock
+/// screen and UAC prompts have their own).
+const DESKTOP_CHECK: Duration = Duration::from_millis(250);
 
 use crate::cursor::{
     CursorLook, CursorState, ImageIds, fit, rgba_from_color, rgba_from_monochrome,
@@ -37,6 +40,7 @@ pub struct CursorReader {
     /// The handle last read and what it looked like, so an unchanged pointer
     /// costs one call.
     last: Option<(usize, Instant, CursorLook)>,
+    desktop_checked: Option<Instant>,
 }
 
 impl Default for CursorReader {
@@ -76,18 +80,32 @@ impl CursorReader {
             standard,
             ids: ImageIds::default(),
             last: None,
+            desktop_checked: None,
         }
     }
 
     /// The pointer now, or `None` when Windows won't say (the secure
     /// desktop, say).
     pub fn read(&mut self) -> Option<CursorState> {
+        if self
+            .desktop_checked
+            .is_none_or(|t| t.elapsed() >= DESKTOP_CHECK)
+        {
+            self.desktop_checked = Some(Instant::now());
+            ws_desktop::follow_input_desktop();
+        }
         let mut info = CURSORINFO {
             cbSize: size_of::<CURSORINFO>() as u32,
             ..Default::default()
         };
         // SAFETY: `info` is a valid CURSORINFO with cbSize set.
-        unsafe { GetCursorInfo(&mut info) }.ok()?;
+        if unsafe { GetCursorInfo(&mut info) }.is_err() {
+            if !ws_desktop::follow_input_desktop() {
+                return None;
+            }
+            // SAFETY: as above.
+            unsafe { GetCursorInfo(&mut info) }.ok()?;
+        }
         let POINT { x, y } = info.ptScreenPos;
         let handle = info.hCursor.0 as usize;
         if info.flags.0 & CURSOR_SHOWING.0 == 0 || handle == 0 {

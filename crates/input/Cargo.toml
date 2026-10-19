@@ -12,6 +12,7 @@ thiserror.workspace = true
 tracing.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+ws-desktop.workspace = true
 vigem-client = { version = "0.1.4", features = ["unstable_ds4", "unstable_xtarget_notification"] }
 windows = { workspace = true, features = [
     "Win32_Foundation",

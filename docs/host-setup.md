@@ -227,8 +227,78 @@ change that on the host (Audio quality in the tray app's settings window);
 Audio in the browser's Settings overrides both for that browser. 20 ms frames sound noticeably better at the same bitrate and
 reach the browser 10 ms later.
 
-## Elevated windows and the secure desktop
+## Sign-in screen, UAC prompts and programs run as administrator
 
-Input is injected as the logged-in user, so Windows blocks it into windows
-running as administrator and on the UAC and lock screens. The planned SYSTEM
-helper covers those; until then, run games without elevation.
+Run normally (the tray app or `ws-host`), the host runs as you, and Windows
+keeps it out of three places: programs running as administrator ignore its
+input, and UAC prompts and the lock and sign-in screens are on a separate,
+protected desktop it can neither capture nor type into. The stream freezes
+there until the desktop comes back.
+
+To reach those too, install the host as a Windows service. From an
+administrator prompt (right-click Terminal, Run as administrator), in the
+checkout:
+
+```
+target\release\ws-host.exe service install
+```
+
+Stream options go at the end, as for `ws-host` (`--codec av1 --fps 120`,
+`--public-ip`, `--allow-resolution-change`, ...); run `install` again to
+change them. It copies `ws-host.exe` to `C:\Program Files\web-stream`,
+registers the **web-stream** service (starts with Windows) and starts it.
+The service then keeps a host running on the PC's screen, as SYSTEM, from
+the sign-in screen on: before anyone signs in, while the PC is locked,
+after signing out, and when switching users. It follows Windows onto the
+UAC and lock screens and types into programs running as administrator.
+
+- **Quit the tray app** and turn off its **Start with Windows**: they use the
+  same ports, and the service's host keeps restarting until they are free.
+- **Pair again.** The service has its own certificate (the browser warns
+  about a new one) and its own paired browsers. To pair, run
+  `"C:\Program Files\web-stream\ws-host.exe" service pair` from an
+  administrator prompt, request a code in the browser, and type the code it
+  prints. `ws-host service console` takes the other console commands
+  (`drop`, `unpair-all`, `send <path>`; `quit` restarts the host).
+- **Updating:** `scripts\update.ps1` updates the service too (one UAC
+  prompt). By hand: build, then `ws-host.exe service update` as
+  administrator.
+- **Logs and data** are in
+  `C:\Windows\System32\config\systemprofile\AppData\Local\web-stream`:
+  `host.log` (the host) and `service.log` (the service starting and
+  restarting it).
+- `ws-host service uninstall` (as administrator) removes the service and the
+  Program Files copy, and leaves its data.
+- If the sign-in screen asks for Ctrl+Alt+Del, the browser can't send it
+  yet; turn that requirement off or sign in once at the PC.
+
+What this changes for security:
+
+- Whoever is paired with the service can do anything on this PC, including
+  answering UAC prompts. Pairing still needs the code shown on the host, and
+  only an administrator can see it: the service's host is controlled only
+  through a pipe that takes an elevated prompt, so a program running as a
+  normal user can't open pairing.
+- The host runs as SYSTEM, which is effectively full control of the PC.
+  Its privileges are removed (it can't load drivers, debug other processes
+  or take ownership of files), but it keeps the SYSTEM account itself:
+  anyone who got code running in it through a bug could still write to
+  System32 and the registry, or install a service of their own. Treat a
+  bug in the network-facing host as a full compromise of the PC.
+- What runs as SYSTEM is the copy in Program Files, which only
+  administrators can change, never the build folder in your checkout.
+- `--cert` and `--key` are copied into the service's data folder when you
+  install, so a user who can write where they came from can't swap them.
+- The service picks a new random name for its control pipe each time it
+  starts the host and keeps it, with the host's process id, in its data
+  folder. `service pair` and `console` connect only if that process
+  answers, so a program running as a normal user that takes the name
+  can't pose as the host.
+- While the host restarts (signing out, switching users) the ports are
+  briefly free, and any local program could listen on them. A browser that
+  connects then sees a certificate other than the one it trusts and warns.
+- The service refuses `--web-root` (a folder a user could change would run
+  their code in a browser that controls the PC), `--data-dir`, and receiving
+  files from the browser (`--allow-upload`), which would write as SYSTEM into
+  a folder a user controls. Sending files from the host still works through
+  `ws-host service console`.

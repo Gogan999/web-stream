@@ -52,6 +52,8 @@ impl PipelineHandle {
             .name("ws-capture".into())
             .spawn(move || {
                 let _ = unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST) };
+                // The session may start on the lock screen.
+                ws_desktop::follow_input_desktop();
                 let mut session = match Session::open(display, config, frames) {
                     Ok(s) => {
                         let _ = ready_tx.send(Ok(()));
@@ -329,12 +331,16 @@ impl Session {
     }
 
     /// Reopens duplication after it was lost, retrying while the desktop is
-    /// unavailable (mode change, UAC prompt). If the display disappeared,
-    /// falls back to the primary display. Returns false on shutdown.
+    /// unavailable (mode change, UAC prompt). Moves to the desktop that
+    /// shows now first: the lock screen and UAC prompts are on their own,
+    /// which only a host running as SYSTEM can capture (see the service).
+    /// If the display disappeared, falls back to the primary display.
+    /// Returns false on shutdown.
     fn reacquire(&mut self, commands: &std_mpsc::Receiver<Command>) -> Result<bool> {
         let started = Instant::now();
         let mut logged = false;
         loop {
+            ws_desktop::follow_input_desktop();
             match self.switch_to(self.display, false) {
                 Ok(()) => return Ok(true),
                 Err(CaptureError::DisplayNotFound(_))

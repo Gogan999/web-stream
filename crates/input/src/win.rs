@@ -101,17 +101,28 @@ pub struct WindowsInput {
 }
 
 fn send(inputs: &[INPUT]) -> Result<(), SinkError> {
-    // SAFETY: `inputs` is a valid slice of fully initialised INPUT structs.
-    let sent = unsafe { SendInput(inputs, std::mem::size_of::<INPUT>() as i32) };
+    let mut sent = send_once(inputs);
+    // The lock screen or a UAC prompt came up, or went away: input goes to
+    // the desktop showing now. Only works when running as SYSTEM. Retried
+    // only when nothing went in, so a partial send isn't doubled.
+    if sent == 0 && ws_desktop::follow_input_desktop() {
+        sent = send_once(inputs);
+    }
     if sent as usize != inputs.len() {
         // Usually UIPI: the foreground window belongs to an elevated process,
-        // or the secure desktop (UAC, lock screen) is showing.
+        // or the secure desktop (UAC, lock screen) is showing. The host
+        // service (running as SYSTEM) gets past both.
         return Err(SinkError(format!(
             "SendInput blocked: {}",
             windows::core::Error::from_thread()
         )));
     }
     Ok(())
+}
+
+fn send_once(inputs: &[INPUT]) -> u32 {
+    // SAFETY: `inputs` is a valid slice of fully initialised INPUT structs.
+    unsafe { SendInput(inputs, std::mem::size_of::<INPUT>() as i32) }
 }
 
 fn mouse(dx: i32, dy: i32, data: u32, flags: MOUSE_EVENT_FLAGS) -> INPUT {

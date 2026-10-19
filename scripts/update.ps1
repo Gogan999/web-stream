@@ -224,7 +224,9 @@ if (Test-Path $deps) {
 Write-Step 'Building the host (release)'
 Push-Location $repo
 try {
-    & cargo build --release -p ws-host -p ws-host-gui
+    # --target-dir: a CARGO_TARGET_DIR in the environment would put the build
+    # somewhere other than $bin.
+    & cargo build --release --target-dir (Join-Path $repo 'target') -p ws-host -p ws-host-gui
     $ok = $LASTEXITCODE -eq 0
 } finally {
     Pop-Location

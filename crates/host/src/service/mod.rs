@@ -142,15 +142,32 @@ pub fn valid_pipe_name(name: &str) -> bool {
         .is_some_and(|rest| rest.len() == 32 && rest.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
-/// Replaces the value after `flag` (the first one) with `value`.
+/// Replaces the value after every `flag` with `value` (the parser keeps
+/// the last one, so none may be left behind).
 pub fn replace_value(args: &[String], flag: &str, value: &str) -> Vec<String> {
     let mut out = args.to_vec();
-    if let Some(i) = out.iter().position(|a| a == flag) {
-        if let Some(v) = out.get_mut(i + 1) {
-            *v = value.to_string();
+    let mut i = 0;
+    while i + 1 < out.len() {
+        if out[i] == flag {
+            out[i + 1] = value.to_string();
+            i += 1;
         }
+        i += 1;
     }
     out
+}
+
+/// What [`PIPE_FILE`] holds: the pipe's name and the host process serving
+/// it, so a console can check it talks to the host itself.
+pub fn pipe_file_contents(pipe: &str, pid: u32) -> String {
+    format!("{pipe}\n{pid}\n")
+}
+
+pub fn parse_pipe_file(text: &str) -> Option<(String, u32)> {
+    let mut lines = text.lines();
+    let pipe = lines.next()?.trim();
+    let pid = lines.next()?.trim().parse().ok()?;
+    valid_pipe_name(pipe).then(|| (pipe.to_string(), pid))
 }
 
 /// Checks the serve options given to `service install`.
@@ -329,6 +346,20 @@ mod tests {
             args(&["--cert", "a.pem", "--key", "c.pem"])
         );
         assert_eq!(replace_value(&a, "--port", "1"), a);
+        let twice = args(&["--cert", "a", "--cert", "b", "--key", "k"]);
+        assert_eq!(
+            replace_value(&twice, "--cert", "c"),
+            args(&["--cert", "c", "--cert", "c", "--key", "k"])
+        );
+    }
+
+    #[test]
+    fn pipe_file() {
+        let pipe = random_pipe_name().unwrap();
+        let text = pipe_file_contents(&pipe, 4242);
+        assert_eq!(parse_pipe_file(&text), Some((pipe.clone(), 4242)));
+        assert_eq!(parse_pipe_file(&pipe), None);
+        assert_eq!(parse_pipe_file("\\\\.\\pipe\\fake\n1\n"), None);
     }
 
     #[test]

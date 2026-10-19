@@ -175,8 +175,11 @@ fn copy_certificate(
         ("--key", key, "service-key.pem"),
     ] {
         let dest = dir.join(name);
-        std::fs::copy(src, &dest)
-            .with_context(|| format!("copy {} to {}", src.display(), dest.display()))?;
+        // Installing again with the copy itself: nothing to copy.
+        if !same_file(src, &dest) {
+            std::fs::copy(src, &dest)
+                .with_context(|| format!("copy {} to {}", src.display(), dest.display()))?;
+        }
         args = super::replace_value(&args, flag, &dest.display().to_string());
     }
     Ok(args)
@@ -409,11 +412,12 @@ impl Supervisor {
 
     fn start_host(&mut self, session: u32) {
         let started = super::random_pipe_name().and_then(|pipe| {
-            // Written before the host creates the pipe, for `console`.
-            let file = self.data_dir.join(super::PIPE_FILE);
-            std::fs::write(&file, &pipe).with_context(|| format!("write {}", file.display()))?;
             let args = super::session_host_args(&pipe, &self.args, &self.data_dir);
             let child = launch::spawn(session, &self.exe, &args, &self.data_dir.join("host.log"))?;
+            // For `console`, which checks the pipe is served by this process.
+            let file = self.pipe_file();
+            std::fs::write(&file, super::pipe_file_contents(&pipe, child.pid))
+                .with_context(|| format!("write {}", file.display()))?;
             Ok((child, pipe))
         });
         match started {
@@ -430,6 +434,15 @@ impl Supervisor {
                 self.retry_later(Duration::ZERO);
             }
         }
+    }
+
+    fn pipe_file(&self) -> PathBuf {
+        self.data_dir.join(super::PIPE_FILE)
+    }
+
+    /// No console may look for a host that is gone.
+    fn forget_pipe(&self) {
+        let _ = std::fs::remove_file(self.pipe_file());
     }
 
     /// Notices a host that exited and schedules the next start: right away
@@ -449,6 +462,7 @@ impl Supervisor {
             "the host exited (its log is host.log)"
         );
         self.host = None;
+        self.forget_pipe();
         self.retry_later(ran);
     }
 
@@ -465,6 +479,7 @@ impl Supervisor {
         let Some(host) = self.host.take() else {
             return;
         };
+        self.forget_pipe();
         if let Err(e) = control::request_quit(&host.pipe, host.child.pid) {
             tracing::warn!("could not ask the host to quit: {e:#}");
         }

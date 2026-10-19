@@ -290,8 +290,10 @@ What this changes for security:
 - `--cert` and `--key` are copied into the service's data folder when you
   install, so a user who can write where they came from can't swap them.
 - The service picks a new random name for its control pipe each time it
-  starts the host, kept in its data folder, so a program running as a
-  normal user can't take the name first.
+  starts the host and keeps it, with the host's process id, in its data
+  folder. `service pair` and `console` connect only if that process
+  answers, so a program running as a normal user that takes the name
+  can't pose as the host.
 - While the host restarts (signing out, switching users) the ports are
   briefly free, and any local program could listen on them. A browser that
   connects then sees a certificate other than the one it trusts and warns.

@@ -194,10 +194,10 @@ fn open_error(e: std::io::Error) -> anyhow::Error {
 }
 
 /// The pipe of the host the service started last.
-fn current_pipe() -> anyhow::Result<String> {
+fn current_pipe() -> anyhow::Result<(String, u32)> {
     let file = super::scm::data_dir()?.join(super::PIPE_FILE);
-    let pipe = match std::fs::read_to_string(&file) {
-        Ok(p) => p.trim().to_string(),
+    let text = match std::fs::read_to_string(&file) {
+        Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
             return Err(open_error(std::io::Error::from_raw_os_error(
                 ERROR_ACCESS_DENIED,
@@ -209,10 +209,22 @@ fn current_pipe() -> anyhow::Result<String> {
             )));
         }
     };
-    if !super::valid_pipe_name(&pipe) {
-        anyhow::bail!("{} does not hold a control pipe name", file.display());
+    super::parse_pipe_file(&text)
+        .with_context(|| format!("{} does not name a control pipe", file.display()))
+}
+
+/// Fails unless process `pid` serves the pipe `handle` is connected to: a
+/// pipe name can be seen by anyone, and taken by anyone once its host is
+/// gone.
+fn check_server(handle: HANDLE, name: &str, pid: u32) -> anyhow::Result<()> {
+    let mut server = 0u32;
+    // SAFETY: a valid pipe handle.
+    unsafe { GetNamedPipeServerProcessId(handle, &mut server) }
+        .context("GetNamedPipeServerProcessId")?;
+    if server != pid {
+        anyhow::bail!("{name} is served by process {server}, not the service's host ({pid})");
     }
-    Ok(pipe)
+    Ok(())
 }
 
 /// `ws-host service console` and `pair`: types commands into the service's
@@ -222,7 +234,7 @@ pub fn console(first: Option<&str>) -> anyhow::Result<()> {
         .enable_all()
         .build()?;
     rt.block_on(async {
-        let pipe = current_pipe()?;
+        let (pipe, pid) = current_pipe()?;
         let client = loop {
             match ClientOptions::new().open(&pipe) {
                 Ok(c) => break c,
@@ -232,6 +244,7 @@ pub fn console(first: Option<&str>) -> anyhow::Result<()> {
                 Err(e) => return Err(open_error(e)),
             }
         };
+        check_server(HANDLE(client.as_raw_handle()), &pipe, pid)?;
         let (read, mut write) = tokio::io::split(client);
         if let Some(cmd) = first {
             write.write_all(format!("{cmd}\n").as_bytes()).await?;
@@ -293,13 +306,7 @@ pub fn request_quit(name: &str, pid: u32) -> anyhow::Result<()> {
             Err(e) => return Err(e.into()),
         }
     };
-    let mut server = 0u32;
-    // SAFETY: a valid pipe handle.
-    unsafe { GetNamedPipeServerProcessId(HANDLE(pipe.as_raw_handle()), &mut server) }
-        .context("GetNamedPipeServerProcessId")?;
-    if server != pid {
-        anyhow::bail!("{name} is served by process {server}, not the host ({pid})");
-    }
+    check_server(HANDLE(pipe.as_raw_handle()), name, pid)?;
     pipe.write_all(b"quit\n")?;
     Ok(())
 }

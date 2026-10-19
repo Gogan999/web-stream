@@ -88,6 +88,15 @@ function Switch-Builds {
     }
 }
 
+# Puts the .old build back after a failed set-aside or build.
+function Restore-Build {
+    foreach ($exe in $Exes) {
+        $cur = Join-Path $bin $exe
+        if (Test-Path "$cur.old") { Move-Item -Force "$cur.old" $cur }
+    }
+    if (Test-Path "$commitFile.old") { Move-Item -Force "$commitFile.old" $commitFile }
+}
+
 function Restart-Host {
     $gui = Join-Path $bin 'ws-host-gui.exe'
     $running = Get-HostProcess 'ws-host-gui'
@@ -99,6 +108,8 @@ function Restart-Host {
         Write-Step 'Restarting the host'
         $running | Stop-Process -Force
         $running | Wait-Process -Timeout 15 -ErrorAction SilentlyContinue
+        # A copy still running holds the single-instance lock, and the new one would exit.
+        if (Get-HostProcess 'ws-host-gui') { throw 'The old host did not stop. Quit it from the tray and start it again.' }
     } else {
         Write-Step 'Starting the host'
     }
@@ -108,7 +119,10 @@ function Restart-Host {
         # Never start the host elevated: Explorer starts it as the normal user.
         Start-Process -FilePath explorer.exe -ArgumentList "`"$gui`""
     } else {
-        Start-Process -FilePath $gui -WorkingDirectory $bin
+        # Back to the tray, as after Start with Windows: the window would cover the stream.
+        $start = @{ FilePath = $gui; WorkingDirectory = $bin }
+        if ($running) { $start.ArgumentList = '--hidden' }
+        Start-Process @start
     }
     if (Get-HostProcess 'ws-host') {
         Write-Host 'The console host (ws-host.exe) is still running the old build; restart it yourself.' -ForegroundColor Yellow
@@ -124,7 +138,9 @@ $bin = Join-Path $repo 'target\release'
 $commitFile = Join-Path $bin 'built-commit.txt'
 
 if ($Rollback) {
-    if (-not (Test-Path (Join-Path $bin 'ws-host-gui.exe.old'))) {
+    # Both or neither, so the two executables stay on the same build.
+    $missing = @($Exes | Where-Object { (Test-Path (Join-Path $bin $_)) -and -not (Test-Path (Join-Path $bin "$_.old")) })
+    if ($missing -or -not (Test-Path (Join-Path $bin 'ws-host-gui.exe.old'))) {
         throw 'There is no previous build to roll back to.'
     }
     Write-Step 'Switching back to the previous build'
@@ -168,20 +184,27 @@ if ($new) {
 # Keep the current build as .old, so the build can write new executables
 # while the host runs and so -Rollback has something to go back to.
 Write-Step 'Setting the current build aside'
+# Delete the build before last first, so nothing has moved yet if one of
+# its executables is still running.
 foreach ($exe in $Exes) {
-    $cur = Join-Path $bin $exe
-    $old = "$cur.old"
-    if (-not (Test-Path $cur)) { continue }
-    if (Test-Path $old) {
-        try {
-            Remove-Item -Force $old
-        } catch {
-            throw "$old is still in use (the host runs from it). Restart the host and run this again."
-        }
+    $old = Join-Path $bin "$exe.old"
+    if (-not (Test-Path $old)) { continue }
+    try {
+        Remove-Item -Force $old
+    } catch {
+        throw "$old is still in use (a host runs from it). Restart the host and run this again."
     }
-    Move-Item $cur $old
 }
-if (Test-Path $commitFile) { Move-Item -Force $commitFile "$commitFile.old" }
+try {
+    foreach ($exe in $Exes) {
+        $cur = Join-Path $bin $exe
+        if (Test-Path $cur) { Move-Item $cur "$cur.old" }
+    }
+    if (Test-Path $commitFile) { Move-Item -Force $commitFile "$commitFile.old" }
+} catch {
+    Restore-Build
+    throw "Could not set the current build aside: $_"
+}
 # Cargo hard-links target\release\<exe> to its copy in deps, so the running
 # host also holds that file and the linker could not write it. Rename it
 # too; earlier copies are deleted once nothing runs from them.
@@ -207,11 +230,7 @@ try {
     Pop-Location
 }
 if (-not $ok) {
-    foreach ($exe in $Exes) {
-        $cur = Join-Path $bin $exe
-        if (Test-Path "$cur.old") { Move-Item -Force "$cur.old" $cur }
-    }
-    if (Test-Path "$commitFile.old") { Move-Item -Force "$commitFile.old" $commitFile }
+    Restore-Build
     throw 'cargo build failed. The previous build is back in place and the host was left running.'
 }
 Set-Content -Path $commitFile -Value $head

@@ -4,11 +4,20 @@
 //! can be faster than the stream frame rate (a 144 Hz monitor streamed at
 //! 60 fps) or never (a static desktop). The pacer caps the encode rate with
 //! a deadline that advances by one frame interval per encode, so the average
-//! rate matches the target without bursts, and re-encodes the last image at
-//! a low rate while the desktop is idle so the stream stays alive and quality
-//! converges.
+//! rate stays at the target (or just above it, see [`RATE_MARGIN`]) without
+//! bursts, and re-encodes the last image at a low rate while the desktop is
+//! idle so the stream stays alive and quality converges.
 
 use std::time::{Duration, Instant};
+
+/// The deadline advances by a frame interval less 1/`RATE_MARGIN` of it, so
+/// a source up to 2% faster than the target passes straight through.
+/// A display's real refresh rate is rarely exactly its nominal one: one that
+/// runs at 60.05 Hz, streamed at 60 fps, gained on a deadline at exactly 60
+/// until every frame was held for most of a frame time before it was
+/// encoded (adding up to 16 ms of latency), with one frame skipped each time
+/// the drift wrapped round.
+const RATE_MARGIN: u32 = 50;
 
 #[derive(Debug)]
 pub(crate) struct Pacer {
@@ -23,11 +32,12 @@ pub(crate) struct Pacer {
 
 impl Pacer {
     pub(crate) fn new(fps: u32) -> Self {
-        let interval = Duration::from_secs(1) / fps.max(1);
+        let nominal = Duration::from_secs(1) / fps.max(1);
+        let interval = nominal - nominal / RATE_MARGIN;
         Self {
             interval,
             slack: interval / 4,
-            idle_repeat: Duration::from_millis(100).max(interval),
+            idle_repeat: Duration::from_millis(100).max(nominal),
             next_due: None,
             last_encode: None,
         }
@@ -215,10 +225,53 @@ mod tests {
         encodes
     }
 
+    /// Feeds frames at `source_hz` for `secs`, encoding each as soon as the
+    /// pacer allows (a newer frame replaces a held one), and returns the
+    /// longest any encoded frame was held.
+    fn longest_hold(source_hz: f64, target_fps: u32, secs: u64) -> Duration {
+        let start = Instant::now();
+        let mut pacer = Pacer::new(target_fps);
+        let step = Duration::from_micros(50);
+        let source_interval = Duration::from_secs_f64(1.0 / source_hz);
+        let mut next_source = start;
+        let mut held: Option<Instant> = None;
+        let mut longest = Duration::ZERO;
+        let mut now = start;
+        while now < start + Duration::from_secs(secs) {
+            if now >= next_source {
+                next_source += source_interval;
+                held = Some(now);
+            }
+            if let Some(arrived) = held {
+                if pacer.ready(now) {
+                    pacer.encoded(now);
+                    longest = longest.max(now - arrived);
+                    held = None;
+                }
+            }
+            now += step;
+        }
+        longest
+    }
+
+    #[test]
+    fn a_display_a_hair_faster_than_the_target_is_not_held() {
+        // A "60 Hz" monitor that really runs at 60.05 Hz, streamed at 60
+        // fps: frames must go out as they arrive, not drift into a hold
+        // of up to most of a frame time.
+        for hz in [60.0, 60.05, 60.5, 61.0] {
+            let hold = longest_hold(hz, 60, 30);
+            assert!(hold < Duration::from_millis(1), "{hz} Hz: held {hold:?}");
+        }
+        let hold = longest_hold(144.2, 144, 30);
+        assert!(hold < Duration::from_millis(1), "144.2 Hz: held {hold:?}");
+    }
+
     #[test]
     fn caps_fast_source_to_target_rate() {
+        // Up to RATE_MARGIN over the target, never the source rate.
         let n = run(144, 60);
-        assert!((59..=61).contains(&n), "{n} encodes");
+        assert!((59..=62).contains(&n), "{n} encodes");
     }
 
     #[test]

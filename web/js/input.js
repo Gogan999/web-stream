@@ -98,7 +98,11 @@ export class InputCapture {
       (!!this.keyTarget && document.activeElement === this.keyTarget);
   }
 
-  rel(buf) { this.session.sendInput(CHANNELS.INPUT, buf); }
+  // Pending motion goes first, so a click, wheel or key lands where the pointer just moved.
+  rel(buf) {
+    this.flushMotion();
+    this.session.sendInput(CHANNELS.INPUT, buf);
+  }
 
   start() {
     const opt = { signal: this.abort.signal };
@@ -116,7 +120,7 @@ export class InputCapture {
     const raw = 'onpointerrawupdate' in window;
     if (raw) {
       document.addEventListener('pointerrawupdate', (e) => {
-        if (e.pointerType === 'mouse' && ours(e)) this.onMouseMove(e);
+        if (e.pointerType !== 'touch' && ours(e)) this.onMouseMove(e);
       }, opt);
     }
     document.addEventListener('mousemove', (e) => { if (!raw && ours(e)) this.onMouseMove(e); }, opt);
@@ -150,7 +154,10 @@ export class InputCapture {
     window.addEventListener('keydown', (e) => this.onKey(e, true), { ...opt, capture: true });
     window.addEventListener('keyup', (e) => this.onKey(e, false), { ...opt, capture: true });
     window.addEventListener('blur', () => this.releaseAll(), opt);
-    document.addEventListener('visibilitychange', () => { if (document.hidden) this.releaseAll(); }, opt);
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) this.releaseAll();
+      else this.watchGamepads();
+    }, opt);
     document.addEventListener('pointerlockchange', () => { if (!this.locked) this.releaseAll(); }, opt);
 
     window.addEventListener('gamepadconnected', () => this.watchGamepads(), opt);
@@ -201,10 +208,7 @@ export class InputCapture {
     }
     if (!this.active) return;
     e.preventDefault();
-    if (this.mode === 'absolute') {
-      this.onMouseMove(e);
-      this.flushMotion(); // the click lands where the pointer is now, not where it last went out
-    }
+    if (this.mode === 'absolute') this.onMouseMove(e);
     this.rel(P.mouseButton(e.button, true));
   }
 
@@ -351,7 +355,8 @@ export class InputCapture {
     if (this.padTimer || this.abort.signal.aborted) return;
     if (![...(navigator.getGamepads?.() ?? [])].some((p) => p?.connected)) return;
     this.padTimer = setInterval(() => {
-      if (!this.pollGamepads()) {
+      // A hidden tab gets no input; gamepadconnected restarts polling.
+      if (document.hidden || !this.pollGamepads()) {
         clearInterval(this.padTimer);
         this.padTimer = 0;
       }

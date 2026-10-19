@@ -69,3 +69,14 @@ test('an absolute click sends the pointer position before the button', () => {
   assert.deepEqual(session.sent.map((m) => m.type), ['mouse-abs', 'mouse-button']);
   clearTimeout(ic.motionTimer);
 });
+
+test('a button waits for no motion: pending motion goes out first', () => {
+  const session = fakeSession();
+  const ic = new InputCapture({ session, video: {}, stage: {} });
+  Object.defineProperty(ic, 'locked', { value: true });
+  ic.onMouseMove({ movementX: 1, movementY: 0 });
+  ic.onMouseMove({ movementX: 2, movementY: 0 }); // held back by MOTION_GAP_MS
+  ic.onMouseDown({ button: 0, preventDefault() {} });
+  assert.deepEqual(session.sent.map((m) => [m.type, m.dx]), [['mouse-rel', 1], ['mouse-rel', 2], ['mouse-button', undefined]]);
+  clearTimeout(ic.motionTimer);
+});

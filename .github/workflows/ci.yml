@@ -25,17 +25,20 @@ jobs:
     runs-on: [self-hosted, windows, x64]
     defaults:
       run:
-        shell: powershell
+        # cmd, not powershell: Windows' default execution policy blocks the
+        # .ps1 files the runner writes for powershell steps.
+        shell: cmd
     env:
       # actions/checkout wipes untracked files, target/ included, so keep
       # build output next to the checkout where it survives between runs.
-      CARGO_TARGET_DIR: ${{ github.workspace }}\..\cargo-target
+      # One dir per event type so PR builds never feed main's.
+      CARGO_TARGET_DIR: ${{ github.workspace }}\..\cargo-target-${{ github.event_name }}
     steps:
       - uses: actions/checkout@v4
-      - name: toolchain
-        run: |
-          rustup update stable --no-self-update
-          rustup show
+      - name: update toolchain
+        run: rustup update stable --no-self-update
+      - name: show toolchain
+        run: rustup show
       - name: fmt
         run: cargo fmt --all --check
       - name: clippy

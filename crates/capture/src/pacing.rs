@@ -4,23 +4,28 @@
 //! can be faster than the stream frame rate (a 144 Hz monitor streamed at
 //! 60 fps) or never (a static desktop). The pacer caps the encode rate with
 //! a deadline that advances by one frame interval per encode, so the average
-//! rate stays at the target (or just above it, see [`RATE_MARGIN`]) without
-//! bursts, and re-encodes the last image at a low rate while the desktop is
-//! idle so the stream stays alive and quality converges.
+//! rate matches the target without bursts (a source barely faster than the
+//! target passes through, see [`NEAR_TARGET`]), and re-encodes the last
+//! image at a low rate while the desktop is idle so the stream stays alive
+//! and quality converges.
 
 use std::time::{Duration, Instant};
 
-/// The deadline advances by a frame interval less 1/`RATE_MARGIN` of it, so
-/// a source up to 2% faster than the target passes straight through.
-/// A display's real refresh rate is rarely exactly its nominal one: one that
-/// runs at 60.05 Hz, streamed at 60 fps, gained on a deadline at exactly 60
-/// until every frame was held for most of a frame time before it was
-/// encoded (adding up to 16 ms of latency), with one frame skipped each time
-/// the drift wrapped round.
-const RATE_MARGIN: u32 = 50;
+/// A source whose frames come at least this fraction of the target interval
+/// apart (one up to about 5% faster than the target) is not capped: each of
+/// its frames is encoded as it arrives. A display's real refresh rate is
+/// rarely exactly its nominal one, and one running at 60.05 Hz, streamed at
+/// 60 fps, gained on a deadline at exactly 60 until every frame was held for
+/// most of a frame time before it was encoded (up to 16 ms of latency), with
+/// a frame skipped each time the drift wrapped round. Sources well above the
+/// target (120 or 240 Hz at 60 fps) keep the exact target rate.
+const NEAR_TARGET: f64 = 0.95;
+/// Weight of the newest interval in the source interval estimate.
+const SOURCE_SMOOTHING: f64 = 1.0 / 8.0;
 
 #[derive(Debug)]
 pub(crate) struct Pacer {
+    /// One frame at the target rate.
     interval: Duration,
     /// A new frame up to this early is encoded immediately instead of held,
     /// absorbing jitter between the display's refresh and our deadline.
@@ -28,24 +33,61 @@ pub(crate) struct Pacer {
     idle_repeat: Duration,
     next_due: Option<Instant>,
     last_encode: Option<Instant>,
+    /// When the source last delivered a frame, and the smoothed time between
+    /// its frames.
+    last_source: Option<Instant>,
+    source_interval: Option<Duration>,
 }
 
 impl Pacer {
     pub(crate) fn new(fps: u32) -> Self {
-        let nominal = Duration::from_secs(1) / fps.max(1);
-        let interval = nominal - nominal / RATE_MARGIN;
+        let interval = Duration::from_secs(1) / fps.max(1);
         Self {
             interval,
             slack: interval / 4,
-            idle_repeat: Duration::from_millis(100).max(nominal),
+            idle_repeat: Duration::from_millis(100).max(interval),
             next_due: None,
             last_encode: None,
+            last_source: None,
+            source_interval: None,
         }
     }
 
     #[cfg(test)]
     pub(crate) fn interval(&self) -> Duration {
         self.interval
+    }
+
+    /// The source delivered a frame at `at`.
+    pub(crate) fn source_frame(&mut self, at: Instant) {
+        if let Some(last) = self.last_source.replace(at) {
+            // A pause (a still desktop) says nothing about the source's rate.
+            let gap = at.saturating_duration_since(last);
+            if gap <= self.interval * 2 {
+                self.source_interval = Some(match self.source_interval {
+                    Some(avg) => {
+                        avg.mul_f64(1.0 - SOURCE_SMOOTHING) + gap.mul_f64(SOURCE_SMOOTHING)
+                    }
+                    None => gap,
+                });
+            }
+        }
+    }
+
+    pub(crate) fn forget_source(&mut self) {
+        self.last_source = None;
+        self.source_interval = None;
+    }
+
+    /// How far apart encodes are kept: the target interval, or just under
+    /// the source's own when that is close to it.
+    fn pace(&self) -> Duration {
+        match self.source_interval {
+            Some(src) if src >= self.interval.mul_f64(NEAR_TARGET) => {
+                self.interval.min(src.mul_f64(0.99))
+            }
+            _ => self.interval,
+        }
     }
 
     /// Whether a freshly captured frame may be encoded now; if not it should
@@ -84,7 +126,7 @@ impl Pacer {
             Some(due) => due.max(now.checked_sub(self.slack).unwrap_or(now)),
             None => now,
         };
-        self.next_due = Some(base + self.interval);
+        self.next_due = Some(base + self.pace());
         self.last_encode = Some(now);
     }
 }
@@ -143,6 +185,7 @@ impl Scheduler {
 
     /// A new desktop image was converted and is waiting to be encoded.
     pub(crate) fn new_image(&mut self, captured: Instant) {
+        self.pacer.source_frame(captured);
         self.has_image = true;
         self.pending = Some(captured);
     }
@@ -153,6 +196,8 @@ impl Scheduler {
         self.has_image = false;
         self.pending = None;
         self.idr_next = true;
+        // Another display may refresh at another rate.
+        self.pacer.forget_source();
     }
 
     pub(crate) fn poll(&mut self, now: Instant) -> Option<EncodeJob> {
@@ -199,59 +244,50 @@ impl Scheduler {
 mod tests {
     use super::*;
 
-    /// Feeds frames at `source_hz` for one second, encoding when the pacer
-    /// allows (holding otherwise), and returns the encode count.
-    fn run(source_hz: u32, target_fps: u32) -> u32 {
-        let start = Instant::now();
-        let mut pacer = Pacer::new(target_fps);
-        let mut encodes = 0;
-        let mut holding = false;
-        let step = Duration::from_micros(100);
-        let source_interval = Duration::from_secs(1) / source_hz;
-        let mut next_source = start;
-        let mut now = start;
-        while now < start + Duration::from_secs(1) {
-            if now >= next_source {
-                next_source += source_interval;
-                holding = true;
-            }
-            if holding && pacer.ready(now) {
-                pacer.encoded(now);
-                holding = false;
-                encodes += 1;
-            }
-            now += step;
-        }
-        encodes
+    struct Run {
+        encodes: u32,
+        mean_hold: Duration,
+        max_hold: Duration,
     }
 
-    /// Feeds frames at `source_hz` for `secs`, encoding each as soon as the
-    /// pacer allows (a newer frame replaces a held one), and returns the
-    /// longest any encoded frame was held.
-    fn longest_hold(source_hz: f64, target_fps: u32, secs: u64) -> Duration {
+    /// Feeds frames at `source_hz` for `secs`, encoding when the pacer
+    /// allows (a newer frame replaces a held one), and reports how often it
+    /// encoded and how long encoded frames were held.
+    fn simulate(source_hz: f64, target_fps: u32, secs: u64) -> Run {
         let start = Instant::now();
         let mut pacer = Pacer::new(target_fps);
         let step = Duration::from_micros(50);
         let source_interval = Duration::from_secs_f64(1.0 / source_hz);
         let mut next_source = start;
         let mut held: Option<Instant> = None;
-        let mut longest = Duration::ZERO;
+        let (mut encodes, mut total, mut max_hold) = (0, Duration::ZERO, Duration::ZERO);
         let mut now = start;
         while now < start + Duration::from_secs(secs) {
             if now >= next_source {
                 next_source += source_interval;
+                pacer.source_frame(now);
                 held = Some(now);
             }
             if let Some(arrived) = held {
                 if pacer.ready(now) {
                     pacer.encoded(now);
-                    longest = longest.max(now - arrived);
+                    encodes += 1;
+                    total += now - arrived;
+                    max_hold = max_hold.max(now - arrived);
                     held = None;
                 }
             }
             now += step;
         }
-        longest
+        Run {
+            encodes,
+            mean_hold: total / encodes.max(1),
+            max_hold,
+        }
+    }
+
+    fn run(source_hz: u32, target_fps: u32) -> u32 {
+        simulate(f64::from(source_hz), target_fps, 1).encodes
     }
 
     #[test]
@@ -259,19 +295,45 @@ mod tests {
         // A "60 Hz" monitor that really runs at 60.05 Hz, streamed at 60
         // fps: frames must go out as they arrive, not drift into a hold
         // of up to most of a frame time.
-        for hz in [60.0, 60.05, 60.5, 61.0] {
-            let hold = longest_hold(hz, 60, 30);
-            assert!(hold < Duration::from_millis(1), "{hz} Hz: held {hold:?}");
+        for (hz, fps) in [
+            (60.0, 60),
+            (60.05, 60),
+            (60.5, 60),
+            (62.0, 60),
+            (144.2, 144),
+        ] {
+            let r = simulate(hz, fps, 30);
+            assert!(
+                r.max_hold < Duration::from_millis(1),
+                "{hz} Hz at {fps} fps: held {:?}",
+                r.max_hold
+            );
         }
-        let hold = longest_hold(144.2, 144, 30);
-        assert!(hold < Duration::from_millis(1), "144.2 Hz: held {hold:?}");
+    }
+
+    #[test]
+    fn a_much_faster_display_keeps_the_target_rate() {
+        // Holds no longer than a plain deadline at exactly the target rate
+        // gives (measured with this simulation before sources near the
+        // target were let through).
+        for (hz, mean_ms, max_ms) in [(120.0, 4.2, 4.25), (144.0, 2.8, 5.6), (240.0, 1.4, 4.2)] {
+            let r = simulate(hz, 60, 30);
+            let fps = f64::from(r.encodes) / 30.0;
+            assert!((59.5..=60.5).contains(&fps), "{hz} Hz: {fps} fps");
+            assert!(
+                r.mean_hold.as_secs_f64() * 1000.0 <= mean_ms
+                    && r.max_hold.as_secs_f64() * 1000.0 <= max_ms,
+                "{hz} Hz: mean hold {:?}, max {:?}",
+                r.mean_hold,
+                r.max_hold
+            );
+        }
     }
 
     #[test]
     fn caps_fast_source_to_target_rate() {
-        // Up to RATE_MARGIN over the target, never the source rate.
         let n = run(144, 60);
-        assert!((59..=62).contains(&n), "{n} encodes");
+        assert!((59..=61).contains(&n), "{n} encodes");
     }
 
     #[test]

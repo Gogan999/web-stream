@@ -509,7 +509,7 @@ function onHotkey(code) {
     case 'KeyS': toggleStats(); return true;
     case 'KeyF': toggleFullscreen(); return true;
     case 'KeyM': setMouseMode(ui.mouseMode.value === 'relative' ? 'absolute' : 'relative'); return true;
-    case 'KeyQ': releasingMouse = true; document.exitPointerLock(); return true;
+    case 'KeyQ': releasingMouse = !!document.pointerLockElement; document.exitPointerLock(); return true;
     case 'KeyE': input?.tapKey(hidUsage('Escape')); return true;
   }
   return false;

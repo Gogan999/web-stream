@@ -308,9 +308,13 @@ export class InputCapture {
   }
 
   // A full press and release of one key, for keys the browser keeps for itself (Esc in a window).
+  // Modifiers still held from the hotkey are let go around it, so the host sees the key alone.
   tapKey(usage) {
+    const mods = [...this.heldKeys].filter((u) => u >= 0xe0 && u <= 0xe7);
+    for (const u of mods) this.rel(P.key(u, false));
     this.rel(P.key(usage, true));
     this.rel(P.key(usage, false));
+    for (const u of mods) this.rel(P.key(u, true));
   }
 
   releaseAll() {

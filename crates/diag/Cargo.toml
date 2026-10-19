@@ -1,0 +1,13 @@
+[package]
+name = "ws-diag"
+description = "Temporary diagnostic log (WS_DIAG) for chasing stalls and keyframes"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+ws-proto.workspace = true
+
+[lints]
+workspace = true

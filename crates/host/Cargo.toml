@@ -8,6 +8,7 @@ license.workspace = true
 
 [dependencies]
 ws-proto.workspace = true
+ws-diag.workspace = true
 ws-capture.workspace = true
 ws-transport.workspace = true
 ws-input.workspace = true

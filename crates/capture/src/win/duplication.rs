@@ -13,8 +13,10 @@ use super::{Gpu, win_err};
 use crate::{CaptureError, Result};
 
 pub(crate) enum Acquired {
-    /// The desktop image changed. Valid until the next `acquire` call.
-    Frame(ID3D11Texture2D),
+    /// The desktop image changed. Valid until the next `acquire` call. The
+    /// count is how many desktop updates DWM folded into it (more than one
+    /// means updates were missed while we weren't waiting).
+    Frame(ID3D11Texture2D, u32),
     /// Timed out, or only the pointer moved.
     Nothing,
     /// The duplication is gone (mode change, fullscreen transition, secure
@@ -75,7 +77,7 @@ impl Duplicator {
             ))?
             .cast::<ID3D11Texture2D>()
             .map_err(win_err("desktop resource as texture"))?;
-        Ok(Acquired::Frame(texture))
+        Ok(Acquired::Frame(texture, info.AccumulatedFrames))
     }
 
     /// Hands the frame back to DWM. Doing this right after copying keeps

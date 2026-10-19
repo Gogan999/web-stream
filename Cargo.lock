@@ -5892,6 +5892,7 @@ dependencies = [
  "tracing",
  "windows",
  "ws-desktop",
+ "ws-diag",
  "ws-nvenc-sys",
  "ws-proto",
 ]
@@ -5902,6 +5903,13 @@ version = "0.1.0"
 dependencies = [
  "tracing",
  "windows",
+]
+
+[[package]]
+name = "ws-diag"
+version = "0.1.0"
+dependencies = [
+ "ws-proto",
 ]
 
 [[package]]
@@ -5919,6 +5927,7 @@ dependencies = [
  "ws-audio",
  "ws-capture",
  "ws-desktop",
+ "ws-diag",
  "ws-input",
  "ws-proto",
  "ws-signaling",
@@ -6014,6 +6023,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "windows",
+ "ws-diag",
  "ws-proto",
  "ws-signaling",
 ]

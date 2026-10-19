@@ -34,7 +34,8 @@ use std::time::{Duration, Instant};
 
 use str0m::net::Protocol;
 use tokio::sync::{Notify, mpsc, oneshot};
-use ws_proto::{AudioPacket, EncodedFrame, channels};
+use ws_diag::diag;
+use ws_proto::{AudioPacket, EncodedFrame, channels, mono_now};
 
 use crate::net::{Net, Packet, SharedFilter};
 use crate::session::{Session, Step, VideoWrite};
@@ -294,6 +295,7 @@ impl Shared {
                 }
             }
             Err(mpsc::error::TrySendError::Full(ev)) => {
+                diag!("event_queue_full", "dropped={ev:?}");
                 tracing::warn!(?ev, "transport event queue full; dropping event");
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {}
@@ -305,14 +307,16 @@ impl Shared {
         self.input.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn keyframe_needed(&self) {
+    fn keyframe_needed(&self, cause: &str) {
         let now = Instant::now();
         let mut asked = self.keyframe_asked.lock().expect("keyframe lock");
         if asked.is_some_and(|t| now.duration_since(t) < KEYFRAME_RETRY) {
+            diag!("keyframe_needed", "cause={cause} suppressed=true");
             return;
         }
         *asked = Some(now);
         drop(asked);
+        diag!("keyframe_needed", "cause={cause} suppressed=false");
         self.emit(TransportEvent::KeyframeNeeded);
     }
 
@@ -326,7 +330,7 @@ impl Shared {
     /// that has taken too long (or before anything was sent).
     fn frame_dropped(&self, next: Option<u64>, dropped: &EncodedFrame) {
         let Some(from) = next else {
-            return self.keyframe_needed();
+            return self.keyframe_needed("drop_before_first_keyframe");
         };
         let now = Instant::now();
         let mut recovering = self.recovering.lock().expect("recovery lock");
@@ -334,16 +338,22 @@ impl Shared {
             Some((f, since)) if f == from => {
                 if now.duration_since(since) >= RECOVERY_WAIT {
                     drop(recovering);
-                    self.keyframe_needed();
+                    self.keyframe_needed("repair_timed_out");
                 } else if dropped.recovers_from.is_some() {
                     // The repair itself was dropped: skip it too.
                     drop(recovering);
+                    diag!("frames_lost", "from={from} why=repair_dropped");
                     self.emit(TransportEvent::FramesLost(from));
                 }
             }
             _ => {
                 *recovering = Some((from, now));
                 drop(recovering);
+                diag!(
+                    "frames_lost",
+                    "from={from} why=first_drop idx={}",
+                    dropped.frame_index
+                );
                 self.emit(TransportEvent::FramesLost(from));
             }
         }
@@ -354,6 +364,7 @@ impl Shared {
     fn repair_lost(&self) {
         let recovering = *self.recovering.lock().expect("recovery lock");
         if let Some((from, _)) = recovering {
+            diag!("frames_lost", "from={from} why=repair_lost_in_queue");
             self.emit(TransportEvent::FramesLost(from));
         }
     }
@@ -368,7 +379,7 @@ impl Shared {
     /// next keyframe is held back.
     fn keyframe_lost(&self) {
         self.keyframe_sent();
-        self.keyframe_needed();
+        self.keyframe_needed("keyframe_lost");
     }
 }
 
@@ -508,6 +519,13 @@ impl Transport {
             }
         };
         if let Some(old) = dropped {
+            diag!(
+                "video_queue_drop",
+                "idx={} keyframe={} repair={}",
+                old.frame_index,
+                old.keyframe,
+                old.recovers_from.is_some()
+            );
             tracing::debug!(index = old.frame_index, "video queue full; frame dropped");
             if self.shared.connected.load(Ordering::Relaxed) {
                 bump(&self.shared.trouble.lost_frames);
@@ -624,10 +642,28 @@ impl Driver {
                 }
                 _ = shared.notify.notified() => {
                     let frames = std::mem::take(&mut *shared.frames.lock().expect("video queue lock"));
+                    let batch = frames.len();
                     for frame in frames {
                         let Some(s) = &mut self.session else { break };
                         let next = s.next_index();
-                        match s.write_video(&frame, Instant::now()) {
+                        let now = Instant::now();
+                        let queue = ws_diag::enabled().then(|| s.queue_diag(now));
+                        let result = s.write_video(&frame, now);
+                        if let Some((age, bytes, packets)) = queue {
+                            // since_enc: encode done -> here, the hop through
+                            // the host's tasks and this loop.
+                            diag!(
+                                "send",
+                                "idx={} key={} repair={} bytes={} result={result:?} since_enc_ms={:.2} batch={batch} pacer_age_ms={:.2} pacer_bytes={bytes} pacer_pkts={packets}",
+                                frame.frame_index,
+                                frame.keyframe,
+                                frame.recovers_from.is_some(),
+                                frame.data.len(),
+                                mono_now().saturating_sub(frame.encode_done_time) as f64 / 1000.0,
+                                age.as_secs_f64() * 1000.0,
+                            );
+                        }
+                        match result {
                             VideoWrite::Sent if frame.keyframe => shared.keyframe_sent(),
                             VideoWrite::Sent => {
                                 if next != Some(frame.frame_index) {
@@ -657,8 +693,15 @@ impl Driver {
                     }
                 }
                 _ = tokio::time::sleep_until(deadline.into()) => {
+                    let now = Instant::now();
+                    // A timer that fires late holds up the pacer: the tokio
+                    // pool was busy, or the timer is coarse.
+                    let late = now.saturating_duration_since(deadline);
+                    if late > Duration::from_millis(4) {
+                        diag!("loop_timer_late", "ms={:.2}", late.as_secs_f64() * 1000.0);
+                    }
                     if let Some(s) = &mut self.session {
-                        s.timeout(Instant::now());
+                        s.timeout(now);
                     }
                 }
             }
@@ -687,6 +730,11 @@ impl Driver {
                             .confirm(destination);
                     }
                     if !self.net.send(proto, source, destination, &data) {
+                        diag!(
+                            "send_drop",
+                            "proto={proto:?} dst={destination} bytes={}",
+                            data.len()
+                        );
                         bump(&self.shared.trouble.send_drops);
                     }
                 }
@@ -696,14 +744,23 @@ impl Driver {
                         self.shared.emit(TransportEvent::Connected);
                         // The first frame the browser sees must be decodable.
                         self.shared.keyframe_sent();
-                        self.shared.keyframe_needed();
+                        self.shared.keyframe_needed("connected");
                     }
                     TransportEvent::KeyframeNeeded => {
                         bump(&self.shared.trouble.browser_keyframe_requests);
-                        self.shared.keyframe_needed()
+                        self.shared.keyframe_needed("browser")
                     }
                     TransportEvent::Stats(mut stats) => {
                         stats.trouble = self.shared.trouble.take();
+                        diag!(
+                            "transport_stats",
+                            "rtt_ms={:?} loss={:?} bwe={:?} bytes_tx={} trouble={:?}",
+                            stats.rtt.map(|r| r.as_millis()),
+                            stats.egress_loss,
+                            stats.bwe,
+                            stats.bytes_tx,
+                            stats.trouble
+                        );
                         self.shared.emit(TransportEvent::Stats(stats))
                     }
                     TransportEvent::Data { channel, data, .. }

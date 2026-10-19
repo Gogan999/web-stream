@@ -183,6 +183,23 @@ impl Scheduler {
         self.repair_requested = true;
     }
 
+    /// Why the next encode will be an IDR, if it will (diagnostics).
+    pub(crate) fn idr_cause(&self) -> Option<&'static str> {
+        if self.keyframe_requested {
+            Some("requested")
+        } else if self.idr_next {
+            Some("start_or_handoff_drop")
+        } else {
+            None
+        }
+    }
+
+    /// Whether the next encode is a repair after invalidated frames
+    /// (diagnostics).
+    pub(crate) fn repair_requested(&self) -> bool {
+        self.repair_requested
+    }
+
     /// A new desktop image was converted and is waiting to be encoded.
     pub(crate) fn new_image(&mut self, captured: Instant) {
         self.pacer.source_frame(captured);

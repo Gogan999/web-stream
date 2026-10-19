@@ -194,6 +194,19 @@ test('client streams from mock host, sends input and switches display', { timeou
   assert.ok(after.some((e) => e.ev === 'control' && e.type === 'selectDisplay' && e.id === 1));
   assert.ok(!after.some((e) => e.type === 'key' && e.usage === 0x1f), 'Digit2 must not reach the host');
 
+  // Ctrl+Alt+Shift+E sends an Esc press and release (the browser keeps a real Esc in a window).
+  const before = (await hostLog()).length;
+  await client.keyboard.down('Control');
+  await client.keyboard.down('Alt');
+  await client.keyboard.down('Shift');
+  await client.keyboard.press('KeyE');
+  await client.keyboard.up('Shift');
+  await client.keyboard.up('Alt');
+  await client.keyboard.up('Control');
+  await host.waitForFunction((n) => window.mockLog.slice(n).filter((e) => e.type === 'key' && e.usage === 0x29).length >= 2, before);
+  const esc = (await hostLog()).slice(before).filter((e) => e.type === 'key' && (e.usage === 0x29 || e.usage === 0x08));
+  assert.deepEqual(esc.map((e) => [e.usage, e.down]), [[0x29, true], [0x29, false]], 'Esc tap only, no E');
+
   // Clicking the stream closed the dropdown. Stats overlay fills in.
   assert.equal(await client.isVisible('#more'), false);
   await client.click('#more-toggle');

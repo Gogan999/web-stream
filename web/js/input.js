@@ -307,6 +307,12 @@ export class InputCapture {
     this.onKeySent?.(usage, down);
   }
 
+  // A full press and release of one key, for keys the browser keeps for itself (Esc in a window).
+  tapKey(usage) {
+    this.rel(P.key(usage, true));
+    this.rel(P.key(usage, false));
+  }
+
   releaseAll() {
     this.gestures.reset();
     clearTimeout(this.holdTimer);

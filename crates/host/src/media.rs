@@ -113,6 +113,7 @@ pub async fn run(
         transfers: None,
         peer: 0,
         peers: peers.clone(),
+        transitions: 0,
         sent: Arc::default(),
         keyframe_requests: 0,
         changed_modes: ChangedModes::default(),
@@ -279,6 +280,9 @@ struct Media {
     /// The peer connection `transfers` belong to.
     peer: u64,
     peers: PeerCount,
+    /// Connected and Disconnected events handled, for
+    /// [`Transport::set_input_sink`].
+    transitions: u64,
 }
 
 #[derive(Debug, Default)]
@@ -309,8 +313,14 @@ struct Video {
 impl Media {
     fn event(&mut self, ev: TransportEvent) {
         match ev {
-            TransportEvent::Connected => self.start(),
-            TransportEvent::Disconnected => self.stop(),
+            TransportEvent::Connected => {
+                self.transitions += 1;
+                self.start()
+            }
+            TransportEvent::Disconnected => {
+                self.transitions += 1;
+                self.stop()
+            }
             TransportEvent::KeyframeNeeded => {
                 if let Some(v) = self.live.as_ref().and_then(|l| l.video.as_ref()) {
                     self.keyframe_requests += 1;
@@ -334,11 +344,6 @@ impl Media {
             } => match channel {
                 channels::CONTROL if !binary => self.control(&data),
                 channels::FILE if binary => self.to_uploads(UploadMsg::Data(data)),
-                channels::INPUT | channels::INPUT_MOTION => {
-                    if let Some(input) = self.live.as_ref().and_then(|l| l.input.as_ref()) {
-                        input.send(&data);
-                    }
-                }
                 other => tracing::debug!(channel = other, binary, "ignoring data channel message"),
             },
             TransportEvent::MicAudio(packet) => {
@@ -393,10 +398,15 @@ impl Media {
     }
 
     fn start(&mut self) {
-        if self.live.is_some() {
-            // Re-established without a reported drop; just resync the decoder.
-            if let Some(v) = self.live.as_ref().and_then(|l| l.video.as_ref()) {
+        if let Some(live) = &self.live {
+            // Re-established without a reported drop; just resync the decoder
+            // (and point input at the input thread again: Connected cleared
+            // it).
+            if let Some(v) = &live.video {
                 v.pipeline.request_keyframe();
+            }
+            if let Some(input) = &live.input {
+                self.route_input(input);
             }
             return;
         }
@@ -411,6 +421,11 @@ impl Media {
         let input = InputThread::start(display_rect, rumble)
             .inspect_err(|e| tracing::error!("input thread: {e}"))
             .ok();
+        // Straight from the transport to the input thread: input never
+        // waits behind this loop (starting capture takes a while).
+        if let Some(input) = &input {
+            self.route_input(input);
+        }
 
         let audio = if self.opts.game_audio {
             let (tx, rx) = mpsc::channel(AUDIO_QUEUE);
@@ -469,6 +484,7 @@ impl Media {
         self.mic_enabled = false;
         self.audio = (self.opts.audio_kbps, self.opts.audio_frame_ms);
         *self.sent.lock().expect("sent stats lock") = SentFrames::default();
+        self.transport.clear_input_sink();
         if let Some(live) = self.live.take() {
             drop_blocking(live);
             tracing::info!("browser disconnected; media stopped");
@@ -489,6 +505,18 @@ impl Media {
         if peer != self.peer {
             self.peer = peer;
             self.transfers = None;
+        }
+    }
+
+    /// Input goes from the transport straight to `input`, unless this loop
+    /// is behind on connection changes (then the connection `input` was
+    /// started for is gone, and a later Connected sets the right one).
+    fn route_input(&self, input: &InputThread) {
+        if !self
+            .transport
+            .set_input_sink(Box::new(input.sink()), self.transitions)
+        {
+            tracing::debug!("input thread is for an earlier connection; not routing input to it");
         }
     }
 

@@ -2,6 +2,7 @@
 //! UDP on localhost: negotiation, video delivery, data channels both ways and
 //! keyframe requests.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -45,6 +46,13 @@ async fn browser_peer_gets_video_and_data() {
     })
     .await
     .unwrap();
+
+    // Input skips the event queue: it goes to a sink set once connected
+    // (and waits for one until then).
+    let sunk = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = |into: Arc<std::sync::Mutex<Vec<Vec<u8>>>>| -> ws_transport::InputSink {
+        Box::new(move |data: &[u8]| into.lock().unwrap().push(data.to_vec()))
+    };
 
     let offer = transport.offer().await.unwrap();
     assert!(offer.contains("a=ice-lite"));
@@ -96,7 +104,12 @@ async fn browser_peer_gets_video_and_data() {
 
         while let Ok(ev) = events.try_recv() {
             match ev {
-                TransportEvent::Connected => host_connected = true,
+                TransportEvent::Connected => {
+                    host_connected = true;
+                    // One Connected handled; a sink for before it is stale.
+                    assert!(!transport.set_input_sink(sink(sunk.clone()), 0));
+                    assert!(transport.set_input_sink(sink(sunk.clone()), 1));
+                }
                 TransportEvent::Data { channel, data, .. } => host_data.push((channel, data)),
                 TransportEvent::KeyframeNeeded => keyframe_requests += 1,
                 _ => {}
@@ -125,7 +138,11 @@ async fn browser_peer_gets_video_and_data() {
                 continue;
             }
         }
-        if got_video > 0 && host_data.len() == 4 && keyframe_requests >= 2 {
+        if got_video > 0
+            && host_data.len() == 2
+            && sunk.lock().unwrap().len() == 2
+            && keyframe_requests >= 2
+        {
             break;
         }
 
@@ -160,8 +177,11 @@ async fn browser_peer_gets_video_and_data() {
             channels::INPUT_MOTION
         ]
     );
-    assert_eq!(host_data.len(), 4, "data from peer: {host_data:?}");
+    let mut data_labels: Vec<_> = host_data.iter().map(|(c, _)| *c).collect();
+    data_labels.sort();
+    assert_eq!(data_labels, [channels::CONTROL, channels::FILE]);
     assert!(host_data.iter().all(|(_, d)| d == b"ping"));
+    assert_eq!(*sunk.lock().unwrap(), [b"ping".to_vec(), b"ping".to_vec()]);
     // One on connect, one for the PLI.
     assert!(
         keyframe_requests >= 2,

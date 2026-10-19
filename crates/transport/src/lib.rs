@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 
 use str0m::net::Protocol;
 use tokio::sync::{Notify, mpsc, oneshot};
-use ws_proto::{AudioPacket, EncodedFrame};
+use ws_proto::{AudioPacket, EncodedFrame, channels};
 
 use crate::net::{Net, Packet, SharedFilter};
 use crate::session::{Session, Step, VideoWrite};
@@ -118,6 +118,8 @@ pub enum TransportEvent {
     ChannelClosed(&'static str),
     /// The channel's send buffer drained; more data can be written.
     ChannelLow(&'static str),
+    /// A data channel message, except on the input channels: those go to
+    /// the [`InputSink`] (see [`Transport::set_input_sink`]).
     Data {
         channel: &'static str,
         binary: bool,
@@ -154,6 +156,53 @@ pub struct Trouble {
     pub send_drops: u32,
     /// Dropped frames the encoder skipped over without a keyframe.
     pub recovered: u32,
+}
+
+/// Takes every message on the `input` and `input-motion` channels, called
+/// straight from the transport's run loop (see [`Transport::set_input_sink`]).
+/// Must return at once: it holds up all media while it runs.
+pub type InputSink = Box<dyn Fn(&[u8]) + Send + Sync>;
+
+/// Input messages kept while no sink is set (the app is still starting its
+/// input side). Past this the oldest go, and the sink is first told to
+/// release everything, since a dropped key-up would leave a key held.
+const INPUT_PENDING: usize = 1024;
+
+/// Where input channel messages go.
+#[derive(Default)]
+struct InputRoute {
+    sink: Option<InputSink>,
+    /// In arrival order, waiting for a sink.
+    pending: VecDeque<Vec<u8>>,
+    /// Some of `pending` was dropped.
+    overflowed: bool,
+    /// Connected and Disconnected events delivered so far. A sink is only
+    /// taken from an app that has handled all of them, so it belongs to the
+    /// current connection.
+    transitions: u64,
+}
+
+impl InputRoute {
+    fn input(&mut self, data: Vec<u8>) {
+        match &self.sink {
+            Some(sink) => sink(&data),
+            None => {
+                if self.pending.len() == INPUT_PENDING {
+                    self.pending.pop_front();
+                    self.overflowed = true;
+                }
+                self.pending.push_back(data);
+            }
+        }
+    }
+
+    /// The connection came up or went down: what was set up for the last
+    /// state no longer applies.
+    fn reset(&mut self) {
+        self.sink = None;
+        self.pending.clear();
+        self.overflowed = false;
+    }
 }
 
 /// [`Trouble`], counted as it happens.
@@ -228,13 +277,32 @@ struct Shared {
     recovering: Mutex<Option<(u64, Instant)>>,
     trouble: TroubleCounts,
     events: mpsc::Sender<TransportEvent>,
+    input: Mutex<InputRoute>,
 }
 
 impl Shared {
     fn emit(&self, ev: TransportEvent) {
-        if let Err(mpsc::error::TrySendError::Full(ev)) = self.events.try_send(ev) {
-            tracing::warn!(?ev, "transport event queue full; dropping event");
+        let transition = matches!(ev, TransportEvent::Connected | TransportEvent::Disconnected);
+        // Held across the send, so a sink set meanwhile is checked against
+        // the count this event makes.
+        let mut route = transition.then(|| self.input_route());
+        match self.events.try_send(ev) {
+            Ok(()) => {
+                if let Some(route) = &mut route {
+                    route.transitions += 1;
+                    route.reset();
+                }
+            }
+            Err(mpsc::error::TrySendError::Full(ev)) => {
+                tracing::warn!(?ev, "transport event queue full; dropping event");
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {}
         }
+    }
+
+    fn input_route(&self) -> std::sync::MutexGuard<'_, InputRoute> {
+        // A sink that panicked leaves nothing half-done in the route.
+        self.input.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     fn keyframe_needed(&self) {
@@ -352,6 +420,7 @@ impl Transport {
             recovering: Mutex::new(None),
             trouble: TroubleCounts::default(),
             events: events_tx,
+            input: Mutex::default(),
         });
         let driver = Driver {
             config,
@@ -450,6 +519,34 @@ impl Transport {
             }
         }
         self.shared.notify.notify_one();
+    }
+
+    /// Hand input channel messages to `sink` as they arrive, starting with
+    /// any that came in before it was set. Input then never waits behind
+    /// other events, and a press is never dropped because the event queue
+    /// is full. `transitions` is how many [`TransportEvent::Connected`] and
+    /// [`TransportEvent::Disconnected`] events the caller has handled: if
+    /// another has been sent since, the sink belongs to a connection that is
+    /// already gone, and it is refused (false). Every such event clears the
+    /// sink, so the app sets it again after each Connected.
+    pub fn set_input_sink(&self, sink: InputSink, transitions: u64) -> bool {
+        let mut route = self.shared.input_route();
+        if route.transitions != transitions {
+            return false;
+        }
+        if std::mem::take(&mut route.overflowed) {
+            sink(&ws_proto::InputEvent::ReleaseAll.encode());
+        }
+        for data in std::mem::take(&mut route.pending) {
+            sink(&data);
+        }
+        route.sink = Some(sink);
+        true
+    }
+
+    /// Stop handing input to the sink; it waits for the next one.
+    pub fn clear_input_sink(&self) {
+        self.shared.input_route().sink = None;
     }
 
     /// Change the most the bandwidth estimate probes up to (see
@@ -609,6 +706,11 @@ impl Driver {
                         stats.trouble = self.shared.trouble.take();
                         self.shared.emit(TransportEvent::Stats(stats))
                     }
+                    TransportEvent::Data { channel, data, .. }
+                        if channel == channels::INPUT || channel == channels::INPUT_MOTION =>
+                    {
+                        self.shared.input_route().input(data)
+                    }
                     ev => self.shared.emit(ev),
                 },
             }
@@ -650,6 +752,7 @@ impl Driver {
             }
         }
         self.shared.connected.store(false, Ordering::Relaxed);
+        self.shared.input_route().reset();
         self.filter.lock().expect("filter lock").reset(None);
         self.confirmed.clear();
     }
@@ -701,5 +804,64 @@ impl Driver {
                 let _ = reply.send(result);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn input_waits_for_the_current_connections_sink_in_order() {
+        let (transport, mut events) = Transport::start(TransportConfig {
+            ips: vec![[127, 0, 0, 1].into()],
+            udp_port: 0,
+            tcp_port: None,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let shared = &transport.shared;
+        let got = Arc::new(Mutex::new(Vec::new()));
+        let sink = || -> InputSink {
+            let got = got.clone();
+            Box::new(move |d: &[u8]| got.lock().unwrap().push(d[0]))
+        };
+
+        shared.emit(TransportEvent::Connected);
+        shared.input_route().input(vec![1]);
+        shared.input_route().input(vec![2]);
+        // The app hasn't seen Connected yet: its sink is for no connection.
+        assert!(!transport.set_input_sink(sink(), 0));
+        assert!(transport.set_input_sink(sink(), 1));
+        shared.input_route().input(vec![3]);
+        assert_eq!(*got.lock().unwrap(), [1, 2, 3]);
+
+        // Going down drops the sink; input waits for the next one.
+        shared.emit(TransportEvent::Disconnected);
+        shared.input_route().input(vec![4]);
+        assert_eq!(*got.lock().unwrap(), [1, 2, 3]);
+        shared.emit(TransportEvent::Connected);
+        assert!(transport.set_input_sink(sink(), 3));
+        // What waited from the last state was dropped with it.
+        assert_eq!(*got.lock().unwrap(), [1, 2, 3]);
+        assert!(matches!(
+            events.recv().await,
+            Some(TransportEvent::Connected)
+        ));
+
+        // A long wait keeps the newest.
+        transport.clear_input_sink();
+        for i in 0..INPUT_PENDING + 5 {
+            shared.input_route().input(vec![(i % 256) as u8]);
+        }
+        assert_eq!(shared.input_route().pending.len(), INPUT_PENDING);
+        got.lock().unwrap().clear();
+        assert!(transport.set_input_sink(sink(), 3));
+        let got = got.lock().unwrap();
+        // Release everything first: a dropped release would leave a key held.
+        assert_eq!(got[0], ws_proto::InputEvent::ReleaseAll.encode()[0]);
+        assert_eq!(got[1..3], [5, 6]);
+        assert_eq!(got.len(), INPUT_PENDING + 1);
     }
 }

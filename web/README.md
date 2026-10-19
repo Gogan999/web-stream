@@ -32,7 +32,8 @@ Pairing and signaling: `docs/signaling.md` (transport). Data channel messages: [
 - First visit: request a pairing code and type the 6-digit code the host shows. After that the browser stays paired (cookie) until **Unpair**.
 - Click **Connect**. Click the video to capture the mouse (relative mode); **Ctrl+Alt+Shift+Q** releases it.
 - **Fullscreen** also turns on Keyboard Lock so Esc, Alt+Tab and the Windows key go to the host. Hold Esc to leave fullscreen.
-- Hotkeys, all Ctrl+Alt+Shift +: **1–9** switch display, **S** stats, **F** fullscreen, **M** relative/absolute mouse, **Q** release mouse.
+- Hotkeys, all Ctrl+Alt+Shift +: **1–9** switch display, **S** stats, **F** fullscreen, **M** relative/absolute mouse, **Q** release mouse, **E** send Esc to the host.
+- Esc: in a window the browser keeps Esc to free the mouse, so it never reaches the host. In fullscreen (the Fullscreen button or Ctrl+Alt+Shift+F, not F11) the keyboard is locked: Esc goes to the host and holding Esc leaves fullscreen. In a window, use Ctrl+Alt+Shift+E.
 - The toolbar holds **Connect**, the status, **Fullscreen** and **Settings ▾**. Settings opens one dropdown, grouped into Display, Video, Input, Audio and Other (stats, unpair, hotkeys); a click outside it or Esc closes it.
 - Stream settings (in the dropdown), remembered in this browser:
   - **Resolution**: *Match this screen* (default) streams at this screen's size in device pixels, fitted to the host display's shape and never larger than it. *Host native* is the display's own size; the others are fixed heights.

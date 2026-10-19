@@ -1,6 +1,7 @@
 import { Session } from './session.js';
 import { defaultSignalUrl } from './signaling.js';
 import { InputCapture } from './input.js';
+import { hidUsage } from './keymap.js';
 import { CursorView } from './cursor.js';
 import { snapshot, compute, format, formatHost, FrameTimer } from './stats.js';
 import * as pairing from './pairing.js';
@@ -434,7 +435,9 @@ function showFullscreenState() {
 
 for (const ev of ['fullscreenchange', 'webkitfullscreenchange']) {
   document.addEventListener(ev, () => {
-    if (!fullscreenElement()) {
+    if (fullscreenElement()) {
+      try { navigator.keyboard?.lock()?.catch(() => {}); } catch { /* unsupported */ }
+    } else {
       navigator.keyboard?.unlock?.();
       try { screen.orientation?.unlock?.(); } catch { /* not locked */ }
     }
@@ -480,6 +483,20 @@ function sendCursorMode() {
   session?.sendControl({ type: 'setCursorPositions', enabled: ui.mouseMode.value === 'relative' });
 }
 
+// In a window the browser keeps Esc to free the mouse and never passes it on; say how to send one.
+// Only the page's fullscreen (not F11) can lock the keyboard and let Esc through.
+let releasingMouse = false;
+let escHintShown = false;
+document.addEventListener('pointerlockchange', () => {
+  if (document.pointerLockElement) return;
+  const byUs = releasingMouse;
+  releasingMouse = false;
+  if (byUs || escHintShown || !input || ui.mouseMode.value !== 'relative' || fullscreenElement()) return;
+  if (document.hidden || !document.hasFocus()) return;
+  escHintShown = true;
+  setStatus('Esc frees the mouse in a window. Use Fullscreen to send Esc, or Ctrl+Alt+Shift+E', ui.status.dataset.state);
+});
+
 // Ctrl+Alt+Shift+<key>. Returns true when handled so the key is not sent to the host.
 function onHotkey(code) {
   const digit = /^Digit([1-9])$/.exec(code);
@@ -492,7 +509,8 @@ function onHotkey(code) {
     case 'KeyS': toggleStats(); return true;
     case 'KeyF': toggleFullscreen(); return true;
     case 'KeyM': setMouseMode(ui.mouseMode.value === 'relative' ? 'absolute' : 'relative'); return true;
-    case 'KeyQ': document.exitPointerLock(); return true;
+    case 'KeyQ': releasingMouse = !!document.pointerLockElement; document.exitPointerLock(); return true;
+    case 'KeyE': input?.tapKey(hidUsage('Escape')); return true;
   }
   return false;
 }

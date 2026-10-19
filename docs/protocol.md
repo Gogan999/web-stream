@@ -39,7 +39,7 @@ One binary frame per message, little-endian, first byte is the type. The host in
 - Gamepad `buttons` are `XINPUT_GAMEPAD_*` flags (DPAD_UP 0x0001 … Y 0x8000, plus 0x0400 for Guide). Sticks use XInput's sign (+y up). Index 0–3. Full state is sent on change and every 100 ms as a keepalive; the first state for an index plugs in a virtual pad, disconnect unplugs it.
 - `release all` is sent on window blur, tab hide, pointer-lock loss and disconnect; the host releases every key and button it holds for this client.
 - Key repeat: repeated `keydown`s are forwarded as further key-down messages.
-- Client hotkeys (Ctrl+Alt+Shift + 1–9, S, F, M, Q) are handled in the browser and never forwarded.
+- Client hotkeys (Ctrl+Alt+Shift + 1–9, S, F, M, Q, E) are handled in the browser and never forwarded.
 
 ## Control messages (`control`)
 

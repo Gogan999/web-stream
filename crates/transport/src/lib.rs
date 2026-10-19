@@ -164,7 +164,8 @@ pub struct Trouble {
 pub type InputSink = Box<dyn Fn(&[u8]) + Send + Sync>;
 
 /// Input messages kept while no sink is set (the app is still starting its
-/// input side). Past this the oldest go.
+/// input side). Past this the oldest go, and the sink is first told to
+/// release everything, since a dropped key-up would leave a key held.
 const INPUT_PENDING: usize = 1024;
 
 /// Where input channel messages go.
@@ -173,6 +174,8 @@ struct InputRoute {
     sink: Option<InputSink>,
     /// In arrival order, waiting for a sink.
     pending: VecDeque<Vec<u8>>,
+    /// Some of `pending` was dropped.
+    overflowed: bool,
     /// Connected and Disconnected events delivered so far. A sink is only
     /// taken from an app that has handled all of them, so it belongs to the
     /// current connection.
@@ -186,6 +189,7 @@ impl InputRoute {
             None => {
                 if self.pending.len() == INPUT_PENDING {
                     self.pending.pop_front();
+                    self.overflowed = true;
                 }
                 self.pending.push_back(data);
             }
@@ -197,6 +201,7 @@ impl InputRoute {
     fn reset(&mut self) {
         self.sink = None;
         self.pending.clear();
+        self.overflowed = false;
     }
 }
 
@@ -529,6 +534,9 @@ impl Transport {
         if route.transitions != transitions {
             return false;
         }
+        if std::mem::take(&mut route.overflowed) {
+            sink(&ws_proto::InputEvent::ReleaseAll.encode());
+        }
         for data in std::mem::take(&mut route.pending) {
             sink(&data);
         }
@@ -847,8 +855,13 @@ mod tests {
         for i in 0..INPUT_PENDING + 5 {
             shared.input_route().input(vec![(i % 256) as u8]);
         }
-        let route = shared.input_route();
-        assert_eq!(route.pending.len(), INPUT_PENDING);
-        assert_eq!(route.pending[0], [5]);
+        assert_eq!(shared.input_route().pending.len(), INPUT_PENDING);
+        got.lock().unwrap().clear();
+        assert!(transport.set_input_sink(sink(), 3));
+        let got = got.lock().unwrap();
+        // Release everything first: a dropped release would leave a key held.
+        assert_eq!(got[0], ws_proto::InputEvent::ReleaseAll.encode()[0]);
+        assert_eq!(got[1..3], [5, 6]);
+        assert_eq!(got.len(), INPUT_PENDING + 1);
     }
 }

@@ -8,19 +8,53 @@ on:
 permissions:
   contents: read
 
+# One self-hosted runner, so drop superseded runs on the same branch.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
 
 jobs:
-  build:
-    name: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        # Windows is the host platform; Linux covers the signaling server.
-        os: [windows-latest, ubuntu-latest]
-    runs-on: ${{ matrix.os }}
+  # Windows is the host platform. Runs on Logan's PC registered as a
+  # self-hosted runner (setup: docs/self-hosted-runner.md).
+  windows:
+    name: windows
+    runs-on: [self-hosted, windows, x64]
+    defaults:
+      run:
+        # cmd, not powershell: Windows' default execution policy blocks the
+        # .ps1 files the runner writes for powershell steps.
+        shell: cmd
+    env:
+      # actions/checkout wipes untracked files, target/ included, so keep
+      # build output next to the checkout where it survives between runs.
+      # One dir per event type so PR builds never feed main's.
+      CARGO_TARGET_DIR: ${{ github.workspace }}\..\cargo-target-${{ github.event_name }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: update toolchain
+        run: rustup update stable --no-self-update
+      - name: show toolchain
+        run: rustup show
+      - name: fmt
+        run: cargo fmt --all --check
+      - name: clippy
+        run: cargo clippy --workspace --all-targets
+      - name: test
+        run: cargo test --workspace
+      - name: build release
+        run: cargo build --workspace --release
+
+  # Linux covers the signaling server. Hosted runners cost Actions minutes on
+  # a private repo, so this only runs when the repo variable HOSTED_LINUX_CI
+  # is 'true' (Settings > Secrets and variables > Actions > Variables).
+  linux:
+    name: ubuntu-latest
+    if: vars.HOSTED_LINUX_CI == 'true'
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -33,6 +67,3 @@ jobs:
         run: cargo clippy --workspace --all-targets
       - name: test
         run: cargo test --workspace
-      - name: build release
-        if: matrix.os == 'windows-latest'
-        run: cargo build --workspace --release

@@ -8,6 +8,7 @@ license.workspace = true
 
 [dependencies]
 ws-proto.workspace = true
+ws-diag.workspace = true
 bytes.workspace = true
 local-ip-address = "0.6"
 socket2 = "0.6"

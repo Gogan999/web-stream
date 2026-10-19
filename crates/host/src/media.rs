@@ -122,6 +122,9 @@ pub async fn run(
         host_events,
     };
     media.set_ceiling();
+    if let Some(path) = ws_diag::path() {
+        tracing::info!("WS_DIAG on: diagnostic log at {}", path.display());
+    }
     loop {
         tokio::select! {
             ev = events.recv() => match ev {
@@ -129,7 +132,14 @@ pub async fn run(
                     // A new peer's events must not reach the old one's transfers.
                     media.sync_peer();
                     let down = matches!(ev, TransportEvent::Disconnected);
+                    let what = event_name(&ev);
+                    let started = std::time::Instant::now();
                     media.event(ev);
+                    // A slow event holds up every event behind it, keyframe
+                    // requests and repairs included.
+                    if started.elapsed() > Duration::from_millis(5) {
+                        ws_diag::diag!("media_slow_event", "ms={:.2} event={what}", started.elapsed().as_secs_f64() * 1000.0);
+                    }
                     if down {
                         media.restore_host_resolution();
                     }
@@ -322,12 +332,14 @@ impl Media {
                 self.stop()
             }
             TransportEvent::KeyframeNeeded => {
+                ws_diag::diag!("media_event", "keyframe_needed");
                 if let Some(v) = self.live.as_ref().and_then(|l| l.video.as_ref()) {
                     self.keyframe_requests += 1;
                     v.pipeline.request_keyframe();
                 }
             }
             TransportEvent::FramesLost(from) => {
+                ws_diag::diag!("media_event", "frames_lost from={from}");
                 if let Some(v) = self.live.as_ref().and_then(|l| l.video.as_ref()) {
                     v.pipeline.recover_from(from);
                 }
@@ -607,6 +619,7 @@ impl Media {
         self.display = Some(info.id);
         self.set_display_origin(&info);
         tracing::info!(display = info.id.0, ?config, "streaming");
+        ws_diag::diag!("streaming", "display={} config={config:?}", info.id.0);
         Ok(())
     }
 
@@ -684,6 +697,12 @@ impl Media {
         let Some(live) = &mut self.live else { return };
         let Some(video) = &live.video else { return };
         if force || worth_changing(live.bitrate_kbps, kbps) {
+            ws_diag::diag!(
+                "encoder_bitrate",
+                "kbps={kbps} from={} bwe={:?}",
+                live.bitrate_kbps,
+                self.last_bwe
+            );
             tracing::debug!(kbps, "encoder bitrate");
             video.pipeline.set_bitrate(kbps);
             live.bitrate_kbps = kbps;
@@ -712,6 +731,7 @@ impl Media {
             ClientControl::RestoreHostResolution => self.restore_host_resolution(),
             ClientControl::SelectDisplay { id } => self.select_display(id),
             ClientControl::RequestKeyframe => {
+                ws_diag::diag!("media_event", "browser_control_keyframe_request");
                 if let Some(v) = self.live.as_ref().and_then(|l| l.video.as_ref()) {
                     self.keyframe_requests += 1;
                     v.pipeline.request_keyframe();
@@ -1085,6 +1105,23 @@ impl Media {
     }
 }
 
+/// A short name for an event, for the diagnostic log.
+fn event_name(ev: &TransportEvent) -> &'static str {
+    match ev {
+        TransportEvent::Connected => "connected",
+        TransportEvent::Disconnected => "disconnected",
+        TransportEvent::KeyframeNeeded => "keyframe_needed",
+        TransportEvent::FramesLost(_) => "frames_lost",
+        TransportEvent::TargetBitrate(_) => "target_bitrate",
+        TransportEvent::Data { .. } => "data",
+        TransportEvent::MicAudio(_) => "mic_audio",
+        TransportEvent::Stats(_) => "stats",
+        TransportEvent::ChannelOpen(_) => "channel_open",
+        TransportEvent::ChannelClosed(_) => "channel_closed",
+        TransportEvent::ChannelLow(_) => "channel_low",
+    }
+}
+
 async fn forward_video(
     mut frames: mpsc::Receiver<EncodedFrame>,
     transport: Transport,
@@ -1093,6 +1130,12 @@ async fn forward_video(
     generation: u64,
 ) {
     while let Some(frame) = frames.recv().await {
+        ws_diag::diag!(
+            "handoff",
+            "idx={} since_enc_ms={:.2}",
+            frame.frame_index,
+            ws_proto::mono_now().saturating_sub(frame.encode_done_time) as f64 / 1000.0
+        );
         {
             let mut sent = sent.lock().expect("sent stats lock");
             sent.frames += 1;

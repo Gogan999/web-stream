@@ -289,6 +289,22 @@ impl Session {
         now.saturating_duration_since(first_unsent)
     }
 
+    /// The video pacer queue (diagnostics): age of the oldest unsent
+    /// packet, bytes and packets waiting.
+    pub fn queue_diag(&mut self, now: Instant) -> (Duration, usize, usize) {
+        let mut api = self.rtc.direct_api();
+        let Some(q) = api
+            .stream_tx_by_mid(self.video, None)
+            .and_then(|tx| tx.queue_info())
+        else {
+            return (Duration::ZERO, 0, 0);
+        };
+        let age = q
+            .first_unsent()
+            .map_or(Duration::ZERO, |t| now.saturating_duration_since(t));
+        (age, q.byte_size(), q.packet_count())
+    }
+
     pub fn write_video(&mut self, frame: &EncodedFrame, now: Instant) -> VideoWrite {
         if !self.connected {
             return VideoWrite::Skipped;
@@ -298,6 +314,13 @@ impl Session {
         // after any gap only a keyframe, or a frame the encoder built
         // without the missing ones, may go out.
         if !follows(self.next_index, frame) {
+            ws_diag::diag!(
+                "broken_drop",
+                "idx={} next={:?} recovers_from={:?}",
+                frame.frame_index,
+                self.next_index,
+                frame.recovers_from
+            );
             tracing::debug!(
                 index = frame.frame_index,
                 "video frame after a gap; dropped"
@@ -309,6 +332,12 @@ impl Session {
         if !frame.keyframe {
             let backlog = self.video_backlog(now);
             if backlog > self.max_send_delay {
+                ws_diag::diag!(
+                    "late_drop",
+                    "idx={} backlog_ms={:.2}",
+                    frame.frame_index,
+                    backlog.as_secs_f64() * 1000.0
+                );
                 tracing::debug!(?backlog, "video frame late; dropped");
                 return VideoWrite::Late;
             }
@@ -476,12 +505,29 @@ impl Session {
                 TransportEvent::Disconnected
             }
             Event::KeyframeRequest(req) if req.mid == self.video => {
+                ws_diag::diag!("browser_keyframe_request", "kind={:?}", req.kind);
                 tracing::debug!(kind = ?req.kind, "browser asked for a keyframe");
                 TransportEvent::KeyframeNeeded
             }
             Event::EgressBitrateEstimate(BweKind::Twcc { estimate, .. })
             | Event::EgressBitrateEstimate(BweKind::Remb { estimate, .. }) => {
+                ws_diag::diag!("bwe", "bps={}", estimate.as_u64());
                 TransportEvent::TargetBitrate(estimate.as_u64())
+            }
+            Event::MediaEgressStats(s) if s.mid == self.video => {
+                // Totals since the stream started.
+                ws_diag::diag!(
+                    "video_egress",
+                    "nacks={} plis={} firs={} packets={} bytes={} loss={:?} rtt_ms={:?}",
+                    s.nacks,
+                    s.plis,
+                    s.firs,
+                    s.packets,
+                    s.bytes,
+                    s.loss,
+                    s.rtt.map(|r| r.as_millis())
+                );
+                return None;
             }
             Event::ChannelOpen(id, _) => {
                 let label = self.label(id)?;

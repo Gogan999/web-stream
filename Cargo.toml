@@ -9,6 +9,7 @@ members = [
     "crates/audio",
     "crates/signaling",
     "crates/desktop",
+    "crates/diag",
     "crates/host",
     "crates/gui",
 ]
@@ -28,6 +29,7 @@ ws-input = { path = "crates/input" }
 ws-audio = { path = "crates/audio" }
 ws-nvenc-sys = { path = "crates/nvenc-sys" }
 ws-desktop = { path = "crates/desktop" }
+ws-diag = { path = "crates/diag" }
 
 anyhow = "1"
 base64 = "0.22"

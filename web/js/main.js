@@ -10,6 +10,7 @@ import { AutoTune, Cancelled } from './autotune.js';
 import { SoftKeyboard } from './softkeys.js';
 import * as P from './protocol.js';
 import { Files, Uploads, formatSize } from './files.js';
+import { DiagLog, diagEnabled } from './diag.js';
 
 const $ = (id) => document.getElementById(id);
 const ui = {
@@ -26,10 +27,16 @@ const ui = {
   kbdInput: $('kbd-input'), touchFullscreen: $('touch-fullscreen'),
   filesToggle: $('files-toggle'), files: $('files'), fileList: $('file-list'), fromHost: $('from-host'),
   toHost: $('to-host'), uploadPick: $('upload-pick'), uploadInput: $('upload-input'), uploadList: $('upload-list'),
+  diagSave: $('diag-save'),
 };
 
 const params = new URLSearchParams(location.search);
 const signalUrl = defaultSignalUrl();
+const diag = diagEnabled(params, globalThis.localStorage) ? new DiagLog() : null;
+if (diag) {
+  ui.diagSave.hidden = false;
+  ui.diagSave.addEventListener('click', () => diag.save());
+}
 
 let session = null;
 let input = null;
@@ -61,6 +68,7 @@ async function connect() {
     // A new connection: the host offers its files afresh, and says whether it takes any.
     files.clear();
     uploads.clear();
+    if (diag && session.pc) diag.start(session.pc, ui.video);
     session.sendControl({ type: 'listDisplays' });
     sendCursorMode();
     // The host keeps the last choice across sessions; tell it this browser's.
@@ -101,6 +109,7 @@ async function connect() {
 }
 
 function disconnect() {
+  diag?.stop();
   if (input) input.stop();
   if (session) session.close();
   cursor?.stop();
@@ -148,6 +157,7 @@ function onControl(msg) {
     }
   } else if (msg.type === 'videoStats' && host) {
     host.stats = msg;
+    diag?.add('host_stats', msg);
     if (tuneWindow) tuneWindow.push(msg);
   } else if (msg.type === 'micUnavailable') {
     // The host can't play the mic: stop sending it.

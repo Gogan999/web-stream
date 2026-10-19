@@ -10,6 +10,7 @@ use windows::Win32::Foundation::LUID;
 use windows::Win32::System::Threading::{
     GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_HIGHEST,
 };
+use ws_diag::diag;
 use ws_proto::{DisplayId, EncodedFrame, VideoConfig, mono_micros, mono_now};
 
 use super::convert::Converter;
@@ -169,6 +170,8 @@ struct Session {
     /// device instead of looping.
     recoveries: Vec<Instant>,
     stats: Stats,
+    /// When Desktop Duplication last delivered an image (diagnostics).
+    last_dxgi: Option<Instant>,
 }
 
 impl Session {
@@ -193,6 +196,7 @@ impl Session {
             intra_next: false,
             recoveries: Vec::new(),
             stats: Stats::default(),
+            last_dxgi: None,
         })
     }
 
@@ -227,15 +231,26 @@ impl Session {
         // Round up so a sub-millisecond wait doesn't become a busy poll.
         let wait_ms = self.sched.wait(now).as_micros().div_ceil(1000) as u32;
         match dup.acquire(wait_ms)? {
-            Acquired::Frame(texture) => {
+            Acquired::Frame(texture, accumulated) => {
                 let captured = Instant::now();
                 let result = self.enc.converter.convert(&self.enc.gpu, &texture);
                 dup.release();
+                if ws_diag::enabled() {
+                    let gap = self.last_dxgi.map(|t| captured - t);
+                    diag!(
+                        "dxgi",
+                        "gap_ms={:.2} acc={accumulated} convert_ms={:.2}",
+                        gap.map_or(-1.0, |g| g.as_secs_f64() * 1000.0),
+                        captured.elapsed().as_secs_f64() * 1000.0
+                    );
+                }
+                self.last_dxgi = Some(captured);
                 result?;
                 self.sched.new_image(captured);
             }
             Acquired::Nothing => {}
             Acquired::Lost => {
+                diag!("dxgi_lost", "");
                 tracing::debug!("desktop duplication lost, reopening");
                 self.dup = None;
             }
@@ -254,6 +269,7 @@ impl Session {
             return Err(error);
         }
         self.recoveries.push(now);
+        diag!("capture_error", "rebuilding error={error}");
         tracing::warn!("capture error, rebuilding the encoder: {error}");
         // Let a driver reset settle before touching the GPU again.
         std::thread::sleep(Duration::from_millis(250));
@@ -262,10 +278,21 @@ impl Session {
 
     fn handle(&mut self, cmd: Command) {
         match cmd {
-            Command::Keyframe => self.sched.request_keyframe(),
+            Command::Keyframe => {
+                diag!("cap_cmd", "keyframe");
+                self.sched.request_keyframe()
+            }
             Command::Recover(from) => self.recover_from(from),
             Command::Bitrate(kbps) => {
-                if let Err(e) = self.enc.encoder.set_bitrate(kbps) {
+                let started = Instant::now();
+                let result = self.enc.encoder.set_bitrate(kbps);
+                diag!(
+                    "cap_cmd",
+                    "bitrate kbps={kbps} ok={} ms={:.2}",
+                    result.is_ok(),
+                    started.elapsed().as_secs_f64() * 1000.0
+                );
+                if let Err(e) = result {
                     tracing::warn!("bitrate change to {kbps} kbps failed: {e}");
                 } else {
                     self.config.bitrate_kbps = kbps;
@@ -299,6 +326,10 @@ impl Session {
             && (from..next)
                 .try_for_each(|i| self.enc.encoder.invalidate(i))
                 .is_ok();
+        diag!(
+            "cap_cmd",
+            "recover from={from} next={next} invalidated={invalidated}"
+        );
         if invalidated {
             self.recovers_from = Some(self.recovers_from.map_or(from, |r| r.min(from)));
             self.intra_next |= next - from >= u64::from(DPB_FRAMES);
@@ -325,6 +356,7 @@ impl Session {
             self.dup = Some(Duplicator::new(&output.output, &self.enc.gpu)?);
         }
         tracing::info!(display = id.0, name = %output.info.name, "capturing");
+        diag!("capture_switch", "display={} rebuild={rebuild}", id.0);
         self.display = id;
         self.sched.reset();
         Ok(())
@@ -380,6 +412,8 @@ impl Session {
     /// Encodes the converter's current image and hands it off. Returns false
     /// once the consumer has gone away.
     fn encode(&mut self, now: Instant, job: EncodeJob) -> Result<bool> {
+        let idr_cause = self.sched.idr_cause();
+        let repair = self.sched.repair_requested();
         let start = Instant::now();
         let intra = std::mem::take(&mut self.intra_next);
         let bits = self.enc.encoder.encode(self.frame_index, job.idr, intra)?;
@@ -388,6 +422,7 @@ impl Session {
         // Only the first frame after an invalidation needs the tag; later
         // ones build on it. A keyframe needs none.
         let recovers_from = self.recovers_from.take().filter(|_| !bits.keyframe);
+        let bytes = bits.data.len();
         let frame = EncodedFrame {
             display: self.display,
             codec: self.config.codec,
@@ -403,6 +438,7 @@ impl Session {
         self.frame_index += 1;
 
         let stats = &mut self.stats;
+        let dropped_before = stats.dropped;
         stats.encode_time += done - start;
         let delivered = match self.frames.try_send(frame) {
             Ok(()) => {
@@ -424,6 +460,28 @@ impl Session {
             }
             Err(TrySendError::Closed(_)) => return Ok(false),
         };
+        if ws_diag::enabled() {
+            // held: captured -> encode start; a repeat re-encodes the last
+            // image because the desktop was still.
+            let index = self.frame_index - 1;
+            let out = if delivered && stats.dropped == dropped_before {
+                "sent"
+            } else if delivered {
+                "full_skipped"
+            } else {
+                "full_idr_next"
+            };
+            diag!(
+                "frame",
+                "idx={index} idr={} intra={intra} repair={repair} why={} repeat={} bytes={bytes} held_ms={:.2} enc_ms={:.2} kbps={} out={out}",
+                job.idr,
+                idr_cause.unwrap_or("-"),
+                job.captured == now,
+                start.saturating_duration_since(job.captured).as_secs_f64() * 1000.0,
+                (done - start).as_secs_f64() * 1000.0,
+                self.config.bitrate_kbps,
+            );
+        }
         self.sched.encoded(now, job, delivered);
 
         let since = *stats.since.get_or_insert(done);

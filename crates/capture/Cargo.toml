@@ -8,6 +8,7 @@ license.workspace = true
 
 [dependencies]
 ws-proto.workspace = true
+ws-diag.workspace = true
 bytes.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

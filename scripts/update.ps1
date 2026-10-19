@@ -1,0 +1,220 @@
+<#
+.SYNOPSIS
+    Updates the host to the latest main and restarts it.
+
+.DESCRIPTION
+    For a PC already set up with install.ps1. Pulls the latest main into the
+    checkout, builds the host and restarts the tray app on the new build.
+
+    The running host keeps serving during the build: its executables are
+    renamed to .old first (Windows allows renaming a running program), so
+    the build can write new ones. The host is only restarted once the build
+    has succeeded, which makes it safe to run from a streaming session: the
+    browser drops for a few seconds and reconnects. If the build fails, the
+    old executables are put back and the host keeps running.
+
+    The previous build stays as .old next to the new one until the next
+    update, and -Rollback switches back to it.
+
+        powershell -ExecutionPolicy Bypass -File scripts\update.ps1
+
+    It installs nothing; run install.ps1 again for new build dependencies or
+    drivers.
+
+.PARAMETER Force
+    Rebuild and restart even when the build is already the latest main.
+
+.PARAMETER Rollback
+    Switch back to the previous build (the .old executables) and restart.
+
+.PARAMETER NoRestart
+    Build, but leave the running host alone. The new build starts the next
+    time the host is started.
+#>
+[CmdletBinding()]
+param(
+    [switch]$Force,
+    [switch]$Rollback,
+    [switch]$NoRestart
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+$Exes = 'ws-host-gui.exe', 'ws-host.exe'
+
+function Write-Step([string]$Message) {
+    Write-Host "==> $Message" -ForegroundColor Cyan
+}
+
+function Update-SessionPath {
+    $machine = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+    $user = [Environment]::GetEnvironmentVariable('Path', 'User')
+    $env:Path = "$machine;$user;$(Join-Path $HOME '.cargo\bin')"
+}
+
+function Invoke-Git {
+    $out = & git -C $repo @args
+    if ($LASTEXITCODE -ne 0) { throw "git $($args -join ' ') failed." }
+    $out
+}
+
+function Get-HostProcess([string]$Name) {
+    $path = Join-Path $bin "$Name.exe"
+    $oldPath = "$path.old"
+    @(Get-Process -Name $Name -ErrorAction SilentlyContinue | Where-Object {
+        $_.Path -and ($_.Path -ieq $path -or $_.Path -ieq $oldPath)
+    })
+}
+
+# Swaps each exe with its .old copy. Works while the host runs from either.
+function Switch-Builds {
+    foreach ($exe in $Exes) {
+        $cur = Join-Path $bin $exe
+        $old = "$cur.old"
+        $tmp = "$cur.swap"
+        if (-not (Test-Path $old)) { continue }
+        if (Test-Path $tmp) { Remove-Item -Force $tmp }
+        if (Test-Path $cur) { Move-Item $cur $tmp }
+        Move-Item $old $cur
+        if (Test-Path $tmp) { Move-Item $tmp $old }
+    }
+    $commit = Join-Path $bin 'built-commit.txt'
+    $oldCommit = "$commit.old"
+    if (Test-Path $oldCommit) {
+        $c = if (Test-Path $commit) { Get-Content $commit } else { $null }
+        Copy-Item -Force $oldCommit $commit
+        if ($c) { Set-Content -Path $oldCommit -Value $c } else { Remove-Item $oldCommit }
+    }
+}
+
+function Restart-Host {
+    $gui = Join-Path $bin 'ws-host-gui.exe'
+    $running = Get-HostProcess 'ws-host-gui'
+    if ($NoRestart) {
+        if ($running) { Write-Host 'The host keeps running the old build until it is restarted.' }
+        return
+    }
+    if ($running) {
+        Write-Step 'Restarting the host'
+        $running | Stop-Process -Force
+        $running | Wait-Process -Timeout 15 -ErrorAction SilentlyContinue
+    } else {
+        Write-Step 'Starting the host'
+    }
+    $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator)
+    if ($admin) {
+        # Never start the host elevated: Explorer starts it as the normal user.
+        Start-Process -FilePath explorer.exe -ArgumentList "`"$gui`""
+    } else {
+        Start-Process -FilePath $gui -WorkingDirectory $bin
+    }
+    if (Get-HostProcess 'ws-host') {
+        Write-Host 'The console host (ws-host.exe) is still running the old build; restart it yourself.' -ForegroundColor Yellow
+    }
+}
+
+Update-SessionPath
+$repo = Split-Path -Parent $PSScriptRoot
+if (-not (Test-Path (Join-Path $repo 'Cargo.toml'))) {
+    throw "$repo is not a web-stream checkout. Run install.ps1 first."
+}
+$bin = Join-Path $repo 'target\release'
+$commitFile = Join-Path $bin 'built-commit.txt'
+
+if ($Rollback) {
+    if (-not (Test-Path (Join-Path $bin 'ws-host-gui.exe.old'))) {
+        throw 'There is no previous build to roll back to.'
+    }
+    Write-Step 'Switching back to the previous build'
+    Switch-Builds
+    Restart-Host
+    $c = if (Test-Path $commitFile) { (Get-Content $commitFile).Trim().Substring(0, 8) } else { 'an unknown commit' }
+    Write-Host "Now on the build of $c. Run update.ps1 -Rollback again to undo." -ForegroundColor Green
+    return
+}
+
+foreach ($tool in 'git', 'cargo') {
+    if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
+        throw "$tool is missing. Run install.ps1 first."
+    }
+}
+
+$branch = (Invoke-Git rev-parse --abbrev-ref HEAD).Trim()
+if ($branch -ne 'main') {
+    throw "The checkout is on $branch, not main. Switch to main (git switch main) and run this again."
+}
+if (Invoke-Git status --porcelain --untracked-files=no) {
+    throw 'The checkout has local changes. Commit or discard them (git status) and run this again.'
+}
+
+Write-Step 'Fetching main'
+Invoke-Git fetch origin main | Out-Host
+$new = @(Invoke-Git log --oneline HEAD..origin/main)
+$built = if (Test-Path $commitFile) { (Get-Content $commitFile).Trim() } else { $null }
+$head = (Invoke-Git rev-parse HEAD).Trim()
+if (-not $new -and $built -eq $head -and -not $Force) {
+    Write-Host "Already up to date ($($head.Substring(0, 8)))." -ForegroundColor Green
+    return
+}
+if ($new) {
+    Write-Host "New on main:"
+    $new | ForEach-Object { Write-Host "  $_" }
+    Invoke-Git merge --ff-only origin/main | Out-Host
+    $head = (Invoke-Git rev-parse HEAD).Trim()
+}
+
+# Keep the current build as .old, so the build can write new executables
+# while the host runs and so -Rollback has something to go back to.
+Write-Step 'Setting the current build aside'
+foreach ($exe in $Exes) {
+    $cur = Join-Path $bin $exe
+    $old = "$cur.old"
+    if (-not (Test-Path $cur)) { continue }
+    if (Test-Path $old) {
+        try {
+            Remove-Item -Force $old
+        } catch {
+            throw "$old is still in use (the host runs from it). Restart the host and run this again."
+        }
+    }
+    Move-Item $cur $old
+}
+if (Test-Path $commitFile) { Move-Item -Force $commitFile "$commitFile.old" }
+# Cargo hard-links target\release\<exe> to its copy in deps, so the running
+# host also holds that file and the linker could not write it. Rename it
+# too; earlier copies are deleted once nothing runs from them.
+$deps = Join-Path $bin 'deps'
+if (Test-Path $deps) {
+    Get-ChildItem -Path $deps -Filter '*.old' | ForEach-Object {
+        Remove-Item -Force $_.FullName -ErrorAction SilentlyContinue
+    }
+    $stamp = Get-Date -Format 'yyyyMMddHHmmss'
+    Get-ChildItem -Path $deps -Filter '*.exe' | Where-Object {
+        $_.Name -like 'ws_host-*.exe' -or $_.Name -like 'ws_host_gui-*.exe'
+    } | ForEach-Object {
+        Move-Item $_.FullName (Join-Path $deps "$($_.Name).$stamp.old")
+    }
+}
+
+Write-Step 'Building the host (release)'
+Push-Location $repo
+try {
+    & cargo build --release -p ws-host -p ws-host-gui
+    $ok = $LASTEXITCODE -eq 0
+} finally {
+    Pop-Location
+}
+if (-not $ok) {
+    foreach ($exe in $Exes) {
+        $cur = Join-Path $bin $exe
+        if (Test-Path "$cur.old") { Move-Item -Force "$cur.old" $cur }
+    }
+    if (Test-Path "$commitFile.old") { Move-Item -Force "$commitFile.old" $commitFile }
+    throw 'cargo build failed. The previous build is back in place and the host was left running.'
+}
+Set-Content -Path $commitFile -Value $head
+
+Restart-Host
+Write-Host "Updated to $($head.Substring(0, 8)). Run update.ps1 -Rollback to go back." -ForegroundColor Green

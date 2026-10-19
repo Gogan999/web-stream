@@ -19,7 +19,7 @@ On a PC without the repository it clones it into `%USERPROFILE%\web-stream`:
 
 The install script updates the checkout (when it is a clean `main`), builds
 the host with the web client built into it and adds **web-stream host** to
-the Start menu. Re-run it to update. Start it from there. It is a tray app:
+the Start menu. Start it from there. It is a tray app:
 the window shows what the host is doing, and closing it leaves the host
 running in the tray (click the icon to bring the window back; Quit in its
 menu, or the Quit button, stops the host).
@@ -95,6 +95,22 @@ are the same options. A paired browser that hasn't connected for 30 days is
 unpaired (`--forget-after DAYS`). Behind a reverse proxy that rewrites the
 Host header, pass its address with `--allow-origin https://name` or the
 browser's requests are refused as cross-site.
+
+## Updating
+
+To update to the latest `main`, run
+
+```
+powershell -ExecutionPolicy Bypass -File scripts\update.ps1
+```
+
+It pulls `main`, builds while the host keeps running and restarts the tray
+app on the new build only once the build has succeeded, so it also works
+from a streaming session (the browser reconnects after a few seconds). If
+the build fails, the host keeps running the old build. The previous build is
+kept, and `scripts\update.ps1 -Rollback` switches back to it. It needs a
+clean `main` checkout and installs nothing; run `install.ps1` again for new
+build dependencies or drivers.
 
 ## Connecting from outside your network
 

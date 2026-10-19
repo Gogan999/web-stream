@@ -47,12 +47,12 @@ async fn browser_peer_gets_video_and_data() {
     .await
     .unwrap();
 
-    // Input skips the event queue once a sink is set.
+    // Input skips the event queue: it goes to a sink set once connected
+    // (and waits for one until then).
     let sunk = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let into = sunk.clone();
-    transport.set_input_sink(Some(Box::new(move |data: &[u8]| {
-        into.lock().unwrap().push(data.to_vec())
-    })));
+    let sink = |into: Arc<std::sync::Mutex<Vec<Vec<u8>>>>| -> ws_transport::InputSink {
+        Box::new(move |data: &[u8]| into.lock().unwrap().push(data.to_vec()))
+    };
 
     let offer = transport.offer().await.unwrap();
     assert!(offer.contains("a=ice-lite"));
@@ -104,7 +104,12 @@ async fn browser_peer_gets_video_and_data() {
 
         while let Ok(ev) = events.try_recv() {
             match ev {
-                TransportEvent::Connected => host_connected = true,
+                TransportEvent::Connected => {
+                    host_connected = true;
+                    // One Connected handled; a sink for before it is stale.
+                    assert!(!transport.set_input_sink(sink(sunk.clone()), 0));
+                    assert!(transport.set_input_sink(sink(sunk.clone()), 1));
+                }
                 TransportEvent::Data { channel, data, .. } => host_data.push((channel, data)),
                 TransportEvent::KeyframeNeeded => keyframe_requests += 1,
                 _ => {}

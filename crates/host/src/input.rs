@@ -10,6 +10,7 @@
 //! the newest absolute position and the newest state per gamepad kept), so
 //! order against presses holds and a backlog cannot turn into lag.
 
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError, channel};
 use std::sync::{Arc, Weak};
 use std::thread::JoinHandle;
@@ -20,6 +21,10 @@ use ws_proto::{GamepadState, HostControl, InputEvent, MAX_GAMEPADS};
 
 use crate::platform;
 
+/// Input events waiting for the thread (stuck in an injection call) before
+/// more are refused: motion is dropped, and a refused press or release makes
+/// the thread release everything once it catches up, so nothing stays held.
+const MAX_BACKLOG: usize = 4096;
 /// How often stale gamepads are centred (the handler requires a timer).
 const TICK: Duration = Duration::from_millis(100);
 /// Injection errors (usually an elevated window in front) are logged at most
@@ -91,8 +96,46 @@ impl Motion {
 pub struct InputThread {
     /// The only strong reference: once it drops, senders handed out by
     /// [`Self::sink`] stop working and the thread can end.
-    tx: Option<Arc<Sender<Msg>>>,
+    tx: Option<Arc<Queue>>,
     thread: Option<JoinHandle<()>>,
+}
+
+struct Queue {
+    tx: Sender<Msg>,
+    backlog: Arc<Backlog>,
+}
+
+/// Shared by the senders and the thread.
+#[derive(Default)]
+struct Backlog {
+    /// Input events sent and not yet taken by the thread.
+    events: AtomicUsize,
+    /// A press or release was refused: release everything.
+    overflowed: AtomicBool,
+}
+
+impl Queue {
+    fn event(&self, data: &[u8]) {
+        let event = match InputEvent::decode(data) {
+            Ok(event) => event,
+            Err(e) => return tracing::debug!("bad input message: {e}"),
+        };
+        if self.backlog.events.load(Ordering::Relaxed) >= MAX_BACKLOG {
+            if !is_motion(&event) {
+                self.backlog.overflowed.store(true, Ordering::Relaxed);
+            }
+            return;
+        }
+        self.backlog.events.fetch_add(1, Ordering::Relaxed);
+        let _ = self.tx.send(Msg::Event(event));
+    }
+}
+
+fn is_motion(event: &InputEvent) -> bool {
+    matches!(
+        event,
+        InputEvent::MouseMove { .. } | InputEvent::MouseAbs { .. } | InputEvent::Gamepad { .. }
+    )
 }
 
 impl InputThread {
@@ -102,24 +145,18 @@ impl InputThread {
         display: Option<DisplayRect>,
         rumble: impl Fn(HostControl) + Send + Sync + 'static,
     ) -> std::io::Result<Self> {
-        // Unbounded so presses are never dropped. It only grows while the
-        // thread is stuck inside an injection call, and the transport's
-        // per-peer packet cap limits how fast anything arrives.
+        // Bounded by MAX_BACKLOG events, counted rather than by the
+        // channel, so display changes always get through.
         let (tx, rx) = channel();
+        let backlog = Arc::new(Backlog::default());
+        let thread_backlog = backlog.clone();
         let thread = std::thread::Builder::new()
             .name("ws-input".into())
-            .spawn(move || run(rx, display, rumble))?;
+            .spawn(move || run(rx, &thread_backlog, display, rumble))?;
         Ok(Self {
-            tx: Some(Arc::new(tx)),
+            tx: Some(Arc::new(Queue { tx, backlog })),
             thread: Some(thread),
         })
-    }
-
-    /// One `input` or `input-motion` message.
-    pub fn send(&self, data: &[u8]) {
-        if let Some(tx) = &self.tx {
-            send_event(tx, data);
-        }
     }
 
     /// Takes `input` and `input-motion` messages from any thread, for as
@@ -128,7 +165,7 @@ impl InputThread {
         let tx = self.tx.as_ref().map(Arc::downgrade).unwrap_or_default();
         move |data: &[u8]| {
             if let Some(tx) = Weak::upgrade(&tx) {
-                send_event(&tx, data);
+                tx.event(data);
             }
         }
     }
@@ -140,17 +177,8 @@ impl InputThread {
 
     fn push(&self, msg: Msg) {
         if let Some(tx) = &self.tx {
-            let _ = tx.send(msg);
+            let _ = tx.tx.send(msg);
         }
-    }
-}
-
-fn send_event(tx: &Sender<Msg>, data: &[u8]) {
-    match InputEvent::decode(data) {
-        Ok(event) => {
-            let _ = tx.send(Msg::Event(event));
-        }
-        Err(e) => tracing::debug!("bad input message: {e}"),
     }
 }
 
@@ -167,6 +195,7 @@ impl Drop for InputThread {
 
 fn run(
     rx: Receiver<Msg>,
+    backlog: &Backlog,
     display: Option<DisplayRect>,
     rumble: impl Fn(HostControl) + Send + Sync + 'static,
 ) {
@@ -194,6 +223,12 @@ fn run(
                     break;
                 }
             }
+        }
+        let events = batch.iter().filter(|m| matches!(m, Msg::Event(_))).count();
+        backlog.events.fetch_sub(events, Ordering::Relaxed);
+        if backlog.overflowed.swap(false, Ordering::Relaxed) {
+            // A press or release was lost: start over from nothing held.
+            batch.push(Msg::Event(InputEvent::ReleaseAll));
         }
         let now = Instant::now();
         for msg in coalesce(batch) {
@@ -312,6 +347,31 @@ mod tests {
         // nothing.
         drop(thread);
         sink(&key);
+    }
+
+    #[test]
+    fn a_full_backlog_drops_motion_and_releases_after_a_lost_press() {
+        let (tx, rx) = channel();
+        let queue = Queue {
+            tx,
+            backlog: Arc::default(),
+        };
+        let motion = InputEvent::MouseMove { dx: 1, dy: 1 }.encode();
+        for _ in 0..MAX_BACKLOG {
+            queue.event(&motion);
+        }
+        queue.event(&motion);
+        assert!(!queue.backlog.overflowed.load(Ordering::Relaxed));
+        assert_eq!(rx.try_iter().count(), MAX_BACKLOG);
+        queue.event(
+            &InputEvent::Key {
+                usage: 4,
+                down: false,
+            }
+            .encode(),
+        );
+        assert!(queue.backlog.overflowed.load(Ordering::Relaxed));
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]

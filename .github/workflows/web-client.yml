@@ -10,17 +10,11 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: web-client-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
 jobs:
   test:
-    # Same self-hosted Windows runner as CI (docs/self-hosted-runner.md).
-    runs-on: [self-hosted, windows, x64]
+    runs-on: ubuntu-latest
     defaults:
       run:
-        shell: cmd
         working-directory: web
     steps:
       - uses: actions/checkout@v4
@@ -28,7 +22,6 @@ jobs:
         with:
           node-version: 22
       - run: npm ci --no-audit --no-fund
-      # Browsers land in %LOCALAPPDATA%\ms-playwright and are reused.
-      - run: npx playwright install chromium
+      - run: npx playwright install --with-deps chromium
       - run: npm test
       - run: npm run test:e2e

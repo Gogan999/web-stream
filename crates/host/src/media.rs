@@ -411,6 +411,11 @@ impl Media {
         let input = InputThread::start(display_rect, rumble)
             .inspect_err(|e| tracing::error!("input thread: {e}"))
             .ok();
+        // Straight from the transport to the input thread: input never
+        // waits behind this loop (starting capture takes a while).
+        if let Some(input) = &input {
+            self.transport.set_input_sink(Some(Box::new(input.sink())));
+        }
 
         let audio = if self.opts.game_audio {
             let (tx, rx) = mpsc::channel(AUDIO_QUEUE);
@@ -469,6 +474,7 @@ impl Media {
         self.mic_enabled = false;
         self.audio = (self.opts.audio_kbps, self.opts.audio_frame_ms);
         *self.sent.lock().expect("sent stats lock") = SentFrames::default();
+        self.transport.set_input_sink(None);
         if let Some(live) = self.live.take() {
             drop_blocking(live);
             tracing::info!("browser disconnected; media stopped");

@@ -11,6 +11,7 @@
 //! order against presses holds and a backlog cannot turn into lag.
 
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError, channel};
+use std::sync::{Arc, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -88,7 +89,9 @@ impl Motion {
 }
 
 pub struct InputThread {
-    tx: Option<Sender<Msg>>,
+    /// The only strong reference: once it drops, senders handed out by
+    /// [`Self::sink`] stop working and the thread can end.
+    tx: Option<Arc<Sender<Msg>>>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -100,23 +103,33 @@ impl InputThread {
         rumble: impl Fn(HostControl) + Send + Sync + 'static,
     ) -> std::io::Result<Self> {
         // Unbounded so presses are never dropped. It only grows while the
-        // thread is stuck inside an injection call, and the transport's own
-        // bounded event queue limits how fast anything arrives.
+        // thread is stuck inside an injection call, and the transport's
+        // per-peer packet cap limits how fast anything arrives.
         let (tx, rx) = channel();
         let thread = std::thread::Builder::new()
             .name("ws-input".into())
             .spawn(move || run(rx, display, rumble))?;
         Ok(Self {
-            tx: Some(tx),
+            tx: Some(Arc::new(tx)),
             thread: Some(thread),
         })
     }
 
     /// One `input` or `input-motion` message.
     pub fn send(&self, data: &[u8]) {
-        match InputEvent::decode(data) {
-            Ok(event) => self.push(Msg::Event(event)),
-            Err(e) => tracing::debug!("bad input message: {e}"),
+        if let Some(tx) = &self.tx {
+            send_event(tx, data);
+        }
+    }
+
+    /// Takes `input` and `input-motion` messages from any thread, for as
+    /// long as this thread runs; holding it does not keep the thread alive.
+    pub fn sink(&self) -> impl Fn(&[u8]) + Send + Sync + 'static {
+        let tx = self.tx.as_ref().map(Arc::downgrade).unwrap_or_default();
+        move |data: &[u8]| {
+            if let Some(tx) = Weak::upgrade(&tx) {
+                send_event(&tx, data);
+            }
         }
     }
 
@@ -132,9 +145,19 @@ impl InputThread {
     }
 }
 
+fn send_event(tx: &Sender<Msg>, data: &[u8]) {
+    match InputEvent::decode(data) {
+        Ok(event) => {
+            let _ = tx.send(Msg::Event(event));
+        }
+        Err(e) => tracing::debug!("bad input message: {e}"),
+    }
+}
+
 impl Drop for InputThread {
     fn drop(&mut self) {
-        // Closing the channel ends the thread, which releases everything.
+        // Closing the channel ends the thread, which releases everything. A
+        // sink caller holds the sender only for the length of one send.
         self.tx.take();
         if let Some(t) = self.thread.take() {
             let _ = t.join();
@@ -273,6 +296,22 @@ mod tests {
             ]
         );
         assert_eq!(m, Motion::default());
+    }
+
+    #[test]
+    fn a_held_sink_does_not_keep_the_thread_alive() {
+        let thread = InputThread::start(None, |_| {}).unwrap();
+        let sink = thread.sink();
+        let key = InputEvent::Key {
+            usage: 4,
+            down: true,
+        }
+        .encode();
+        sink(&key);
+        // Joins even though the sink outlives it, and the sink then does
+        // nothing.
+        drop(thread);
+        sink(&key);
     }
 
     #[test]

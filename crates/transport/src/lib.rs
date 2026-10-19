@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 
 use str0m::net::Protocol;
 use tokio::sync::{Notify, mpsc, oneshot};
-use ws_proto::{AudioPacket, EncodedFrame};
+use ws_proto::{AudioPacket, EncodedFrame, channels};
 
 use crate::net::{Net, Packet, SharedFilter};
 use crate::session::{Session, Step, VideoWrite};
@@ -118,6 +118,8 @@ pub enum TransportEvent {
     ChannelClosed(&'static str),
     /// The channel's send buffer drained; more data can be written.
     ChannelLow(&'static str),
+    /// A data channel message. Messages on the input channels go to the
+    /// [`InputSink`] instead, while one is set.
     Data {
         channel: &'static str,
         binary: bool,
@@ -155,6 +157,11 @@ pub struct Trouble {
     /// Dropped frames the encoder skipped over without a keyframe.
     pub recovered: u32,
 }
+
+/// Takes every message on the `input` and `input-motion` channels, called
+/// straight from the transport's run loop (see [`Transport::set_input_sink`]).
+/// Must return at once: it holds up all media while it runs.
+pub type InputSink = Box<dyn Fn(&[u8]) + Send + Sync>;
 
 /// [`Trouble`], counted as it happens.
 #[derive(Default)]
@@ -228,6 +235,7 @@ struct Shared {
     recovering: Mutex<Option<(u64, Instant)>>,
     trouble: TroubleCounts,
     events: mpsc::Sender<TransportEvent>,
+    input: Mutex<Option<InputSink>>,
 }
 
 impl Shared {
@@ -352,6 +360,7 @@ impl Transport {
             recovering: Mutex::new(None),
             trouble: TroubleCounts::default(),
             events: events_tx,
+            input: Mutex::new(None),
         });
         let driver = Driver {
             config,
@@ -450,6 +459,14 @@ impl Transport {
             }
         }
         self.shared.notify.notify_one();
+    }
+
+    /// Hand input channel messages to `sink` as they arrive, or (`None`) as
+    /// [`TransportEvent::Data`] again. Input then skips the event queue: it
+    /// can't wait behind other events while the app is busy, and a reliable
+    /// press can't be dropped when that queue is full.
+    pub fn set_input_sink(&self, sink: Option<InputSink>) {
+        *self.shared.input.lock().expect("input sink lock") = sink;
     }
 
     /// Change the most the bandwidth estimate probes up to (see
@@ -608,6 +625,24 @@ impl Driver {
                     TransportEvent::Stats(mut stats) => {
                         stats.trouble = self.shared.trouble.take();
                         self.shared.emit(TransportEvent::Stats(stats))
+                    }
+                    TransportEvent::Data {
+                        channel,
+                        binary,
+                        data,
+                    } if channel == channels::INPUT || channel == channels::INPUT_MOTION => {
+                        let sink = self.shared.input.lock().expect("input sink lock");
+                        match sink.as_ref() {
+                            Some(sink) => sink(&data),
+                            None => {
+                                drop(sink);
+                                self.shared.emit(TransportEvent::Data {
+                                    channel,
+                                    binary,
+                                    data,
+                                })
+                            }
+                        }
                     }
                     ev => self.shared.emit(ev),
                 },

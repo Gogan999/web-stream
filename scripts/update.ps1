@@ -97,9 +97,34 @@ function Restore-Build {
     if (Test-Path "$commitFile.old") { Move-Item -Force "$commitFile.old" $commitFile }
 }
 
+# The web-stream service runs its own copy of ws-host.exe from Program Files.
+# Copying the new build there takes administrator rights: one UAC prompt,
+# which a browser connected through the service can answer.
+function Update-Service {
+    if (-not (Get-Service -Name 'web-stream' -ErrorAction SilentlyContinue)) { return }
+    $exe = Join-Path $bin 'ws-host.exe'
+    if ($NoRestart) {
+        Write-Host "The service keeps running the old build until you run `"$exe`" service update as administrator."
+        return
+    }
+    Write-Step 'Updating the web-stream service (asks for administrator rights)'
+    try {
+        $p = Start-Process -FilePath $exe -ArgumentList 'service', 'update' -Verb RunAs -Wait -PassThru -WindowStyle Hidden
+        $code = $p.ExitCode
+    } catch {
+        $code = 'declined'
+    }
+    if ($code -ne 0) {
+        Write-Host "The service was not updated ($code). Run `"$exe`" service update as administrator." -ForegroundColor Yellow
+    }
+}
+
 function Restart-Host {
+    Update-Service
     $gui = Join-Path $bin 'ws-host-gui.exe'
     $running = Get-HostProcess 'ws-host-gui'
+    # With the service hosting, the tray app would only fight it for the ports.
+    if (-not $running -and (Get-Service -Name 'web-stream' -ErrorAction SilentlyContinue)) { return }
     if ($NoRestart) {
         if ($running) { Write-Host 'The host keeps running the old build until it is restarted.' }
         return

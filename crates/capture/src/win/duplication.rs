@@ -31,7 +31,9 @@ impl Duplicator {
     pub(crate) fn new(output: &IDXGIOutput1, gpu: &Gpu) -> Result<Self> {
         let dup = unsafe { output.DuplicateOutput(&gpu.device) }.map_err(|e| {
             let hint = match e.code() {
-                E_ACCESSDENIED => " (secure desktop such as UAC or the lock screen is showing)",
+                E_ACCESSDENIED => {
+                    " (the lock screen or a UAC prompt is showing; only the host service can capture those)"
+                }
                 DXGI_ERROR_NOT_CURRENTLY_AVAILABLE => {
                     " (too many apps are duplicating this output)"
                 }

@@ -22,9 +22,12 @@ use ws_proto::{
 use ws_transport::{Transport, TransportConfig, TransportEvent, TransportStats};
 
 use crate::cursor::{CursorSession, CursorTarget};
+use crate::files::{FileCommand, FileMsg, FileSession};
 use crate::input::InputThread;
 use crate::options::MediaOptions;
 use crate::platform;
+use crate::serve::Event;
+use crate::uploads::{self, UploadMsg, UploadSession};
 
 /// Encoded frames waiting for the transport. The transport keeps only the
 /// newest frame anyway; a full channel makes the encoder drop and send a
@@ -61,17 +64,30 @@ const MIN_RESTART_GAP: Duration = Duration::from_secs(1);
 /// Video codecs the browser's answer accepted; `None` until known.
 pub type AcceptedCodecs = watch::Receiver<Option<Vec<VideoCodec>>>;
 
+/// How many peer connections signaling has set up. A count rather than an
+/// event, so a busy loop can't miss one.
+pub type PeerCount = watch::Receiver<u64>;
+
+/// What signaling tells media about the current peer connection.
+pub struct Signaled {
+    pub codecs: AcceptedCodecs,
+    pub peers: PeerCount,
+}
+
 pub async fn run(
     transport: Transport,
     mut events: mpsc::Receiver<TransportEvent>,
     opts: MediaOptions,
-    codecs: AcceptedCodecs,
+    signaled: Signaled,
+    mut file_commands: mpsc::Receiver<FileCommand>,
+    host_events: mpsc::UnboundedSender<Event>,
     mut shutdown: oneshot::Receiver<()>,
 ) {
     let (control_tx, mut control_rx) = mpsc::channel(CONTROL_QUEUE);
     let (stopped_tx, mut stopped_rx) = mpsc::channel(4);
     let (later_tx, mut later_rx) = mpsc::channel(8);
     let (cursor_target, _) = watch::channel(CursorTarget::default());
+    let Signaled { codecs, mut peers } = signaled;
     let mut media = Media {
         transport,
         config: opts.video.clone(),
@@ -94,17 +110,23 @@ pub async fn run(
         last_restart: None,
         codecs,
         live: None,
+        transfers: None,
+        peer: 0,
+        peers: peers.clone(),
         sent: Arc::default(),
         keyframe_requests: 0,
         changed_modes: ChangedModes::default(),
         mode_busy: false,
         last_mode_change: None,
+        host_events,
     };
     media.set_ceiling();
     loop {
         tokio::select! {
             ev = events.recv() => match ev {
                 Some(ev) => {
+                    // A new peer's events must not reach the old one's transfers.
+                    media.sync_peer();
                     let down = matches!(ev, TransportEvent::Disconnected);
                     media.event(ev);
                     if down {
@@ -118,6 +140,8 @@ pub async fn run(
             Some(msg) = control_rx.recv() => media.send_control(msg).await,
             Some(generation) = stopped_rx.recv() => media.video_stopped(generation),
             Some(later) = later_rx.recv() => media.later(later),
+            Some(cmd) = file_commands.recv() => media.file_command(cmd),
+            Ok(()) = peers.changed() => media.sync_peer(),
             _ = &mut shutdown => break,
         }
     }
@@ -158,6 +182,19 @@ enum Later {
     },
     /// A second after a resolution change, when the desktop has settled.
     ModeSettled { session: u64 },
+    /// The connection has been down for [`TRANSFER_GRACE`]: end `peer`'s
+    /// file transfers if it hasn't come back.
+    TransfersExpire { peer: u64 },
+}
+
+/// How long file transfers wait for a dropped connection to come back.
+const TRANSFER_GRACE: Duration = Duration::from_secs(30);
+
+/// File transfers both ways for one peer connection. They live as long as
+/// its channels, so they carry on when ICE drops and comes back.
+struct Transfers {
+    files: FileSession,
+    uploads: UploadSession,
 }
 
 /// Displays whose resolution this host changed. Dropping it puts them back,
@@ -234,6 +271,14 @@ struct Media {
     /// A resolution change or restore is running.
     mode_busy: bool,
     last_mode_change: Option<Instant>,
+    /// What the host user sees.
+    host_events: mpsc::UnboundedSender<Event>,
+    /// From when the `control` channel opens until the peer connection is
+    /// replaced (or stays down for [`TRANSFER_GRACE`]).
+    transfers: Option<Transfers>,
+    /// The peer connection `transfers` belong to.
+    peer: u64,
+    peers: PeerCount,
 }
 
 #[derive(Debug, Default)]
@@ -277,13 +322,18 @@ impl Media {
                     v.pipeline.recover_from(from);
                 }
             }
-            TransportEvent::TargetBitrate(bps) => self.target_bitrate(bps),
+            TransportEvent::TargetBitrate(bps) => {
+                let video = self.live.as_ref().is_some_and(|l| l.video.is_some());
+                self.to_files(FileMsg::Bitrate(video.then_some(bps)));
+                self.target_bitrate(bps)
+            }
             TransportEvent::Data {
                 channel,
                 binary,
                 data,
             } => match channel {
                 channels::CONTROL if !binary => self.control(&data),
+                channels::FILE if binary => self.to_uploads(UploadMsg::Data(data)),
                 channels::INPUT | channels::INPUT_MOTION => {
                     if let Some(input) = self.live.as_ref().and_then(|l| l.input.as_ref()) {
                         input.send(&data);
@@ -306,6 +356,22 @@ impl Media {
                 tracing::debug!(channel = c, "channel open");
                 if c == channels::CONTROL {
                     self.control_open = true;
+                    self.transfers = Some(Transfers {
+                        files: FileSession::start(
+                            self.transport.clone(),
+                            self.control_tx.clone(),
+                            self.host_events.clone(),
+                        ),
+                        uploads: UploadSession::start(
+                            self.opts.upload_dir.clone(),
+                            self.control_tx.clone(),
+                            self.host_events.clone(),
+                        ),
+                    });
+                    self.reply(HostControl::Uploads {
+                        enabled: self.opts.upload_dir.is_some(),
+                        max_size: uploads::MAX_SIZE,
+                    });
                     for msg in std::mem::take(&mut self.unsent) {
                         self.reply(msg);
                     }
@@ -317,9 +383,11 @@ impl Media {
                 tracing::debug!(channel = c, "channel closed");
                 if c == channels::CONTROL {
                     self.control_open = false;
+                    self.transfers = None;
                     self.cursor_target.send_modify(|t| t.origin = None);
                 }
             }
+            TransportEvent::ChannelLow(channels::FILE) => self.to_files(FileMsg::ChannelLow),
             TransportEvent::ChannelLow(_) => {}
         }
     }
@@ -366,6 +434,11 @@ impl Media {
         };
 
         let cursor = CursorSession::start(self.transport.clone(), self.cursor_target.subscribe());
+        if self.transfers.is_some() {
+            // ICE came back on the same peer connection: its channels, open
+            // before the drop, are still open.
+            self.control_open = true;
+        }
         self.live = Some(Live {
             input,
             _cursor: cursor,
@@ -399,6 +472,23 @@ impl Media {
         if let Some(live) = self.live.take() {
             drop_blocking(live);
             tracing::info!("browser disconnected; media stopped");
+        }
+        if self.transfers.is_some() {
+            let (tx, peer) = (self.later_tx.clone(), self.peer);
+            tokio::spawn(async move {
+                tokio::time::sleep(TRANSFER_GRACE).await;
+                let _ = tx.send(Later::TransfersExpire { peer }).await;
+            });
+        }
+    }
+
+    /// When signaling has set up a new peer connection, the old one's file
+    /// transfers end.
+    fn sync_peer(&mut self) {
+        let peer = *self.peers.borrow();
+        if peer != self.peer {
+            self.peer = peer;
+            self.transfers = None;
         }
     }
 
@@ -618,9 +708,13 @@ impl Media {
                     drop_blocking(mic);
                 }
             }
-            ClientControl::RequestFile { .. } => {
-                self.error("file transfer is not available yet".into());
+            ClientControl::RequestFile { id } => self.to_files(FileMsg::Request(id)),
+            ClientControl::FileAck { id, received } => self.to_files(FileMsg::Ack { id, received }),
+            ClientControl::CancelFile { id } => self.to_files(FileMsg::Cancel(id)),
+            ClientControl::UploadFile { id, name, size } => {
+                self.to_uploads(UploadMsg::Offer { id, name, size })
             }
+            ClientControl::CancelUpload { id } => self.to_uploads(UploadMsg::Cancel(id)),
             ClientControl::SetCursorPositions { enabled } => {
                 self.cursor_target.send_if_modified(|t| {
                     let changed = t.positions != enabled;
@@ -630,6 +724,34 @@ impl Media {
             }
             ClientControl::Ping { client_time_ms } => {
                 self.reply(HostControl::Pong { client_time_ms });
+            }
+        }
+    }
+
+    fn to_files(&self, msg: FileMsg) {
+        if let Some(t) = &self.transfers {
+            t.files.send(msg);
+        }
+    }
+
+    fn to_uploads(&self, msg: UploadMsg) {
+        if let Some(t) = &self.transfers {
+            t.uploads.send(msg);
+        }
+    }
+
+    fn file_command(&self, cmd: FileCommand) {
+        match (&self.transfers, &self.live) {
+            (Some(t), Some(_)) => t.files.send(FileMsg::Command(cmd)),
+            (Some(t), None) if matches!(cmd, FileCommand::Stop(_)) => {
+                t.files.send(FileMsg::Command(cmd))
+            }
+            _ => {
+                if matches!(cmd, FileCommand::Share(_)) {
+                    let _ = self.host_events.send(Event::Error(
+                        "no browser is connected: connect one, then share the file".into(),
+                    ));
+                }
             }
         }
     }
@@ -801,6 +923,11 @@ impl Media {
                 if session == self.session && self.live.is_some() {
                     block_in_place(|| self.refresh_input_rect());
                     self.send_displays();
+                }
+            }
+            Later::TransfersExpire { peer } => {
+                if peer == self.peer && self.live.is_none() && self.transfers.take().is_some() {
+                    tracing::info!("connection still down; file transfers ended");
                 }
             }
         }

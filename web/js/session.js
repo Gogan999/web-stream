@@ -7,6 +7,7 @@ export const CHANNELS = Object.freeze({
   INPUT_RT: 'input-motion',
   INPUT: 'input',
   CONTROL: 'control',
+  FILE: 'file',
 });
 
 // Queued motion beyond this is stale; hold it back and send the sum later instead.
@@ -160,6 +161,10 @@ export class Session extends EventTarget {
       const opened = () => this.dispatchEvent(new Event('control-open'));
       if (ch.readyState === 'open') opened();
       else ch.onopen = opened;
+    } else if (ch.label === CHANNELS.FILE) {
+      ch.onmessage = (e) => {
+        if (e.data instanceof ArrayBuffer) this.dispatchEvent(new CustomEvent('file-chunk', { detail: e.data }));
+      };
     }
   }
 
@@ -174,6 +179,19 @@ export class Session extends EventTarget {
   sendInput(label, buf) {
     if (!this.canSend(label)) return false;
     this.channels[label].send(buf);
+    return true;
+  }
+
+  // Bytes waiting on the file channel, or null when it isn't open.
+  fileBuffered() {
+    const ch = this.channels[CHANNELS.FILE];
+    return ch?.readyState === 'open' ? ch.bufferedAmount : null;
+  }
+
+  sendFile(buf) {
+    const ch = this.channels[CHANNELS.FILE];
+    if (ch?.readyState !== 'open') return false;
+    ch.send(buf);
     return true;
   }
 

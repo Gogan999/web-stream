@@ -8,6 +8,7 @@ import * as settingsStore from './settings.js';
 import { AutoTune, Cancelled } from './autotune.js';
 import { SoftKeyboard } from './softkeys.js';
 import * as P from './protocol.js';
+import { Files, Uploads, formatSize } from './files.js';
 
 const $ = (id) => document.getElementById(id);
 const ui = {
@@ -22,6 +23,8 @@ const ui = {
   audioKbps: $('audio-kbps'), audioFrame: $('audio-frame'),
   moreToggle: $('more-toggle'), more: $('more'), kbdToggle: $('kbd-toggle'), keysToggle: $('keys-toggle'), keys: $('keys'),
   kbdInput: $('kbd-input'), touchFullscreen: $('touch-fullscreen'),
+  filesToggle: $('files-toggle'), files: $('files'), fileList: $('file-list'), fromHost: $('from-host'),
+  toHost: $('to-host'), uploadPick: $('upload-pick'), uploadInput: $('upload-input'), uploadList: $('upload-list'),
 };
 
 const params = new URLSearchParams(location.search);
@@ -52,7 +55,11 @@ async function connect() {
   session = new Session({ signalUrl, video: ui.video });
   session.addEventListener('status', (e) => setStatus(e.detail.text, e.detail.state));
   session.addEventListener('control', (e) => onControl(e.detail));
+  session.addEventListener('file-chunk', (e) => files.onChunk(e.detail));
   session.addEventListener('control-open', () => {
+    // A new connection: the host offers its files afresh, and says whether it takes any.
+    files.clear();
+    uploads.clear();
     session.sendControl({ type: 'listDisplays' });
     sendCursorMode();
     // The host keeps the last choice across sessions; tell it this browser's.
@@ -63,6 +70,8 @@ async function connect() {
     ui.connect.textContent = 'Connect';
     ui.display.disabled = true;
     tuning?.cancel();
+    files.clear();
+    uploads.clear();
   });
   host = { displays: [], active: null, config: null, stats: null, matched: false, awaitingMatch: false };
   lastSent = null;
@@ -101,6 +110,8 @@ function disconnect() {
   session = null;
   stopStats();
   tuning?.cancel();
+  files.clear();
+  uploads.clear();
   host = null;
   ui.display.replaceChildren();
   setStatus('Not connected', 'idle');
@@ -108,6 +119,8 @@ function disconnect() {
 
 function onControl(msg) {
   if (cursor?.onControl(msg)) return;
+  if (files.onControl(msg)) return;
+  if (uploads.onControl(msg)) return;
   if (msg.type === 'displays' && Array.isArray(msg.displays)) {
     ui.display.replaceChildren(...msg.displays.map((d, i) => {
       const o = document.createElement('option');
@@ -493,17 +506,148 @@ ui.statsToggle.addEventListener('click', toggleStats);
 // Toolbar controls keep focus otherwise, and Space/Enter would re-trigger them.
 for (const el of [ui.connect, ui.fullscreen, ui.statsToggle, ui.autotune]) el.addEventListener('mouseup', () => el.blur());
 
-// Settings dropdown: the toggle opens it; a click or tap anywhere else, or Esc, closes it.
+// Settings and Files dropdowns: a toggle opens one; a click or tap anywhere else, or Esc, closes it.
 function setSettingsOpen(open) {
+  if (open) setFilesOpen(false);
   document.body.classList.toggle('more-open', open);
   ui.moreToggle.setAttribute('aria-expanded', String(open));
 }
+function setFilesOpen(open) {
+  if (open) setSettingsOpen(false);
+  document.body.classList.toggle('files-open', open);
+  ui.filesToggle.setAttribute('aria-expanded', String(open));
+}
 ui.moreToggle.addEventListener('click', () => setSettingsOpen(!document.body.classList.contains('more-open')));
+ui.filesToggle.addEventListener('click', () => setFilesOpen(!document.body.classList.contains('files-open')));
 document.addEventListener('pointerdown', (e) => {
   if (!ui.more.contains(e.target) && !ui.moreToggle.contains(e.target)) setSettingsOpen(false);
+  if (!ui.files.contains(e.target) && !ui.filesToggle.contains(e.target)) setFilesOpen(false);
 }, { capture: true });
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && document.body.classList.contains('more-open')) setSettingsOpen(false);
+  if (e.key !== 'Escape') return;
+  if (document.body.classList.contains('more-open')) setSettingsOpen(false);
+  if (document.body.classList.contains('files-open')) setFilesOpen(false);
+});
+
+// Files the host shares: the Files button shows how many; each row saves, cancels or says what happened.
+const files = new Files({ sendControl: (msg) => session?.sendControl(msg) });
+files.addEventListener('offer', (e) => {
+  setStatus(`Host shared ${e.detail.name} (${formatSize(e.detail.size)}): see Files`, ui.status.dataset.state);
+});
+// Files this browser sends to the host, when it takes them: Send files… or a drop on the page.
+const uploads = new Uploads({
+  sendControl: (msg) => session?.sendControl(msg),
+  sendFile: (buf) => session?.sendFile(buf) ?? false,
+  fileBuffered: () => session?.fileBuffered() ?? null,
+});
+let filesQueued = false;
+const queueFiles = () => {
+  if (filesQueued) return;
+  filesQueued = true;
+  requestAnimationFrame(() => { filesQueued = false; showFiles(); });
+};
+files.addEventListener('change', queueFiles);
+uploads.addEventListener('change', queueFiles);
+// Rows are updated in place, so a click isn't lost to a row redrawn under the pointer.
+const fileRows = new Map();
+const uploadRows = new Map();
+function showFiles() {
+  const list = files.list();
+  ui.filesToggle.hidden = list.length === 0 && !uploads.enabled;
+  ui.filesToggle.textContent = list.length ? `Files (${list.length})` : 'Files';
+  if (ui.filesToggle.hidden) setFilesOpen(false);
+  ui.fromHost.hidden = list.length === 0;
+  ui.toHost.hidden = !uploads.enabled;
+  showRows(ui.fileList, fileRows, list, (f) => ({
+    button: { offered: 'Save', receiving: 'Cancel', saved: 'Save again', failed: 'Save' }[f.state],
+    progress: f.state === 'receiving' ? f.stored : null,
+    failed: f.state === 'failed',
+    info: fileInfo(f),
+  }));
+  showRows(ui.uploadList, uploadRows, uploads.list(), (u) => ({
+    button: u.state === 'queued' || u.state === 'waiting' || u.state === 'sending' ? 'Cancel' : null,
+    progress: u.state === 'sending' ? u.acked : null,
+    failed: u.state === 'failed',
+    info: uploadInfo(u),
+  }));
+}
+function showRows(listEl, rows, items, view) {
+  for (const [id, row] of rows) {
+    if (!items.some((i) => i.id === id)) { row.li.remove(); rows.delete(id); }
+  }
+  for (const item of items) {
+    let row = rows.get(item.id);
+    if (!row) {
+      const li = document.createElement('li');
+      const name = Object.assign(document.createElement('span'), { className: 'name', textContent: item.name, title: item.name });
+      const info = Object.assign(document.createElement('span'), { className: 'info' });
+      const button = Object.assign(document.createElement('button'), { type: 'button' });
+      button.dataset.id = String(item.id);
+      const bar = document.createElement('progress');
+      li.append(name, button, info, bar);
+      listEl.append(li);
+      row = { li, info, button, bar };
+      rows.set(item.id, row);
+    }
+    const v = view(item);
+    row.button.hidden = !v.button;
+    row.button.textContent = v.button ?? '';
+    row.bar.hidden = v.progress === null;
+    row.bar.max = Math.max(item.size, 1);
+    row.bar.value = v.progress ?? 0;
+    row.info.classList.toggle('failed', v.failed);
+    row.info.textContent = v.info;
+  }
+}
+function rate(bytes, startedAt) {
+  const secs = (performance.now() - startedAt) / 1000;
+  return secs > 0.5 ? ` · ${formatSize(Math.round(bytes / secs))}/s` : '';
+}
+function fileInfo(f) {
+  const size = formatSize(f.size);
+  if (f.state === 'saved') return `Saved · ${size}`;
+  if (f.state === 'failed') return f.error;
+  if (f.state !== 'receiving') return size;
+  return `${formatSize(f.stored)} of ${size}${rate(f.stored, f.startedAt)}`;
+}
+function uploadInfo(u) {
+  const size = formatSize(u.size);
+  if (u.state === 'saved') return `On the host as ${u.savedAs} · ${size}`;
+  if (u.state === 'failed') return u.error;
+  if (u.state === 'sending') return `${formatSize(u.acked)} of ${size}${rate(u.acked, u.startedAt)}`;
+  return `${size} · waiting`;
+}
+ui.uploadPick.addEventListener('click', () => ui.uploadInput.click());
+ui.uploadInput.addEventListener('change', () => {
+  uploads.add(ui.uploadInput.files);
+  ui.uploadInput.value = '';
+});
+ui.uploadList.addEventListener('click', (e) => {
+  const button = e.target.closest('button[data-id]');
+  if (button) uploads.cancel(Number(button.dataset.id));
+});
+// Dropping files anywhere on the page sends them, when the host takes them.
+const dragsFiles = (e) => uploads.enabled && e.dataTransfer?.types.includes('Files');
+document.addEventListener('dragover', (e) => {
+  if (!dragsFiles(e)) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'copy';
+  document.body.classList.add('drop-target');
+});
+document.addEventListener('dragleave', (e) => { if (!e.relatedTarget) document.body.classList.remove('drop-target'); });
+document.addEventListener('drop', (e) => {
+  document.body.classList.remove('drop-target');
+  if (!dragsFiles(e)) return;
+  e.preventDefault();
+  uploads.add(e.dataTransfer.files);
+  setFilesOpen(true);
+});
+ui.fileList.addEventListener('click', (e) => {
+  const button = e.target.closest('button[data-id]');
+  if (!button) return;
+  const id = Number(button.dataset.id);
+  if (files.files.get(id)?.state === 'receiving') files.cancel(id);
+  else files.save(id);
 });
 
 // Touch screens: overlay buttons and on-screen keyboard.

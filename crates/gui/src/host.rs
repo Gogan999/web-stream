@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 use ws_host::options::ServeOptions;
-use ws_host::serve::{self, Command, Event, Notice};
+use ws_host::serve::{self, Command, Event, FileEvent, FileId, Notice};
 
 const LOG_LINES: usize = 200;
 const PAIRING_OPEN: Duration = Duration::from_secs(120);
@@ -35,6 +35,25 @@ pub struct PairingCode {
     pub expires: Instant,
 }
 
+/// A file shared with the connected browser.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SharedFile {
+    pub id: FileId,
+    pub name: String,
+    pub size: u64,
+    pub status: FileStatus,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum FileStatus {
+    Offered,
+    /// The browser has stored this many bytes.
+    Sending(u64),
+    Sent,
+    Cancelled,
+    Failed(String),
+}
+
 #[derive(Debug)]
 pub struct State {
     pub status: Status,
@@ -44,6 +63,8 @@ pub struct State {
     pub pairing_locked: bool,
     /// The browser streaming right now.
     pub connected: Option<String>,
+    /// Files on offer to the connected browser.
+    pub shared: Vec<SharedFile>,
     pub log: VecDeque<String>,
 }
 
@@ -84,6 +105,7 @@ impl State {
             }
             Event::UnpairedAll => self.log("every paired browser was removed"),
             Event::Error(e) => self.log(e),
+            Event::File(f) => self.file(f),
             Event::Notice(n) => match n {
                 Notice::PairingCode {
                     code,
@@ -125,6 +147,46 @@ impl State {
         }
     }
 
+    fn file(&mut self, event: FileEvent) {
+        let set = |shared: &mut Vec<SharedFile>, id: FileId, status: FileStatus| {
+            if let Some(f) = shared.iter_mut().find(|f| f.id == id) {
+                f.status = status;
+            }
+        };
+        match event {
+            FileEvent::Shared { id, name, size } => {
+                self.log(format!("sharing {name:?} with the browser"));
+                self.shared.push(SharedFile {
+                    id,
+                    name,
+                    size,
+                    status: FileStatus::Offered,
+                });
+            }
+            FileEvent::Progress { id, received, .. } => {
+                set(&mut self.shared, id, FileStatus::Sending(received))
+            }
+            FileEvent::Sent { id, name } => {
+                self.log(format!("sent {name:?}"));
+                set(&mut self.shared, id, FileStatus::Sent);
+            }
+            FileEvent::Cancelled { id, .. } => set(&mut self.shared, id, FileStatus::Cancelled),
+            FileEvent::Failed { id, name, message } => {
+                self.log(format!("sending {name:?} failed: {message}"));
+                set(&mut self.shared, id, FileStatus::Failed(message));
+            }
+            FileEvent::Withdrawn { id, .. } => self.shared.retain(|f| f.id != id),
+            FileEvent::Cleared => self.shared.clear(),
+            FileEvent::Receiving { name, .. } => {
+                self.log(format!("receiving {name:?} from the browser"))
+            }
+            FileEvent::Received { path, .. } => self.log(format!("received {}", path.display())),
+            FileEvent::ReceiveFailed { name, message } => {
+                self.log(format!("receiving {name:?} failed: {message}"))
+            }
+        }
+    }
+
     /// Drops pairing state that has run out.
     pub fn expire(&mut self, now: Instant) {
         if self.pairing_until.is_some_and(|t| t <= now) {
@@ -139,6 +201,7 @@ impl State {
         self.pairing_until = None;
         self.code = None;
         self.connected = None;
+        self.shared.clear();
         match result {
             Ok(()) => {
                 self.status = Status::Stopped;
@@ -181,6 +244,7 @@ impl Host {
                     code: None,
                     pairing_locked: false,
                     connected: None,
+                    shared: Vec::new(),
                     log: VecDeque::new(),
                 }),
                 commands: Mutex::new(None),
@@ -267,8 +331,8 @@ impl Host {
             .expect("host commands lock")
             .as_ref()
         {
-            if c.try_send(cmd).is_err() {
-                tracing::warn!(?cmd, "host is not taking commands");
+            if let Err(e) = c.try_send(cmd) {
+                tracing::warn!(cmd = ?e.into_inner(), "host is not taking commands");
             }
         }
     }

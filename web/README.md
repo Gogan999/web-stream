@@ -21,6 +21,7 @@ Pairing and signaling: `docs/signaling.md` (transport). Data channel messages: [
 | `js/protocol.js` | Binary input message encoder/decoder |
 | `js/keymap.js` | `KeyboardEvent.code` → USB HID usage |
 | `js/gamepad.js` | Gamepad API standard mapping → XInput state |
+| `js/files.js` | Files the host shares (saving to disk or to downloads) and files sent to the host: acks, cancel |
 | `js/stats.js` | Stats overlay numbers from `getStats()`, `requestVideoFrameCallback` and the host's `videoStats` |
 | `js/settings.js` | Resolution, bitrate, fps and quality settings → the host's `VideoConfig`; kept in `localStorage` |
 | `js/autotune.js` | Auto-tune (test): bitrate ladder, then encoder quality, keeping the best that streams cleanly |
@@ -41,6 +42,8 @@ Pairing and signaling: `docs/signaling.md` (transport). Data channel messages: [
   - **Audio bitrate** and **Frame**: game audio quality. *Host setting* keeps what the host was started with (128 kb/s, 10 ms unless changed). 20 ms frames sound better at the same bitrate and arrive 10 ms later. Changes apply straight away.
   - **Mic** sends this browser's microphone to the host, which plays it into its virtual cable (see `docs/host-setup.md`). Off by default; the browser asks for mic permission the first time. Turning it on or off doesn't reconnect.
   - **Auto-tune (test)** tries bitrates from 10 to 150 Mb/s, then Clarity and Balanced, about 7 s each, and keeps the best that streams without freezes, drops, loss, or slow encode/decode, minus 15% headroom. Run it while something moves on screen. Click again to stop.
+- **Files (n)** appears next to Settings when the host shares files. Each row has **Save**, which asks where to save and writes the file as it arrives (on phones the file goes to downloads, up to 512 MiB), and **Cancel** while it runs. Nothing downloads until you click Save. The list empties when the session ends.
+- When the host lets the browser send it files, the Files panel also has **Send files…**, and files dropped on the page go too. They're sent one at a time; each row says the name the host saved it under.
 - The stats overlay's last two lines are the host's side: encoder bitrate / ceiling, bandwidth estimate, encode time and keyframe requests.
 - URL option: `?autoconnect` connects on load when paired.
 

@@ -112,6 +112,7 @@ async function offer() {
   for (const channel of channels) {
     channel.binaryType = 'arraybuffer';
     if (channel.label === 'control') window.__control = channel;
+    if (channel.label === 'file') window.__file = channel;
     channel.onopen = () => write({ ev: 'channel', label: channel.label, ordered: channel.ordered, maxRetransmits: channel.maxRetransmits });
     channel.onmessage = (m) => {
       if (channel.label === 'control') {
@@ -134,10 +135,13 @@ async function offer() {
         if (c.type === 'setMicEnabled' && c.enabled && window.mockNoMic) {
           channel.send(JSON.stringify({ type: 'micUnavailable', message: 'the host has the mic turned off (--no-mic)' }));
         }
+        if (c.type === 'requestFile') sendFile(c.id);
+        if (c.type === 'uploadFile') receiving.set(c.id, { name: c.name, size: c.size, parts: [], received: 0 }), channel.send(JSON.stringify({ type: 'uploadAccepted', id: c.id }));
         if (c.type === 'setHostResolution') {
           channel.send(JSON.stringify({ type: 'error', message: "the host doesn't allow changing its resolution; start it with --allow-resolution-change" }));
         }
       } else {
+        if (channel.label === 'file') { receive(m.data); return; }
         write({ ev: 'input', ch: channel.label, ...decode(m.data) });
       }
     };
@@ -183,4 +187,49 @@ function sendDisplays(channel) {
     displays: DISPLAYS.map(({ color, ...d }) => d),
     active: active.id,
   }));
+}
+
+// Shared files, like the real host's: offered by id, sent in 16 KiB chunks with an id and offset
+// header when asked for. Only for small files: this mock ignores the ack window.
+const shared = new Map();
+window.mockShareFile = (id, name, text) => {
+  const data = new TextEncoder().encode(text);
+  shared.set(id, data);
+  window.__control.send(JSON.stringify({ type: 'fileOffer', id, name, size: data.byteLength }));
+};
+
+function sendFile(id) {
+  const data = shared.get(id);
+  if (!data) {
+    window.__control.send(JSON.stringify({ type: 'fileFailed', id, message: 'that file is not shared' }));
+    return;
+  }
+  for (let offset = 0; offset < data.byteLength; offset += 16384) {
+    const part = data.subarray(offset, offset + 16384);
+    const msg = new Uint8Array(16 + part.byteLength);
+    const v = new DataView(msg.buffer);
+    v.setBigUint64(0, BigInt(id));
+    v.setBigUint64(8, BigInt(offset));
+    msg.set(part, 16);
+    window.__file.send(msg.buffer);
+  }
+}
+
+// Files from the client, when a test turns uploads on: { name: text } once complete.
+const receiving = new Map();
+window.mockUploaded = {};
+function receive(buf) {
+  const v = new DataView(buf);
+  const id = Number(v.getBigUint64(0));
+  const offset = Number(v.getBigUint64(8));
+  const up = receiving.get(id);
+  if (!up || offset !== up.received) return;
+  up.parts.push(new Uint8Array(buf, 16));
+  up.received += buf.byteLength - 16;
+  if (up.received === up.size) {
+    receiving.delete(id);
+    window.mockUploaded[up.name] = new TextDecoder().decode(new Uint8Array(up.parts.flatMap((p) => [...p])));
+    window.__control.send(JSON.stringify({ type: 'uploadAck', id, received: up.size }));
+    window.__control.send(JSON.stringify({ type: 'uploadSaved', id, name: up.name }));
+  }
 }

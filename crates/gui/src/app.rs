@@ -9,7 +9,7 @@ use eframe::egui::{self, Color32, RichText};
 use ws_host::serve::Notice;
 use ws_host::serve::{Command, Event};
 
-use crate::host::{Host, Status};
+use crate::host::{FileStatus, Host, Status};
 use crate::settings::{CODECS, QUALITIES, Settings};
 
 pub struct App {
@@ -237,6 +237,10 @@ impl App {
             }
         });
 
+        if connected.is_some() {
+            self.files_ui(ui);
+        }
+
         ui.horizontal(|ui| {
             if ui
                 .add_enabled(running, egui::Button::new("Pair a browser"))
@@ -287,6 +291,64 @@ impl App {
                 self.confirm_unpair = true;
             }
         });
+    }
+
+    /// Files shared with the connected browser: pick more, see how they
+    /// are doing, stop sharing one.
+    fn files_ui(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            #[cfg(windows)]
+            if ui
+                .button("Send file...")
+                .on_hover_text(
+                    "Offer files to the browser; it saves them when you click Save there",
+                )
+                .clicked()
+            {
+                pick_files(self.host.clone());
+            }
+            ui.weak("or drop files on this window");
+        });
+        if self.settings.allow_upload {
+            ui.horizontal(|ui| {
+                ui.label("Files from the browser go to");
+                let dir = match self.settings.upload_dir.trim() {
+                    "" => ws_host::options::default_upload_dir(),
+                    d => PathBuf::from(d),
+                };
+                if ui.link(dir.display().to_string()).clicked() {
+                    open_folder(&dir);
+                }
+            });
+        }
+        let shared = self.host.state().shared.clone();
+        if shared.is_empty() {
+            return;
+        }
+        egui::Grid::new("shared")
+            .num_columns(3)
+            .striped(true)
+            .show(ui, |ui| {
+                for f in &shared {
+                    ui.add(egui::Label::new(&f.name).truncate())
+                        .on_hover_text(&f.name);
+                    let status = match &f.status {
+                        FileStatus::Offered => format!("{}, waiting for Save", size(f.size)),
+                        FileStatus::Sending(n) => {
+                            let pct = (n * 100).checked_div(f.size).unwrap_or(100);
+                            format!("{pct}% of {}", size(f.size))
+                        }
+                        FileStatus::Sent => format!("{}, sent", size(f.size)),
+                        FileStatus::Cancelled => "stopped by the browser".into(),
+                        FileStatus::Failed(e) => format!("failed: {e}"),
+                    };
+                    ui.label(status);
+                    if ui.small_button("Stop sharing").clicked() {
+                        self.host.command(Command::StopSharing(f.id));
+                    }
+                    ui.end_row();
+                }
+            });
     }
 
     fn settings_ui(&mut self, ui: &mut egui::Ui) {
@@ -410,6 +472,20 @@ impl App {
                     "let the browser change this PC's resolution",
                 );
                 ui.end_row();
+                ui.label("Files");
+                ui.vertical(|ui| {
+                    ui.checkbox(&mut d.allow_upload, "let the browser send files to this PC")
+                        .on_hover_text(
+                            "They are saved in this folder, marked as downloaded from the \
+                             internet, and never opened by the host",
+                        );
+                    ui.add_enabled(
+                        d.allow_upload,
+                        egui::TextEdit::singleline(&mut d.upload_dir)
+                            .hint_text("Downloads\\web-stream"),
+                    );
+                });
+                ui.end_row();
                 ui.label("More options");
                 ui.add(
                     egui::TextEdit::singleline(&mut d.extra_args)
@@ -513,6 +589,22 @@ impl eframe::App for App {
             }
         }
 
+        let dropped: Vec<PathBuf> = ctx.input(|i| {
+            i.raw
+                .dropped_files
+                .iter()
+                .filter_map(|f| f.path.clone())
+                .collect()
+        });
+        if !dropped.is_empty() {
+            if self.host.state().connected.is_some() {
+                self.host.command(Command::ShareFiles(dropped));
+            } else {
+                self.host
+                    .log("no browser is connected: connect one, then share the file");
+            }
+        }
+
         egui::TopBottomPanel::bottom("footer").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 if ui.button("Open data folder").clicked() {
@@ -547,6 +639,44 @@ impl eframe::App for App {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.host.stop_and_wait(Duration::from_secs(15));
+    }
+}
+
+/// Opens the file dialog on a thread of its own, so the window keeps
+/// drawing, and shares what is picked.
+#[cfg(windows)]
+fn pick_files(host: Host) {
+    let spawned = std::thread::Builder::new()
+        .name("ws-pick-files".into())
+        .spawn(move || {
+            if let Some(paths) = rfd::FileDialog::new()
+                .set_title("Send to the browser")
+                .pick_files()
+            {
+                host.command(Command::ShareFiles(paths));
+            }
+        });
+    if let Err(e) = spawned {
+        tracing::warn!("file dialog: {e}");
+    }
+}
+
+fn size(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["KB", "MB", "GB", "TB"];
+    if bytes < 1024 {
+        return format!("{bytes} B");
+    }
+    let mut v = bytes as f64;
+    let mut unit = 0;
+    v /= 1024.0;
+    while v >= 1024.0 && unit < UNITS.len() - 1 {
+        v /= 1024.0;
+        unit += 1;
+    }
+    if v < 10.0 {
+        format!("{v:.1} {}", UNITS[unit])
+    } else {
+        format!("{v:.0} {}", UNITS[unit])
     }
 }
 

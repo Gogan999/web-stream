@@ -8,13 +8,14 @@ Defined by the WebRTC transport thread in `docs/signaling.md`, which is authorit
 
 - Pairing via `GET /api/session`, `POST /api/pair/start`, `POST /api/pair/confirm` and `POST /api/unpair`, using an HttpOnly `ws_device` cookie. A refused WebSocket upgrade sends the user back to the pairing screen.
 - WebSocket at `/ws`, same origin. The host sends `welcome {ice_servers}` and then `offer {sdp}`, and the browser replies `answer {sdp}` and `candidate {candidate,sdpMid,sdpMLineIndex}`. When ICE fails, the browser sends `restart` (up to 3 times) and answers the fresh offer on a new peer connection. `bye {reason}` and `error {code,message}` are shown to the user.
-- The host opens the data channels. The client uses three of them:
+- The host opens the data channels. The client uses all four:
 
 | Label | Options | Carries |
 |---|---|---|
 | `input-motion` | unordered, `maxRetransmits: 0` | mouse motion, gamepad state |
 | `input` | ordered, reliable | keys, mouse buttons, wheel, gamepad disconnect, release-all |
 | `control` | ordered, reliable, JSON text | `ClientControl` / `HostControl` |
+| `file` | ordered, reliable, binary | bytes of a shared file (see File transfer) |
 
 The client sets `jitterBufferTarget = 0` on video receivers. It always answers audio `sendrecv`; the mic comes and goes with `replaceTrack` on that transceiver (no track: nothing is sent), alongside `{"type":"setMicEnabled","enabled":true|false}` on `control`, which the host refuses with `{"type":"micUnavailable","message":"…"}` when it runs with `--no-mic` or can't open its mic device; the client then stops sending and unticks Mic. The host's mic is off at the start of every session until the client turns it on.
 
@@ -60,5 +61,43 @@ JSON text, `ws-proto` `ClientControl` / `HostControl`. The client uses:
 | host → browser | `{"type":"cursorPosition","x":812,"y":440}`: the pointer's hotspot in host pixels from the streamed display's top-left (outside the display when it is on another one). Sent on change while the pointer shows and positions are enabled; only the newest matters (the host keeps just the latest and skips any it can't write). |
 
 A display switch changes resolution mid-stream; the client handles that without renegotiation.
+
+## File transfer (`control` and `file`)
+
+The host user shares files from the tray app (**Send file...** or dropping files on its window) or the console (`send <path>`). Only those can be sent: the browser asks by the id the host gave, never by path. Offers last for the session; a new connection starts with none.
+
+| Direction | Message |
+|---|---|
+| host → browser | `{"type":"fileOffer","id":6684867476655281,"name":"report.pdf","size":2202009}`. `id` is random, below 2^53; `name` is a bare file name, which the browser cleans again before suggesting it. |
+| browser → host | `{"type":"requestFile","id":…}` asks for the bytes, from offset 0. Asking again starts over. An id not on offer gets `fileFailed`. |
+| host → browser | bytes on `file`, below |
+| browser → host | `{"type":"fileAck","id":…,"received":262144}` after storing every 256 KiB, and at the end. The host keeps at most 1 MiB in flight past the last ack, and counts the file as sent when `received` is its size. |
+| browser → host | `{"type":"cancelFile","id":…}` stops the transfer; the file stays on offer. |
+| host → browser | `{"type":"fileFailed","id":…,"message":"…"}` the host couldn't send it (read error, not on offer). |
+| host → browser | `{"type":"fileWithdrawn","id":…}` the host user stopped sharing it. |
+
+Each binary message on `file` is a 16-byte header, the id then the offset of its first byte (both big-endian u64), followed by at most 16 KiB of the file. One file is sent at a time; requests queue in order. The browser keeps a chunk only if its offset is where the file left off, which drops bytes still in flight from a cancelled try. There is no "done" message: the control and file channels aren't ordered with each other, so the browser finishes when it has `size` bytes.
+
+File data isn't part of the video's bandwidth estimate, so while video streams the host paces it to a quarter of that estimate (at least 1 Mb/s), leaving the game stream its room. Without video it goes as fast as the connection allows.
+
+The host opens each file when it is shared and reads only that handle, so renaming or replacing the file later can't change what is sent. On Windows it is opened with read sharing only: other programs can read it but not change or delete it while it is on offer, and a file another program is writing can't be shared.
+
+The browser saves with Chrome's save dialog, writing to disk as the bytes arrive. Without that API (Chrome on Android) it collects the file in memory, up to 512 MiB, and hands it to the browser's downloads.
+
+### Browser to host
+
+Off unless the host runs with `--allow-upload` (the tray app's "let the browser send files to this PC"). Files go to `--upload-dir`, by default `Downloads\web-stream` in the host user's profile.
+
+| Direction | Message |
+|---|---|
+| host → browser | `{"type":"uploads","enabled":true,"maxSize":4294967296}` when the control channel opens. The browser shows **Send files…** and takes dropped files only when enabled. |
+| browser → host | `{"type":"uploadFile","id":1,"name":"save.dat","size":123456}`. `id` is the browser's own, new for each file. One file at a time: the next is offered after this one is saved or failed. |
+| host → browser | `{"type":"uploadAccepted","id":1}`, then the browser sends the bytes on `file` as above (same header), at most 1 MiB past the host's last ack. |
+| host → browser | `{"type":"uploadAck","id":1,"received":262144}` every 256 KiB written, and at the end. |
+| host → browser | `{"type":"uploadSaved","id":1,"name":"save (2).dat"}`: the name it was saved under. |
+| host → browser | `{"type":"uploadFailed","id":1,"message":"…"}`: refused (off, too big, another file still coming) or broken off. Nothing is kept. |
+| browser → host | `{"type":"cancelUpload","id":1}` stops it; the host deletes what it has. |
+
+The browser's name is only a suggestion. The host keeps the bare name, replaces what Windows would read as a path, a stream (`:`) or a wildcard, prefixes device names (`CON`, `COM1`…), drops trailing dots and spaces, and never overwrites: a taken name becomes `name (2).ext`. Bytes go to `name.part`, renamed when complete; a cancel, a gap in the offsets, too many bytes, a write error or a disconnect deletes it. On Windows the saved file gets a Mark of the Web (`Zone.Identifier`, internet zone), so SmartScreen and Office treat it as a download. The host never opens what it receives.
 
 The video carries no pointer. In absolute mouse mode the browser sets the video's CSS `cursor` from `cursorShape` (its own cursor for standard kinds, the host image for `custom`), so it moves with no added latency. In relative mode pointer lock hides the browser's pointer, so it draws the host image over the video at `cursorPosition`.

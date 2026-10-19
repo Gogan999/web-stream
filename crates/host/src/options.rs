@@ -39,6 +39,9 @@ serve options:
   --audio-frame-ms 10|20  game audio Opus frame; 20 sounds better, 10 ms sooner
   --allow-resolution-change  let the browser change the streamed display's
                        resolution to match its screen (undone on disconnect)
+  --allow-upload       let the browser send files to this PC; they are saved
+                       in --upload-dir and never opened by the host
+  --upload-dir DIR     where received files go, default Downloads\\web-stream
   --pair               open pairing for two minutes at startup
 ";
 
@@ -76,6 +79,8 @@ pub struct MediaOptions {
     pub audio_frame_ms: u32,
     /// The browser may change the host display's resolution.
     pub allow_resolution_change: bool,
+    /// Where files from the browser are saved; `None` refuses them.
+    pub upload_dir: Option<PathBuf>,
 }
 
 impl ServeOptions {
@@ -104,8 +109,11 @@ impl ServeOptions {
             audio_kbps: DEFAULT_AUDIO_KBPS,
             audio_frame_ms: 10,
             allow_resolution_change: false,
+            upload_dir: None,
         };
         let mut no_mic = false;
+        let mut allow_upload = false;
+        let mut upload_dir = None;
         let mut pair_at_start = false;
 
         let mut it = args.iter();
@@ -149,12 +157,17 @@ impl ServeOptions {
                     media.audio_frame_ms = value()?.parse().context("--audio-frame-ms")?
                 }
                 "--allow-resolution-change" => media.allow_resolution_change = true,
+                "--allow-upload" => allow_upload = true,
+                "--upload-dir" => upload_dir = Some(PathBuf::from(value()?)),
                 "--pair" => pair_at_start = true,
                 f => bail!("unknown flag {f}\n\n{USAGE}"),
             }
         }
         if no_mic {
             media.mic_device = None;
+        }
+        if allow_upload {
+            media.upload_dir = Some(upload_dir.unwrap_or_else(default_upload_dir));
         }
         let cert = match (cert, key) {
             (Some(c), Some(k)) => Some((c, k)),
@@ -254,6 +267,16 @@ pub fn default_data_dir() -> PathBuf {
     }
 }
 
+/// `Downloads\web-stream` in the user's profile (the home directory
+/// elsewhere).
+pub fn default_upload_dir() -> PathBuf {
+    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"));
+    match home {
+        Some(h) => PathBuf::from(h).join("Downloads").join("web-stream"),
+        None => PathBuf::from("web-stream-received"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -283,6 +306,28 @@ mod tests {
         assert!(parse(&["--audio-frame-ms", "5"]).is_err());
         assert_eq!(o.device_idle_expiry, Duration::from_secs(30 * 24 * 3600));
         assert!(o.extra_origins.is_empty());
+    }
+
+    #[test]
+    fn uploads_are_off_unless_allowed() {
+        assert_eq!(parse(&[]).unwrap().media.upload_dir, None);
+        assert_eq!(
+            parse(&["--upload-dir", "x"]).unwrap().media.upload_dir,
+            None
+        );
+        assert_eq!(
+            parse(&["--allow-upload", "--upload-dir", "x"])
+                .unwrap()
+                .media
+                .upload_dir,
+            Some(PathBuf::from("x"))
+        );
+        let dir = parse(&["--allow-upload"])
+            .unwrap()
+            .media
+            .upload_dir
+            .unwrap();
+        assert!(dir.ends_with("Downloads/web-stream") || dir.ends_with("web-stream-received"));
     }
 
     #[test]

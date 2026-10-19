@@ -4,10 +4,11 @@ use std::io::BufRead;
 
 use tokio::sync::mpsc;
 use ws_host::options::ServeOptions;
-use ws_host::serve::{self, Command, Event, Notice};
+use ws_host::serve::{self, Command, Event, FileEvent, Notice};
 
 const CONSOLE_HELP: &str = "\
-commands: pair (let a browser pair for two minutes), unpair-all, drop (end the session), quit";
+commands: pair (let a browser pair for two minutes), unpair-all, drop (end the session),
+          send <path> (offer a file to the connected browser), quit";
 
 pub async fn run(opts: ServeOptions) -> anyhow::Result<()> {
     let (commands, commands_rx) = mpsc::channel(8);
@@ -47,6 +48,7 @@ async fn print_events(mut events: mpsc::UnboundedReceiver<Event>) {
             Event::UnpairedAll => println!("every paired browser was removed"),
             Event::Error(e) => println!("{e}"),
             Event::Notice(n) => print_notice(n),
+            Event::File(f) => print_file(f),
         }
     }
 }
@@ -72,6 +74,27 @@ fn print_notice(n: Notice) {
     }
 }
 
+fn print_file(f: FileEvent) {
+    match f {
+        FileEvent::Shared { name, size, .. } => {
+            println!("sharing {name:?} ({size} bytes) with the browser")
+        }
+        FileEvent::Progress { .. } => {}
+        FileEvent::Sent { name, .. } => println!("sent {name:?}"),
+        FileEvent::Cancelled { name, .. } => println!("the browser stopped receiving {name:?}"),
+        FileEvent::Failed { name, message, .. } => println!("sending {name:?} failed: {message}"),
+        FileEvent::Withdrawn { name, .. } => println!("stopped sharing {name:?}"),
+        FileEvent::Cleared => {}
+        FileEvent::Receiving { name, size } => {
+            println!("receiving {name:?} ({size} bytes) from the browser")
+        }
+        FileEvent::Received { path, .. } => println!("received {}", path.display()),
+        FileEvent::ReceiveFailed { name, message } => {
+            println!("receiving {name:?} failed: {message}")
+        }
+    }
+}
+
 /// Reads commands typed on stdin. A thread, since tokio's stdin would block
 /// shutdown. When stdin closes (run without a console) the host keeps
 /// serving: `commands` lives on in the ctrl-c task.
@@ -81,7 +104,16 @@ fn console(commands: mpsc::Sender<Command>) {
         .spawn(move || {
             for line in std::io::stdin().lock().lines() {
                 let Ok(line) = line else { break };
-                let cmd = match line.trim() {
+                let line = line.trim();
+                if let Some(path) = line.strip_prefix("send ") {
+                    let path = path.trim().trim_matches('"');
+                    let cmd = Command::ShareFiles(vec![path.into()]);
+                    if commands.blocking_send(cmd).is_err() {
+                        break;
+                    }
+                    continue;
+                }
+                let cmd = match line {
                     "pair" | "p" => Command::OpenPairing,
                     "drop" | "d" => Command::DropSession,
                     "unpair-all" => Command::UnpairAll,

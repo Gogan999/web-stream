@@ -8,6 +8,12 @@ import { TouchGestures, HOLD_MS } from './touch.js';
 
 const GAMEPAD_KEEPALIVE_MS = 100;
 const MAX_PADS = 4;
+// Chrome reads gamepads every 4 ms; polling only once per animation frame would leave a press waiting
+// up to a display frame (16 ms at 60 Hz) before it is even seen.
+export const GAMEPAD_POLL_MS = 4;
+// Mouse motion goes out at most this often. Raw pointer updates arrive as fast as the mouse reports
+// (up to 8 kHz); faster than this they are summed, so a gaming mouse can't flood the channel.
+export const MOTION_GAP_MS = 2;
 
 // Chrome reports ~100 px per wheel notch; Windows expects 120 per notch.
 export function wheelToDelta(e) {
@@ -77,6 +83,9 @@ export class InputCapture {
     this.padSentAt = new Array(MAX_PADS).fill(0);
     this.abort = new AbortController();
     this.rafId = 0;
+    this.padTimer = 0;
+    this.motionTimer = 0;
+    this.motionSentAt = -Infinity;
   }
 
   get locked() {
@@ -102,7 +111,15 @@ export class InputCapture {
     const ours = (e) => (this.locked || e.target === v) && !fromTouch(e);
     document.addEventListener('mousedown', (e) => { if (ours(e)) this.onMouseDown(e); }, opt);
     document.addEventListener('mouseup', (e) => { if (ours(e)) this.onMouseUp(e); }, opt);
-    document.addEventListener('mousemove', (e) => { if (ours(e)) this.onMouseMove(e); }, opt);
+    // Chrome holds mousemove back to the next animation frame, up to a display frame late;
+    // pointerrawupdate fires as soon as the mouse reports, so motion uses it where it exists.
+    const raw = 'onpointerrawupdate' in window;
+    if (raw) {
+      document.addEventListener('pointerrawupdate', (e) => {
+        if (e.pointerType === 'mouse' && ours(e)) this.onMouseMove(e);
+      }, opt);
+    }
+    document.addEventListener('mousemove', (e) => { if (!raw && ours(e)) this.onMouseMove(e); }, opt);
     document.addEventListener('wheel', (e) => { if (ours(e)) this.onWheel(e); }, { ...opt, passive: false });
     v.addEventListener('contextmenu', (e) => e.preventDefault(), opt);
     v.addEventListener('mouseenter', (e) => { if (!fromTouch(e)) this.stageFocused = true; }, opt);
@@ -136,6 +153,7 @@ export class InputCapture {
     document.addEventListener('visibilitychange', () => { if (document.hidden) this.releaseAll(); }, opt);
     document.addEventListener('pointerlockchange', () => { if (!this.locked) this.releaseAll(); }, opt);
 
+    window.addEventListener('gamepadconnected', () => this.watchGamepads(), opt);
     window.addEventListener('gamepaddisconnected', (e) => {
       const i = e.gamepad.index;
       if (i < MAX_PADS && this.pads[i]) {
@@ -146,12 +164,15 @@ export class InputCapture {
     this.session.addEventListener('control', (e) => this.onControl(e.detail), opt);
     const poll = () => { this.flushMotion(); this.pollGamepads(); this.rafId = requestAnimationFrame(poll); };
     this.rafId = requestAnimationFrame(poll);
+    this.watchGamepads();
   }
 
   stop() {
     this.releaseAll();
     this.abort.abort();
     cancelAnimationFrame(this.rafId);
+    clearInterval(this.padTimer);
+    clearTimeout(this.motionTimer);
     clearTimeout(this.holdTimer);
     if (this.locked) document.exitPointerLock();
   }
@@ -180,7 +201,10 @@ export class InputCapture {
     }
     if (!this.active) return;
     e.preventDefault();
-    if (this.mode === 'absolute') this.onMouseMove(e);
+    if (this.mode === 'absolute') {
+      this.onMouseMove(e);
+      this.flushMotion(); // the click lands where the pointer is now, not where it last went out
+    }
     this.rel(P.mouseButton(e.button, true));
   }
 
@@ -199,7 +223,11 @@ export class InputCapture {
         this.video.videoWidth, this.video.videoHeight);
       if (p) this.motion.abs = p;
     }
-    this.flushMotion();
+    const wait = this.motionSentAt + MOTION_GAP_MS - performance.now();
+    if (wait <= 0) this.flushMotion();
+    else if (!this.motionTimer) {
+      this.motionTimer = setTimeout(() => { this.motionTimer = 0; this.flushMotion(); }, wait);
+    }
   }
 
   // Sends pending motion if the channel has room. When it is backed up, relative deltas
@@ -207,6 +235,8 @@ export class InputCapture {
   // event or next animation frame) sends the sum, so no movement is lost or delayed in a queue.
   flushMotion() {
     const m = this.motion;
+    if (!m.abs && !m.dx && !m.dy) return;
+    this.motionSentAt = performance.now();
     if (m.abs && this.session.sendInput(CHANNELS.INPUT_RT, P.mouseAbs(m.abs.x, m.abs.y))) m.abs = null;
     while ((m.dx || m.dy) && this.session.canSend(CHANNELS.INPUT_RT)) {
       const dx = Math.max(-32768, Math.min(32767, m.dx));
@@ -316,11 +346,26 @@ export class InputCapture {
     this.rel(P.releaseAll());
   }
 
+  // Polls gamepads every GAMEPAD_POLL_MS while any is connected.
+  watchGamepads() {
+    if (this.padTimer || this.abort.signal.aborted) return;
+    if (![...(navigator.getGamepads?.() ?? [])].some((p) => p?.connected)) return;
+    this.padTimer = setInterval(() => {
+      if (!this.pollGamepads()) {
+        clearInterval(this.padTimer);
+        this.padTimer = 0;
+      }
+    }, GAMEPAD_POLL_MS);
+  }
+
+  // Sends what changed; returns whether any gamepad is connected.
   pollGamepads() {
-    if (!navigator.getGamepads) return;
+    if (!navigator.getGamepads) return false;
     const now = performance.now();
+    let any = false;
     for (const pad of navigator.getGamepads()) {
       if (!pad || !pad.connected || pad.index >= MAX_PADS) continue;
+      any = true;
       const i = pad.index;
       const s = toXInput(pad);
       if ((!sameState(s, this.pads[i]) || now - this.padSentAt[i] >= GAMEPAD_KEEPALIVE_MS) &&
@@ -329,6 +374,7 @@ export class InputCapture {
         this.padSentAt[i] = now;
       }
     }
+    return any;
   }
 
   onControl(msg) {

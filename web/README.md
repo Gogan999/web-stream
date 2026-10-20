@@ -15,7 +15,8 @@ Pairing and signaling: `docs/signaling.md` (transport). Data channel messages: [
 | `js/signaling.js` | WebSocket signaling client |
 | `js/pairing.js` | Pairing API client (`/api/session`, `/api/pair/*`) |
 | `js/input.js` | Keyboard, mouse (pointer lock or absolute), touch and gamepad capture |
-| `js/touch.js` | Touch gestures → mouse actions (trackpad and direct modes) |
+| `js/touch.js` | Touch gestures → mouse actions (trackpad and direct modes) and pinch zoom |
+| `js/zoom.js` | Pinch zoom and pan of the stream in the page |
 | `js/cursor.js` | The host pointer: CSS cursor in absolute mode, an overlay at the host position in relative mode |
 | `js/softkeys.js` | On-screen keyboard: typed text → key presses, extra keys row |
 | `js/protocol.js` | Binary input message encoder/decoder |
@@ -52,9 +53,10 @@ Pairing and signaling: `docs/signaling.md` (transport). Data channel messages: [
 
 Chrome on Android is the target; iPhone and iPad Safari work with the limits below.
 
-- The Settings dropdown spans a narrow screen and its controls are finger-sized. Buttons over the stream (top right) stay there in fullscreen: **Keyboard**, **Keys** and **Fullscreen**.
-- **Mouse: Relative** works as a trackpad: drag moves the cursor, tap clicks, hold then drag drags with the left button, two-finger tap right-clicks, two-finger drag scrolls.
+- The Settings dropdown spans a narrow screen and its controls are finger-sized. Buttons over the stream (top right) stay there in fullscreen: **Fit** (while zoomed), **Keyboard**, **Keys** and **Fullscreen**.
+- **Mouse: Relative** works as a trackpad: drag moves the cursor, tap clicks, two-finger tap right-clicks, two-finger drag scrolls. To drag (move a window, select text), tap and then touch again straight away and drag, like a laptop trackpad; holding still for half a second then dragging also works.
 - **Mouse: Absolute** is direct touch: the cursor goes where the finger is; tap clicks there, drag drags, hold right-clicks, two-finger tap right-clicks, two-finger drag scrolls.
+- **Pinch** zooms into the stream (on the phone only; the host's screen doesn't change) and moving the pinch pans around. While zoomed in, a two-finger drag pans instead of scrolling, and in Relative mode the view follows the pointer. **Fit** (top right, shown while zoomed) zooms back out; pinching back in does too. Trackpad motion gets finer as you zoom in.
 - **Keyboard** opens the phone's keyboard. What it types is sent as key presses on a US layout (the host's layout decides what they produce); characters a US keyboard can't type are skipped. Autocorrect is off, but some keyboards still send a word only when it's finished.
 - **Keys** shows Esc, Tab, Ctrl, Alt, Shift, Win, arrows, Del, Backspace and Enter. Ctrl, Alt, Shift and Win stay down until the next other key (tap again to let go), so Ctrl+Esc is Ctrl then Esc.
 - **Fullscreen** on Android also turns the phone to the host display's shape. iPhone Safari can't fullscreen a page, so the stream fills the window instead; adding the page to the home screen gets closest to fullscreen there. *Match this screen* sizes the stream for the phone turned sideways.

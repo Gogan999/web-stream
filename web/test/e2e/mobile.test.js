@@ -54,6 +54,7 @@ test('phone: touch input, on-screen keyboard and small-screen toolbar', { timeou
   await clearLog();
   await client.touchscreen.tap(cx, cy);
   await host.waitForFunction(() => window.mockLog.some((e) => e.type === 'mouse-button' && !e.down));
+  await client.waitForTimeout(500); // past the tap-and-drag window
   await touch('touchStart', [{ x: cx, y: cy }]);
   for (let i = 1; i <= 5; i++) await touch('touchMove', [{ x: cx + i * 10, y: cy }]);
   await touch('touchEnd', []);
@@ -64,6 +65,21 @@ test('phone: touch input, on-screen keyboard and small-screen toolbar', { timeou
   assert.ok(dx > 50, `relative motion ${dx}`); // 50 CSS px, scaled up to picture pixels
   assert.ok(!got.some((e) => e.type === 'mouse-abs'));
 
+  // Tap, then touch again and drag: the left button is held for the drag, pressed after moving.
+  await clearLog();
+  await touch('touchStart', [{ x: cx, y: cy }]);
+  await touch('touchEnd', []);
+  await touch('touchStart', [{ x: cx, y: cy }]);
+  for (let i = 1; i <= 5; i++) await touch('touchMove', [{ x: cx + i * 10, y: cy }]);
+  await touch('touchEnd', []);
+  await host.waitForFunction(() => window.mockLog.filter((e) => e.type === 'mouse-button').length >= 4);
+  got = await inputs();
+  const btn = (e) => e.type === 'mouse-button';
+  assert.deepEqual(got.filter(btn).map((e) => [e.button, e.down]), [[0, true], [0, false], [0, true], [0, false]]);
+  const press = got.filter(btn)[2];
+  assert.ok(got.findIndex((e) => e.type === 'mouse-rel') < got.indexOf(press), 'moved before pressing');
+  assert.ok(got.slice(got.indexOf(press)).some((e) => e.type === 'mouse-rel'), 'moved while pressed');
+
   // Two-finger drag scrolls.
   await clearLog();
   await touch('touchStart', [{ x: cx - 50, y: cy, id: 1 }, { x: cx + 50, y: cy, id: 2 }]);
@@ -73,6 +89,20 @@ test('phone: touch input, on-screen keyboard and small-screen toolbar', { timeou
   got = await inputs();
   assert.ok(got.filter((e) => e.type === 'wheel').every((e) => e.dy > 0));
   assert.ok(!got.some((e) => e.type === 'mouse-button'));
+
+  // Pinch out zooms the view (not the host) and shows Fit; Fit zooms back out.
+  await clearLog();
+  await touch('touchStart', [{ x: cx - 40, y: cy, id: 1 }, { x: cx + 40, y: cy, id: 2 }]);
+  for (let i = 1; i <= 8; i++) await touch('touchMove', [{ x: cx - 40 - i * 10, y: cy, id: 1 }, { x: cx + 40 + i * 10, y: cy, id: 2 }]);
+  await touch('touchEnd', []);
+  const zoomed = await client.locator('#video').boundingBox();
+  assert.ok(zoomed.width > box.width * 1.8, `zoomed width ${zoomed.width}`);
+  assert.equal(await client.isVisible('#zoom-reset'), true);
+  await client.waitForTimeout(200);
+  assert.ok(!(await inputs()).some((e) => e.type === 'wheel' || e.type === 'mouse-button'));
+  await client.tap('#zoom-reset');
+  assert.equal((await client.locator('#video').boundingBox()).width, box.width);
+  assert.equal(await client.isVisible('#zoom-reset'), false);
 
   // Direct (absolute mode): a tap clicks where the finger is.
   await client.tap('#more-toggle');

@@ -11,6 +11,7 @@ import { SoftKeyboard } from './softkeys.js';
 import * as P from './protocol.js';
 import { Files, Uploads, formatSize } from './files.js';
 import { DiagLog, diagEnabled } from './diag.js';
+import { ZoomView } from './zoom.js';
 
 const $ = (id) => document.getElementById(id);
 const ui = {
@@ -24,7 +25,7 @@ const ui = {
   matchHost: $('match-host'), autotune: $('autotune'), mic: $('mic'),
   audioKbps: $('audio-kbps'), audioFrame: $('audio-frame'),
   moreToggle: $('more-toggle'), more: $('more'), kbdToggle: $('kbd-toggle'), keysToggle: $('keys-toggle'), keys: $('keys'),
-  kbdInput: $('kbd-input'), touchFullscreen: $('touch-fullscreen'),
+  kbdInput: $('kbd-input'), touchFullscreen: $('touch-fullscreen'), view: $('view'), zoomReset: $('zoom-reset'),
   filesToggle: $('files-toggle'), files: $('files'), fileList: $('file-list'), fromHost: $('from-host'),
   toHost: $('to-host'), uploadPick: $('upload-pick'), uploadInput: $('upload-input'), uploadList: $('upload-list'),
   diagSave: $('diag-save'),
@@ -37,6 +38,9 @@ if (diag) {
   ui.diagSave.hidden = false;
   ui.diagSave.addEventListener('click', () => diag.save());
 }
+
+const zoom = new ZoomView({ el: ui.view, stage: ui.stage, onChange: (on) => { ui.zoomReset.hidden = !on; } });
+ui.zoomReset.addEventListener('click', () => zoom.reset());
 
 let session = null;
 let input = null;
@@ -91,10 +95,14 @@ async function connect() {
     keyTarget: ui.kbdInput, onKeySent: (usage, down) => softKeys.keySent(usage, down),
     onReleaseAll: () => softKeys.forget(),
     displaySize: () => host?.displays.find((d) => d.id === host.active) ?? null,
+    zoom,
   });
   input.setMode(ui.mouseMode.value);
   input.start();
-  cursor = new CursorView({ video: ui.video, overlay: ui.cursor, displaySize: () => host?.displays.find((d) => d.id === host.active) ?? null });
+  cursor = new CursorView({
+    video: ui.video, overlay: ui.cursor, displaySize: () => host?.displays.find((d) => d.id === host.active) ?? null,
+    onPlace: (x, y) => zoom.follow(x, y), // zoomed in, the view keeps the trackpad's pointer in sight
+  });
   cursor.setMode(ui.mouseMode.value);
   ui.connect.textContent = 'Disconnect';
   if (!ui.stats.hidden) startStats();
@@ -113,6 +121,7 @@ function disconnect() {
   if (input) input.stop();
   if (session) session.close();
   cursor?.stop();
+  zoom.reset();
   micTrack?.stop();
   micTrack = null;
   input = null;
@@ -394,6 +403,7 @@ ui.autotune.addEventListener('click', autoTune);
 function selectDisplay(id) {
   if (!session) return;
   ui.display.value = id;
+  zoom.reset(); // a different screen: start from the whole of it
   session.sendControl({ type: 'selectDisplay', id: Number(id) });
 }
 

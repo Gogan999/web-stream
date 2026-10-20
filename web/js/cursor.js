@@ -63,10 +63,11 @@ function toDataUrl({ width, height, rgba }) {
 }
 
 export class CursorView {
-  constructor({ video, overlay, displaySize }) {
+  constructor({ video, overlay, displaySize, onPlace = null }) {
     this.video = video;
     this.overlay = overlay; // an <img> over the video
     this.displaySize = displaySize; // () => { width, height } of the streamed display
+    this.onPlace = onPlace; // (x, y) where the overlay's hotspot was drawn, in the video's parent's px
     this.images = new Map(); // id -> { url, width, height, hotX, hotY }, for this session
     this.kind = 'default';
     this.id = null;
@@ -126,6 +127,8 @@ export class CursorView {
     o.style.height = `${box.height}px`;
     o.style.transform = `translate(${this.video.offsetLeft + box.left}px, ${this.video.offsetTop + box.top}px)`;
     o.hidden = false;
+    this.onPlace?.(this.video.offsetLeft + box.left + image.hotX * box.width / image.width,
+      this.video.offsetTop + box.top + image.hotY * box.height / image.height);
   }
 
   stop() {

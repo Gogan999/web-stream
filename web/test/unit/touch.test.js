@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { TouchGestures, HOLD_MS } from '../../js/touch.js';
+import { TouchGestures, HOLD_MS, TAP_DRAG_MS } from '../../js/touch.js';
 
-function rig(mode) {
+function rig(mode, zoomed = false) {
   const log = [];
   const g = new TouchGestures({
     move: (dx, dy) => log.push(['move', dx, dy]),
@@ -10,6 +10,8 @@ function rig(mode) {
     button: (b, down) => log.push([down ? 'down' : 'up', b]),
     wheel: (dx, dy) => log.push(['wheel', dx, dy]),
     haptic: () => log.push(['haptic']),
+    pinch: (ratio, x, y, dx, dy) => log.push(['pinch', ratio, x, y, dx, dy]),
+    zoomed: () => zoomed,
   }, mode);
   return { g, log };
 }
@@ -91,4 +93,62 @@ test('cancel lets go of a held button; a second finger mid-drag is ignored', () 
   g.move(2, 320, 300);
   g.cancel();
   assert.deepEqual(log, [['TO', 0, 0], ['TO', 0, 0], ['down', 0], ['to', 50, 0], ['up', 0]]);
+});
+
+test('trackpad: tap then touch again and drag drags with the left button, moving before the press', () => {
+  const { g, log } = rig('trackpad');
+  g.down(1, 100, 100, 0);
+  g.up(1, 60);
+  log.length = 0;
+  g.down(1, 100, 100, 60 + TAP_DRAG_MS - 1);
+  g.move(1, 120, 100);
+  g.move(1, 140, 110);
+  g.up(1, 900);
+  assert.deepEqual(log, [['move', 20, 0], ['down', 0], ['move', 20, 10], ['up', 0]]);
+  // Too late after the tap: an ordinary move.
+  log.length = 0;
+  g.down(1, 100, 100, 1000);
+  g.up(1, 1050);
+  log.length = 0;
+  g.down(1, 100, 100, 1050 + TAP_DRAG_MS + 1);
+  g.move(1, 120, 100);
+  g.up(1, 2000);
+  assert.deepEqual(log, [['move', 20, 0]]);
+  // Two quick taps double-click; a third quick touch doesn't drag.
+  log.length = 0;
+  g.down(1, 100, 100, 3000);
+  g.up(1, 3050);
+  g.down(1, 100, 100, 3150);
+  g.up(1, 3200);
+  g.down(1, 100, 100, 3300);
+  g.move(1, 130, 100);
+  g.up(1, 3500);
+  assert.deepEqual(log, [['down', 0], ['up', 0], ['down', 0], ['up', 0], ['move', 30, 0]]);
+});
+
+test('pinch zooms around the midpoint and pans with it; no scroll or click', () => {
+  const { g, log } = rig('direct');
+  g.down(1, 100, 100, 0);
+  g.down(2, 200, 100, 10);
+  log.length = 0;
+  for (let i = 1; i <= 5; i++) { g.move(1, 100 - i * 10, 100); g.move(2, 200 + i * 10, 100); }
+  g.up(1, 500);
+  g.up(2, 510);
+  const pinches = log.filter((e) => e[0] === 'pinch');
+  assert.deepEqual(log.filter((e) => e[0] !== 'pinch'), []);
+  const ratio = pinches.reduce((r, e) => r * e[1], 1);
+  assert.ok(Math.abs(ratio - 2) < 1e-9, String(ratio)); // spread 100 -> 200
+  assert.ok(pinches.every((e) => Math.abs(e[2] - 150) <= 5 && e[3] === 100));
+});
+
+test('zoomed in, a two-finger drag pans the view instead of scrolling', () => {
+  const { g, log } = rig('trackpad', true);
+  g.down(1, 100, 100, 0);
+  g.down(2, 200, 100, 10);
+  for (let y = 105; y <= 130; y += 5) { g.move(1, 100, y); g.move(2, 200, y); }
+  g.up(1, 500);
+  g.up(2, 510);
+  assert.ok(log.length && log.every((e) => e[0] === 'pinch'), JSON.stringify(log));
+  const pan = log.reduce((s, e) => s + e[5], 0);
+  assert.equal(pan, 30);
 });

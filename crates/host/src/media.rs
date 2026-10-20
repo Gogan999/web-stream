@@ -26,6 +26,7 @@ use crate::files::{FileCommand, FileMsg, FileSession};
 use crate::input::InputThread;
 use crate::options::MediaOptions;
 use crate::platform;
+use crate::scale::{self, AutoScale};
 use crate::serve::Event;
 use crate::uploads::{self, UploadMsg, UploadSession};
 
@@ -108,6 +109,7 @@ pub async fn run(
         generation: 0,
         last_bwe: None,
         last_restart: None,
+        autoscale: AutoScale::default(),
         codecs,
         live: None,
         transfers: None,
@@ -272,6 +274,8 @@ struct Media {
     /// Latest bandwidth estimate of this connection, in bits per second.
     last_bwe: Option<u64>,
     last_restart: Option<Instant>,
+    /// Encodes below the configured size while the bitrate is too low.
+    autoscale: AutoScale,
     codecs: AcceptedCodecs,
     live: Option<Live>,
     /// Frames handed to the transport since the last stats report.
@@ -488,6 +492,7 @@ impl Media {
         self.unsent.clear();
         self.last_bwe = None;
         self.rebuild_pending = false;
+        self.autoscale.reset();
         self.session += 1;
         self.keyframe_requests = 0;
         self.cursor_target.send_replace(CursorTarget::default());
@@ -589,9 +594,13 @@ impl Media {
             self.error(msg);
         }
         let start_kbps = self.start_kbps();
+        let (width, height) =
+            scale::size(self.config.width, self.config.height, self.autoscale.step());
         let config = VideoConfig {
             codec,
             bitrate_kbps: start_kbps,
+            width,
+            height,
             ..self.config.clone()
         };
         let (tx, rx) = mpsc::channel(FRAME_QUEUE);
@@ -690,6 +699,32 @@ impl Media {
     fn target_bitrate(&mut self, bps: u64) {
         self.last_bwe = Some(bps);
         self.apply_bitrate(false);
+        self.check_scale();
+    }
+
+    /// Restarts the pipeline at another size when the bitrate has been too
+    /// low (or plenty) for the current one for a while.
+    fn check_scale(&mut self) {
+        if !self.live.as_ref().is_some_and(|l| l.video.is_some()) {
+            return;
+        }
+        let kbps = self.start_kbps();
+        let c = &self.config;
+        let Some(step) = self
+            .autoscale
+            .update(Instant::now(), kbps, c.width, c.height, c.fps)
+        else {
+            return;
+        };
+        let (width, height) = scale::size(c.width, c.height, step);
+        tracing::info!(
+            kbps,
+            width,
+            height,
+            "bitrate changed; encoding at a new size"
+        );
+        ws_diag::diag!("autoscale", "step={step} size={width}x{height} kbps={kbps}");
+        self.request_rebuild();
     }
 
     /// Moves the encoder to the target for the latest estimate, unless the
@@ -984,6 +1019,10 @@ impl Media {
     }
 
     fn set_video_config(&mut self, config: VideoConfig) {
+        // The browser picked a size: start from it again.
+        if (config.width, config.height) != (self.config.width, self.config.height) {
+            self.autoscale.reset();
+        }
         let same_but_bitrate = VideoConfig {
             bitrate_kbps: self.config.bitrate_kbps,
             ..config.clone()
@@ -1003,6 +1042,12 @@ impl Media {
         }
         self.config = config;
         self.set_ceiling();
+        self.request_rebuild();
+    }
+
+    /// Rebuilds the pipeline now, or once [`MIN_RESTART_GAP`] after the
+    /// last rebuild if that was too recent.
+    fn request_rebuild(&mut self) {
         if let Some(wait) = self
             .last_restart
             .and_then(|t| MIN_RESTART_GAP.checked_sub(t.elapsed()))

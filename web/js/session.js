@@ -1,5 +1,8 @@
 // One streaming session: signaling + RTCPeerConnection + data channels.
 // The host is the offerer and opens the data channels. See docs/signaling.md.
+// Once the connection is up and `control` is open, signaling is handed off: the WebSocket closes
+// and everything, `bye` included, goes over the peer connection. Recovering from a failed
+// connection then takes a new WebSocket.
 
 import { Signaling } from './signaling.js';
 
@@ -42,7 +45,9 @@ export function withStereoOpus(sdp) {
 export class Session extends EventTarget {
   constructor({ signalUrl, video }) {
     super();
-    this.signal = new Signaling(signalUrl);
+    this.signalUrl = signalUrl;
+    this.signal = null;
+    this.handedOff = false; // the WebSocket is closed and the session runs on the peer connection
     this.video = video;
     this.pc = null;
     this.iceServers = [];
@@ -58,14 +63,33 @@ export class Session extends EventTarget {
 
   async start() {
     this.status('Connecting to host…', 'connecting');
-    this.signal.addEventListener('close', (e) => {
-      if (this.closed) return;
+    await this.openSignal();
+  }
+
+  // A fresh WebSocket; the host answers it with welcome and a new offer.
+  async openSignal() {
+    const signal = new Signaling(this.signalUrl);
+    this.signal = signal;
+    signal.addEventListener('close', (e) => {
+      if (this.closed || signal !== this.signal || this.handedOff) return;
       // Unauthenticated upgrades are refused before the socket opens; the page re-checks pairing.
       if (this.pc?.connectionState === 'connected') return; // media no longer needs signaling
       this.fail(e.detail?.code === 1006 && !this.pc ? 'Could not reach host (or not paired)' : 'Signaling closed');
     });
-    this.signal.addEventListener('message', (e) => this.onSignal(e.detail).catch((err) => this.fail(err.message)));
-    await this.signal.open();
+    signal.addEventListener('message', (e) => {
+      if (signal === this.signal) this.onSignal(e.detail).catch((err) => this.fail(err.message));
+    });
+    await signal.open();
+    this.handedOff = false; // signaling is back on the socket until the next handoff
+  }
+
+  // Once the connection is up and `control` is open, the WebSocket isn't needed: tell the host
+  // and let it close the socket.
+  maybeHandOff() {
+    if (this.handedOff || this.pc?.connectionState !== 'connected') return;
+    if (this.channels[CHANNELS.CONTROL]?.readyState !== 'open' || !this.signal?.isOpen) return;
+    this.handedOff = true;
+    this.signal.send({ type: 'handoff' });
   }
 
   async onSignal(msg) {
@@ -110,6 +134,7 @@ export class Session extends EventTarget {
       const s = pc.connectionState;
       if (s === 'connected') {
         this.restarts = 0;
+        this.maybeHandOff();
         this.isRelayed().then((r) => this.status(r ? 'Connected (TCP fallback, degraded)' : 'Connected', 'connected'));
       } else if (s === 'failed') this.restart();
       else if (s === 'disconnected') this.status('Connection interrupted…', 'connecting');
@@ -139,13 +164,20 @@ export class Session extends EventTarget {
 
   restart() {
     if (this.closed) return;
-    if (this.restarts >= 3 || !this.signal.isOpen) {
+    if (this.restarts >= 3 || (!this.handedOff && !this.signal?.isOpen)) {
       this.fail('Connection failed');
       return;
     }
     this.restarts++;
     this.status('Connection lost, retrying…', 'connecting');
-    this.signal.send({ type: 'restart' });
+    if (!this.handedOff) {
+      this.signal.send({ type: 'restart' });
+      return;
+    }
+    // Signaling was handed off, so the failed connection was the only way to the host. Drop it
+    // first, so a late `bye` on it can't end the new one, and ask for a new offer on a new socket.
+    this.closePeer();
+    this.openSignal().catch(() => setTimeout(() => this.restart(), 1000));
   }
 
   onChannel(ch) {
@@ -156,9 +188,14 @@ export class Session extends EventTarget {
         if (typeof e.data !== 'string') return;
         let msg;
         try { msg = JSON.parse(e.data); } catch { return; }
-        if (msg && typeof msg.type === 'string') this.dispatchEvent(new CustomEvent('control', { detail: msg }));
+        if (!msg || typeof msg.type !== 'string') return;
+        if (msg.type === 'bye') this.fail(BYE_TEXT[msg.reason] || `Disconnected: ${msg.reason}`);
+        else this.dispatchEvent(new CustomEvent('control', { detail: msg }));
       };
-      const opened = () => this.dispatchEvent(new Event('control-open'));
+      const opened = () => {
+        this.dispatchEvent(new Event('control-open'));
+        this.maybeHandOff();
+      };
       if (ch.readyState === 'open') opened();
       else ch.onopen = opened;
     } else if (ch.label === CHANNELS.FILE) {
@@ -233,7 +270,7 @@ export class Session extends EventTarget {
   close() {
     if (this.closed) return;
     this.closed = true;
-    this.signal.close();
+    this.signal?.close();
     this.closePeer();
     this.dispatchEvent(new Event('closed'));
   }

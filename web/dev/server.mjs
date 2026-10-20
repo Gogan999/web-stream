@@ -103,7 +103,11 @@ server.on('upgrade', (req, socket, head) => {
       client = ws;
       toHost({ type: 'dev-client-connected' });
     }
-    ws.on('message', (data) => (isHost ? client : host)?.send(data.toString()));
+    ws.on('message', (data) => {
+      (isHost ? client : host)?.send(data.toString());
+      // Like the real host: after a handoff the client's socket closes and the session goes on.
+      if (!isHost && /"type":"handoff"/.test(data.toString())) ws.close(1000, 'handoff');
+    });
     ws.on('close', () => {
       if (isHost && host === ws) host = null;
       if (!isHost && client === ws) { client = null; toHost({ type: 'dev-client-disconnected' }); }

@@ -72,14 +72,28 @@ pub struct SignalingSession {
     /// LAN this is the WAN address or DDNS name, which the media
     /// candidates must include.
     pub host: Option<String>,
-    incoming: mpsc::Receiver<ClientSignal>,
+    incoming: mpsc::Receiver<SessionEvent>,
     outgoing: mpsc::Sender<HostSignal>,
 }
 
+/// What [`SignalingSession::recv`] reports.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionEvent {
+    Signal(ClientSignal),
+    /// The browser sent [`ClientSignal::Handoff`] and the socket is closed.
+    /// The session lives on as long as the peer connection does: the host
+    /// ends it by dropping this, and nothing more can be sent here.
+    HandedOff,
+    /// A handed-off session was ended from this side (replaced by a new
+    /// connection, revoked, or dropped). Tell the browser over `control`
+    /// ([`ws_proto::HostControl::Bye`]) and close the peer connection.
+    Ended(ByeReason),
+}
+
 impl SignalingSession {
-    /// Next message from the browser; `None` once the socket is gone or the
-    /// session was replaced.
-    pub async fn recv(&mut self) -> Option<ClientSignal> {
+    /// Next event; `None` once the socket is gone (unless it was handed off)
+    /// or the session ended.
+    pub async fn recv(&mut self) -> Option<SessionEvent> {
         self.incoming.recv().await
     }
 
@@ -609,6 +623,7 @@ async fn run_socket(
     let mut ping = tokio::time::interval(WS_PING_EVERY);
     ping.tick().await;
     let mut last_heard = Instant::now();
+    let mut handed_off = false;
     loop {
         tokio::select! {
             _ = ping.tick() => {
@@ -638,10 +653,14 @@ async fn run_socket(
                 last_heard = Instant::now();
                 match incoming {
                     Some(Ok(Message::Text(text))) => match serde_json::from_str::<ClientSignal>(&text) {
+                        Ok(ClientSignal::Handoff) => {
+                            handed_off = true;
+                            break;
+                        }
                         Ok(msg) => {
                             // A host that stops reading must not block kicks
                             // and pings; a browser flooding it gets dropped.
-                            if in_tx.try_send(msg).is_err() {
+                            if in_tx.try_send(SessionEvent::Signal(msg)).is_err() {
                                 break;
                             }
                         }
@@ -659,9 +678,49 @@ async fn run_socket(
         }
     }
 
+    if handed_off {
+        let _ = send(
+            &mut socket,
+            Message::Close(Some(CloseFrame {
+                code: 1000,
+                reason: "handoff".into(),
+            })),
+        )
+        .await;
+        drop(socket);
+        tracing::info!(device = %device_name, "signaling handed off to the peer connection");
+        if in_tx.try_send(SessionEvent::HandedOff).is_ok() {
+            run_handed_off(kick_rx, &in_tx, &mut out_rx).await;
+        }
+    }
+
     clear_current(&shared, id).await;
     tracing::info!(device = %device_name, "session ended");
     shared.notify(Notice::SessionEnded { device_name });
+}
+
+/// A handed-off session stays the live one, so a new connection, a revoke
+/// or a drop still ends it, until the host drops it.
+async fn run_handed_off(
+    kick: oneshot::Receiver<ByeReason>,
+    events: &mpsc::Sender<SessionEvent>,
+    outgoing: &mut mpsc::Receiver<HostSignal>,
+) {
+    tokio::pin!(kick);
+    loop {
+        tokio::select! {
+            reason = &mut kick => {
+                if let Ok(reason) = reason {
+                    let _ = events.try_send(SessionEvent::Ended(reason));
+                }
+                return;
+            }
+            // There is no socket to deliver to; `None`: the host dropped it.
+            out = outgoing.recv() => if out.is_none() {
+                return;
+            },
+        }
+    }
 }
 
 async fn clear_current(shared: &Shared, id: u64) {

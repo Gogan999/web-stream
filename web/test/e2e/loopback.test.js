@@ -31,6 +31,10 @@ test('client streams from mock host, sends input and switches display', { timeou
     window.__pcs = [];
     window.RTCPeerConnection = function (...a) { const pc = new Orig(...a); window.__pcs.push(pc); return pc; };
     window.RTCPeerConnection.prototype = Orig.prototype;
+    const OrigWs = window.WebSocket;
+    window.__sockets = [];
+    window.WebSocket = function (...a) { const ws = new OrigWs(...a); window.__sockets.push(ws); return ws; };
+    Object.assign(window.WebSocket, { CONNECTING: 0, OPEN: 1, CLOSING: 2, CLOSED: 3, prototype: OrigWs.prototype });
     // No save dialog in a headless test: files take the in-memory path to downloads.
     window.showSaveFilePicker = undefined;
   });
@@ -73,6 +77,12 @@ test('client streams from mock host, sends input and switches display', { timeou
   assert.deepEqual(Object.keys(channels).sort(), ['control', 'file', 'input', 'input-motion']);
   assert.equal(channels['input-motion'].ordered, false);
   assert.equal(channels['input-motion'].maxRetransmits, 0);
+
+  // Once connected with control open, signaling is handed off and the WebSocket closes; everything
+  // below runs over the peer connection alone.
+  await host.waitForFunction(() => window.mockLog.some((e) => e.ev === 'handoff'));
+  await client.waitForFunction(() => window.__sockets.at(-1)?.readyState === 3, null, { timeout: 5000 });
+  assert.equal(await client.evaluate(() => document.getElementById('status').dataset.state), 'connected');
   assert.equal(channels.input.ordered, true);
   assert.equal(channels.input.maxRetransmits, null);
 
@@ -116,7 +126,8 @@ test('client streams from mock host, sends input and switches display', { timeou
 
   // A host that refuses the mic stops it: the box unticks and nothing is sent.
   await host.evaluate(() => { window.mockNoMic = true; });
-  await client.check('#mic');
+  // click, not check: the refusal can untick the box before check() looks at it.
+  await client.click('#mic');
   await client.waitForFunction(() => !document.getElementById('mic').checked && /--no-mic/.test(document.getElementById('status').textContent));
   await client.waitForFunction(() => !window.__pcs.at(-1).getSenders().some((x) => x.track?.kind === 'audio'));
   await host.evaluate(() => { window.mockNoMic = false; });
@@ -253,6 +264,10 @@ test('client streams from mock host, sends input and switches display', { timeou
   assert.equal(await host.evaluate(() => window.mockUploaded['up.txt']), upText);
   await client.waitForSelector('#upload-list li:has-text("On the host as up.txt")');
   await client.keyboard.press('Escape');
+
+  // With no socket, the host's bye comes over control.
+  await sendHost({ type: 'bye', reason: 'host_shutdown' });
+  await client.waitForFunction(() => /host shut down/.test(document.getElementById('status').textContent));
 
   // Reload: the pairing cookie persists, so it connects straight away.
   await client.reload();

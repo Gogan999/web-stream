@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use rav1e::prelude::*;
 use ws_proto::{ClientSignal, DisplayId, EncodedFrame, HostSignal, VideoCodec};
-use ws_signaling::{Notice, SignalingConfig, SignalingServer, SignalingSession};
+use ws_signaling::{Notice, SessionEvent, SignalingConfig, SignalingServer, SignalingSession};
 use ws_transport::{Transport, TransportConfig, TransportEvent};
 
 const W: usize = 320;
@@ -128,7 +128,7 @@ async fn run_session(mut session: SignalingSession, transport: Transport) {
             }
         }
         match session.recv().await {
-            Some(ClientSignal::Answer { sdp }) => {
+            Some(SessionEvent::Signal(ClientSignal::Answer { sdp })) => {
                 if let Err(e) = transport.accept_answer(sdp).await {
                     let msg = HostSignal::Error {
                         code: "bad_answer".into(),
@@ -137,11 +137,13 @@ async fn run_session(mut session: SignalingSession, transport: Transport) {
                     let _ = session.send(msg).await;
                 }
             }
-            Some(ClientSignal::Candidate { candidate, .. }) => {
+            Some(SessionEvent::Signal(ClientSignal::Candidate { candidate, .. })) => {
                 transport.add_remote_candidate(candidate)
             }
-            Some(ClientSignal::Restart) => send_offer = true,
-            None => break,
+            Some(SessionEvent::Signal(ClientSignal::Restart)) => send_offer = true,
+            // The session goes on over the peer connection until it is ended.
+            Some(SessionEvent::Signal(ClientSignal::Handoff) | SessionEvent::HandedOff) => {}
+            Some(SessionEvent::Ended(_)) | None => break,
         }
     }
     transport.close();

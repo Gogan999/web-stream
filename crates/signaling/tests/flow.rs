@@ -10,7 +10,7 @@ use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use ws_proto::{ByeReason, ClientSignal, HostSignal};
-use ws_signaling::{Notice, SignalingConfig, SignalingServer};
+use ws_signaling::{Notice, SessionEvent, SignalingConfig, SignalingServer};
 
 struct Http {
     status: u16,
@@ -85,6 +85,47 @@ async fn next_host_msg<
             return serde_json::from_str(&t).unwrap();
         }
     }
+}
+
+/// Pairs a browser and returns its cookie.
+async fn pair(
+    addr: SocketAddr,
+    origin: Option<&str>,
+    handle: &ws_signaling::SignalingHandle,
+    events: &mut ws_signaling::SignalingEvents,
+) -> String {
+    handle.open_pairing().await.unwrap();
+    let r = request(
+        addr,
+        "POST",
+        "/api/pair/start",
+        origin,
+        None,
+        r#"{"device_name":"Test browser"}"#,
+    )
+    .await;
+    let pairing_id = body_json(&r)["pairing_id"].as_str().unwrap().to_string();
+    let Some(Notice::PairingCode { code, .. }) = events.notices.recv().await else {
+        panic!("no pairing code");
+    };
+    let r = request(
+        addr,
+        "POST",
+        "/api/pair/confirm",
+        origin,
+        None,
+        &format!(r#"{{"pairing_id":"{pairing_id}","code":"{code}"}}"#),
+    )
+    .await;
+    let token = r
+        .headers
+        .split("__Host-ws_device=")
+        .nth(1)
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap();
+    format!("__Host-ws_device={token}")
 }
 
 #[tokio::test]
@@ -221,9 +262,9 @@ async fn pair_then_signal() {
         .unwrap();
     assert_eq!(
         session.recv().await,
-        Some(ClientSignal::Answer {
+        Some(SessionEvent::Signal(ClientSignal::Answer {
             sdp: "v=0 answer".into()
-        })
+        }))
     );
     ws.send(Message::text(r#"{"type":"nonsense"}"#))
         .await
@@ -248,7 +289,72 @@ async fn pair_then_signal() {
         }
     );
     assert_eq!(session.recv().await, None);
-    let _session2 = events.sessions.recv().await.unwrap();
+    let mut session2 = events.sessions.recv().await.unwrap();
+
+    // A handoff closes the socket but keeps the session live.
+    ws2.send(Message::text(r#"{"type":"handoff"}"#))
+        .await
+        .unwrap();
+    let closed = tokio::time::timeout(Duration::from_secs(5), ws2.next())
+        .await
+        .unwrap();
+    assert!(
+        matches!(closed, Some(Ok(Message::Close(Some(ref f)))) if f.reason == "handoff"),
+        "{closed:?}"
+    );
+    assert_eq!(session2.recv().await, Some(SessionEvent::HandedOff));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), session2.recv())
+            .await
+            .is_err()
+    );
+
+    // A new connection still replaces it; the host hears why, to tell the
+    // browser over the peer connection.
+    let mut ws3 = ws_connect(addr, &cookie).await.unwrap();
+    assert_eq!(
+        next_host_msg(&mut ws3).await,
+        HostSignal::Welcome {
+            ice_servers: vec![]
+        }
+    );
+    assert_eq!(
+        session2.recv().await,
+        Some(SessionEvent::Ended(ByeReason::Replaced))
+    );
+    assert_eq!(session2.recv().await, None);
+    let mut session3 = events.sessions.recv().await.unwrap();
+
+    // Unpairing a handed-off session ends it too.
+    ws3.send(Message::text(r#"{"type":"handoff"}"#))
+        .await
+        .unwrap();
+    assert_eq!(session3.recv().await, Some(SessionEvent::HandedOff));
+    let r = request(addr, "POST", "/api/unpair", origin, Some(&cookie), "{}").await;
+    assert_eq!(r.status, 200);
+    assert_eq!(
+        session3.recv().await,
+        Some(SessionEvent::Ended(ByeReason::Revoked))
+    );
+    assert_eq!(ws_connect(addr, &cookie).await.err(), Some(401));
+}
+
+#[tokio::test]
+async fn unpair_kicks_a_live_socket() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = SignalingConfig::new("127.0.0.1:0".parse().unwrap(), dir.path().to_path_buf());
+    let (server, mut events) = SignalingServer::new(config).unwrap();
+    let router = server.router();
+    let handle = server.handle();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let origin = format!("https://{addr}");
+    let origin = Some(origin.as_str());
+    let cookie = pair(addr, origin, &handle, &mut events).await;
+    let mut ws2 = ws_connect(addr, &cookie).await.unwrap();
+    next_host_msg(&mut ws2).await;
+    let _session = events.sessions.recv().await.unwrap();
 
     // Unpairing kicks the live session and kills the token.
     let r = request(addr, "POST", "/api/unpair", origin, Some(&cookie), "{}").await;

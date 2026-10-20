@@ -26,6 +26,10 @@ const DOWN_AFTER: Duration = Duration::from_secs(2);
 const UP_AFTER: Duration = Duration::from_secs(10);
 /// "Comfortably": this many times what the next size up needs.
 const UP_MARGIN: f64 = 1.5;
+/// No step down this soon after a connection starts or the size changes:
+/// the bandwidth estimate starts at 10 Mb/s (a 7.5 Mb/s target, under what
+/// 1440p60 needs) and takes a moment to climb.
+const SETTLE: Duration = Duration::from_secs(5);
 
 /// The size to encode at `step` of `width` x `height`: scaled, rounded down
 /// to a multiple of 8 (the encoder needs even sizes).
@@ -55,6 +59,8 @@ fn last_step(width: u32, height: u32) -> usize {
 #[derive(Debug, Default)]
 pub(crate) struct AutoScale {
     step: usize,
+    /// The first update since the last reset or size change.
+    since_change: Option<Instant>,
     /// Since when the bitrate has been too low for the current step.
     low_since: Option<Instant>,
     /// Since when it has been enough for the step above.
@@ -88,7 +94,9 @@ impl AutoScale {
             min_kbps(w, h, fps)
         };
         let last = last_step(width, height);
-        if self.step < last && kbps < need(self.step) {
+        let settled =
+            now.saturating_duration_since(*self.since_change.get_or_insert(now)) >= SETTLE;
+        if settled && self.step < last && kbps < need(self.step) {
             self.high_since = None;
             let since = *self.low_since.get_or_insert(now);
             if now.saturating_duration_since(since) >= DOWN_AFTER {
@@ -97,6 +105,7 @@ impl AutoScale {
                     .find(|&s| kbps >= need(s))
                     .unwrap_or(last);
                 self.low_since = None;
+                self.since_change = Some(now);
                 return Some(self.step);
             }
             return None;
@@ -107,6 +116,7 @@ impl AutoScale {
             if now.saturating_duration_since(since) >= UP_AFTER {
                 self.step -= 1;
                 self.high_since = None;
+                self.since_change = Some(now);
                 return Some(self.step);
             }
         } else {
@@ -121,6 +131,13 @@ mod tests {
     use super::*;
 
     const S: Duration = Duration::from_secs(1);
+
+    /// A scaler whose settling time after connecting is over by `t`.
+    fn settled(t: Instant) -> AutoScale {
+        let mut a = AutoScale::default();
+        a.update(t - SETTLE, 1_000_000, 2560, 1440, 60);
+        a
+    }
 
     #[test]
     fn sizes_scale_to_multiples_of_8() {
@@ -142,7 +159,7 @@ mod tests {
     #[test]
     fn steps_down_only_after_the_bitrate_stays_low() {
         let t = Instant::now();
-        let mut a = AutoScale::default();
+        let mut a = settled(t);
         // 1440p60 needs about 8.8 Mb/s.
         assert_eq!(a.update(t, 3000, 2560, 1440, 60), None);
         assert_eq!(a.update(t + S, 3000, 2560, 1440, 60), None);
@@ -158,7 +175,7 @@ mod tests {
     #[test]
     fn goes_no_lower_than_the_last_step() {
         let t = Instant::now();
-        let mut a = AutoScale::default();
+        let mut a = settled(t);
         a.update(t, 200, 2560, 1440, 60);
         assert_eq!(a.update(t + S * 2, 200, 2560, 1440, 60), Some(3));
         assert_eq!(a.update(t + S * 10, 200, 2560, 1440, 60), None);
@@ -167,7 +184,7 @@ mod tests {
     #[test]
     fn steps_up_one_at_a_time_after_a_long_stretch_of_headroom() {
         let t = Instant::now();
-        let mut a = AutoScale::default();
+        let mut a = settled(t);
         a.update(t, 1000, 2560, 1440, 60);
         assert_eq!(a.update(t + S * 2, 1000, 2560, 1440, 60), Some(3));
         // Enough for 720p, but not with margin: stay.
@@ -180,6 +197,35 @@ mod tests {
         assert_eq!(a.update(t + S * 41, 30_000, 2560, 1440, 60), None);
         assert_eq!(a.update(t + S * 50, 30_000, 2560, 1440, 60), None);
         assert_eq!(a.update(t + S * 51, 30_000, 2560, 1440, 60), Some(1));
+    }
+
+    #[test]
+    fn the_starting_estimate_does_not_step_down() {
+        // A new connection's 7.5 Mb/s target, under 1440p60's need, while
+        // the estimate climbs.
+        let t = Instant::now();
+        let mut a = AutoScale::default();
+        assert_eq!(a.update(t, 7500, 2560, 1440, 60), None);
+        assert_eq!(a.update(t + S * 4, 7500, 2560, 1440, 60), None);
+        assert_eq!(a.update(t + S * 5, 30_000, 2560, 1440, 60), None);
+        assert_eq!(a.update(t + S * 30, 30_000, 2560, 1440, 60), None);
+        assert_eq!(a.step(), 0);
+        // Still low once settled: step down after the usual wait.
+        assert_eq!(a.update(t + S * 31, 3000, 2560, 1440, 60), None);
+        assert_eq!(a.update(t + S * 33, 3000, 2560, 1440, 60), Some(2));
+    }
+
+    #[test]
+    fn no_second_step_down_right_after_a_change() {
+        let t = Instant::now();
+        let mut a = settled(t);
+        a.update(t, 3000, 2560, 1440, 60);
+        assert_eq!(a.update(t + S * 2, 3000, 2560, 1440, 60), Some(2));
+        // The new size needs a moment too.
+        a.update(t + S * 3, 200, 2560, 1440, 60);
+        assert_eq!(a.update(t + S * 6, 200, 2560, 1440, 60), None);
+        assert_eq!(a.update(t + S * 7, 200, 2560, 1440, 60), None);
+        assert_eq!(a.update(t + S * 9, 200, 2560, 1440, 60), Some(3));
     }
 
     #[test]

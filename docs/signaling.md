@@ -103,7 +103,9 @@ same reasons) and closes the peer connection a moment later.
 Without a socket, recovering from a failed connection takes a new one: the
 browser drops the failed peer connection, opens `/ws` again (up to 3 times),
 and answers the fresh offer. The host ends a handed-off session whose peer
-connection stays down for 20 seconds.
+connection stays down for 20 seconds. So a browser that simply closes its
+tab shows as connected on the host until then, where a socket close used
+to end the session at once.
 
 The host puts all of its candidates in the offer, so it never trickles.
 Browser candidates are optional (the host learns the browser's address from

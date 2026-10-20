@@ -70,7 +70,6 @@ export class Session extends EventTarget {
   async openSignal() {
     const signal = new Signaling(this.signalUrl);
     this.signal = signal;
-    this.handedOff = false;
     signal.addEventListener('close', (e) => {
       if (this.closed || signal !== this.signal || this.handedOff) return;
       // Unauthenticated upgrades are refused before the socket opens; the page re-checks pairing.
@@ -81,6 +80,7 @@ export class Session extends EventTarget {
       if (signal === this.signal) this.onSignal(e.detail).catch((err) => this.fail(err.message));
     });
     await signal.open();
+    this.handedOff = false; // signaling is back on the socket until the next handoff
   }
 
   // Once the connection is up and `control` is open, the WebSocket isn't needed: tell the host
@@ -177,7 +177,7 @@ export class Session extends EventTarget {
     // Signaling was handed off, so the failed connection was the only way to the host. Drop it
     // first, so a late `bye` on it can't end the new one, and ask for a new offer on a new socket.
     this.closePeer();
-    this.openSignal().catch(() => this.fail('Connection failed'));
+    this.openSignal().catch(() => setTimeout(() => this.restart(), 1000));
   }
 
   onChannel(ch) {

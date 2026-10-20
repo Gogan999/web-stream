@@ -81,10 +81,13 @@
   <p id="pair-msg" role="status"></p>
 </form>
 <main id="stage" tabindex="-1">
-  <video id="video" autoplay playsinline disablepictureinpicture disableremoteplayback></video>
-  <img id="cursor" alt="" hidden>
+  <div id="view">
+    <video id="video" autoplay playsinline disablepictureinpicture disableremoteplayback></video>
+    <img id="cursor" alt="" hidden>
+  </div>
   <pre id="stats" hidden></pre>
   <div id="touchbar">
+    <button id="zoom-reset" type="button" title="Zoom back out to the whole screen" hidden>Fit</button>
     <button id="kbd-toggle" type="button" aria-pressed="false" title="On-screen keyboard">Keyboard</button>
     <button id="keys-toggle" type="button" aria-pressed="false" title="Esc, Tab, Ctrl, Alt, Win, arrows">Keys</button>
     <button id="touch-fullscreen" type="button">Fullscreen</button>

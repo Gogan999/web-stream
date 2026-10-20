@@ -1,14 +1,22 @@
 // Touch gestures on the video, turned into mouse actions. Pure state machine (times and points
 // come in as arguments) so it can be tested; input.js feeds it pointer events.
 //
-// Trackpad (relative mouse mode): drag moves the cursor, tap clicks, hold then drag drags with the
-// left button, two-finger tap right-clicks, two-finger drag scrolls.
+// Trackpad (relative mouse mode): drag moves the cursor, tap clicks, tap then touch again and drag
+// (or hold then drag) drags with the left button, two-finger tap right-clicks, two-finger drag scrolls.
 // Direct (absolute mouse mode): the cursor goes where the finger is; tap clicks there, drag drags
 // with the left button, hold right-clicks, two-finger tap right-clicks, two-finger drag scrolls.
+// Both: pinching zooms the view (the stream, not the host) and moving the pinch pans it; while
+// zoomed in, any two-finger drag pans instead of scrolling.
 
 export const SLOP_PX = 10; // movement below this still counts as a tap or hold
 export const HOLD_MS = 450;
 export const TWO_TAP_MS = 300;
+// Trackpad: a finger landing this soon after a tap drags with the left button once it moves.
+export const TAP_DRAG_MS = 350;
+// Two fingers: scroll once their midpoint moves this far, pinch once their spread changes this
+// much (whichever is larger at that point decides).
+export const SCROLL_PX = 2 * SLOP_PX;
+export const PINCH_PX = 30;
 // Wheel units per CSS px of two-finger drag (120 is one notch).
 export const WHEEL_PER_PX = 2;
 
@@ -16,8 +24,10 @@ const LEFT = 0;
 const RIGHT = 2;
 
 export class TouchGestures {
-  // out: { move(dx, dy), moveTo(x, y, reliable), button(b, down), wheel(dx, dy), haptic() }
+  // out: { move(dx, dy), moveTo(x, y, reliable), button(b, down), wheel(dx, dy), haptic(),
+  //        pinch(ratio, midX, midY, panX, panY), zoomed() }
   // moveTo's `reliable` is true where a button event follows at that point (touch down, drag start).
+  // pinch: the spread changed by `ratio` around the midpoint, which moved by (panX, panY).
   constructor(out, mode = 'trackpad') {
     this.out = out;
     this.mode = mode; // 'trackpad' or 'direct'
@@ -29,7 +39,10 @@ export class TouchGestures {
     this.primary = null; // first finger down
     this.state = 'idle'; // idle, pending, moving, holding, dragging, two, done
     this.t0 = 0;
-    this.scrolling = false;
+    this.two = null; // two fingers: null (undecided), 'scroll' or 'pinch'
+    this.spread = null; // two fingers: { d, x, y } distance and midpoint at the start and last sent
+    this.tapDrag = false;
+    this.lastTap ??= -Infinity; // kept across reset() so cancel doesn't forget it
     this.leftDown = false;
     this.wheelRest = { x: 0, y: 0 };
   }
@@ -46,12 +59,15 @@ export class TouchGestures {
       this.primary = id;
       this.state = 'pending';
       this.t0 = t;
+      this.tapDrag = this.mode === 'trackpad' && t - this.lastTap < TAP_DRAG_MS;
       if (this.mode === 'direct') this.out.moveTo(x, y, true);
     } else if (n === 2 && (this.state === 'pending' || this.state === 'moving')) {
       this.state = 'two';
       this.t0 = t;
-      this.scrolling = false;
+      this.two = null;
       for (const p of this.points.values()) { p.sx = p.x; p.sy = p.y; }
+      this.spread = this.measure();
+      this.spread0 = this.spread;
     } else if (n >= 3) {
       this.releaseLeft();
       this.state = 'done';
@@ -71,8 +87,11 @@ export class TouchGestures {
       case 'pending':
         if (Math.hypot(x - p.sx, y - p.sy) < SLOP_PX) return;
         if (this.mode === 'trackpad') {
-          this.state = 'moving';
+          this.state = this.tapDrag ? 'holding' : 'moving';
+          // Move before pressing: the press lands away from the tap, so the host doesn't take the
+          // two as a double-click (which would maximize a window dragged by its title bar).
           this.out.move(x - p.sx, y - p.sy);
+          if (this.tapDrag) this.pressLeft();
         } else {
           this.state = 'dragging';
           this.out.moveTo(p.sx, p.sy, true); // the drag starts where the finger landed
@@ -88,14 +107,36 @@ export class TouchGestures {
         this.out.moveTo(x, y, false);
         return;
       case 'two': {
-        if (!this.scrolling) {
-          if (Math.hypot(x - p.sx, y - p.sy) < SLOP_PX) return;
-          this.scrolling = true;
+        const now = this.measure();
+        if (!this.two) {
+          const s = this.spread0;
+          const spread = Math.abs(now.d - s.d);
+          const pan = Math.hypot(now.x - s.x, now.y - s.y);
+          if (this.out.zoomed?.() && Math.hypot(x - p.sx, y - p.sy) >= SLOP_PX) this.two = 'pinch';
+          else if (spread >= PINCH_PX && spread > pan) this.two = 'pinch';
+          else if (pan >= SCROLL_PX && pan > spread) this.two = 'scroll';
+          else return;
+          if (this.two === 'scroll') {
+            this.scroll(now.x - s.x, now.y - s.y); // the movement so far
+            return;
+          }
         }
-        // Each finger moves half the scroll; content follows the fingers like a touch screen.
-        this.scroll(dx / 2, dy / 2);
+        if (this.two === 'scroll') {
+          // Each finger moves half the scroll; content follows the fingers like a touch screen.
+          this.scroll(dx / 2, dy / 2);
+          return;
+        }
+        const last = this.spread;
+        this.spread = now;
+        if (last.d > 0 && now.d > 0) this.out.pinch?.(now.d / last.d, now.x, now.y, now.x - last.x, now.y - last.y);
       }
     }
+  }
+
+  // Distance between the two fingers and their midpoint.
+  measure() {
+    const [a, b] = this.points.values();
+    return { d: Math.hypot(a.x - b.x, a.y - b.y), x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
   }
 
   up(id, t) {
@@ -103,13 +144,15 @@ export class TouchGestures {
     switch (this.state) {
       case 'pending':
         this.click(LEFT);
+        // A tap that ended a tap-drag's second touch is a double-click; a third touch doesn't drag.
+        this.lastTap = this.tapDrag ? -Infinity : t;
         break;
       case 'holding':
       case 'dragging':
         this.releaseLeft();
         break;
       case 'two':
-        if (!this.scrolling && t - this.t0 < TWO_TAP_MS) this.click(RIGHT);
+        if (!this.two && t - this.t0 < TWO_TAP_MS) this.click(RIGHT);
         break;
     }
     this.state = this.points.size ? 'done' : 'idle';

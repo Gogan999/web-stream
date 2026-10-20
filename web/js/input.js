@@ -46,7 +46,7 @@ export function videoPoint(clientX, clientY, rect, videoW, videoH, clamp = false
 }
 
 export class InputCapture {
-  constructor({ session, video, stage, onHotkey, keyTarget = null, onKeySent = null, onReleaseAll = null, displaySize = null }) {
+  constructor({ session, video, stage, onHotkey, keyTarget = null, onKeySent = null, onReleaseAll = null, displaySize = null, zoom = null }) {
     this.session = session;
     this.video = video;
     this.stage = stage;
@@ -55,6 +55,7 @@ export class InputCapture {
     this.onKeySent = onKeySent;
     this.onReleaseAll = onReleaseAll; // softkeys: forget sticky modifiers the host just let go
     this.displaySize = displaySize; // () => { width, height } of the host display, for trackpad scaling
+    this.zoom = zoom; // ZoomView: pinches zoom and pan the stream in the page
     this.touchActive = false; // the stream was touched last, so keys from a paired keyboard go to it
     this.touchRest = { x: 0, y: 0 }; // sub-pixel trackpad motion not yet sent
     this.holdTimer = 0;
@@ -75,6 +76,8 @@ export class InputCapture {
         this.onKeySent?.(0, false);
       },
       haptic: () => navigator.vibrate?.(15),
+      pinch: (ratio, x, y, dx, dy) => this.zoom?.pinch(ratio, x, y, dx, dy),
+      zoomed: () => !!this.zoom?.zoomed,
     });
     this.mode = 'relative'; // 'relative' (pointer lock) or 'absolute'
     this.heldKeys = new Set();

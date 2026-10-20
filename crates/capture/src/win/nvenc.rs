@@ -1,6 +1,8 @@
 //! NVENC encoder session on a D3D11 device, configured for interactive
 //! streaming: ultra-low-latency tuning at the preset [`crate::tuning`] picks
-//! for the config's quality, CBR with a VBV of about one frame, no B-frames, an infinite GOP (keyframes only on demand), and
+//! for the config's quality, CBR with a VBV of about one frame and a
+//! quarter-resolution first pass (so a scene cut stays near its budget), no
+//! B-frames, an infinite GOP (keyframes only on demand), and
 //! parameter sets repeated on every IDR so a decoder can join at any
 //! keyframe.
 //!
@@ -173,7 +175,7 @@ impl NvEncoder {
             "nvEncCreateBitstreamBuffer",
         )?;
         this.bitstream = bs.bitstreamBuffer;
-        tracing::info!(codec = ?cfg.codec, cfg.width, cfg.height, cfg.fps, cfg.bitrate_kbps, quality = ?cfg.quality, keyframe_scale = this.keyframe_scale, invalidation = this.can_invalidate, "NVENC ready");
+        tracing::info!(codec = ?cfg.codec, cfg.width, cfg.height, cfg.fps, cfg.bitrate_kbps, quality = ?cfg.quality, keyframe_scale = this.keyframe_scale, invalidation = this.can_invalidate, two_pass = this.config.rcParams.multiPass.0 != 0, "NVENC ready");
         Ok(this)
     }
 
@@ -249,7 +251,14 @@ impl NvEncoder {
         // so a driver default change can't add frames of delay.
         config.rcParams.set_enableLookahead(0);
         config.rcParams.lookaheadDepth = 0;
-        config.rcParams.multiPass = nv::NV_ENC_MULTI_PASS::NV_ENC_MULTI_PASS_DISABLED;
+        // A quarter-resolution first pass over each frame, so rate control
+        // knows what the frame costs before it picks a quantizer. Without
+        // it a scene cut came out at up to 20 times the frame's budget (a
+        // 449 KB frame against about 25 KB in a real run), which backed the
+        // send queue up for hundreds of milliseconds. NVIDIA recommends it
+        // for low-latency CBR with a one-frame VBV; it adds no frames of
+        // delay, only a little encode time.
+        config.rcParams.multiPass = nv::NV_ENC_MULTI_PASS::NV_ENC_TWO_PASS_QUARTER_RESOLUTION;
         // SAFETY: the union member matches the codec GUID chosen above.
         unsafe {
             let codec = &mut config.encodeCodecConfig;
@@ -316,12 +325,26 @@ impl NvEncoder {
             tuningInfo: tuning,
             ..Default::default()
         };
-        let status = unsafe {
+        let mut status = unsafe {
             call!(
                 self.api,
                 nvEncInitializeEncoder(self.encoder, &mut *self.init)
             )
         };
+        if status != nv::NVENCSTATUS::NV_ENC_SUCCESS {
+            // An older GPU or driver may refuse the first pass: do without.
+            tracing::warn!(
+                "encoder refused two-pass rate control ({}); using one pass",
+                self.last_error(status)
+            );
+            self.config.rcParams.multiPass = nv::NV_ENC_MULTI_PASS::NV_ENC_MULTI_PASS_DISABLED;
+            status = unsafe {
+                call!(
+                    self.api,
+                    nvEncInitializeEncoder(self.encoder, &mut *self.init)
+                )
+            };
+        }
         if status != nv::NVENCSTATUS::NV_ENC_SUCCESS {
             return Err(CaptureError::NoEncoder(format!(
                 "nvEncInitializeEncoder: {}",

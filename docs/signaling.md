@@ -86,7 +86,24 @@ Browser to host:
 {"type":"answer","sdp":"v=0…"}
 {"type":"candidate","candidate":"candidate:…","sdpMid":"0","sdpMLineIndex":0}
 {"type":"restart"}                            // ask for a fresh offer (for example after ICE failure)
+{"type":"handoff"}                            // connected and `control` is open: close this socket
 ```
+
+### Handoff
+
+The socket is only needed to set up the connection. Once the peer
+connection is up and the `control` channel is open, the browser sends
+`handoff`; the host closes the socket (code 1000, reason `handoff`), and
+from then on only the peer connection carries anything, so the web page is
+the one thing outside it. The session stays the live one: a new connection
+still replaces it, and an unpair or "drop session" still ends it. The host
+then sends `bye` on `control` instead (`{"type":"bye","reason":"replaced"}`,
+same reasons) and closes the peer connection a moment later.
+
+Without a socket, recovering from a failed connection takes a new one: the
+browser drops the failed peer connection, opens `/ws` again (up to 3 times),
+and answers the fresh offer. The host ends a handed-off session whose peer
+connection stays down for 20 seconds.
 
 The host puts all of its candidates in the offer, so it never trickles.
 Browser candidates are optional (the host learns the browser's address from

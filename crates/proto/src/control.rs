@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{CursorShape, DisplayId, DisplayInfo, VideoConfig};
+use crate::{ByeReason, CursorShape, DisplayId, DisplayInfo, VideoConfig};
 
 /// Identifies a file the host has offered this session. The host only ever
 /// serves ids it issued, never paths from the client.
@@ -217,6 +217,12 @@ pub enum HostControl {
     Error {
         message: String,
     },
+    /// The session is over, as signaling's `bye`: sent here once the browser
+    /// has handed signaling off ([`crate::ClientSignal::Handoff`]), just
+    /// before the host closes the peer connection.
+    Bye {
+        reason: ByeReason,
+    },
 }
 
 /// The host's side of the stream over the last stats interval.
@@ -295,6 +301,13 @@ mod tests {
             })
             .unwrap(),
             r#"{"type":"fileFailed","id":7,"message":"gone"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&HostControl::Bye {
+                reason: ByeReason::HostShutdown
+            })
+            .unwrap(),
+            r#"{"type":"bye","reason":"host_shutdown"}"#
         );
         assert_eq!(
             serde_json::to_string(&HostControl::FileWithdrawn { id: FileId(7) }).unwrap(),

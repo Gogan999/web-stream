@@ -478,6 +478,11 @@ impl Transport {
         }
     }
 
+    /// Whether the current peer connection is up (ICE and DTLS).
+    pub fn is_connected(&self) -> bool {
+        self.shared.connected.load(Ordering::Relaxed)
+    }
+
     /// End the current peer connection.
     pub fn close(&self) {
         if let Err(mpsc::error::TrySendError::Full(cmd)) = self.cmds.try_send(Cmd::Close) {

@@ -13,7 +13,9 @@ mod tls;
 mod turn;
 
 pub use config::{SignalingConfig, TlsSource, TurnServer};
-pub use server::{Notice, SignalingEvents, SignalingHandle, SignalingServer, SignalingSession};
+pub use server::{
+    Notice, SessionEvent, SignalingEvents, SignalingHandle, SignalingServer, SignalingSession,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

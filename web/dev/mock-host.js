@@ -55,6 +55,7 @@ const audioTrack = dest.stream.getAudioTracks()[0];
 
 const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws?role=host`);
 let pc = null;
+let handedOff = false; // the client closed its socket; it hears from us over control only
 const send = (m) => ws.send(JSON.stringify(m));
 ws.onopen = () => write({ ev: 'signaling-open' });
 
@@ -67,6 +68,9 @@ ws.onmessage = async (e) => {
       break;
     case 'dev-client-connected':
       write({ ev: 'client-connected' });
+      // Like the real host: a client that handed signaling off learns it was replaced over control.
+      if (handedOff && window.__control?.readyState === 'open') window.__control.send(JSON.stringify({ type: 'bye', reason: 'replaced' }));
+      handedOff = false;
       send({ type: 'welcome', ice_servers: [] });
       await offer();
       break;
@@ -78,10 +82,15 @@ ws.onmessage = async (e) => {
       write({ ev: 'answer' });
       await pc.setRemoteDescription({ type: 'answer', sdp: msg.sdp });
       break;
+    case 'handoff':
+      handedOff = true;
+      write({ ev: 'handoff' });
+      break;
     case 'candidate':
       if (pc) await pc.addIceCandidate({ candidate: msg.candidate, sdpMid: msg.sdpMid, sdpMLineIndex: msg.sdpMLineIndex }).catch(() => {});
       break;
     case 'dev-client-disconnected':
+      if (handedOff) break; // the session goes on over the peer connection
       pc?.close();
       pc = null;
       break;

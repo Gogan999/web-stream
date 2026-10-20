@@ -4,13 +4,14 @@
 
 use std::net::IpAddr;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use tokio::sync::{mpsc, oneshot, watch};
-use ws_proto::{ClientSignal, HostSignal, VideoCodec};
+use ws_proto::{ByeReason, ClientSignal, HostControl, HostSignal, VideoCodec, channels};
 pub use ws_signaling::Notice;
 use ws_signaling::{
-    SignalingConfig, SignalingHandle, SignalingServer, SignalingSession, TlsSource,
+    SessionEvent, SignalingConfig, SignalingHandle, SignalingServer, SignalingSession, TlsSource,
 };
 use ws_transport::{Transport, TransportConfig};
 
@@ -113,11 +114,13 @@ pub async fn serve(
         media_stop_rx,
     ));
     tokio::spawn(forward_notices(signaling_events.notices, events.clone()));
-    let sessions = tokio::spawn(run_signaling(
+    let (signaling_stop, signaling_stop_rx) = oneshot::channel();
+    let mut sessions = tokio::spawn(run_signaling(
         signaling_events.sessions,
         transport.clone(),
         codecs_tx,
         peers_tx,
+        signaling_stop_rx,
     ));
 
     let _ = events.send(Event::Started {
@@ -163,7 +166,14 @@ pub async fn serve(
     };
 
     signaling.drop_session().await;
-    sessions.abort();
+    // Lets a handed-off browser hear the `bye` over `control`.
+    let _ = signaling_stop.send(());
+    if tokio::time::timeout(Duration::from_secs(1), &mut sessions)
+        .await
+        .is_err()
+    {
+        sessions.abort();
+    }
     server_task.abort();
     transport.close();
     let _ = media_stop.send(());
@@ -205,22 +215,47 @@ async fn forward_notices(
     }
 }
 
+/// How long a `bye` sent over `control` gets to reach the browser before
+/// the peer connection closes.
+const BYE_GRACE: Duration = Duration::from_millis(250);
+/// A handed-off session whose peer connection has been down this long is
+/// over. Without a socket nothing else says the browser left.
+const HANDED_OFF_DOWN_LIMIT: Duration = Duration::from_secs(20);
+
 /// Signaling for one browser at a time: offer on connect, apply the answer,
 /// pass candidates through, re-offer on restart. A new session replaces the
-/// current one (the server has already told the old browser).
+/// current one (the server has already told the old browser, unless it had
+/// handed signaling off: then it hears it over `control`). A handed-off
+/// session ends when the server says so, or when its peer connection stays
+/// down.
 async fn run_signaling(
     mut sessions: mpsc::Receiver<SignalingSession>,
     transport: Transport,
     codecs: watch::Sender<Option<Vec<VideoCodec>>>,
     peers: watch::Sender<u64>,
+    mut stop: oneshot::Receiver<()>,
 ) {
     let mut current: Option<SignalingSession> = None;
+    let mut handed_off = false;
+    let mut down_since: Option<Instant> = None;
+    let mut check = tokio::time::interval(Duration::from_secs(1));
+    check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         let msg = tokio::select! {
+            _ = &mut stop => {
+                if handed_off {
+                    say_bye(&transport, ByeReason::HostShutdown).await;
+                }
+                break;
+            }
             s = sessions.recv() => {
                 let Some(s) = s else { break };
                 tracing::info!(device = %s.device_name, "signaling session");
+                if current.is_some() && handed_off {
+                    say_bye(&transport, ByeReason::Replaced).await;
+                }
                 current = Some(s);
+                handed_off = false;
                 // Until this browser answers, its codecs are unknown.
                 codecs.send_replace(None);
                 peers.send_modify(|n| *n += 1);
@@ -229,10 +264,21 @@ async fn run_signaling(
                 }
                 continue;
             }
+            _ = check.tick(), if handed_off => {
+                if transport.is_connected() {
+                    down_since = None;
+                } else if down_since.get_or_insert_with(Instant::now).elapsed() >= HANDED_OFF_DOWN_LIMIT {
+                    tracing::info!("peer connection stayed down; session over");
+                    current = None;
+                    handed_off = false;
+                    transport.close();
+                }
+                continue;
+            }
             msg = next_signal(&mut current) => msg,
         };
         match msg {
-            Some(ClientSignal::Answer { sdp }) => {
+            Some(SessionEvent::Signal(ClientSignal::Answer { sdp })) => {
                 let accepted = answer_video_codecs(&sdp);
                 tracing::debug!(?accepted, "browser video codecs");
                 if let Err(e) = transport.accept_answer(sdp).await {
@@ -249,10 +295,10 @@ async fn run_signaling(
                     codecs.send_replace(Some(accepted));
                 }
             }
-            Some(ClientSignal::Candidate { candidate, .. }) => {
+            Some(SessionEvent::Signal(ClientSignal::Candidate { candidate, .. })) => {
                 transport.add_remote_candidate(candidate)
             }
-            Some(ClientSignal::Restart) => {
+            Some(SessionEvent::Signal(ClientSignal::Restart)) => {
                 codecs.send_replace(None);
                 peers.send_modify(|n| *n += 1);
                 if !send_offer(&transport, current.as_ref()).await {
@@ -260,15 +306,40 @@ async fn run_signaling(
                     transport.close();
                 }
             }
+            // The server turns this into `HandedOff`.
+            Some(SessionEvent::Signal(ClientSignal::Handoff)) => {}
+            Some(SessionEvent::HandedOff) => {
+                handed_off = true;
+                down_since = None;
+            }
+            Some(SessionEvent::Ended(reason)) => {
+                say_bye(&transport, reason).await;
+                current = None;
+                handed_off = false;
+                transport.close();
+            }
             None => {
                 current = None;
+                handed_off = false;
                 transport.close();
             }
         }
     }
 }
 
-async fn next_signal(session: &mut Option<SignalingSession>) -> Option<ClientSignal> {
+/// Tells a handed-off browser why its session ends, and gives the message a
+/// moment to arrive before the caller closes the peer connection.
+async fn say_bye(transport: &Transport, reason: ByeReason) {
+    let text = serde_json::to_vec(&HostControl::Bye { reason }).expect("bye serializes");
+    if matches!(
+        transport.send_data(channels::CONTROL, false, text).await,
+        Ok(true)
+    ) {
+        tokio::time::sleep(BYE_GRACE).await;
+    }
+}
+
+async fn next_signal(session: &mut Option<SignalingSession>) -> Option<SessionEvent> {
     match session {
         Some(s) => s.recv().await,
         None => std::future::pending().await,

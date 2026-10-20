@@ -54,6 +54,12 @@ pub enum ClientSignal {
     },
     /// Ask for a fresh offer, e.g. after ICE failure.
     Restart,
+    /// The peer connection is up and its `control` channel open: the
+    /// browser is about to close this socket, and the session goes on over
+    /// the peer connection alone. A `bye` then arrives on `control` instead
+    /// ([`crate::HostControl::Bye`]); to recover from a failed connection the
+    /// browser opens a new socket.
+    Handoff,
 }
 
 /// One `RTCIceServer`.
@@ -148,6 +154,8 @@ mod tests {
         assert_eq!(serde_json::to_string(&msg).unwrap(), json);
         let restart: ClientSignal = serde_json::from_str(r#"{"type":"restart"}"#).unwrap();
         assert_eq!(restart, ClientSignal::Restart);
+        let handoff: ClientSignal = serde_json::from_str(r#"{"type":"handoff"}"#).unwrap();
+        assert_eq!(handoff, ClientSignal::Handoff);
     }
 
     #[test]

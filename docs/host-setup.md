@@ -270,8 +270,17 @@ UAC and lock screens and types into programs running as administrator.
   restarting it).
 - `ws-host service uninstall` (as administrator) removes the service and the
   Program Files copy, and leaves its data.
-- If the sign-in screen asks for Ctrl+Alt+Del, the browser can't send it
-  yet; turn that requirement off or sign in once at the PC.
+- **Ctrl+Alt+Del:** a browser can't send it as keys, so use the
+  **Ctrl+Alt+Del** button in the browser's top bar (or in **Keys** on a
+  phone). The service asks Windows for it. Windows only takes it from a
+  service when the policy *Disable or enable software Secure Attention
+  Sequence* (Computer Configuration, Administrative Templates, Windows
+  Components, Windows Logon Options) is enabled for **Services**, which is
+  the registry value `SoftwareSASGeneration` = 1 under
+  `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System`. It is
+  off by default; `service.log` says when it is off and a request comes.
+  Most PCs don't need Ctrl+Alt+Del to sign in: a click or a key opens the
+  lock screen.
 
 What this changes for security:
 

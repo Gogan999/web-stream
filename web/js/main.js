@@ -529,10 +529,14 @@ ui.connect.addEventListener('click', () => (session && !session.closed ? disconn
 ui.display.addEventListener('change', () => selectDisplay(ui.display.value));
 ui.mouseMode.addEventListener('change', () => setMouseMode(ui.mouseMode.value));
 ui.fullscreen.addEventListener('click', toggleFullscreen);
+// Ctrl+Alt+Del never reaches the page as keys; the host asks Windows for it.
+for (const el of [$('sas'), $('keys-sas')]) {
+  el.addEventListener('click', () => session?.sendControl({ type: 'secureAttention' }));
+}
 ui.touchFullscreen.addEventListener('click', toggleFullscreen);
 ui.statsToggle.addEventListener('click', toggleStats);
 // Toolbar controls keep focus otherwise, and Space/Enter would re-trigger them.
-for (const el of [ui.connect, ui.fullscreen, ui.statsToggle, ui.autotune]) el.addEventListener('mouseup', () => el.blur());
+for (const el of [ui.connect, ui.fullscreen, $('sas'), ui.statsToggle, ui.autotune]) el.addEventListener('mouseup', () => el.blur());
 
 // Settings and Files dropdowns: a toggle opens one; a click or tap anywhere else, or Esc, closes it.
 function setSettingsOpen(open) {

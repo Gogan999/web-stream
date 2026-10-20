@@ -15,6 +15,7 @@
   <button id="connect" type="button">Connect</button>
   <span id="status" data-state="idle">Not connected</span>
   <span class="spacer"></span>
+  <button id="sas" type="button" title="Sends Ctrl+Alt+Del to the host, for its sign-in and lock screen. Needs the host to run as the web-stream service.">Ctrl+Alt+Del</button>
   <button id="fullscreen" type="button">Fullscreen</button>
   <button id="files-toggle" type="button" aria-expanded="false" aria-controls="files" aria-haspopup="true" hidden>Files</button>
   <div id="files" class="panel" role="group" aria-label="Files from the host">
@@ -102,6 +103,7 @@
     <button type="button" data-key="Delete">Del</button>
     <button type="button" data-key="Backspace">Bksp</button>
     <button type="button" data-key="Enter">Enter</button>
+    <button type="button" id="keys-sas">Ctrl+Alt+Del</button>
   </div>
   <textarea id="kbd-input" tabindex="-1" aria-label="On-screen keyboard input" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" enterkeyhint="enter"></textarea>
 </main>

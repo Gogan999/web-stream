@@ -11,14 +11,14 @@ use windows::Win32::System::Threading::{
     GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_HIGHEST,
 };
 use ws_diag::diag;
-use ws_proto::{DisplayId, EncodedFrame, VideoConfig, mono_micros, mono_now};
+use ws_proto::{DisplayId, EncodedFrame, SendBacklog, VideoConfig, mono_micros, mono_now};
 
 use super::convert::Converter;
 use super::display::{self, Output};
 use super::duplication::{Acquired, Duplicator};
 use super::nvenc::{DPB_FRAMES, NvEncoder};
 use super::{Gpu, init_process};
-use crate::pacing::{EncodeJob, Scheduler};
+use crate::pacing::{Backpressure, EncodeJob, Scheduler};
 use crate::{CaptureError, Result};
 
 enum Command {
@@ -32,6 +32,9 @@ enum Command {
 /// keyframe is sent instead. Comfortably more than the encoder keeps as
 /// references, so nothing in the gap can still be referenced.
 const MAX_INVALIDATE: u64 = 16;
+/// While a due frame is held back for the send queue, how often the queue
+/// is looked at again (new desktop images are still taken meanwhile).
+const HOLD_POLL_MS: u32 = 2;
 
 pub(crate) struct PipelineHandle {
     commands: Option<std_mpsc::Sender<Command>>,
@@ -43,6 +46,7 @@ impl PipelineHandle {
         display: DisplayId,
         config: VideoConfig,
         frames: mpsc::Sender<EncodedFrame>,
+        backlog: SendBacklog,
     ) -> Result<Self> {
         init_process();
         // Fix the shared clock's epoch before any frame timestamps exist.
@@ -55,7 +59,7 @@ impl PipelineHandle {
                 let _ = unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST) };
                 // The session may start on the lock screen.
                 ws_desktop::follow_input_desktop();
-                let mut session = match Session::open(display, config, frames) {
+                let mut session = match Session::open(display, config, frames, backlog) {
                     Ok(s) => {
                         let _ = ready_tx.send(Ok(()));
                         s
@@ -158,6 +162,8 @@ struct Session {
     config: VideoConfig,
     frames: mpsc::Sender<EncodedFrame>,
     sched: Scheduler,
+    backlog: SendBacklog,
+    backpressure: Backpressure,
     frame_index: u64,
     /// The next frame must not reference frames from this index on, which
     /// were invalidated: it is tagged so the receiver can let it follow
@@ -179,6 +185,7 @@ impl Session {
         id: DisplayId,
         config: VideoConfig,
         frames: mpsc::Sender<EncodedFrame>,
+        backlog: SendBacklog,
     ) -> Result<Self> {
         let output = display::find(id)?;
         let enc = Encode::open(&output, &config)?;
@@ -191,6 +198,8 @@ impl Session {
             sched: Scheduler::new(config.fps),
             config,
             frames,
+            backlog,
+            backpressure: Backpressure::default(),
             frame_index: 0,
             recovers_from: None,
             intra_next: false,
@@ -222,14 +231,46 @@ impl Session {
     /// Returns false once the consumer or the handle has gone away.
     fn step(&mut self, commands: &std_mpsc::Receiver<Command>) -> Result<bool> {
         let now = Instant::now();
-        if let Some(job) = self.sched.poll(now) {
-            return self.encode(now, job);
+        let mut holding = false;
+        if self.sched.due(now) {
+            let backlog = self.backlog.get();
+            let was = self.backpressure.holding_since();
+            holding = self.backpressure.hold(now, backlog);
+            if holding && was.is_none() {
+                diag!(
+                    "hold",
+                    "start backlog_ms={:.2}",
+                    backlog.as_secs_f64() * 1000.0
+                );
+            }
+            if !holding {
+                if let Some(since) = was {
+                    let how = if self.backpressure.holding_since().is_none() {
+                        "caught_up"
+                    } else {
+                        "max_hold"
+                    };
+                    diag!(
+                        "hold",
+                        "end {how} after_ms={:.2} backlog_ms={:.2}",
+                        (now - since).as_secs_f64() * 1000.0,
+                        backlog.as_secs_f64() * 1000.0
+                    );
+                }
+                if let Some(job) = self.sched.poll(now) {
+                    return self.encode(now, job);
+                }
+            }
         }
         let Some(dup) = self.dup.as_mut() else {
             return self.reacquire(commands);
         };
         // Round up so a sub-millisecond wait doesn't become a busy poll.
-        let wait_ms = self.sched.wait(now).as_micros().div_ceil(1000) as u32;
+        let wait_ms = if holding {
+            HOLD_POLL_MS
+        } else {
+            self.sched.wait(now).as_micros().div_ceil(1000) as u32
+        };
         match dup.acquire(wait_ms)? {
             Acquired::Frame(texture, accumulated) => {
                 let captured = Instant::now();

@@ -22,7 +22,7 @@ const PLAYOUT_DELAY_EXT_ID: u8 = 5;
 /// The file channel may hold at most this much unsent data, so transfers
 /// leave room in the shared SCTP buffer (128 KiB) for control and input.
 const FILE_MAX_BUFFERED: usize = 64 * 1024;
-/// Longest the frames behind a keyframe are exempt from the late-frame
+/// Longest the frames behind a keyframe (or a repair) are exempt from the late-frame
 /// drop. Several frame times: enough for a keyframe at a few times the
 /// frame budget to drain at the pacing rate.
 const KEYFRAME_DRAIN_MAX: Duration = Duration::from_millis(250);
@@ -289,8 +289,8 @@ impl Session {
         now.saturating_duration_since(first_unsent)
     }
 
-    /// The video pacer queue (diagnostics): age of the oldest unsent
-    /// packet, bytes and packets waiting.
+    /// The video pacer queue: age of the oldest unsent packet, and bytes and
+    /// packets waiting (the last two for diagnostics).
     pub fn queue_diag(&mut self, now: Instant) -> (Duration, usize, usize) {
         let mut api = self.rtc.direct_api();
         let Some(q) = api
@@ -328,8 +328,12 @@ impl Session {
             return VideoWrite::Broken;
         }
         // Drop rather than queue: a frame that would wait behind older ones
-        // arrives late, and every frame after it would too.
-        if !frame.keyframe {
+        // arrives late, and every frame after it would too. Not a keyframe
+        // or a repair, though: dropping either only asks for another one,
+        // bigger still, and the queue backs up further (in a real run a
+        // late drop led to late repairs and then a keyframe several times
+        // a second).
+        if !frame.keyframe && frame.recovers_from.is_none() {
             let backlog = self.video_backlog(now);
             if backlog > self.max_send_delay {
                 ws_diag::diag!(
@@ -364,7 +368,9 @@ impl Session {
             .write(pt, wallclock, rtp_time, frame.data.to_vec())
         {
             Ok(()) => {
-                if frame.keyframe {
+                // A repair is several frames' worth too: let the frames
+                // right behind it wait for it, as for a keyframe.
+                if frame.keyframe || frame.recovers_from.is_some() {
                     self.keyframe_draining = Some(now);
                 }
                 self.next_index = Some(frame.frame_index + 1);

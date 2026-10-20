@@ -34,7 +34,7 @@ mod win;
 
 use thiserror::Error;
 use tokio::sync::mpsc;
-use ws_proto::{DisplayId, DisplayInfo, EncodedFrame, VideoCodec, VideoConfig};
+use ws_proto::{DisplayId, DisplayInfo, EncodedFrame, SendBacklog, VideoCodec, VideoConfig};
 
 /// SDP `a=fmtp` parameters describing what the encoder produces, for the
 /// transport's offer. H.264 is Constrained High (no B-frames) at level 5.2,
@@ -154,21 +154,24 @@ impl VideoPipeline {
     /// bitrate. Returns once the encoder is initialized. The output size
     /// stays fixed for the life of the pipeline; displays with a different
     /// aspect ratio are letterboxed.
+    /// `backlog` is the transport's send queue age: while it is behind,
+    /// frames are skipped before they are encoded (see `pacing`).
     pub fn start(
         display: DisplayId,
         config: VideoConfig,
         frames: mpsc::Sender<EncodedFrame>,
+        backlog: SendBacklog,
     ) -> Result<Self> {
         validate(&config)?;
         #[cfg(windows)]
         {
             Ok(Self {
-                inner: win::PipelineHandle::start(display, config, frames)?,
+                inner: win::PipelineHandle::start(display, config, frames, backlog)?,
             })
         }
         #[cfg(not(windows))]
         {
-            let _ = (display, frames);
+            let _ = (display, frames, backlog);
             Err(CaptureError::Unsupported)
         }
     }

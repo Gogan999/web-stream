@@ -131,6 +131,49 @@ impl Pacer {
     }
 }
 
+/// Send queue age past which a due frame is held back instead of encoded:
+/// under half the transport's late cutoff (50 ms), so a frame encoded now
+/// still goes out in time, and well above the zero a healthy link shows.
+pub(crate) const HOLD_BACKLOG: Duration = Duration::from_millis(20);
+/// Longest a frame is held back while the send queue stays behind. Past
+/// this one frame is encoded anyway, so a queue that never drains still
+/// gets a picture now and then (and the transport's late drop decides).
+pub(crate) const MAX_HOLD: Duration = Duration::from_millis(100);
+
+/// Holds frames back while the transport's send queue is behind, so the
+/// encoder sends fewer frames rather than frames that would be dropped as
+/// late. A late drop costs more than a skipped encode: the encoder has to
+/// repair it with a frame built on an older reference (several times the
+/// bits), and if the repair is late too, with a keyframe, which backs the
+/// queue up further. Skipping before the encoder leaves no gap to repair.
+#[derive(Debug, Default)]
+pub(crate) struct Backpressure {
+    /// When the current hold began.
+    since: Option<Instant>,
+}
+
+impl Backpressure {
+    /// Whether a frame due now should wait, given the send queue's age.
+    pub(crate) fn hold(&mut self, now: Instant, backlog: Duration) -> bool {
+        if backlog <= HOLD_BACKLOG {
+            self.since = None;
+            return false;
+        }
+        let since = *self.since.get_or_insert(now);
+        if now.saturating_duration_since(since) < MAX_HOLD {
+            return true;
+        }
+        // Let one through and start a new hold.
+        self.since = Some(now);
+        false
+    }
+
+    /// When the current hold began, if one is on.
+    pub(crate) fn holding_since(&self) -> Option<Instant> {
+        self.since
+    }
+}
+
 /// What the capture thread should encode next.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct EncodeJob {
@@ -217,15 +260,20 @@ impl Scheduler {
         self.pacer.forget_source();
     }
 
-    pub(crate) fn poll(&mut self, now: Instant) -> Option<EncodeJob> {
+    /// Whether [`Self::poll`] would return a job now.
+    pub(crate) fn due(&self, now: Instant) -> bool {
         if !self.has_image {
-            return None;
+            return false;
         }
-        let due = match self.pending {
+        let paced = match self.pending {
             Some(_) => self.pacer.ready(now),
             None => self.pacer.idle_repeat_due(now),
         };
-        if !due && !self.keyframe_requested && !self.repair_requested {
+        paced || self.keyframe_requested || self.repair_requested
+    }
+
+    pub(crate) fn poll(&mut self, now: Instant) -> Option<EncodeJob> {
+        if !self.due(now) {
             return None;
         }
         Some(EncodeJob {
@@ -390,6 +438,52 @@ mod tests {
 #[cfg(test)]
 mod scheduler_tests {
     use super::*;
+
+    #[test]
+    fn backpressure_holds_only_while_the_queue_is_behind() {
+        let t = Instant::now();
+        let mut b = Backpressure::default();
+        let behind = HOLD_BACKLOG + Duration::from_millis(1);
+        assert!(!b.hold(t, Duration::ZERO));
+        assert!(!b.hold(t, HOLD_BACKLOG));
+        assert!(b.hold(t, behind));
+        assert_eq!(b.holding_since(), Some(t));
+        // Caught up: encode at once.
+        assert!(!b.hold(t + Duration::from_millis(5), Duration::ZERO));
+        assert_eq!(b.holding_since(), None);
+    }
+
+    #[test]
+    fn backpressure_lets_a_frame_through_every_max_hold() {
+        let t = Instant::now();
+        let mut b = Backpressure::default();
+        let behind = Duration::from_secs(1);
+        let mut passed = Vec::new();
+        let mut now = t;
+        while now < t + MAX_HOLD * 3 + Duration::from_millis(1) {
+            if !b.hold(now, behind) {
+                passed.push(now - t);
+            }
+            now += Duration::from_millis(1);
+        }
+        assert_eq!(passed, [MAX_HOLD, MAX_HOLD * 2, MAX_HOLD * 3]);
+    }
+
+    #[test]
+    fn due_matches_poll() {
+        let t = Instant::now();
+        let mut s = Scheduler::new(60);
+        assert!(!s.due(t));
+        s.new_image(t);
+        assert!(s.due(t));
+        let job = s.poll(t).unwrap();
+        s.encoded(t, job, true);
+        s.new_image(t);
+        assert!(!s.due(t));
+        assert!(s.poll(t).is_none());
+        s.request_repair();
+        assert!(s.due(t));
+    }
 
     #[test]
     fn first_frame_is_idr() {

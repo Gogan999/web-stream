@@ -189,6 +189,10 @@ foreach ($tool in 'git', 'cargo') {
     }
 }
 
+# A folder from GitHub's "Download ZIP" has no git history to pull into.
+if (-not (Test-Path (Join-Path $repo '.git'))) {
+    throw "$repo is not a git clone (a downloaded ZIP has no .git folder), so it can't be updated. Clone it once with: git clone https://github.com/Gogan999/web-stream.git, then run scripts\install.ps1 from the clone."
+}
 $branch = (Invoke-Git rev-parse --abbrev-ref HEAD).Trim()
 if ($branch -ne 'main') {
     throw "The checkout is on $branch, not main. Switch to main (git switch main) and run this again."

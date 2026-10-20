@@ -109,7 +109,8 @@ app on the new build only once the build has succeeded, so it also works
 from a streaming session (the browser reconnects after a few seconds). If
 the build fails, the host keeps running the old build. The previous build is
 kept, and `scripts\update.ps1 -Rollback` switches back to it. It needs a
-clean `main` checkout and installs nothing; run `install.ps1` again for new
+clean `main` git clone (a folder from GitHub's Download ZIP can't be
+updated; clone the repository instead) and installs nothing; run `install.ps1` again for new
 build dependencies or drivers.
 
 ## Connecting from outside your network

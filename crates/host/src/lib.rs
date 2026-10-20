@@ -8,6 +8,7 @@ mod media;
 mod names;
 pub mod options;
 mod platform;
+mod scale;
 pub mod serve;
 mod uploads;
 

@@ -35,7 +35,7 @@ use std::time::{Duration, Instant};
 use str0m::net::Protocol;
 use tokio::sync::{Notify, mpsc, oneshot};
 use ws_diag::diag;
-use ws_proto::{AudioPacket, EncodedFrame, channels, mono_now};
+use ws_proto::{AudioPacket, EncodedFrame, SendBacklog, channels, mono_now};
 
 use crate::net::{Net, Packet, SharedFilter};
 use crate::session::{Session, Step, VideoWrite};
@@ -279,6 +279,8 @@ struct Shared {
     trouble: TroubleCounts,
     events: mpsc::Sender<TransportEvent>,
     input: Mutex<InputRoute>,
+    /// Age of the oldest unsent video packet, for the encoder.
+    backlog: SendBacklog,
 }
 
 impl Shared {
@@ -432,6 +434,7 @@ impl Transport {
             trouble: TroubleCounts::default(),
             events: events_tx,
             input: Mutex::default(),
+            backlog: SendBacklog::default(),
         });
         let driver = Driver {
             config,
@@ -565,6 +568,13 @@ impl Transport {
     /// Stop handing input to the sink; it waits for the next one.
     pub fn clear_input_sink(&self) {
         self.shared.input_route().sink = None;
+    }
+
+    /// How far behind the video send queue is, updated as it sends. The
+    /// encoder skips frames while it is behind rather than send frames that
+    /// would only be dropped as late.
+    pub fn send_backlog(&self) -> SendBacklog {
+        self.shared.backlog.clone()
     }
 
     /// Change the most the bandwidth estimate probes up to (see
@@ -774,10 +784,15 @@ impl Driver {
         }
         if !alive {
             self.end_session();
-        } else if let Some(s) = &self.session {
-            self.shared
-                .connected
-                .store(s.is_connected(), Ordering::Relaxed);
+        } else if let Some(s) = &mut self.session {
+            let connected = s.is_connected();
+            self.shared.connected.store(connected, Ordering::Relaxed);
+            let age = if connected {
+                s.queue_diag(Instant::now()).0
+            } else {
+                Duration::ZERO
+            };
+            self.shared.backlog.set(age);
         }
         deadline
     }
@@ -809,6 +824,7 @@ impl Driver {
             }
         }
         self.shared.connected.store(false, Ordering::Relaxed);
+        self.shared.backlog.set(Duration::ZERO);
         self.shared.input_route().reset();
         self.filter.lock().expect("filter lock").reset(None);
         self.confirmed.clear();

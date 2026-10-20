@@ -40,6 +40,25 @@ pub enum VideoQuality {
     Clarity,
 }
 
+/// How long the oldest video packet has waited in the transport's send
+/// queue, shared with the encoder: a frame encoded while the queue is
+/// behind would only be dropped as late, and the frames repairing that drop
+/// cost more bits still, so the encoder skips a frame instead. Cheap to
+/// clone; zero until the transport sets it.
+#[derive(Debug, Clone, Default)]
+pub struct SendBacklog(std::sync::Arc<std::sync::atomic::AtomicU64>);
+
+impl SendBacklog {
+    pub fn set(&self, age: std::time::Duration) {
+        self.0
+            .store(age.as_micros() as u64, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn get(&self) -> std::time::Duration {
+        std::time::Duration::from_micros(self.0.load(std::sync::atomic::Ordering::Relaxed))
+    }
+}
+
 /// Encoder settings requested by the client or chosen by the host.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

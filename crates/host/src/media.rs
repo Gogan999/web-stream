@@ -598,7 +598,9 @@ impl Media {
         let Some(live) = &mut self.live else {
             return Ok(());
         };
-        let pipeline = block_in_place(|| VideoPipeline::start(info.id, config.clone(), tx))?;
+        let backlog = self.transport.send_backlog();
+        let pipeline =
+            block_in_place(|| VideoPipeline::start(info.id, config.clone(), tx, backlog))?;
         self.generation += 1;
         tokio::spawn(forward_video(
             rx,

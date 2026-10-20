@@ -810,6 +810,11 @@ impl Media {
             ClientControl::Ping { client_time_ms } => {
                 self.reply(HostControl::Pong { client_time_ms });
             }
+            ClientControl::SecureAttention => {
+                if let Err(e) = crate::sas::request() {
+                    self.error(e);
+                }
+            }
         }
     }
 

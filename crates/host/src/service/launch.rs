@@ -109,7 +109,15 @@ impl Child {
 }
 
 /// Starts `exe args` as SYSTEM in `session`, its output appended to `log`.
-pub fn spawn(session: u32, exe: &Path, args: &[String], log: &Path) -> anyhow::Result<Child> {
+/// It inherits the handles in `inherit` (which must be inheritable) and no
+/// others.
+pub fn spawn(
+    session: u32,
+    exe: &Path,
+    args: &[String],
+    log: &Path,
+    inherit: &[usize],
+) -> anyhow::Result<Child> {
     let token = host_token(session)?;
     let env = Environment::new(&token)?;
     let log = open_log(log)?;
@@ -139,7 +147,9 @@ pub fn spawn(session: u32, exe: &Path, args: &[String], log: &Path) -> anyhow::R
     let mut desktop = wide(r"winsta0\default");
 
     let attrs = AttributeList::new(1)?;
-    let handles = [log_handle];
+    let handles: Vec<HANDLE> = std::iter::once(log_handle)
+        .chain(inherit.iter().map(|&h| HANDLE(h as *mut _)))
+        .collect();
     // SAFETY: `handles` outlives process creation; the size is its own.
     unsafe {
         UpdateProcThreadAttribute(
@@ -147,7 +157,7 @@ pub fn spawn(session: u32, exe: &Path, args: &[String], log: &Path) -> anyhow::R
             0,
             PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
             Some(handles.as_ptr().cast()),
-            size_of_val(&handles),
+            size_of_val(handles.as_slice()),
             None,
             None,
         )

@@ -25,6 +25,8 @@ mod control;
 #[cfg(windows)]
 mod launch;
 #[cfg(windows)]
+mod sas;
+#[cfg(windows)]
 pub(crate) mod scm;
 
 pub const USAGE: &str = "\
@@ -113,28 +115,54 @@ pub fn random_pipe_name() -> anyhow::Result<String> {
 }
 
 /// The session host's arguments (after the exe), as the service builds
-/// them: the pipe, the installed serve options, and the service's data
-/// folder.
-pub fn session_host_args(pipe: &str, serve_args: &[String], data_dir: &Path) -> Vec<String> {
-    let mut args = vec!["service".into(), "session-host".into(), pipe.into()];
+/// them: the pipe, the Ctrl+Alt+Del event handle the host inherits, the
+/// installed serve options, and the service's data folder.
+pub fn session_host_args(
+    pipe: &str,
+    sas_event: usize,
+    serve_args: &[String],
+    data_dir: &Path,
+) -> Vec<String> {
+    let mut args = vec![
+        "service".into(),
+        "session-host".into(),
+        pipe.into(),
+        sas_event.to_string(),
+    ];
     args.extend(serve_args.iter().cloned());
     args.push("--data-dir".into());
     args.push(data_dir.display().to_string());
     args
 }
 
-/// Splits what follows `service session-host` into the pipe name and the
-/// serve options, checking both.
-pub fn parse_session_host_args(args: &[String]) -> anyhow::Result<(String, ServeOptions)> {
-    let Some((pipe, rest)) = args.split_first() else {
-        bail!("session-host needs a pipe name");
+/// What the session host is started with.
+#[derive(Debug)]
+pub struct SessionHost {
+    pub pipe: String,
+    /// The inherited event the host sets to ask the service for
+    /// Ctrl+Alt+Del; 0 for none.
+    pub sas_event: usize,
+    pub opts: ServeOptions,
+}
+
+/// Parses what follows `service session-host`, checking it.
+pub fn parse_session_host_args(args: &[String]) -> anyhow::Result<SessionHost> {
+    let [pipe, sas_event, rest @ ..] = args else {
+        bail!("session-host needs a pipe name and an event handle");
     };
     if !valid_pipe_name(pipe) {
         bail!("bad control pipe name {pipe:?}");
     }
+    let sas_event = sas_event
+        .parse()
+        .map_err(|_| anyhow::anyhow!("bad event handle {sas_event:?}"))?;
     let opts = ServeOptions::parse(rest)?;
     check_session_host_options(&opts)?;
-    Ok((pipe.clone(), opts))
+    Ok(SessionHost {
+        pipe: pipe.clone(),
+        sas_event,
+        opts,
+    })
 }
 
 pub fn valid_pipe_name(name: &str) -> bool {
@@ -244,11 +272,15 @@ mod imp {
         if !ws_desktop::running_as_system() {
             anyhow::bail!("session-host is started by the web-stream service, not by hand");
         }
-        let (pipe, opts) = super::parse_session_host_args(args)?;
+        let host = super::parse_session_host_args(args)?;
+        if host.sas_event != 0 {
+            let event = host.sas_event;
+            ws_host::sas::install(move || super::sas::request(event));
+        }
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?
-            .block_on(super::control::serve(pipe, opts))
+            .block_on(super::control::serve(host.pipe, host.opts))
     }
 }
 
@@ -307,18 +339,25 @@ mod tests {
         let pipe = random_pipe_name().unwrap();
         assert!(valid_pipe_name(&pipe));
         let dir = Path::new(r"C:\Windows\System32\config\systemprofile\App Data\web-stream");
-        let built = session_host_args(&pipe, &args(&["--port", "9000", "--codec", "av1"]), dir);
+        let built = session_host_args(
+            &pipe,
+            0x1a4,
+            &args(&["--port", "9000", "--codec", "av1"]),
+            dir,
+        );
         assert_eq!(&built[..2], ["service", "session-host"]);
-        let (p, o) = parse_session_host_args(&built[2..]).unwrap();
-        assert_eq!(p, pipe);
-        assert_eq!(o.port, 9000);
-        assert_eq!(o.data_dir, dir);
+        let host = parse_session_host_args(&built[2..]).unwrap();
+        assert_eq!(host.pipe, pipe);
+        assert_eq!(host.sas_event, 0x1a4);
+        assert_eq!(host.opts.port, 9000);
+        assert_eq!(host.opts.data_dir, dir);
+        assert!(parse_session_host_args(&args(&[&pipe, "x"])).is_err());
 
         assert!(parse_session_host_args(&[]).is_err());
         let squat = format!("{PIPE_PREFIX}x");
         assert!(parse_session_host_args(&args(&[&squat])).is_err());
         assert!(!valid_pipe_name(r"\\.\pipe\other"));
-        let uploads = session_host_args(&pipe, &args(&["--allow-upload"]), dir);
+        let uploads = session_host_args(&pipe, 0, &args(&["--allow-upload"]), dir);
         assert!(parse_session_host_args(&uploads[2..]).is_err());
     }
 

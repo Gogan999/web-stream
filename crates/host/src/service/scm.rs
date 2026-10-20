@@ -362,6 +362,8 @@ struct Supervisor {
     exe: PathBuf,
     args: Vec<String>,
     data_dir: PathBuf,
+    /// Set by the host to ask for Ctrl+Alt+Del; 0 if it couldn't be made.
+    sas_event: usize,
     host: Option<Host>,
     backoff: Duration,
     next_start: Instant,
@@ -373,10 +375,21 @@ impl Supervisor {
         std::fs::create_dir_all(&data_dir)
             .with_context(|| format!("create {}", data_dir.display()))?;
         tracing::info!("service started");
+        let sas_event = match super::sas::new_event() {
+            Ok(event) => {
+                super::sas::spawn_sender(event);
+                event
+            }
+            Err(e) => {
+                tracing::error!("Ctrl+Alt+Del won't work: {e:#}");
+                0
+            }
+        };
         Ok(Self {
             exe: std::env::current_exe()?,
             args: SERVE_ARGS.get().cloned().unwrap_or_default(),
             data_dir,
+            sas_event,
             host: None,
             backoff: Duration::ZERO,
             next_start: Instant::now(),
@@ -412,8 +425,13 @@ impl Supervisor {
 
     fn start_host(&mut self, session: u32) {
         let started = super::random_pipe_name().and_then(|pipe| {
-            let args = super::session_host_args(&pipe, &self.args, &self.data_dir);
-            let child = launch::spawn(session, &self.exe, &args, &self.data_dir.join("host.log"))?;
+            let args = super::session_host_args(&pipe, self.sas_event, &self.args, &self.data_dir);
+            let inherit: &[usize] = match self.sas_event {
+                0 => &[],
+                event => &[event],
+            };
+            let log = self.data_dir.join("host.log");
+            let child = launch::spawn(session, &self.exe, &args, &log, inherit)?;
             // For `console`, which checks the pipe is served by this process.
             let file = self.pipe_file();
             std::fs::write(&file, super::pipe_file_contents(&pipe, child.pid))

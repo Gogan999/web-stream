@@ -122,6 +122,11 @@ pub enum ClientControl {
     Ping {
         client_time_ms: f64,
     },
+    /// Ctrl+Alt+Del, which no browser can send as keys: the host asks
+    /// Windows for the secure attention sequence (sign-in and lock screen,
+    /// Task Manager menu). Only a host running as the web-stream service
+    /// can; any other answers with [`HostControl::Error`].
+    SecureAttention,
 }
 
 /// Messages on the reliable `control` data channel, host -> browser.
@@ -268,6 +273,12 @@ pub struct VideoStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn secure_attention_shape() {
+        let msg: ClientControl = serde_json::from_str(r#"{"type":"secureAttention"}"#).unwrap();
+        assert_eq!(msg, ClientControl::SecureAttention);
+    }
 
     #[test]
     fn file_request_is_by_id() {

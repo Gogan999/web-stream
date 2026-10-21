@@ -137,20 +137,43 @@ export class InputCapture {
       this.stageFocused = false;
     }, opt);
 
-    const touch = (e) => e.pointerType === 'touch';
-    v.addEventListener('pointerdown', (e) => { if (touch(e)) this.onTouchDown(e); }, opt);
-    v.addEventListener('pointermove', (e) => {
-      if (!touch(e)) return;
-      // Coalesced events keep a fast swipe's full path; the sum is the same, but the hold/tap
-      // slop check sees every step.
-      const steps = e.getCoalescedEvents?.();
-      const t = performance.now();
-      this.batchTouch(() => {
-        for (const c of steps?.length ? steps : [e]) this.gestures.move(e.pointerId, c.clientX, c.clientY, t);
-      });
-    }, opt);
-    v.addEventListener('pointerup', (e) => { if (touch(e)) this.onTouchUp(e); }, opt);
-    v.addEventListener('pointercancel', (e) => { if (touch(e)) this.gestures.cancel(); }, opt);
+    if ('ontouchstart' in window) {
+      // Touch events where there are any: in WebKit (every iOS browser) only a non-passive
+      // touchstart/touchmove that cancels stops the page's own pinch, and its touch pointer events
+      // get cancelled when a second finger lands. Each touch keeps its target, so no capture is needed.
+      const each = (e, fn) => {
+        e.preventDefault(); // no page zoom or scroll, no synthesized mouse events, no focus change
+        const t = performance.now();
+        this.batchTouch(() => { for (const c of e.changedTouches) fn(c, t); });
+      };
+      const active = { ...opt, passive: false };
+      v.addEventListener('touchstart', (e) => each(e, (c, t) => this.onTouchDown(c.identifier, c.clientX, c.clientY, t)), active);
+      v.addEventListener('touchmove', (e) => each(e, (c, t) => this.gestures.move(c.identifier, c.clientX, c.clientY, t)), active);
+      v.addEventListener('touchend', (e) => each(e, (c, t) => this.onTouchUp(c.identifier, t)), active);
+      v.addEventListener('touchcancel', () => this.gestures.cancel(), opt);
+    } else {
+      const touch = (e) => e.pointerType === 'touch';
+      v.addEventListener('pointerdown', (e) => {
+        if (!touch(e)) return;
+        e.preventDefault(); // no synthesized mouse events, no focus change
+        this.video.setPointerCapture?.(e.pointerId);
+        this.batchTouch(() => this.onTouchDown(e.pointerId, e.clientX, e.clientY, performance.now()));
+      }, opt);
+      v.addEventListener('pointermove', (e) => {
+        if (!touch(e)) return;
+        // Coalesced events keep a fast swipe's full path; the sum is the same, but the hold/tap
+        // slop check sees every step.
+        const steps = e.getCoalescedEvents?.();
+        const t = performance.now();
+        this.batchTouch(() => {
+          for (const c of steps?.length ? steps : [e]) this.gestures.move(e.pointerId, c.clientX, c.clientY, t);
+        });
+      }, opt);
+      v.addEventListener('pointerup', (e) => {
+        if (touch(e)) this.batchTouch(() => this.onTouchUp(e.pointerId, performance.now()));
+      }, opt);
+      v.addEventListener('pointercancel', (e) => { if (touch(e)) this.gestures.cancel(); }, opt);
+    }
     // Touching anything outside the stream (toolbar, settings) hands keys back to the page.
     document.addEventListener('pointerdown', (e) => {
       if (!this.stage.contains(e.target) && e.target !== this.keyTarget) this.touchActive = false;
@@ -257,12 +280,10 @@ export class InputCapture {
     }
   }
 
-  onTouchDown(e) {
-    e.preventDefault(); // no synthesized mouse events, no focus change
-    this.video.setPointerCapture?.(e.pointerId);
+  onTouchDown(id, x, y, t) {
     this.touchActive = true;
     if (this.video.paused) this.video.play().catch(() => {}); // autoplay refused (iOS): a touch starts it
-    this.gestures.down(e.pointerId, e.clientX, e.clientY, performance.now());
+    this.gestures.down(id, x, y, t);
     clearTimeout(this.holdTimer);
     clearTimeout(this.slideTimer);
     const tick = () => this.batchTouch(() => this.gestures.tick(performance.now()));
@@ -270,8 +291,10 @@ export class InputCapture {
     this.holdTimer = setTimeout(tick, HOLD_MS + 10);
   }
 
-  onTouchUp(e) {
-    this.batchTouch(() => this.gestures.up(e.pointerId, performance.now()));
+  onTouchUp(id, t) {
+    // WebKit counts only the end of a touch as the user's go-ahead to play.
+    if (this.video.paused) this.video.play().catch(() => {});
+    this.gestures.up(id, t);
     if (!this.gestures.points.size) {
       clearTimeout(this.holdTimer);
       clearTimeout(this.slideTimer);

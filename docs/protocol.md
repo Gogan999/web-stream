@@ -84,7 +84,7 @@ File data isn't part of the video's bandwidth estimate, so while video streams t
 
 The host opens each file when it is shared and reads only that handle, so renaming or replacing the file later can't change what is sent. On Windows it is opened with read sharing only: other programs can read it but not change or delete it while it is on offer, and a file another program is writing can't be shared.
 
-The browser saves with Chrome's save dialog, writing to disk as the bytes arrive. Without that API (Chrome on Android) it collects the file in memory, up to 512 MiB, and hands it to the browser's downloads.
+The browser saves with Chrome's save dialog, writing to disk as the bytes arrive. Without that API (Firefox, Safari, Chrome on Android), or when the dialog refuses to open (blocked by policy, say), it collects the file in memory, up to 512 MiB, and hands it to the browser's downloads.
 
 ### Browser to host
 

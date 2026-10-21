@@ -126,8 +126,7 @@ export class Files extends EventTarget {
       if (writable) sink = new DiskSink(writable);
     } catch (err) {
       if (err?.name === 'AbortError') return; // the user closed the save dialog
-      this.fail(f, `could not save: ${err.message}`, false);
-      return;
+      // The dialog is blocked (policy, lost gesture, a browser that stubs it): use downloads.
     }
     if (!sink) {
       if (f.size > BLOB_MAX) {
@@ -347,7 +346,7 @@ export class Uploads extends EventTarget {
 }
 
 // Chrome's save dialog, writing as the file arrives; null where there is none (then the file is
-// collected in memory).
+// collected in memory, as it is when the dialog refuses to open).
 function defaultPicker() {
   if (typeof window === 'undefined' || typeof window.showSaveFilePicker !== 'function') return null;
   return async (name) => {

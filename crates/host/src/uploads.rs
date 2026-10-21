@@ -21,11 +21,10 @@ use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
 use tokio::task::{AbortHandle, block_in_place};
 use ws_proto::{
-    FILE_CHUNK_HEADER, FILE_CHUNK_MAX, FILE_WINDOW, FileId, HostControl, parse_file_chunk,
+    FILE_CHUNK_HEADER, FILE_CHUNK_MAX, FILE_WINDOW, FileId, HostControl, names, parse_file_chunk,
 };
 
 use crate::files::FileEvent;
-use crate::names;
 use crate::serve::Event;
 
 /// Largest file accepted.

@@ -3,9 +3,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 use axum::Router;
+use axum::extract::Request;
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{DefaultBodyLimit, State};
-use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
+use axum::middleware::Next;
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use serde_json::json;
@@ -36,6 +38,10 @@ const WS_SEND_TIMEOUT: Duration = Duration::from_secs(5);
 const CSP: &str = "default-src 'self'; connect-src 'self'; img-src 'self' data: blob:; \
                    media-src 'self' blob:; style-src 'self' 'unsafe-inline'; object-src 'none'; \
                    base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
+/// The page asks only for the microphone; nothing it embeds or a script
+/// injected into it may reach the rest.
+const PERMISSIONS_POLICY: &str = "microphone=(self), camera=(), geolocation=(), payment=(), \
+                                  usb=(), serial=(), hid=(), display-capture=()";
 
 /// Things the host should show its user.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -259,26 +265,64 @@ fn router(shared: Arc<Shared>) -> Router {
         None => api.fallback(|| async { Html(PLACEHOLDER) }),
     };
 
-    app.layer(SetResponseHeaderLayer::overriding(
-        header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static(CSP),
-    ))
-    .layer(SetResponseHeaderLayer::overriding(
-        header::X_CONTENT_TYPE_OPTIONS,
-        HeaderValue::from_static("nosniff"),
-    ))
-    .layer(SetResponseHeaderLayer::overriding(
-        header::REFERRER_POLICY,
-        HeaderValue::from_static("no-referrer"),
-    ))
-    .layer(SetResponseHeaderLayer::overriding(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("no-store"),
-    ))
-    .layer(TimeoutLayer::with_status_code(
-        StatusCode::REQUEST_TIMEOUT,
-        REQUEST_TIMEOUT,
-    ))
+    app.layer(axum::middleware::from_fn(no_cross_site_autoconnect))
+        .layer(SetResponseHeaderLayer::overriding(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static(CSP),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            header::X_CONTENT_TYPE_OPTIONS,
+            HeaderValue::from_static("nosniff"),
+        ))
+        // A page another site opens gets no handle on this one, and nothing
+        // here loads into another site's page.
+        .layer(SetResponseHeaderLayer::overriding(
+            HeaderName::from_static("cross-origin-opener-policy"),
+            HeaderValue::from_static("same-origin"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            HeaderName::from_static("cross-origin-resource-policy"),
+            HeaderValue::from_static("same-origin"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            HeaderName::from_static("permissions-policy"),
+            HeaderValue::from_static(PERMISSIONS_POLICY),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            header::REFERRER_POLICY,
+            HeaderValue::from_static("no-referrer"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("no-store"),
+        ))
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            REQUEST_TIMEOUT,
+        ))
+}
+
+/// `?autoconnect` connects as soon as the page loads, which replaces the
+/// live session. A link or redirect from another site must not do that, so
+/// it lands on the plain page instead.
+async fn no_cross_site_autoconnect(req: Request, next: Next) -> Response {
+    if is_cross_site_autoconnect(req.headers(), req.uri()) {
+        return (StatusCode::SEE_OTHER, [(header::LOCATION, "/")]).into_response();
+    }
+    next.run(req).await
+}
+
+fn is_cross_site_autoconnect(headers: &HeaderMap, uri: &axum::http::Uri) -> bool {
+    let autoconnect = uri.query().is_some_and(|q| {
+        q.split('&')
+            .any(|kv| kv.split('=').next() == Some("autoconnect"))
+    });
+    // `none` is a typed URL or a bookmark, `same-origin` the page itself.
+    // Browsers too old to send the header can't be told apart; let them be.
+    let foreign = headers
+        .get("sec-fetch-site")
+        .is_some_and(|v| v != "same-origin" && v != "none");
+    autoconnect && foreign
 }
 
 /// A file of the built-in web client by its URL path, `/` being `index.html`.
@@ -750,6 +794,24 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(header::HOST, HeaderValue::from_str(value).unwrap());
         request_host(&headers)
+    }
+
+    #[test]
+    fn autoconnect_only_from_this_site() {
+        let check = |site: Option<&str>, uri: &str| {
+            let mut headers = HeaderMap::new();
+            if let Some(site) = site {
+                headers.insert("sec-fetch-site", HeaderValue::from_str(site).unwrap());
+            }
+            is_cross_site_autoconnect(&headers, &uri.parse().unwrap())
+        };
+        assert!(check(Some("cross-site"), "/?autoconnect"));
+        assert!(check(Some("same-site"), "/?x=1&autoconnect=1"));
+        assert!(!check(Some("same-origin"), "/?autoconnect"));
+        assert!(!check(Some("none"), "/?autoconnect"));
+        assert!(!check(None, "/?autoconnect"));
+        assert!(!check(Some("cross-site"), "/"));
+        assert!(!check(Some("cross-site"), "/?noautoconnect"));
     }
 
     #[test]

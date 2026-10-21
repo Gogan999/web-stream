@@ -5,7 +5,6 @@ mod cursor;
 mod files;
 mod input;
 mod media;
-mod names;
 pub mod options;
 mod platform;
 pub mod sas;

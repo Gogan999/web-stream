@@ -13,6 +13,7 @@ pub mod control;
 pub mod cursor;
 pub mod display;
 pub mod input;
+pub mod names;
 pub mod signaling;
 pub mod video;
 

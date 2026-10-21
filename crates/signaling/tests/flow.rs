@@ -387,6 +387,8 @@ async fn serves_the_built_in_web_client() {
     let headers = r.headers.to_lowercase();
     assert!(headers.contains("content-type: text/html"));
     assert!(headers.contains("content-security-policy"));
+    assert!(headers.contains("cross-origin-opener-policy: same-origin"));
+    assert!(headers.contains("permissions-policy: microphone=(self), camera=()"));
     let r = request(addr, "GET", "/js/main.js", None, None, "").await;
     assert_eq!(r.status, 200);
     assert!(r.headers.to_lowercase().contains("text/javascript"));

@@ -1,4 +1,4 @@
-//! File names that cross the wire: what to keep of them.
+//! Names that cross the wire (file names, browser names): what to keep of them.
 
 /// Neither a control character nor an invisible formatting one (Unicode
 /// Cf: bidi overrides like U+202E, zero-width marks), which can make

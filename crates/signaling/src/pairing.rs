@@ -229,7 +229,13 @@ fn random_code() -> Result<String, Error> {
 }
 
 fn clean_name(name: &str) -> String {
-    let cleaned: String = name.chars().filter(|c| !c.is_control()).take(64).collect();
+    // The host user reads this name next to the code, so nothing invisible
+    // (bidi overrides, zero-width marks) may make it look like another one.
+    let cleaned: String = name
+        .chars()
+        .filter(|&c| ws_proto::names::printable(c))
+        .take(64)
+        .collect();
     let cleaned = cleaned.trim();
     if cleaned.is_empty() {
         "Unnamed browser".into()
@@ -371,5 +377,12 @@ mod tests {
         p.open(now, 2 * CODE_TTL).unwrap();
         p.start("x", now).unwrap().unwrap();
         assert!(p.start("y", now + CODE_TTL).unwrap().is_ok());
+    }
+
+    #[test]
+    fn device_names_lose_invisible_characters() {
+        assert_eq!(clean_name("Logan\u{202E}enohp\u{200B}\n"), "Loganenohp");
+        assert_eq!(clean_name("\u{2066}\u{FEFF} "), "Unnamed browser");
+        assert_eq!(clean_name("Pixel 9 Café"), "Pixel 9 Café");
     }
 }

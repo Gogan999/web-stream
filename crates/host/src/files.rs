@@ -26,10 +26,9 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 use tokio::task::AbortHandle;
-use ws_proto::{FILE_CHUNK_MAX, FILE_WINDOW, FileId, HostControl, channels, file_chunk};
+use ws_proto::{FILE_CHUNK_MAX, FILE_WINDOW, FileId, HostControl, channels, file_chunk, names};
 use ws_transport::Transport;
 
-use crate::names;
 use crate::serve::Event;
 
 /// Bytes read from disk at a time.

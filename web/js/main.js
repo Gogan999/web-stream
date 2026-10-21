@@ -20,7 +20,7 @@ const ui = {
   cursor: $('cursor'),
   unpair: $('unpair'), pair: $('pair'), deviceName: $('device-name'), pairStart: $('pair-start'),
   pairCode: $('pair-code'), pairConfirm: $('pair-confirm'), pairMsg: $('pair-msg'),
-  resolution: $('resolution'), bitrate: $('bitrate'), fps: $('fps'), quality: $('quality'),
+  resolution: $('resolution'), codec: $('codec'), bitrate: $('bitrate'), fps: $('fps'), quality: $('quality'),
   keyframeScale: $('keyframe-scale'), recoverDrops: $('recover-drops'),
   matchHost: $('match-host'), autotune: $('autotune'), mic: $('mic'),
   audioKbps: $('audio-kbps'), audioFrame: $('audio-frame'),
@@ -162,6 +162,7 @@ function onControl(msg) {
     if (host) {
       host.active = msg.id;
       if (msg.config) host.config = msg.config;
+      showCodec();
       applySettings();
     }
   } else if (msg.type === 'videoStats' && host) {
@@ -227,6 +228,11 @@ const RES_LABELS = { screen: 'Match this screen', native: 'Host native', 2160: '
 fillSelect(ui.resolution, settingsStore.RESOLUTIONS, (v) => RES_LABELS[v]);
 fillSelect(ui.bitrate, ['auto', ...settingsStore.BITRATES_KBPS], (v) => (v === 'auto' ? 'Auto' : `${v / 1000} Mb/s`));
 fillSelect(ui.fps, settingsStore.FRAME_RATES, (v) => String(v));
+const CODEC_LABELS = { h264: 'H.264', h265: 'H.265 (HEVC)', av1: 'AV1' };
+const decodable = settingsStore.decodableCodecs();
+fillSelect(ui.codec, decodable, (v) => CODEC_LABELS[v]);
+// A codec picked in another browser (settings are per origin) may not play in this one.
+if (settings.codec && !decodable.includes(settings.codec)) settings.codec = null;
 fillSelect(ui.quality, settingsStore.QUALITIES, (v) => v[0].toUpperCase() + v.slice(1));
 fillSelect(ui.keyframeScale, settingsStore.KEYFRAME_SCALES, (v) => (v === 1 ? '1x (fastest)' : v === 4 ? '4x (sharpest)' : `${v}x`));
 fillSelect(ui.audioKbps, settingsStore.AUDIO_KBPS, (v) => (v === 'host' ? 'Host setting' : `${v} kb/s`));
@@ -241,6 +247,8 @@ function showSettings() {
     ui.bitrate.append(o);
   }
   ui.resolution.value = settings.resolution;
+  showCodec();
+  ui.mouseMode.value = settings.mouseMode;
   ui.bitrate.value = String(settings.bitrate);
   ui.fps.value = String(settings.fps);
   ui.quality.value = settings.quality;
@@ -251,9 +259,13 @@ function showSettings() {
   ui.audioKbps.value = settings.audioKbps;
   ui.audioFrame.value = settings.audioFrame;
 }
+// The chosen codec, else what the host streams (nothing selected before it says).
+function showCodec() {
+  ui.codec.value = settings.codec ?? host?.config?.codec ?? '';
+}
 showSettings();
 
-for (const [el, key] of [[ui.resolution, 'resolution'], [ui.bitrate, 'bitrate'], [ui.fps, 'fps'], [ui.quality, 'quality'], [ui.keyframeScale, 'keyframeScale']]) {
+for (const [el, key] of [[ui.resolution, 'resolution'], [ui.codec, 'codec'], [ui.bitrate, 'bitrate'], [ui.fps, 'fps'], [ui.quality, 'quality'], [ui.keyframeScale, 'keyframeScale']]) {
   el.addEventListener('change', () => {
     settings[key] = key === 'fps' || key === 'keyframeScale' ? Number(el.value) : el.value;
     settingsStore.save(settings);
@@ -377,7 +389,7 @@ async function autoTune() {
     onProgress: (text) => setStatus(text, 'connecting'),
   });
   ui.autotune.textContent = 'Stop auto-tune';
-  for (const el of [ui.resolution, ui.bitrate, ui.fps, ui.quality, ui.keyframeScale, ui.recoverDrops, ui.display, ui.matchHost]) el.disabled = true;
+  for (const el of [ui.resolution, ui.codec, ui.bitrate, ui.fps, ui.quality, ui.keyframeScale, ui.recoverDrops, ui.display, ui.matchHost]) el.disabled = true;
   try {
     const { config, summary } = await tuning.run();
     settings.bitrate = String(config.bitrateKbps);
@@ -391,7 +403,7 @@ async function autoTune() {
     tuning = null;
     tuneWindow = null;
     ui.autotune.textContent = 'Auto-tune (test)';
-    for (const el of [ui.resolution, ui.bitrate, ui.fps, ui.quality, ui.keyframeScale, ui.recoverDrops, ui.matchHost]) el.disabled = false;
+    for (const el of [ui.resolution, ui.codec, ui.bitrate, ui.fps, ui.quality, ui.keyframeScale, ui.recoverDrops, ui.matchHost]) el.disabled = false;
     ui.display.disabled = ui.display.options.length < 2;
     showSettings();
     if (session) applySettings();
@@ -493,6 +505,8 @@ function stopStats() {
 
 function setMouseMode(mode) {
   ui.mouseMode.value = mode;
+  settings.mouseMode = mode;
+  settingsStore.save(settings);
   input?.setMode(mode);
   cursor?.setMode(mode);
   sendCursorMode();

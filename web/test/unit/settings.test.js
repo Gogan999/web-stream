@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { autoKbps, fitToDisplay, streamSize, videoConfig, sameConfig, audioConfig, load, save, DEFAULTS } from '../../js/settings.js';
+import { autoKbps, fitToDisplay, streamSize, videoConfig, sameConfig, audioConfig, load, save, sanitize, decodableCodecs, DEFAULTS } from '../../js/settings.js';
 
 test('auto bitrate is 20 Mb/s at 1080p60 and grows with pixel rate', () => {
   assert.equal(autoKbps(1920, 1080, 60), 20000);
@@ -92,4 +92,25 @@ test('audio settings become setAudioConfig; host keeps its own by default', () =
   assert.deepEqual(audioConfig({ ...DEFAULTS, audioKbps: '256', audioFrame: '20' }), { type: 'setAudioConfig', bitrateKbps: 256, frameMs: 20 });
   // Junk falls back to the host's setting.
   assert.deepEqual(audioConfig({ audioKbps: '9999', audioFrame: '15' }), { type: 'setAudioConfig', bitrateKbps: null, frameMs: null });
+});
+
+test('the chosen codec replaces the host one; no choice keeps it', () => {
+  const opts = { screen: { width: 1920, height: 1080 }, display: null, codec: 'h264' };
+  assert.equal(videoConfig({ ...DEFAULTS }, opts).codec, 'h264');
+  assert.equal(videoConfig({ ...DEFAULTS, codec: 'av1' }, opts).codec, 'av1');
+  assert.equal(sanitize({ codec: 'vp9' }).codec, null);
+  assert.equal(sanitize({ codec: 'h265' }).codec, 'h265');
+});
+
+test('mouse mode is remembered and checked', () => {
+  assert.equal(sanitize({}).mouseMode, 'relative');
+  assert.equal(sanitize({ mouseMode: 'absolute' }).mouseMode, 'absolute');
+  assert.equal(sanitize({ mouseMode: 'other' }).mouseMode, 'relative');
+});
+
+test('only codecs the browser decodes are offered', () => {
+  const receiver = (mimes) => ({ getCapabilities: () => ({ codecs: mimes.map((mimeType) => ({ mimeType })) }) });
+  assert.deepEqual(decodableCodecs(receiver(['video/VP8', 'video/H264', 'video/AV1'])), ['h264', 'av1']);
+  assert.deepEqual(decodableCodecs(receiver(['video/h265', 'video/H264'])), ['h264', 'h265']);
+  assert.deepEqual(decodableCodecs(undefined), ['h264', 'h265', 'av1']);
 });

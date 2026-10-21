@@ -40,11 +40,14 @@ The window shows:
   in the browser appears here in large digits, and the window comes forward
   by itself when a browser asks for one. **Forget paired browsers** removes
   every paired browser;
-- **Settings**: port, ICE-TCP fallback, public addresses, the web client
-  folder, the display to stream first, codec, size, frame rate, bitrate cap,
-  quality, game audio, the browser mic device and letting the browser change
-  this PC's resolution. **More options** takes any other `ws-host` flag
-  (`--cert a.pem --key b.pem`, `--ip`, `--hostname`; quote paths with
+- **Settings**: port, ICE-TCP fallback and its port, public addresses,
+  host names for the certificate, how long an unused browser stays paired,
+  the web client folder, the display to stream first, codec, size, frame
+  rate, bitrate cap, quality, game audio and the device it comes from, the
+  browser mic device, the gamepad type and letting the browser change this
+  PC's resolution. While hosting, the window lists the ports to forward on
+  the router. **More options** takes any other `ws-host` flag
+  (`--cert a.pem --key b.pem`, `--ip`, `--allow-origin`; quote paths with
   spaces). **Save and restart** applies them; a browser that is streaming is
   disconnected and can reconnect. **Copy command line** gives the same host
   as a `ws-host` command;
@@ -132,8 +135,10 @@ media port is not forwarded or the firewall is blocking it.
 Capture, game audio, the mic and input start when a browser connects and
 stop when it leaves; dropping the session releases every held key and
 unplugs the virtual gamepads. The encoder follows the connection's bandwidth
-estimate, up to `--kbps` or the bitrate chosen in the browser. If the browser
-can't decode `--codec`, the host falls back to H.264 and says so in the
+estimate, up to `--kbps` or the bitrate chosen in the browser. The codec is
+`--codec` unless the browser picks one (Codec in its settings). If the
+browser can't decode it, or this PC's GPU can't encode it (AV1 needs an RTX
+40 series or newer), the host falls back to H.264 and says so in the
 browser.
 
 `--quality` (or Quality in the browser) sets how hard NVENC works on each
@@ -166,8 +171,9 @@ Without it the host still streams; gamepad messages are dropped and the log
 says "ViGEmBus driver is not installed". ViGEmBus is no longer developed but
 its last release works on Windows 10 and 11.
 
-Browser gamepads appear as Xbox 360 controllers by default (`GamepadKind`
-in `ws-input` switches to DualShock 4). Rumble is supported on Xbox 360 pads.
+Browser gamepads appear as Xbox 360 controllers by default; `--gamepad ds4`
+(or Gamepads in the tray app's settings) plugs in DualShock 4 controllers
+instead. Rumble is supported on Xbox 360 pads.
 
 ## Microphone: a virtual audio cable
 

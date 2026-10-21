@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, bail};
+use ws_input::GamepadKind;
 use ws_proto::{DisplayId, VideoCodec, VideoConfig, VideoQuality};
 
 pub const USAGE: &str = "\
@@ -37,6 +38,7 @@ serve options:
                        Windows default output (follows it when it changes)
   --audio-kbps K       game audio Opus bitrate, 32-510, default 128
   --audio-frame-ms 10|20  game audio Opus frame; 20 sounds better, 10 ms sooner
+  --gamepad xbox360|ds4  virtual controller for browser gamepads, default xbox360
   --allow-resolution-change  let the browser change the streamed display's
                        resolution to match its screen (undone on disconnect)
   --allow-upload       let the browser send files to this PC; they are saved
@@ -77,6 +79,8 @@ pub struct MediaOptions {
     pub audio_kbps: u32,
     /// Opus frame length, one of `ws_audio::FRAME_MS`.
     pub audio_frame_ms: u32,
+    /// Virtual controller plugged in for each browser gamepad.
+    pub gamepad: GamepadKind,
     /// The browser may change the host display's resolution.
     pub allow_resolution_change: bool,
     /// Where files from the browser are saved; `None` refuses them.
@@ -108,6 +112,7 @@ impl ServeOptions {
             audio_device: None,
             audio_kbps: DEFAULT_AUDIO_KBPS,
             audio_frame_ms: 10,
+            gamepad: GamepadKind::Xbox360,
             allow_resolution_change: false,
             upload_dir: None,
         };
@@ -156,6 +161,7 @@ impl ServeOptions {
                 "--audio-frame-ms" => {
                     media.audio_frame_ms = value()?.parse().context("--audio-frame-ms")?
                 }
+                "--gamepad" => media.gamepad = parse_gamepad(value()?)?,
                 "--allow-resolution-change" => media.allow_resolution_change = true,
                 "--allow-upload" => allow_upload = true,
                 "--upload-dir" => upload_dir = Some(PathBuf::from(value()?)),
@@ -250,6 +256,14 @@ pub fn parse_quality(s: &str) -> anyhow::Result<VideoQuality> {
     })
 }
 
+pub fn parse_gamepad(s: &str) -> anyhow::Result<GamepadKind> {
+    Ok(match s {
+        "xbox360" | "xbox" => GamepadKind::Xbox360,
+        "ds4" | "dualshock4" => GamepadKind::DualShock4,
+        g => bail!("unknown gamepad {g}: xbox360 or ds4"),
+    })
+}
+
 pub fn parse_size(s: &str) -> anyhow::Result<(u32, u32)> {
     let (w, h) = s.split_once('x').context("size is WxH")?;
     Ok((w.parse()?, h.parse()?))
@@ -296,6 +310,12 @@ mod tests {
         assert_eq!(o.media.audio_device, None);
         assert_eq!(o.media.audio_kbps * 1000, ws_audio::DEFAULT_BITRATE);
         assert_eq!(o.media.audio_frame_ms, 10);
+        assert_eq!(o.media.gamepad, GamepadKind::Xbox360);
+        assert_eq!(
+            parse(&["--gamepad", "ds4"]).unwrap().media.gamepad,
+            GamepadKind::DualShock4
+        );
+        assert!(parse(&["--gamepad", "wii"]).is_err());
         assert_eq!(
             parse(&["--audio-frame-ms", "20"])
                 .unwrap()

@@ -16,7 +16,7 @@ use std::sync::{Arc, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use ws_input::{DisplayRect, InputHandler};
+use ws_input::{DisplayRect, GamepadKind, InputHandler};
 use ws_proto::{GamepadState, HostControl, InputEvent, MAX_GAMEPADS};
 
 use crate::platform;
@@ -139,10 +139,12 @@ fn is_motion(event: &InputEvent) -> bool {
 }
 
 impl InputThread {
+    /// `gamepad` is the virtual controller browser gamepads become.
     /// `rumble` is called from another thread with messages for the
     /// `control` channel.
     pub fn start(
         display: Option<DisplayRect>,
+        gamepad: GamepadKind,
         rumble: impl Fn(HostControl) + Send + Sync + 'static,
     ) -> std::io::Result<Self> {
         // Bounded by MAX_BACKLOG events, counted rather than by the
@@ -152,7 +154,7 @@ impl InputThread {
         let thread_backlog = backlog.clone();
         let thread = std::thread::Builder::new()
             .name("ws-input".into())
-            .spawn(move || run(rx, &thread_backlog, display, rumble))?;
+            .spawn(move || run(rx, &thread_backlog, display, gamepad, rumble))?;
         Ok(Self {
             tx: Some(Arc::new(Queue { tx, backlog })),
             thread: Some(thread),
@@ -197,9 +199,11 @@ fn run(
     rx: Receiver<Msg>,
     backlog: &Backlog,
     display: Option<DisplayRect>,
+    gamepad: GamepadKind,
     rumble: impl Fn(HostControl) + Send + Sync + 'static,
 ) {
     let mut handler = InputHandler::new(platform::input_sink(rumble));
+    handler.set_gamepad_kind(gamepad);
     if let Some(rect) = display {
         platform::set_display_rect(handler.sink_mut(), rect);
     }
@@ -335,7 +339,7 @@ mod tests {
 
     #[test]
     fn a_held_sink_does_not_keep_the_thread_alive() {
-        let thread = InputThread::start(None, |_| {}).unwrap();
+        let thread = InputThread::start(None, GamepadKind::default(), |_| {}).unwrap();
         let sink = thread.sink();
         let key = InputEvent::Key {
             usage: 4,

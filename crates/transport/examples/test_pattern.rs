@@ -79,9 +79,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    // Input channel messages skip the event queue and go to the input sink
+    // (see Transport::set_input_sink). A sink must return at once, so it
+    // queues them for this task to echo. It doesn't learn the channel; the
+    // test sends `hi-<channel>`, so reply on the channel the message names.
+    let (input_tx, mut input_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     let echo = transport.clone();
     tokio::spawn(async move {
+        while let Some(data) = input_rx.recv().await {
+            let Some(channel) = [ws_proto::channels::INPUT, ws_proto::channels::INPUT_MOTION]
+                .into_iter()
+                .find(|c| data.strip_prefix(b"hi-") == Some(c.as_bytes()))
+            else {
+                continue;
+            };
+            let mut reply = b"echo:".to_vec();
+            reply.extend_from_slice(&data);
+            let _ = echo.send_data(channel, false, reply).await;
+        }
+    });
+
+    let echo = transport.clone();
+    tokio::spawn(async move {
+        let mut transitions = 0;
         while let Some(ev) = transport_events.recv().await {
+            if matches!(ev, TransportEvent::Connected | TransportEvent::Disconnected) {
+                transitions += 1;
+            }
+            if ev == TransportEvent::Connected {
+                let input_tx = input_tx.clone();
+                let sink = Box::new(move |data: &[u8]| {
+                    let _ = input_tx.send(data.to_vec());
+                });
+                echo.set_input_sink(sink, transitions);
+            }
             match ev {
                 // rav1e can't skip a dropped frame; restart from a keyframe.
                 TransportEvent::KeyframeNeeded | TransportEvent::FramesLost(_) => {

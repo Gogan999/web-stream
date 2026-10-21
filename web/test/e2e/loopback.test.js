@@ -229,6 +229,7 @@ test('client streams from mock host, sends input and switches display', { timeou
   // Clicking the stream closed the dropdown. Stats overlay fills in.
   assert.equal(await client.isVisible('#more'), false);
   await client.click('#more-toggle');
+  await client.selectOption('#stats-level', 'detailed');
   await client.click('#stats-toggle');
   await client.keyboard.press('Escape');
   assert.equal(await client.isVisible('#more'), false);

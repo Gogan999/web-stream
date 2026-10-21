@@ -46,7 +46,10 @@ Pairing and signaling: `docs/signaling.md` (transport). Data channel messages: [
   - **Auto-tune (test)** tries bitrates from 10 to 150 Mb/s, then Clarity and Balanced, about 7 s each, and keeps the best that streams without freezes, drops, loss, or slow encode/decode, minus 15% headroom. Run it while something moves on screen. Click again to stop.
 - **Files (n)** appears next to Settings when the host shares files. Each row has **Save**, which asks where to save and writes the file as it arrives (on phones the file goes to downloads, up to 512 MiB), and **Cancel** while it runs. Nothing downloads until you click Save. The list empties when the session ends.
 - When the host lets the browser send it files, the Files panel also has **Send files…**, and files dropped on the page go too. They're sent one at a time; each row says the name the host saved it under.
-- The stats overlay's last two lines are the host's side: encoder bitrate / ceiling, bandwidth estimate, encode time and keyframe requests.
+- **Stats** shows the overlay; **Stats level** (or Ctrl+Alt+Shift+L, which also shows it) picks how much:
+  - *Essential* (default): `OK`, or warnings in yellow/red, worst first: reduced resolution (host scaled down), reduced bitrate (with the network estimate), slow connection (round trip 80 ms+), lossy connection (1%+), TCP fallback or TURN relay in use, frozen picture, frames dropped by the browser or host, keyframe repairs, fewer frames shown than the host sends, slow decode or encode. Each stays up 4 s after it was last seen. Then resolution, fps, bitrate, round trip, route and latency estimate.
+  - *Detailed*: every browser figure, then the host's side (encoder bitrate / ceiling, bandwidth estimate, encode time, keyframe requests and why).
+  - *Debug*: adds the ICE route, the config the host runs, running totals and the host's raw `videoStats`.
 - URL option: `?autoconnect` connects on load when paired.
 
 ## Phones and tablets

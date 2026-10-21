@@ -118,6 +118,29 @@ test('phone: touch input, on-screen keyboard and small-screen toolbar', { timeou
   assert.equal(abs.ch, 'input');
   assert.ok(got.indexOf(abs) < got.findIndex((e) => e.type === 'mouse-button'));
 
+  // A real pinch: the first finger slides before the second lands. Still a zoom, no drag on the host.
+  await clearLog();
+  await touch('touchStart', [{ x: cx - 40, y: cy, id: 1 }]);
+  await touch('touchMove', [{ x: cx - 60, y: cy, id: 1 }]);
+  await touch('touchStart', [{ x: cx - 60, y: cy, id: 1 }, { x: cx + 40, y: cy, id: 2 }]);
+  for (let i = 1; i <= 8; i++) await touch('touchMove', [{ x: cx - 60 - i * 10, y: cy, id: 1 }, { x: cx + 40 + i * 10, y: cy, id: 2 }]);
+  await touch('touchEnd', []);
+  await client.waitForTimeout(200);
+  assert.ok(!(await inputs()).some((e) => e.type === 'mouse-button'), 'no drag on the host');
+  assert.equal(await client.isVisible('#zoom-reset'), true);
+  // Zoomed in, a tap still lands on the host pixel under the finger.
+  const vb = await client.locator('#video').boundingBox();
+  const vw = await client.evaluate(() => [document.getElementById('video').videoWidth, document.getElementById('video').videoHeight]);
+  const fit = Math.min(vb.width / vw[0], vb.height / vw[1]);
+  const pic = { left: vb.x + (vb.width - vw[0] * fit) / 2, top: vb.y + (vb.height - vw[1] * fit) / 2, w: vw[0] * fit, h: vw[1] * fit };
+  await clearLog();
+  await client.touchscreen.tap(cx + 30, cy + 20);
+  await host.waitForFunction(() => window.mockLog.some((e) => e.type === 'mouse-button' && !e.down));
+  const zabs = (await inputs()).find((e) => e.type === 'mouse-abs');
+  const want = { x: (cx + 30 - pic.left) / pic.w * 65535, y: (cy + 20 - pic.top) / pic.h * 65535 };
+  assert.ok(Math.abs(zabs.x - want.x) < 300 && Math.abs(zabs.y - want.y) < 300, JSON.stringify({ zabs, want }));
+  await client.tap('#zoom-reset');
+
   // On-screen keyboard: text typed by an IME (no key codes) arrives as key presses, with Shift.
   await clearLog();
   await client.tap('#kbd-toggle');

@@ -4,7 +4,7 @@ import * as P from './protocol.js';
 import { hidUsage } from './keymap.js';
 import { toXInput, sameState } from './gamepad.js';
 import { CHANNELS } from './session.js';
-import { TouchGestures, HOLD_MS } from './touch.js';
+import { TouchGestures, HOLD_MS, SECOND_FINGER_MS } from './touch.js';
 
 const GAMEPAD_KEEPALIVE_MS = 100;
 const MAX_PADS = 4;
@@ -59,6 +59,7 @@ export class InputCapture {
     this.touchActive = false; // the stream was touched last, so keys from a paired keyboard go to it
     this.touchRest = { x: 0, y: 0 }; // sub-pixel trackpad motion not yet sent
     this.holdTimer = 0;
+    this.slideTimer = 0;
     this.gestures = new TouchGestures({
       move: (dx, dy) => this.touchMove(dx, dy),
       moveTo: (x, y, reliable) => this.touchMoveTo(x, y, reliable),
@@ -143,8 +144,9 @@ export class InputCapture {
       // Coalesced events keep a fast swipe's full path; the sum is the same, but the hold/tap
       // slop check sees every step.
       const steps = e.getCoalescedEvents?.();
+      const t = performance.now();
       this.batchTouch(() => {
-        for (const c of steps?.length ? steps : [e]) this.gestures.move(e.pointerId, c.clientX, c.clientY);
+        for (const c of steps?.length ? steps : [e]) this.gestures.move(e.pointerId, c.clientX, c.clientY, t);
       });
     }, opt);
     v.addEventListener('pointerup', (e) => { if (touch(e)) this.onTouchUp(e); }, opt);
@@ -184,6 +186,7 @@ export class InputCapture {
     clearInterval(this.padTimer);
     clearTimeout(this.motionTimer);
     clearTimeout(this.holdTimer);
+    clearTimeout(this.slideTimer);
     if (this.locked) document.exitPointerLock();
   }
 
@@ -261,12 +264,18 @@ export class InputCapture {
     if (this.video.paused) this.video.play().catch(() => {}); // autoplay refused (iOS): a touch starts it
     this.gestures.down(e.pointerId, e.clientX, e.clientY, performance.now());
     clearTimeout(this.holdTimer);
-    this.holdTimer = setTimeout(() => this.gestures.tick(performance.now()), HOLD_MS + 10);
+    clearTimeout(this.slideTimer);
+    const tick = () => this.batchTouch(() => this.gestures.tick(performance.now()));
+    this.slideTimer = setTimeout(tick, SECOND_FINGER_MS + 5);
+    this.holdTimer = setTimeout(tick, HOLD_MS + 10);
   }
 
   onTouchUp(e) {
-    this.gestures.up(e.pointerId, performance.now());
-    if (!this.gestures.points.size) clearTimeout(this.holdTimer);
+    this.batchTouch(() => this.gestures.up(e.pointerId, performance.now()));
+    if (!this.gestures.points.size) {
+      clearTimeout(this.holdTimer);
+      clearTimeout(this.slideTimer);
+    }
   }
 
   // Coalesced touch steps go out as one motion message and one wheel message per event.
@@ -357,6 +366,7 @@ export class InputCapture {
   releaseAll() {
     this.gestures.reset();
     clearTimeout(this.holdTimer);
+    clearTimeout(this.slideTimer);
     this.heldKeys.clear();
     this.onReleaseAll?.();
     this.motion = { dx: 0, dy: 0, abs: null };

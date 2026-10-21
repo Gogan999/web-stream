@@ -63,11 +63,12 @@ function toDataUrl({ width, height, rgba }) {
 }
 
 export class CursorView {
-  constructor({ video, overlay, displaySize, onPlace = null }) {
+  constructor({ video, overlay, displaySize, onPlace = null, zoom = () => 1 }) {
     this.video = video;
     this.overlay = overlay; // an <img> over the video
     this.displaySize = displaySize; // () => { width, height } of the streamed display
     this.onPlace = onPlace; // (x, y) where the overlay's hotspot was drawn, in the video's parent's px
+    this.zoom = zoom; // () => how much the video's parent is scaled (zoom.js); the pointer isn't
     this.images = new Map(); // id -> { url, width, height, hotX, hotY }, for this session
     this.kind = 'default';
     this.id = null;
@@ -125,10 +126,16 @@ export class CursorView {
     if (o.getAttribute('src') !== image.url) o.src = image.url;
     o.style.width = `${box.width}px`;
     o.style.height = `${box.height}px`;
-    o.style.transform = `translate(${this.video.offsetLeft + box.left}px, ${this.video.offsetTop + box.top}px)`;
+    // Zoomed in, the pointer keeps its size on screen: scaled back down around its hotspot.
+    const left = this.video.offsetLeft + box.left;
+    const top = this.video.offsetTop + box.top;
+    const hx = left + image.hotX * box.width / image.width;
+    const hy = top + image.hotY * box.height / image.height;
+    const k = 1 / (this.zoom() || 1);
+    o.style.transform = k === 1 ? `translate(${left}px, ${top}px)`
+      : `translate(${hx}px, ${hy}px) scale(${k}) translate(${left - hx}px, ${top - hy}px)`;
     o.hidden = false;
-    this.onPlace?.(this.video.offsetLeft + box.left + image.hotX * box.width / image.width,
-      this.video.offsetTop + box.top + image.hotY * box.height / image.height);
+    this.onPlace?.(hx, hy);
   }
 
   stop() {

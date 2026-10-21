@@ -113,6 +113,18 @@ clean `main` git clone (a folder from GitHub's Download ZIP can't be
 updated; clone the repository instead) and installs nothing; run `install.ps1` again for new
 build dependencies or drivers.
 
+To update from a browser, turn on "let the browser update and restart this
+host" in the tray app's settings (`--allow-remote-update`). The browser's
+Settings then has **Update host** (under Other), which asks for confirmation
+and runs the same `update.ps1` on the host. The stream keeps running during
+the build and drops for a few seconds when the host restarts; the browser
+shows the result if there was nothing to update or the build failed, and
+the script's output is in `update.log` in `%LOCALAPPDATA%\web-stream`. Only
+paired browsers can reach it, it is off by default, and the browser can't
+choose what is built: it always builds `main` from the clone the host runs
+from. The console host and the service can't restart themselves, so they
+refuse it.
+
 ## Connecting from outside your network
 
 1. On the router, forward TCP 8443, UDP 8443 and TCP 8444 to this PC, to the

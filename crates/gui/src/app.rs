@@ -486,6 +486,17 @@ impl App {
                     );
                 });
                 ui.end_row();
+                ui.label("Updates");
+                ui.checkbox(
+                    &mut d.allow_remote_update,
+                    "let the browser update and restart this host",
+                )
+                .on_hover_text(
+                    "Adds \"Update host\" to the browser's settings: it runs \
+                     scripts\\update.ps1 here (pull main, build, restart). Only paired \
+                     browsers can use it",
+                );
+                ui.end_row();
                 ui.label("More options");
                 ui.add(
                     egui::TextEdit::singleline(&mut d.extra_args)

@@ -47,6 +47,9 @@ fn run() -> anyhow::Result<()> {
     if !win::single_instance() {
         return Ok(());
     }
+    // update.ps1 restarts the tray app, so a browser may ask for an update
+    // (when the settings allow it).
+    ws_host::update::enable();
 
     let settings = match settings::Settings::load(&data_dir) {
         Ok(s) => s,

@@ -11,6 +11,7 @@ mod platform;
 pub mod sas;
 mod scale;
 pub mod serve;
+pub mod update;
 mod uploads;
 
 pub use platform::audio_devices;

@@ -61,6 +61,9 @@ JSON text, `ws-proto` `ClientControl` / `HostControl`. The client uses:
 | browser → host | `{"type":"setCursorPositions","enabled":true}` when the channel opens and when the mouse mode changes: `true` in relative mode, where the browser draws the pointer. Off until asked. |
 | host → browser | `{"type":"cursorPosition","x":812,"y":440}`: the pointer's hotspot in host pixels from the streamed display's top-left (outside the display when it is on another one). Sent on change while the pointer shows and positions are enabled; only the newest matters (the host keeps just the latest and skips any it can't write). |
 | browser → host | `{"type":"secureAttention"}`: Ctrl+Alt+Del, which a browser can't send as keys. The host running as the web-stream service asks Windows for it; any other host answers with an `error`. |
+| host → browser | `{"type":"remoteUpdate","enabled":true}` when the channel opens: whether this browser may update and restart the host. Only the tray app started with `--allow-remote-update` ("let the browser update and restart this host") says `true`. |
+| browser → host | `{"type":"updateHost"}` runs `scripts\update.ps1` from the git clone the running host was built in (pull `main`, build beside the running host, restart the tray app). The browser chooses nothing about what is built. One update at a time; refused with an `error` when not enabled. |
+| host → browser | `{"type":"updateStatus","state":"started","message":"…"}`. After `started` the host restarts once the build succeeds, which drops the session; the browser reconnects to the new build. `finished` (nothing to update) or `failed` (the old build keeps running) come instead when the script ends without a restart. The script's output is in `update.log` in the host's data dir. |
 
 A display switch changes resolution mid-stream; the client handles that without renegotiation.
 

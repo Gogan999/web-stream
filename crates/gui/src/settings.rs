@@ -42,6 +42,9 @@ pub struct Settings {
     pub allow_upload: bool,
     /// Where they go; empty: `Downloads\web-stream`.
     pub upload_dir: String,
+    /// Let a paired browser update the host to the latest `main` and
+    /// restart it (`scripts\update.ps1`).
+    pub allow_remote_update: bool,
     /// More `ws-host` options, for what the window has no field for.
     pub extra_args: String,
     /// Start hosting as soon as the app opens.
@@ -70,6 +73,7 @@ impl Default for Settings {
             allow_resolution_change: false,
             allow_upload: false,
             upload_dir: String::new(),
+            allow_remote_update: false,
             extra_args: String::new(),
             start_hosting: true,
         }
@@ -150,6 +154,9 @@ impl Settings {
             if !dir.is_empty() {
                 args.extend(["--upload-dir".into(), dir.into()]);
             }
+        }
+        if self.allow_remote_update {
+            args.push("--allow-remote-update".into());
         }
         args.extend(split_args(&self.extra_args)?);
         Ok(args)
@@ -232,6 +239,7 @@ mod tests {
             allow_resolution_change: true,
             allow_upload: true,
             upload_dir: "D:\\Received files".into(),
+            allow_remote_update: true,
             audio_kbps: 256,
             audio_frame_ms: 20,
             extra_args: r#"--hostname home.example.net --data-dir "C:\some dir""#.into(),
@@ -248,6 +256,15 @@ mod tests {
             Some(std::path::PathBuf::from("D:\\Received files"))
         );
         assert_eq!((o.media.audio_kbps, o.media.audio_frame_ms), (256, 20));
+        assert!(o.media.update_log.is_some());
+        assert_eq!(
+            Settings::default()
+                .serve_options()
+                .unwrap()
+                .media
+                .update_log,
+            None
+        );
         assert_eq!(o.hostnames, vec!["home.example.net".to_string()]);
         assert_eq!(o.data_dir, std::path::PathBuf::from(r"C:\some dir"));
         assert!(s.command_line().unwrap().contains(r#""C:\some dir""#));

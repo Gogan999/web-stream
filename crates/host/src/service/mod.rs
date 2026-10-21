@@ -59,6 +59,11 @@ const REFUSED: &[(&str, &str)] = &[
     ),
     ("--upload-dir", "the service can't receive files yet"),
     (
+        "--allow-remote-update",
+        "the service runs its own copy of ws-host.exe from Program Files; update it on the PC \
+         with scripts\\update.ps1",
+    ),
+    (
         "--pair",
         "it would open pairing every time the host starts; use `ws-host service pair`",
     ),

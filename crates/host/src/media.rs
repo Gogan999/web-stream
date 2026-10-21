@@ -16,8 +16,8 @@ use ws_audio::{LoopbackConfig, MicConfig, MicReceiver};
 use ws_capture::VideoPipeline;
 use ws_input::DisplayRect;
 use ws_proto::{
-    ClientControl, DisplayId, DisplayInfo, EncodedFrame, HostControl, VideoCodec, VideoConfig,
-    VideoStats, channels,
+    ClientControl, DisplayId, DisplayInfo, EncodedFrame, HostControl, UpdateState, VideoCodec,
+    VideoConfig, VideoStats, channels,
 };
 use ws_transport::{Transport, TransportConfig, TransportEvent, TransportStats};
 
@@ -28,6 +28,7 @@ use crate::options::MediaOptions;
 use crate::platform;
 use crate::scale::{self, AutoScale};
 use crate::serve::Event;
+use crate::update;
 use crate::uploads::{self, UploadMsg, UploadSession};
 
 /// Encoded frames waiting for the transport. The transport keeps only the
@@ -392,6 +393,9 @@ impl Media {
                     self.reply(HostControl::Uploads {
                         enabled: self.opts.upload_dir.is_some(),
                         max_size: uploads::MAX_SIZE,
+                    });
+                    self.reply(HostControl::RemoteUpdate {
+                        enabled: self.opts.update_log.is_some() && update::available(),
                     });
                     for msg in std::mem::take(&mut self.unsent) {
                         self.reply(msg);
@@ -815,6 +819,39 @@ impl Media {
                     self.error(e);
                 }
             }
+            ClientControl::UpdateHost => self.update_host(),
+        }
+    }
+
+    fn update_host(&self) {
+        let Some(log) = &self.opts.update_log else {
+            self.error(
+                "updating from the browser is off on the host: turn on \"let the browser \
+                 update and restart this host\" in the tray app's settings \
+                 (--allow-remote-update)"
+                    .into(),
+            );
+            return;
+        };
+        // The media task outlives sessions, so this reaches whichever
+        // browser is connected when the script ends.
+        let tx = self.control_tx.clone();
+        let events = self.host_events.clone();
+        let done = move |state, message: String| {
+            let _ = events.send(Event::Update(format!("update: {message}")));
+            let _ = tx.try_send(HostControl::UpdateStatus { state, message });
+        };
+        match update::start(log, done) {
+            Ok(message) => {
+                let _ = self.host_events.send(Event::Update(
+                    "a browser started an update; the host restarts when the build is done".into(),
+                ));
+                self.reply(HostControl::UpdateStatus {
+                    state: UpdateState::Started,
+                    message,
+                });
+            }
+            Err(e) => self.error(e),
         }
     }
 

@@ -59,6 +59,9 @@ pub enum Event {
     File(FileEvent),
     /// A command failed.
     Error(String),
+    /// A browser started, or the host finished, an update
+    /// (`--allow-remote-update`).
+    Update(String),
 }
 
 /// Runs the host until [`Command::Quit`], until every command sender is

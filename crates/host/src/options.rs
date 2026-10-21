@@ -42,6 +42,8 @@ serve options:
   --allow-upload       let the browser send files to this PC; they are saved
                        in --upload-dir and never opened by the host
   --upload-dir DIR     where received files go, default Downloads\\web-stream
+  --allow-remote-update  let the browser update the host to the latest main and
+                       restart it (scripts\\update.ps1; tray app only)
   --pair               open pairing for two minutes at startup
 ";
 
@@ -81,6 +83,9 @@ pub struct MediaOptions {
     pub allow_resolution_change: bool,
     /// Where files from the browser are saved; `None` refuses them.
     pub upload_dir: Option<PathBuf>,
+    /// Where update.ps1's output goes when the browser may update the host
+    /// (`--allow-remote-update`); `None` refuses updates.
+    pub update_log: Option<PathBuf>,
 }
 
 impl ServeOptions {
@@ -110,11 +115,13 @@ impl ServeOptions {
             audio_frame_ms: 10,
             allow_resolution_change: false,
             upload_dir: None,
+            update_log: None,
         };
         let mut no_mic = false;
         let mut allow_upload = false;
         let mut upload_dir = None;
         let mut pair_at_start = false;
+        let mut allow_remote_update = false;
 
         let mut it = args.iter();
         while let Some(flag) = it.next() {
@@ -159,6 +166,7 @@ impl ServeOptions {
                 "--allow-resolution-change" => media.allow_resolution_change = true,
                 "--allow-upload" => allow_upload = true,
                 "--upload-dir" => upload_dir = Some(PathBuf::from(value()?)),
+                "--allow-remote-update" => allow_remote_update = true,
                 "--pair" => pair_at_start = true,
                 f => bail!("unknown flag {f}\n\n{USAGE}"),
             }
@@ -200,6 +208,10 @@ impl ServeOptions {
                  1-240 fps, 500-200000 kbps"
             );
         }
+        let data_dir = data_dir.unwrap_or_else(default_data_dir);
+        if allow_remote_update {
+            media.update_log = Some(data_dir.join("update.log"));
+        }
         Ok(Self {
             port,
             ice_tcp_port,
@@ -207,7 +219,7 @@ impl ServeOptions {
             public_ips,
             hostnames,
             cert,
-            data_dir: data_dir.unwrap_or_else(default_data_dir),
+            data_dir,
             device_idle_expiry: Duration::from_secs(u64::from(forget_after_days) * 24 * 3600),
             extra_origins,
             web_root,
@@ -306,6 +318,18 @@ mod tests {
         assert!(parse(&["--audio-frame-ms", "5"]).is_err());
         assert_eq!(o.device_idle_expiry, Duration::from_secs(30 * 24 * 3600));
         assert!(o.extra_origins.is_empty());
+    }
+
+    #[test]
+    fn remote_update_is_off_unless_allowed() {
+        assert_eq!(parse(&[]).unwrap().media.update_log, None);
+        assert_eq!(
+            parse(&["--allow-remote-update", "--data-dir", "d"])
+                .unwrap()
+                .media
+                .update_log,
+            Some(PathBuf::from("d").join("update.log"))
+        );
     }
 
     #[test]

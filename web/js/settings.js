@@ -16,13 +16,15 @@ export const RESOLUTIONS = Object.freeze(['screen', 'native', '2160', '1440', '1
 // Game audio: Opus kb/s and frame length in ms; 'host' keeps the host's own setting.
 export const AUDIO_KBPS = Object.freeze(['host', '96', '128', '192', '256', '320', '510']);
 export const AUDIO_FRAMES = Object.freeze(['host', '10', '20']);
+// How much the stats overlay shows; see stats.js.
+export const STATS_LEVELS = Object.freeze(['essential', 'detailed', 'debug']);
 
 // codec null: stream whatever the host streams now.
 export const DEFAULTS = Object.freeze({
   codec: null, mouseMode: 'relative',
   bitrate: 'auto', resolution: 'screen', fps: 60, quality: 'balanced', keyframeScale: 2, recoverDrops: true,
   matchHost: false, mic: false,
-  audioKbps: 'host', audioFrame: 'host',
+  audioKbps: 'host', audioFrame: 'host', statsLevel: 'essential',
 });
 
 const STORAGE_KEY = 'ws-stream-settings';
@@ -121,6 +123,7 @@ export function sanitize(saved) {
     mic: v.mic === true,
     audioKbps: AUDIO_KBPS.includes(v.audioKbps) ? v.audioKbps : DEFAULTS.audioKbps,
     audioFrame: AUDIO_FRAMES.includes(v.audioFrame) ? v.audioFrame : DEFAULTS.audioFrame,
+    statsLevel: STATS_LEVELS.includes(v.statsLevel) ? v.statsLevel : DEFAULTS.statsLevel,
   };
 }
 

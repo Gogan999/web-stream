@@ -3,7 +3,7 @@ import { defaultSignalUrl } from './signaling.js';
 import { InputCapture } from './input.js';
 import { hidUsage } from './keymap.js';
 import { CursorView } from './cursor.js';
-import { snapshot, compute, format, formatHost, FrameTimer } from './stats.js';
+import { snapshot, compute, assess, render, Alerts, FrameTimer } from './stats.js';
 import * as pairing from './pairing.js';
 import * as settingsStore from './settings.js';
 import { AutoTune, Cancelled } from './autotune.js';
@@ -16,7 +16,7 @@ import { ZoomView } from './zoom.js';
 const $ = (id) => document.getElementById(id);
 const ui = {
   connect: $('connect'), status: $('status'), display: $('display'), mouseMode: $('mouse-mode'),
-  fullscreen: $('fullscreen'), statsToggle: $('stats-toggle'), stage: $('stage'), video: $('video'), stats: $('stats'),
+  fullscreen: $('fullscreen'), statsToggle: $('stats-toggle'), statsLevel: $('stats-level'), stage: $('stage'), video: $('video'), stats: $('stats'),
   cursor: $('cursor'),
   unpair: $('unpair'), updateHost: $('update-host'), pair: $('pair'), deviceName: $('device-name'), pairStart: $('pair-start'),
   pairCode: $('pair-code'), pairConfirm: $('pair-confirm'), pairMsg: $('pair-msg'),
@@ -48,6 +48,7 @@ let cursor = null;
 let statsTimer = 0;
 let prevSnap = null;
 const frameTimer = new FrameTimer(ui.video);
+const alerts = new Alerts();
 
 // Stream settings and what the host reported. See settings.js.
 const settings = settingsStore.load();
@@ -247,6 +248,7 @@ if (settings.codec && !decodable.includes(settings.codec)) settings.codec = null
 fillSelect(ui.quality, settingsStore.QUALITIES, (v) => v[0].toUpperCase() + v.slice(1));
 fillSelect(ui.keyframeScale, settingsStore.KEYFRAME_SCALES, (v) => (v === 1 ? '1x (fastest)' : v === 4 ? '4x (sharpest)' : `${v}x`));
 fillSelect(ui.audioKbps, settingsStore.AUDIO_KBPS, (v) => (v === 'host' ? 'Host setting' : `${v} kb/s`));
+fillSelect(ui.statsLevel, settingsStore.STATS_LEVELS, (v) => v[0].toUpperCase() + v.slice(1));
 fillSelect(ui.audioFrame, settingsStore.AUDIO_FRAMES, (v) => (v === 'host' ? 'Host setting' : v === '10' ? '10 ms (lowest delay)' : '20 ms (better sound)'));
 
 // Shows the settings; a bitrate auto-tune picked that isn't in the list gets its own entry.
@@ -269,6 +271,7 @@ function showSettings() {
   ui.mic.checked = !!settings.mic;
   ui.audioKbps.value = settings.audioKbps;
   ui.audioFrame.value = settings.audioFrame;
+  ui.statsLevel.value = settings.statsLevel;
 }
 // The chosen codec, else what the host streams (nothing selected before it says).
 function showCodec() {
@@ -503,15 +506,32 @@ function startStats() {
     const pc = session?.pc;
     if (!pc) return;
     const snap = snapshot(await pc.getStats(), performance.now());
-    if (prevSnap) ui.stats.textContent = `${format(compute(prevSnap, snap), frameTimer.avgMs)}\n${formatHost(host?.stats)}`;
+    if (prevSnap) showStats(compute(prevSnap, snap), snap.t);
     prevSnap = snap;
   }, 500);
+}
+
+function showStats(s, now) {
+  const active = alerts.update(assess(s, host?.stats, host?.config), now);
+  ui.stats.replaceChildren(...render(settings.statsLevel, s, frameTimer.avgMs, host?.stats, host?.config, active).map(({ text, sev }) => {
+    const line = document.createElement('span');
+    if (sev) line.className = sev;
+    line.textContent = `${text}\n`;
+    return line;
+  }));
 }
 
 function stopStats() {
   clearInterval(statsTimer);
   frameTimer.stop();
+  alerts.clear();
   prevSnap = null;
+}
+
+function setStatsLevel(level) {
+  settings.statsLevel = level;
+  ui.statsLevel.value = level;
+  settingsStore.save(settings);
 }
 
 function setMouseMode(mode) {
@@ -552,6 +572,12 @@ function onHotkey(code) {
   }
   switch (code) {
     case 'KeyS': toggleStats(); return true;
+    case 'KeyL': {
+      const levels = settingsStore.STATS_LEVELS;
+      setStatsLevel(levels[(levels.indexOf(settings.statsLevel) + 1) % levels.length]);
+      if (ui.stats.hidden) toggleStats();
+      return true;
+    }
     case 'KeyF': toggleFullscreen(); return true;
     case 'KeyM': setMouseMode(ui.mouseMode.value === 'relative' ? 'absolute' : 'relative'); return true;
     case 'KeyQ': releasingMouse = !!document.pointerLockElement; document.exitPointerLock(); return true;
@@ -570,6 +596,7 @@ for (const el of [$('sas'), $('keys-sas')]) {
 }
 ui.touchFullscreen.addEventListener('click', toggleFullscreen);
 ui.statsToggle.addEventListener('click', toggleStats);
+ui.statsLevel.addEventListener('change', () => setStatsLevel(ui.statsLevel.value));
 // Toolbar controls keep focus otherwise, and Space/Enter would re-trigger them.
 for (const el of [ui.connect, ui.fullscreen, $('sas'), ui.statsToggle, ui.autotune]) el.addEventListener('mouseup', () => el.blur());
 

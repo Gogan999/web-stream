@@ -2,8 +2,10 @@
 // pairing, signaling, video decode and every data channel work, over UDP and
 // then ICE-TCP. Usage: node run.mjs <port> (needs the `playwright` package).
 // TEST_ORIGIN_HOST connects through another address (say one forwarded to
-// 127.0.0.1, standing in for a router's WAN address).
-import { spawn } from 'node:child_process';
+// 127.0.0.1, standing in for a router's WAN address). TEST_BLOCK_UDP=1 also
+// firewalls the media UDP port with iptables (as root, or through sudo -n)
+// and checks the browser falls back to ICE-TCP on its own.
+import { execFileSync, spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
@@ -11,8 +13,22 @@ const { chromium } = require(process.env.PLAYWRIGHT_PATH || 'playwright');
 const port = process.argv[2] || '18443';
 const origin = `https://${process.env.TEST_ORIGIN_HOST || '127.0.0.1'}:${port}`;
 
+// Blocking needs a known media port (UDP n, ICE-TCP n+1).
+const blockUdp = !!process.env.TEST_BLOCK_UDP;
+const mediaPort = process.env.TEST_MEDIA_PORT || (blockUdp ? String(Number(port) + 1000) : '');
+const iptables = (op) => {
+  const args = [op, 'INPUT', '-p', 'udp', '--dport', mediaPort, '-j', 'DROP'];
+  if (process.getuid?.() === 0) execFileSync('iptables', args);
+  else execFileSync('sudo', ['-n', 'iptables', ...args]);
+};
+let blocked = false;
+const unblock = () => { if (blocked) { blocked = false; iptables('-D'); } };
+
 const codes = [];
-const host = spawn(process.env.TEST_PATTERN_BIN, [port], { stdio: ['ignore', 'pipe', 'inherit'] });
+const host = spawn(process.env.TEST_PATTERN_BIN, [port], {
+  stdio: ['ignore', 'pipe', 'inherit'],
+  env: { ...process.env, TEST_MEDIA_PORT: mediaPort },
+});
 host.stdout.on('data', (d) => {
   for (const line of d.toString().split('\n')) {
     const m = line.match(/^PAIRING_CODE (\d{6})/);
@@ -20,7 +36,7 @@ host.stdout.on('data', (d) => {
   }
 });
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
-const fail = (msg) => { console.error('FAIL:', msg); host.kill(); process.exit(1); };
+const fail = (msg) => { console.error('FAIL:', msg); unblock(); host.kill(); process.exit(1); };
 
 await wait(1500);
 const browser = await chromium.launch();
@@ -34,7 +50,9 @@ if (!codes.length) fail('no pairing code printed');
 const status = await page.evaluate(([id, code]) => window.confirmPair(id, code), [id, codes[0]]);
 if (status !== 200) fail('pairing confirm returned ' + status);
 
-async function check(tcpOnly) {
+// `tcpOnly` drops the UDP candidates from the offer; `want` is the transport
+// the browser should end up on.
+async function check(tcpOnly, want = tcpOnly ? 'tcp' : 'udp') {
   await page.evaluate((t) => window.connect(t), tcpOnly);
   let s;
   for (let i = 0; i < 100; i++) {
@@ -45,9 +63,9 @@ async function check(tcpOnly) {
   await page.evaluate(() => { for (const ch of Object.values(window.e2e.channels)) ch.send('hi-' + ch.label); });
   await wait(500);
   s = await page.evaluate(() => window.stats());
-  console.log(JSON.stringify({ tcpOnly, ...s }, null, 1));
+  console.log(JSON.stringify({ tcpOnly, want, ...s }, null, 1));
   if (!(s.framesDecoded > 10)) fail('video not decoding');
-  if (s.localProtocol !== (tcpOnly ? 'tcp' : 'udp')) fail('wrong transport ' + s.localProtocol);
+  if (s.localProtocol !== want) fail('wrong transport ' + s.localProtocol);
   if (s.channels['input-motion']?.ordered !== false || s.channels['input-motion']?.maxRetransmits !== 0) fail('input-motion options');
   for (const label of ['control', 'input', 'input-motion', 'file']) {
     if (!s.echo.some((e) => e.label === label && e.data === 'echo:hi-' + label)) fail('no echo on ' + label);
@@ -59,6 +77,14 @@ async function check(tcpOnly) {
 
 await check(false);
 await check(true);
+if (blockUdp) {
+  // A full offer, as on a network that drops UDP: the browser must find the
+  // ICE-TCP candidate by itself.
+  iptables('-I');
+  blocked = true;
+  await check(false, 'tcp');
+  unblock();
+}
 console.log('PASS');
 await browser.close();
 host.kill();

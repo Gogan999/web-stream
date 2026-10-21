@@ -10,7 +10,7 @@ use ws_host::serve::Notice;
 use ws_host::serve::{Command, Event};
 
 use crate::host::{FileStatus, Host, Status};
-use crate::settings::{CODECS, QUALITIES, Settings};
+use crate::settings::{CODECS, GAMEPADS, QUALITIES, Settings};
 
 pub struct App {
     host: Host,
@@ -20,6 +20,8 @@ pub struct App {
     draft: Settings,
     data_dir: PathBuf,
     displays: Vec<(u32, String)>,
+    /// Playback devices, for game audio and the browser mic.
+    audio_devices: Vec<String>,
     /// Restart the host once the running one has stopped.
     restart: bool,
     confirm_unpair: bool,
@@ -76,12 +78,18 @@ impl App {
             }
         };
 
+        let audio_devices = ws_host::audio_devices().unwrap_or_else(|e| {
+            tracing::warn!("could not list audio devices: {e}");
+            Vec::new()
+        });
+
         let mut app = Self {
             host,
             draft: settings.clone(),
             settings,
             data_dir,
             displays,
+            audio_devices,
             restart: false,
             confirm_unpair: false,
             settings_error: None,
@@ -193,6 +201,10 @@ impl App {
                             }
                         }
                     });
+                    ui.end_row();
+                    ui.label("Forward on the router")
+                        .on_hover_text("Only to reach this PC from outside your network");
+                    ui.monospace(forward_ports(&self.settings));
                     ui.end_row();
                     ui.label("Certificate SHA-256");
                     ui.add(egui::Label::new(RichText::new(fingerprint).monospace().small()).wrap());
@@ -360,16 +372,43 @@ impl App {
                 ui.label("Port (TCP and UDP)");
                 ui.add(egui::DragValue::new(&mut d.port).range(1..=65534));
                 ui.end_row();
-                ui.label("ICE-TCP fallback");
-                ui.checkbox(
-                    &mut d.ice_tcp,
-                    format!("on TCP {}", d.port.saturating_add(1)),
-                );
+                ui.label("ICE-TCP fallback")
+                    .on_hover_text("Media over TCP for networks that block UDP");
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut d.ice_tcp, "on TCP");
+                    let next = d.port.saturating_add(1);
+                    let mut port = d.ice_tcp_port.unwrap_or(next);
+                    if ui
+                        .add_enabled(d.ice_tcp, egui::DragValue::new(&mut port).range(1..=65535))
+                        .changed()
+                    {
+                        // The port after the main one follows it.
+                        d.ice_tcp_port = (port != next).then_some(port);
+                    }
+                });
                 ui.end_row();
                 ui.label("Public addresses");
                 ui.add(
                     egui::TextEdit::singleline(&mut d.public_ips)
                         .hint_text("WAN IPs that forward here (optional)"),
+                );
+                ui.end_row();
+                ui.label("Host names").on_hover_text(
+                    "Names or IPs browsers use to reach this PC, put in its \
+                         self-signed certificate. Changing them makes a new certificate, \
+                         which browsers warn about once",
+                );
+                ui.add(
+                    egui::TextEdit::singleline(&mut d.hostnames)
+                        .hint_text("e.g. a DDNS name (optional)"),
+                );
+                ui.end_row();
+                ui.label("Forget browsers");
+                ui.add(
+                    egui::DragValue::new(&mut d.forget_after_days)
+                        .range(1..=3650)
+                        .prefix("unused for ")
+                        .suffix(" days"),
                 );
                 ui.end_row();
                 ui.label("Web client folder");
@@ -429,7 +468,18 @@ impl App {
                 ui.end_row();
 
                 ui.label("Game audio");
-                ui.checkbox(&mut d.game_audio, "send to the browser");
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut d.game_audio, "send, from");
+                    ui.add_enabled_ui(d.game_audio, |ui| {
+                        device_combo(
+                            ui,
+                            "audio-device",
+                            &mut d.audio_device,
+                            ("", "Default output"),
+                            &self.audio_devices,
+                        );
+                    });
+                });
                 ui.end_row();
                 ui.label("Audio quality");
                 ui.add_enabled_ui(d.game_audio, |ui| {
@@ -460,11 +510,33 @@ impl App {
                 ui.label("Browser mic");
                 ui.horizontal(|ui| {
                     ui.checkbox(&mut d.mic, "play into");
-                    ui.add_enabled(
-                        d.mic,
-                        egui::TextEdit::singleline(&mut d.mic_device).desired_width(140.0),
-                    );
+                    ui.add_enabled_ui(d.mic, |ui| {
+                        device_combo(
+                            ui,
+                            "mic-device",
+                            &mut d.mic_device,
+                            ("auto", "auto (CABLE Input, else Steam)"),
+                            &self.audio_devices,
+                        );
+                    });
                 });
+                ui.end_row();
+                ui.label("Gamepads");
+                let name = GAMEPADS
+                    .iter()
+                    .find(|(v, _)| *v == d.gamepad)
+                    .map_or(d.gamepad.as_str(), |(_, n)| n);
+                egui::ComboBox::from_id_salt("gamepad")
+                    .selected_text(format!("as {name}"))
+                    .show_ui(ui, |ui| {
+                        for (value, name) in GAMEPADS {
+                            ui.selectable_value(&mut d.gamepad, value.to_string(), *name);
+                        }
+                    })
+                    .response
+                    .on_hover_text(
+                        "The virtual controller each browser gamepad becomes (ViGEmBus)",
+                    );
                 ui.end_row();
                 ui.label("Resolution");
                 ui.checkbox(
@@ -568,6 +640,45 @@ impl App {
                 }
             });
     }
+}
+
+/// A playback device by name: `first` (value, label) then `devices`, and
+/// the saved name if it is not among them (unplugged, or typed elsewhere).
+fn device_combo(
+    ui: &mut egui::Ui,
+    id: &str,
+    value: &mut String,
+    first: (&str, &str),
+    devices: &[String],
+) {
+    let selected = if value == first.0 {
+        first.1
+    } else {
+        value.as_str()
+    };
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(selected.to_string())
+        .width(220.0)
+        .show_ui(ui, |ui| {
+            ui.selectable_value(value, first.0.to_string(), first.1);
+            if *value != first.0 && !devices.contains(value) {
+                let v = value.clone();
+                ui.selectable_value(value, v.clone(), v);
+            }
+            for d in devices {
+                ui.selectable_value(value, d.clone(), d);
+            }
+        });
+}
+
+/// The ports a router forwards to this PC, as the host was started.
+fn forward_ports(s: &Settings) -> String {
+    let mut out = format!("TCP {p}, UDP {p}", p = s.port);
+    if s.ice_tcp {
+        let tcp = s.ice_tcp_port.unwrap_or(s.port.saturating_add(1));
+        out.push_str(&format!(", TCP {tcp}"));
+    }
+    out
 }
 
 fn combo(ui: &mut egui::Ui, id: &str, value: &mut String, choices: &[&str]) {

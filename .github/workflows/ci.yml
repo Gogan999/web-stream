@@ -33,6 +33,42 @@ jobs:
         run: cargo clippy --workspace --all-targets
       - name: test
         run: cargo test --workspace
+      # The browser client against the real host: shared files reach the browser's downloads.
+      - uses: actions/setup-node@v4
+        if: matrix.os == 'ubuntu-latest'
+        with:
+          node-version: 22
+      - name: web client with the host
+        if: matrix.os == 'ubuntu-latest'
+        working-directory: web
+        run: |
+          cargo build -p ws-host
+          npm ci --no-audit --no-fund
+          npx playwright install --with-deps chromium
+          WS_HOST_BIN=../target/debug/ws-host npm run test:host
       - name: build release
         if: matrix.os == 'windows-latest'
         run: cargo build --workspace --release
+
+  # Headless Chromium against the transport's test pattern host: UDP, forced
+  # ICE-TCP, and UDP firewalled so the browser has to fall back by itself.
+  transport-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci --no-audit --no-fund
+        working-directory: web
+      - run: npx playwright install --with-deps chromium
+        working-directory: web
+      - run: cargo build -p ws-transport --example test_pattern
+      - name: e2e
+        run: node crates/transport/examples/e2e/run.mjs 18443
+        env:
+          TEST_BLOCK_UDP: '1'
+          TEST_PATTERN_BIN: ${{ github.workspace }}/target/debug/examples/test_pattern
+          PLAYWRIGHT_PATH: ${{ github.workspace }}/web/node_modules/playwright

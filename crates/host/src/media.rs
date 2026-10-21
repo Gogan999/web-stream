@@ -112,6 +112,7 @@ pub async fn run(
         last_restart: None,
         autoscale: AutoScale::default(),
         codecs,
+        refused_codecs: Vec::new(),
         live: None,
         transfers: None,
         peer: 0,
@@ -278,6 +279,9 @@ struct Media {
     /// Encodes below the configured size while the bitrate is too low.
     autoscale: AutoScale,
     codecs: AcceptedCodecs,
+    /// Codecs this PC's encoder failed to start while H.264 then worked
+    /// (no AV1 or HEVC on the GPU): never tried again while the host runs.
+    refused_codecs: Vec<VideoCodec>,
     live: Option<Live>,
     /// Frames handed to the transport since the last stats report.
     sent: Arc<Mutex<SentFrames>>,
@@ -438,7 +442,7 @@ impl Media {
             }
         };
         let display_rect = self.chosen_display().map(|d| rect(&d));
-        let input = InputThread::start(display_rect, rumble)
+        let input = InputThread::start(display_rect, self.opts.gamepad, rumble)
             .inspect_err(|e| tracing::error!("input thread: {e}"))
             .ok();
         // Straight from the transport to the input thread: input never
@@ -585,11 +589,10 @@ impl Media {
         let info = pick_display(&displays, self.display)
             .ok_or_else(|| anyhow::anyhow!("no display to capture"))?
             .clone();
-        let accepted = self.codecs.borrow().clone();
-        let codec = pick_codec(self.config.codec, accepted.as_deref()).ok_or_else(|| {
+        let codec = self.streaming_codec().ok_or_else(|| {
             anyhow::anyhow!("the browser accepted none of the video codecs the host encodes")
         })?;
-        if codec != self.config.codec {
+        if codec != self.config.codec && !self.refused_codecs.contains(&self.config.codec) {
             let msg = format!(
                 "the browser can't decode {:?}; streaming {codec:?} instead",
                 self.config.codec
@@ -600,7 +603,7 @@ impl Media {
         let start_kbps = self.start_kbps();
         let (width, height) =
             scale::size(self.config.width, self.config.height, self.autoscale.step());
-        let config = VideoConfig {
+        let mut config = VideoConfig {
             codec,
             bitrate_kbps: start_kbps,
             width,
@@ -608,12 +611,38 @@ impl Media {
             ..self.config.clone()
         };
         let (tx, rx) = mpsc::channel(FRAME_QUEUE);
+        let backlog = self.transport.send_backlog();
+        let pipeline = match block_in_place(|| {
+            VideoPipeline::start(info.id, config.clone(), tx.clone(), backlog.clone())
+        }) {
+            Ok(p) => p,
+            // The GPU may not encode AV1 or HEVC: stream H.264 rather than
+            // nothing, if the browser takes it.
+            Err(e)
+                if config.codec != VideoCodec::H264
+                    && self
+                        .codecs
+                        .borrow()
+                        .as_ref()
+                        .is_none_or(|a| a.contains(&VideoCodec::H264)) =>
+            {
+                let refused = config.codec;
+                let msg = format!("this PC can't encode {refused:?} ({e}); streaming H264");
+                config.codec = VideoCodec::H264;
+                // H.264 failing too means the trouble isn't the codec.
+                let pipeline =
+                    block_in_place(|| VideoPipeline::start(info.id, config.clone(), tx, backlog))
+                        .map_err(|_| e)?;
+                tracing::warn!("{msg}");
+                self.error(msg);
+                self.refused_codecs.push(refused);
+                pipeline
+            }
+            Err(e) => return Err(e.into()),
+        };
         let Some(live) = &mut self.live else {
             return Ok(());
         };
-        let backlog = self.transport.send_backlog();
-        let pipeline =
-            block_in_place(|| VideoPipeline::start(info.id, config.clone(), tx, backlog))?;
         self.generation += 1;
         tokio::spawn(forward_video(
             rx,
@@ -1146,16 +1175,22 @@ impl Media {
 
     fn display_changed(&self) {
         if let Some(id) = self.display {
-            let accepted = self.codecs.borrow().clone();
-            let codec = pick_codec(self.config.codec, accepted.as_deref());
             self.reply(HostControl::DisplayChanged {
                 id,
                 config: VideoConfig {
-                    codec: codec.unwrap_or(self.config.codec),
+                    codec: self.streaming_codec().unwrap_or(self.config.codec),
                     ..self.config.clone()
                 },
             });
         }
+    }
+
+    /// The codec the stream runs (or will run) in: the configured one if
+    /// both the browser and this PC can, else H.264, else whatever the
+    /// browser takes.
+    fn streaming_codec(&self) -> Option<VideoCodec> {
+        let accepted = self.codecs.borrow().clone();
+        pick_codec(self.config.codec, accepted.as_deref(), &self.refused_codecs)
     }
 
     fn error(&self, message: String) {
@@ -1253,14 +1288,16 @@ fn drop_blocking<T>(value: T) {
 
 /// The configured codec if the browser accepted it, else H.264, else
 /// anything it accepted. `None` (not known yet) trusts the configuration.
-fn pick_codec(wanted: VideoCodec, accepted: Option<&[VideoCodec]>) -> Option<VideoCodec> {
-    let Some(accepted) = accepted else {
-        return Some(wanted);
-    };
+fn pick_codec(
+    wanted: VideoCodec,
+    accepted: Option<&[VideoCodec]>,
+    refused: &[VideoCodec],
+) -> Option<VideoCodec> {
+    let usable = |c: &VideoCodec| !refused.contains(c) && accepted.is_none_or(|a| a.contains(c));
     [wanted, VideoCodec::H264]
         .into_iter()
-        .find(|c| accepted.contains(c))
-        .or_else(|| accepted.first().copied())
+        .find(usable)
+        .or_else(|| accepted?.iter().copied().find(usable))
 }
 
 fn pick_display(displays: &[DisplayInfo], wanted: Option<DisplayId>) -> Option<&DisplayInfo> {
@@ -1332,11 +1369,15 @@ mod tests {
     #[test]
     fn codec_falls_back_to_h264_then_anything() {
         use VideoCodec::*;
-        assert_eq!(pick_codec(Av1, None), Some(Av1));
-        assert_eq!(pick_codec(Av1, Some(&[H264, Av1])), Some(Av1));
-        assert_eq!(pick_codec(H265, Some(&[Av1, H264])), Some(H264));
-        assert_eq!(pick_codec(H265, Some(&[Av1])), Some(Av1));
-        assert_eq!(pick_codec(H264, Some(&[])), None);
+        assert_eq!(pick_codec(Av1, None, &[]), Some(Av1));
+        assert_eq!(pick_codec(Av1, Some(&[H264, Av1]), &[]), Some(Av1));
+        assert_eq!(pick_codec(H265, Some(&[Av1, H264]), &[]), Some(H264));
+        assert_eq!(pick_codec(H265, Some(&[Av1]), &[]), Some(Av1));
+        assert_eq!(pick_codec(H264, Some(&[]), &[]), None);
+        // Codecs this PC failed to encode are skipped.
+        assert_eq!(pick_codec(Av1, None, &[Av1]), Some(H264));
+        assert_eq!(pick_codec(Av1, Some(&[H264, Av1]), &[Av1]), Some(H264));
+        assert_eq!(pick_codec(H265, Some(&[Av1, H265]), &[H265]), Some(Av1));
     }
 
     #[test]

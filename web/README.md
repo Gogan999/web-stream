@@ -78,6 +78,7 @@ Open `http://localhost:8080/dev/mock-host.html` in one tab, then `http://localho
 ```
 npm test               # unit tests (node --test)
 npm run test:e2e       # client ↔ mock host over real WebRTC in headless Chromium (Playwright)
+WS_HOST_BIN=../target/debug/ws-host npm run test:host   # file transfer against the real host (cargo build -p ws-host)
 ```
 
 The headless Chromium bundled with Playwright has no H.264, so the e2e run negotiates VP8; real Chrome picks H.264.

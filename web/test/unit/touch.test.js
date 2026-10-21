@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { TouchGestures, HOLD_MS, TAP_DRAG_MS } from '../../js/touch.js';
+import { TouchGestures, HOLD_MS, TAP_DRAG_MS, SECOND_FINGER_MS } from '../../js/touch.js';
 
 function rig(mode, zoomed = false) {
   const log = [];
@@ -151,4 +151,61 @@ test('zoomed in, a two-finger drag pans the view instead of scrolling', () => {
   assert.ok(log.length && log.every((e) => e[0] === 'pinch'), JSON.stringify(log));
   const pan = log.reduce((s, e) => s + e[5], 0);
   assert.equal(pan, 30);
+});
+
+test('a pinch whose first finger slides before the second lands still pinches, not drags', () => {
+  for (const mode of ['direct', 'trackpad']) {
+    const { g, log } = rig(mode);
+    if (mode === 'trackpad') { g.down(1, 100, 100, 0); g.up(1, 50); } // a tap first: the touch would tap-drag
+    log.length = 0;
+    const t = 100;
+    g.down(1, 100, 100, t);
+    g.move(1, 80, 100, t + 30); // past the slop
+    g.down(2, 200, 100, t + 60);
+    for (let i = 1; i <= 5; i++) { g.move(1, 80 - i * 10, 100, t + 60 + i); g.move(2, 200 + i * 10, 100, t + 60 + i); }
+    g.up(1, t + 300);
+    g.up(2, t + 310);
+    const other = log.filter((e) => e[0] !== 'pinch' && e[0] !== 'TO');
+    assert.deepEqual(other, [], mode);
+    assert.ok(log.some((e) => e[0] === 'pinch'), mode);
+  }
+});
+
+test('direct: a drag waits for a second finger at most SECOND_FINGER_MS, from where it landed', () => {
+  const { g, log } = rig('direct');
+  g.down(1, 10, 20, 0);
+  g.move(1, 40, 20, 50);
+  assert.deepEqual(log, [['TO', 10, 20]]);
+  g.tick(SECOND_FINGER_MS); // the finger stopped: the timer starts it
+  g.move(1, 60, 20, SECOND_FINGER_MS + 10);
+  g.up(1, 400);
+  assert.deepEqual(log, [['TO', 10, 20], ['TO', 10, 20], ['down', 0], ['to', 40, 20], ['to', 60, 20], ['up', 0]]);
+  // A quick flick, lifted before the wait is over, is still a drag rather than a click.
+  log.length = 0;
+  g.down(1, 10, 20, 1000);
+  g.move(1, 60, 20, 1040);
+  g.up(1, 1060);
+  assert.deepEqual(log, [['TO', 10, 20], ['TO', 10, 20], ['down', 0], ['to', 60, 20], ['up', 0]]);
+  // No hold right-click for a finger that slid.
+  log.length = 0;
+  g.down(1, 10, 20, 2000);
+  g.move(1, 60, 20, 2010);
+  g.tick(2000 + HOLD_MS);
+  g.up(1, 2600);
+  assert.ok(!log.some((e) => e[0] === 'down' && e[1] === 2), JSON.stringify(log));
+});
+
+test('lifting one finger of a pinch and putting it back keeps pinching', () => {
+  const { g, log } = rig('direct');
+  g.down(1, 100, 100, 0);
+  g.down(2, 200, 100, 10);
+  for (let i = 1; i <= 5; i++) { g.move(1, 100 - i * 10, 100); g.move(2, 200 + i * 10, 100); }
+  g.up(2, 300);
+  g.move(1, 40, 100); // the finger left over does nothing on its own
+  log.length = 0;
+  g.down(2, 200, 100, 400);
+  g.move(2, 202, 100); // under the pinch threshold, but this is a pinch already
+  g.up(1, 500);
+  g.up(2, 510);
+  assert.deepEqual(log.map((e) => e[0]), ['pinch']);
 });

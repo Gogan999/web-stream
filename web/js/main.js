@@ -39,7 +39,16 @@ if (diag) {
   ui.diagSave.addEventListener('click', () => diag.save());
 }
 
-const zoom = new ZoomView({ el: ui.view, stage: ui.stage, onChange: (on) => { ui.zoomReset.hidden = !on; } });
+const zoom = new ZoomView({
+  el: ui.view, stage: ui.stage,
+  onChange: (on) => { ui.zoomReset.hidden = !on; },
+  onView: () => cursor?.schedule(), // the pointer overlay keeps its on-screen size
+});
+// iOS Safari zooms the whole page on a pinch whatever the viewport meta says, and touch-action
+// alone doesn't always stop it; the page zoomed in breaks the layout and steals the stream's pinch.
+for (const ev of ['gesturestart', 'gesturechange', 'gestureend']) {
+  document.addEventListener(ev, (e) => e.preventDefault(), { passive: false });
+}
 ui.zoomReset.addEventListener('click', () => zoom.reset());
 
 let session = null;
@@ -105,6 +114,7 @@ async function connect() {
   cursor = new CursorView({
     video: ui.video, overlay: ui.cursor, displaySize: () => host?.displays.find((d) => d.id === host.active) ?? null,
     onPlace: (x, y) => zoom.follow(x, y), // zoomed in, the view keeps the trackpad's pointer in sight
+    zoom: () => zoom.scale,
   });
   cursor.setMode(ui.mouseMode.value);
   ui.connect.textContent = 'Disconnect';

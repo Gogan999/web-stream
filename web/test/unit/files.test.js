@@ -123,6 +123,19 @@ test('closing the save dialog does nothing', async () => {
   assert.equal(files.files.get(4).state, 'offered');
 });
 
+test('a save dialog that refuses to open falls back to downloads', async () => {
+  const { files, sent, downloads } = setup();
+  files.pickFile = async () => { throw Object.assign(new Error('blocked by policy'), { name: 'NotAllowedError' }); };
+  files.onControl({ type: 'fileOffer', id: 5, name: 'y.txt', size: 2 });
+  await files.save(5);
+  assert.deepEqual(sent, [{ type: 'requestFile', id: 5 }]);
+  files.onChunk(chunk(5, 0, [7, 8]));
+  for (let i = 0; i < 10; i++) await tick();
+  assert.equal(files.files.get(5).state, 'saved');
+  assert.equal(downloads[0].name, 'y.txt');
+  assert.deepEqual([...new Uint8Array(await downloads[0].blob.arrayBuffer())], [7, 8]);
+});
+
 function uploadSetup() {
   const sent = [];
   const chunks = [];

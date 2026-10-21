@@ -33,6 +33,19 @@ jobs:
         run: cargo clippy --workspace --all-targets
       - name: test
         run: cargo test --workspace
+      # The browser client against the real host: shared files reach the browser's downloads.
+      - uses: actions/setup-node@v4
+        if: matrix.os == 'ubuntu-latest'
+        with:
+          node-version: 22
+      - name: web client with the host
+        if: matrix.os == 'ubuntu-latest'
+        working-directory: web
+        run: |
+          cargo build -p ws-host
+          npm ci --no-audit --no-fund
+          npx playwright install --with-deps chromium
+          WS_HOST_BIN=../target/debug/ws-host npm run test:host
       - name: build release
         if: matrix.os == 'windows-latest'
         run: cargo build --workspace --release

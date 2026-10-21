@@ -17,6 +17,9 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 eframe = { version = "0.32", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }
 
+[dev-dependencies]
+ws-input.workspace = true
+
 [target.'cfg(windows)'.dependencies]
 tray-icon = "0.21"
 rfd = { version = "0.15", default-features = false }

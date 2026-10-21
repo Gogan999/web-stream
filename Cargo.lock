@@ -5951,6 +5951,7 @@ dependencies = [
  "windows",
  "ws-capture",
  "ws-host",
+ "ws-input",
 ]
 
 [[package]]

@@ -1,7 +1,10 @@
-// Stream settings chosen in the browser: bitrate, resolution, frame rate, encoder quality and keyframe
+// Stream settings chosen in the browser: codec, bitrate, resolution, frame rate, encoder quality and keyframe
 // handling, turned into the host's VideoConfig. Pure functions so they can be tested; main.js owns the UI.
 
 export const QUALITIES = Object.freeze(['speed', 'balanced', 'clarity']);
+// Video codecs the host encodes, as VideoConfig names them, with the browser's MIME type for each.
+export const CODECS = Object.freeze({ h264: 'video/H264', h265: 'video/H265', av1: 'video/AV1' });
+export const MOUSE_MODES = Object.freeze(['relative', 'absolute']);
 export const BITRATES_KBPS = Object.freeze([5000, 10000, 15000, 20000, 30000, 50000, 80000, 120000, 150000]);
 export const FRAME_RATES = Object.freeze([30, 60, 90, 120, 144]);
 // How many ordinary frames' worth of bits a keyframe may use: sharper keyframes, longer to send.
@@ -14,7 +17,9 @@ export const RESOLUTIONS = Object.freeze(['screen', 'native', '2160', '1440', '1
 export const AUDIO_KBPS = Object.freeze(['host', '96', '128', '192', '256', '320', '510']);
 export const AUDIO_FRAMES = Object.freeze(['host', '10', '20']);
 
+// codec null: stream whatever the host streams now.
 export const DEFAULTS = Object.freeze({
+  codec: null, mouseMode: 'relative',
   bitrate: 'auto', resolution: 'screen', fps: 60, quality: 'balanced', keyframeScale: 2, recoverDrops: true,
   matchHost: false, mic: false,
   audioKbps: 'host', audioFrame: 'host',
@@ -54,9 +59,10 @@ export function streamSize(resolution, screen, display, rotate = false) {
   return { width: even(dw * scale), height: even(dh * scale) };
 }
 
-// The VideoConfig to ask the host for. `codec` is kept from what the host streams now.
+// The VideoConfig to ask the host for. `codec` is what the host streams now, kept unless one was chosen.
 export function videoConfig(settings, { screen, display, codec = 'h264', rotate = false }) {
   settings = sanitize(settings);
+  codec = settings.codec ?? codec;
   const { width, height } = streamSize(settings.resolution, screen, display, rotate);
   const fps = Number(settings.fps) || DEFAULTS.fps;
   const bitrateKbps = settings.bitrate === 'auto' ? autoKbps(width, height, fps) : Number(settings.bitrate);
@@ -82,6 +88,15 @@ export function sameConfig(a, b) {
     .every((k) => (a[k] ?? HOST_DEFAULTS[k]) === (b[k] ?? HOST_DEFAULTS[k]));
 }
 
+// The codecs this browser can decode, of CODECS; all of them if it can't say.
+export function decodableCodecs(receiver = globalThis.RTCRtpReceiver) {
+  const caps = receiver?.getCapabilities?.('video')?.codecs;
+  const all = Object.keys(CODECS);
+  if (!caps) return all;
+  const mimes = new Set(caps.map((c) => c.mimeType.toLowerCase()));
+  return all.filter((c) => mimes.has(CODECS[c].toLowerCase()));
+}
+
 // This screen in device pixels (what a fullscreen stream is shown at).
 export function screenPixels(win = globalThis) {
   const dpr = win.devicePixelRatio || 1;
@@ -94,6 +109,8 @@ export function sanitize(saved) {
   const v = saved && typeof saved === 'object' ? saved : {};
   const kbps = Number(v.bitrate);
   return {
+    codec: Object.hasOwn(CODECS, v.codec) ? v.codec : DEFAULTS.codec,
+    mouseMode: MOUSE_MODES.includes(v.mouseMode) ? v.mouseMode : DEFAULTS.mouseMode,
     bitrate: Number.isInteger(kbps) && kbps >= 500 && kbps <= 200000 ? String(kbps) : DEFAULTS.bitrate,
     resolution: RESOLUTIONS.includes(v.resolution) ? v.resolution : DEFAULTS.resolution,
     fps: FRAME_RATES.includes(Number(v.fps)) ? Number(v.fps) : DEFAULTS.fps,

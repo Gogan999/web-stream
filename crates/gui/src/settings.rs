@@ -12,14 +12,22 @@ pub const FILE_NAME: &str = "gui-settings.json";
 
 pub const CODECS: &[&str] = &["h264", "h265", "av1"];
 pub const QUALITIES: &[&str] = &["speed", "balanced", "clarity"];
+pub const GAMEPADS: &[(&str, &str)] = &[("xbox360", "Xbox 360"), ("ds4", "DualShock 4")];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     pub port: u16,
     pub ice_tcp: bool,
+    /// `None`: the port after `port`.
+    pub ice_tcp_port: Option<u16>,
     /// Public addresses that forward to this PC, separated by spaces or commas.
     pub public_ips: String,
+    /// Names or IPs browsers reach this PC by (a DDNS name), for the
+    /// self-signed certificate; separated like `public_ips`.
+    pub hostnames: String,
+    /// A paired browser unused for this many days is unpaired.
+    pub forget_after_days: u32,
     /// Empty: the web client built into the host.
     pub web_root: String,
     /// `None`: the primary display.
@@ -31,12 +39,17 @@ pub struct Settings {
     pub kbps: u32,
     pub quality: String,
     pub game_audio: bool,
+    /// Output device game audio is captured from; empty: the Windows
+    /// default output.
+    pub audio_device: String,
     /// Game audio Opus bitrate (kb/s) and frame length (10 or 20 ms). A
     /// browser can override both from its own settings.
     pub audio_kbps: u32,
     pub audio_frame_ms: u32,
     pub mic: bool,
     pub mic_device: String,
+    /// One of [`GAMEPADS`].
+    pub gamepad: String,
     pub allow_resolution_change: bool,
     /// Let the browser send files to this PC.
     pub allow_upload: bool,
@@ -53,7 +66,10 @@ impl Default for Settings {
         Self {
             port: 8443,
             ice_tcp: true,
+            ice_tcp_port: None,
             public_ips: String::new(),
+            hostnames: String::new(),
+            forget_after_days: 30,
             web_root: String::new(),
             display: None,
             codec: "h264".into(),
@@ -63,10 +79,12 @@ impl Default for Settings {
             kbps: 20_000,
             quality: "balanced".into(),
             game_audio: true,
+            audio_device: String::new(),
             audio_kbps: 128,
             audio_frame_ms: 10,
             mic: true,
             mic_device: "auto".into(),
+            gamepad: "xbox360".into(),
             allow_resolution_change: false,
             allow_upload: false,
             upload_dir: String::new(),
@@ -100,14 +118,16 @@ impl Settings {
         let mut args = vec!["--port".to_string(), self.port.to_string()];
         if !self.ice_tcp {
             args.push("--no-ice-tcp".into());
+        } else if let Some(p) = self.ice_tcp_port {
+            args.extend(["--ice-tcp-port".into(), p.to_string()]);
         }
-        for ip in self
-            .public_ips
-            .split([' ', ',', ';'])
-            .filter(|s| !s.is_empty())
-        {
+        for ip in list(&self.public_ips) {
             args.extend(["--public-ip".into(), ip.into()]);
         }
+        for name in list(&self.hostnames) {
+            args.extend(["--hostname".into(), name.into()]);
+        }
+        args.extend(["--forget-after".into(), self.forget_after_days.to_string()]);
         let web_root = self.web_root.trim();
         if !web_root.is_empty() {
             args.extend(["--web-root".into(), web_root.into()]);
@@ -130,6 +150,10 @@ impl Settings {
         if !self.game_audio {
             args.push("--no-audio".into());
         }
+        let audio_device = self.audio_device.trim();
+        if !audio_device.is_empty() {
+            args.extend(["--audio-device".into(), audio_device.into()]);
+        }
         args.extend([
             "--audio-kbps".into(),
             self.audio_kbps.to_string(),
@@ -141,6 +165,7 @@ impl Settings {
         } else {
             args.push("--no-mic".into());
         }
+        args.extend(["--gamepad".into(), self.gamepad.clone()]);
         if self.allow_resolution_change {
             args.push("--allow-resolution-change".into());
         }
@@ -174,6 +199,11 @@ impl Settings {
             .collect();
         Ok(format!("ws-host {}", quoted.join(" ")))
     }
+}
+
+/// The items of a list typed as `a, b c`.
+fn list(s: &str) -> impl Iterator<Item = &str> {
+    s.split([' ', ',', ';']).filter(|s| !s.is_empty())
 }
 
 /// Splits on whitespace, keeping "double quoted" parts (paths with spaces)
@@ -234,7 +264,12 @@ mod tests {
             upload_dir: "D:\\Received files".into(),
             audio_kbps: 256,
             audio_frame_ms: 20,
-            extra_args: r#"--hostname home.example.net --data-dir "C:\some dir""#.into(),
+            ice_tcp_port: Some(9500),
+            hostnames: "home.example.net".into(),
+            forget_after_days: 7,
+            audio_device: "Speakers (Realtek)".into(),
+            gamepad: "ds4".into(),
+            extra_args: r#"--hostname 192.168.1.20 --data-dir "C:\some dir""#.into(),
             ..Settings::default()
         };
         let o = s.serve_options().unwrap();
@@ -248,7 +283,18 @@ mod tests {
             Some(std::path::PathBuf::from("D:\\Received files"))
         );
         assert_eq!((o.media.audio_kbps, o.media.audio_frame_ms), (256, 20));
-        assert_eq!(o.hostnames, vec!["home.example.net".to_string()]);
+        assert_eq!(o.hostnames, vec!["home.example.net", "192.168.1.20"]);
+        assert_eq!(
+            o.device_idle_expiry,
+            std::time::Duration::from_secs(7 * 24 * 3600)
+        );
+        assert_eq!(o.media.audio_device.as_deref(), Some("Speakers (Realtek)"));
+        assert_eq!(o.media.gamepad, ws_input::GamepadKind::DualShock4);
+        assert!(
+            s.command_line()
+                .unwrap()
+                .contains(r#""Speakers (Realtek)""#)
+        );
         assert_eq!(o.data_dir, std::path::PathBuf::from(r"C:\some dir"));
         assert!(s.command_line().unwrap().contains(r#""C:\some dir""#));
     }
@@ -260,11 +306,21 @@ mod tests {
             ..Settings::default()
         };
         assert!(bad_size.serve_options().is_err());
+        let ice = Settings {
+            ice_tcp_port: Some(9500),
+            ..Settings::default()
+        };
+        assert_eq!(ice.serve_options().unwrap().ice_tcp_port, Some(9500));
         let bad_extra = Settings {
             extra_args: "--bogus".into(),
             ..Settings::default()
         };
         assert!(bad_extra.serve_options().is_err());
+        let bad_gamepad = Settings {
+            gamepad: "wii".into(),
+            ..Settings::default()
+        };
+        assert!(bad_gamepad.serve_options().is_err());
         let bad_frame = Settings {
             audio_frame_ms: 15,
             ..Settings::default()

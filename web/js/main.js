@@ -18,7 +18,7 @@ const ui = {
   connect: $('connect'), status: $('status'), display: $('display'), mouseMode: $('mouse-mode'),
   fullscreen: $('fullscreen'), statsToggle: $('stats-toggle'), stage: $('stage'), video: $('video'), stats: $('stats'),
   cursor: $('cursor'),
-  unpair: $('unpair'), pair: $('pair'), deviceName: $('device-name'), pairStart: $('pair-start'),
+  unpair: $('unpair'), updateHost: $('update-host'), pair: $('pair'), deviceName: $('device-name'), pairStart: $('pair-start'),
   pairCode: $('pair-code'), pairConfirm: $('pair-confirm'), pairMsg: $('pair-msg'),
   resolution: $('resolution'), codec: $('codec'), bitrate: $('bitrate'), fps: $('fps'), quality: $('quality'),
   keyframeScale: $('keyframe-scale'), recoverDrops: $('recover-drops'),
@@ -56,6 +56,7 @@ let lastSent = null;
 let tuning = null; // running AutoTune
 let tuneWindow = null; // host stats gathered while auto-tune measures
 let micTrack = null; // this browser's microphone while the Mic setting is on and a session runs
+let remoteUpdate = false; // the host lets this browser update and restart it
 
 function setStatus(text, state) {
   ui.status.textContent = text;
@@ -80,6 +81,7 @@ async function connect() {
     session.sendControl(settingsStore.audioConfig(settings));
   });
   session.addEventListener('closed', () => {
+    setRemoteUpdate(false);
     ui.connect.textContent = 'Connect';
     ui.display.disabled = true;
     tuning?.cancel();
@@ -131,6 +133,7 @@ function disconnect() {
   tuning?.cancel();
   files.clear();
   uploads.clear();
+  setRemoteUpdate(false);
   host = null;
   ui.display.replaceChildren();
   setStatus('Not connected', 'idle');
@@ -169,6 +172,12 @@ function onControl(msg) {
     host.stats = msg;
     diag?.add('host_stats', msg);
     if (tuneWindow) tuneWindow.push(msg);
+  } else if (msg.type === 'remoteUpdate') {
+    setRemoteUpdate(msg.enabled === true);
+  } else if (msg.type === 'updateStatus' && typeof msg.message === 'string') {
+    setStatus(`Host update: ${msg.message}`, ui.status.dataset.state);
+    // Started: the host restarts once the build is done, and this page reconnects to the new one.
+    setRemoteUpdate(true, msg.state === 'started');
   } else if (msg.type === 'micUnavailable') {
     // The host can't play the mic: stop sending it.
     setStatus(`Host: ${msg.message}`, ui.status.dataset.state);
@@ -178,6 +187,8 @@ function onControl(msg) {
     setMic(false);
   } else if (msg.type === 'error' && typeof msg.message === 'string') {
     setStatus(`Host: ${msg.message}`, ui.status.dataset.state);
+    // A refused update can be tried again.
+    if (remoteUpdate) setRemoteUpdate(true);
     if (host) {
       // Whatever was asked for may not have applied; let the next change (or this one) go again.
       lastSent = null;
@@ -561,6 +572,23 @@ ui.touchFullscreen.addEventListener('click', toggleFullscreen);
 ui.statsToggle.addEventListener('click', toggleStats);
 // Toolbar controls keep focus otherwise, and Space/Enter would re-trigger them.
 for (const el of [ui.connect, ui.fullscreen, $('sas'), ui.statsToggle, ui.autotune]) el.addEventListener('mouseup', () => el.blur());
+
+// Update host: only when the host allows it, and only after a confirm, since it restarts the host.
+function setRemoteUpdate(enabled, running = false) {
+  remoteUpdate = enabled;
+  ui.updateHost.disabled = !enabled || running;
+  ui.updateHost.textContent = running ? 'Updating host…' : 'Update host';
+}
+ui.updateHost.addEventListener('click', () => {
+  if (!session || !remoteUpdate) return;
+  const ok = confirm('Update the host to the latest main and restart it?\n\n'
+    + 'It builds while the stream keeps running (several minutes), then restarts: '
+    + 'the stream drops for a few seconds and reconnects to the new build. '
+    + 'If the build fails, the host keeps running the old one.');
+  if (!ok || !session) return;
+  ui.updateHost.disabled = true;
+  session.sendControl({ type: 'updateHost' });
+});
 
 // Settings and Files dropdowns: a toggle opens one; a click or tap anywhere else, or Esc, closes it.
 function setSettingsOpen(open) {

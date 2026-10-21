@@ -58,7 +58,7 @@ pub fn describe(e: Event) -> Option<String> {
             "pairing is open for two minutes: request a code in the browser".into()
         }
         Event::UnpairedAll => "every paired browser was removed".into(),
-        Event::Error(e) => e,
+        Event::Error(e) | Event::Update(e) => e,
         Event::Notice(n) => describe_notice(n),
         Event::File(f) => return describe_file(f),
     })

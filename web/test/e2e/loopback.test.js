@@ -265,6 +265,25 @@ test('client streams from mock host, sends input and switches display', { timeou
   await client.waitForSelector('#upload-list li:has-text("On the host as up.txt")');
   await client.keyboard.press('Escape');
 
+  // Update host: off until the host allows it, asks first, then waits for the restart.
+  await client.click('#more-toggle');
+  assert.equal(await client.isDisabled('#update-host'), true);
+  await sendHost({ type: 'remoteUpdate', enabled: true });
+  await client.waitForSelector('#update-host:not([disabled])');
+  client.once('dialog', (d) => d.dismiss());
+  await client.click('#update-host');
+  client.once('dialog', (d) => d.accept());
+  await client.click('#update-host');
+  await host.waitForFunction(() => window.mockLog.some((e) => e.type === 'updateHost'));
+  assert.equal((await hostLog()).filter((e) => e.type === 'updateHost').length, 1);
+  await sendHost({ type: 'updateStatus', state: 'started', message: 'Building the latest main' });
+  await client.waitForSelector('#update-host:has-text("Updating host")');
+  assert.equal(await client.isDisabled('#update-host'), true);
+  await sendHost({ type: 'updateStatus', state: 'finished', message: 'Already up to date (abcd1234).' });
+  await client.waitForFunction(() => /Host update: Already up to date/.test(document.getElementById('status').textContent));
+  assert.equal(await client.isDisabled('#update-host'), false);
+  await client.keyboard.press('Escape');
+
   // With no socket, the host's bye comes over control.
   await sendHost({ type: 'bye', reason: 'host_shutdown' });
   await client.waitForFunction(() => /host shut down/.test(document.getElementById('status').textContent));

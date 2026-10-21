@@ -104,7 +104,7 @@ impl State {
                 self.log("pairing is open for two minutes: request a code in the browser");
             }
             Event::UnpairedAll => self.log("every paired browser was removed"),
-            Event::Error(e) => self.log(e),
+            Event::Error(e) | Event::Update(e) => self.log(e),
             Event::File(f) => self.file(f),
             Event::Notice(n) => match n {
                 Notice::PairingCode {

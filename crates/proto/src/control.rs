@@ -127,6 +127,12 @@ pub enum ClientControl {
     /// Task Manager menu). Only a host running as the web-stream service
     /// can; any other answers with [`HostControl::Error`].
     SecureAttention,
+    /// Update the host to the latest `main` and restart it, as
+    /// `scripts\update.ps1` on the host would. Only honoured when the host
+    /// user allowed it ([`HostControl::RemoteUpdate`]); the browser chooses
+    /// nothing about what is built. Answered with
+    /// [`HostControl::UpdateStatus`] or [`HostControl::Error`].
+    UpdateHost,
 }
 
 /// Messages on the reliable `control` data channel, host -> browser.
@@ -193,6 +199,19 @@ pub enum HostControl {
         id: FileId,
         message: String,
     },
+    /// Whether this browser may update and restart the host
+    /// ([`ClientControl::UpdateHost`]). Sent when the `control` channel opens.
+    RemoteUpdate {
+        enabled: bool,
+    },
+    /// How an update this browser started is going. `Started` is followed
+    /// by the host restarting (the session drops and the browser reconnects
+    /// to the new build) unless `Finished` (nothing to update) or `Failed`
+    /// comes first.
+    UpdateStatus {
+        state: UpdateState,
+        message: String,
+    },
     /// Gamepad rumble, motor strengths 0.0..=1.0.
     Rumble {
         index: u8,
@@ -228,6 +247,18 @@ pub enum HostControl {
     Bye {
         reason: ByeReason,
     },
+}
+
+/// See [`HostControl::UpdateStatus`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum UpdateState {
+    /// The build runs; the host restarts when it succeeds.
+    Started,
+    /// The script ended without restarting the host, e.g. already up to date.
+    Finished,
+    /// The script failed; the old build keeps running.
+    Failed,
 }
 
 /// The host's side of the stream over the last stats interval.
@@ -278,6 +309,24 @@ mod tests {
     fn secure_attention_shape() {
         let msg: ClientControl = serde_json::from_str(r#"{"type":"secureAttention"}"#).unwrap();
         assert_eq!(msg, ClientControl::SecureAttention);
+    }
+
+    #[test]
+    fn update_messages_shape() {
+        let msg: ClientControl = serde_json::from_str(r#"{"type":"updateHost"}"#).unwrap();
+        assert_eq!(msg, ClientControl::UpdateHost);
+        assert_eq!(
+            serde_json::to_string(&HostControl::RemoteUpdate { enabled: true }).unwrap(),
+            r#"{"type":"remoteUpdate","enabled":true}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&HostControl::UpdateStatus {
+                state: UpdateState::Started,
+                message: "m".into()
+            })
+            .unwrap(),
+            r#"{"type":"updateStatus","state":"started","message":"m"}"#
+        );
     }
 
     #[test]

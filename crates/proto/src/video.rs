@@ -81,6 +81,12 @@ pub struct VideoConfig {
     /// keyframe. Loss on the network still needs a keyframe.
     #[serde(default = "default_true")]
     pub recover_drops: bool,
+    /// The smallest the host may shrink the encode size to when the
+    /// bitrate is too low for it, as a percent of the width and height:
+    /// 100 turns automatic scaling off, 0 lets it go as low as it ever does
+    /// (360 lines).
+    #[serde(default)]
+    pub min_scale_percent: u8,
 }
 
 pub const DEFAULT_KEYFRAME_SCALE: u8 = 2;
@@ -96,7 +102,7 @@ fn default_true() -> bool {
 impl VideoConfig {
     /// Clamps a client-supplied config to values the host will run: even
     /// sizes from 320x180 to 7680x4320, 1..=240 fps, 500..=200000 kbps,
-    /// keyframes 1..=4 frames' worth of bits.
+    /// keyframes 1..=4 frames' worth of bits, a scale floor of at most 100%.
     pub fn clamped(&self) -> Self {
         let even = |v: u32, lo: u32, hi: u32| v.clamp(lo, hi) & !1;
         Self {
@@ -108,6 +114,7 @@ impl VideoConfig {
             quality: self.quality,
             keyframe_scale: self.keyframe_scale.clamp(1, 4),
             recover_drops: self.recover_drops,
+            min_scale_percent: self.min_scale_percent.min(100),
         }
     }
 }
@@ -123,6 +130,7 @@ impl Default for VideoConfig {
             quality: VideoQuality::Balanced,
             keyframe_scale: DEFAULT_KEYFRAME_SCALE,
             recover_drops: true,
+            min_scale_percent: 0,
         }
     }
 }
@@ -174,12 +182,14 @@ mod tests {
             quality: VideoQuality::Speed,
             keyframe_scale: 200,
             recover_drops: false,
+            min_scale_percent: 250,
         }
         .clamped();
         assert_eq!(
             (c.width, c.height, c.fps, c.bitrate_kbps, c.keyframe_scale),
             (7680, 180, 1, 200_000, 4)
         );
+        assert_eq!(c.min_scale_percent, 100);
         let odd = VideoConfig {
             width: 1921,
             height: 1081,
@@ -196,6 +206,7 @@ mod tests {
         assert_eq!(c.quality, VideoQuality::Balanced);
         assert_eq!(c.keyframe_scale, DEFAULT_KEYFRAME_SCALE);
         assert!(c.recover_drops);
+        assert_eq!(c.min_scale_percent, 0);
         let c = VideoConfig {
             quality: VideoQuality::Clarity,
             ..Default::default()

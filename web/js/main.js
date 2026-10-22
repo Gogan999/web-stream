@@ -21,7 +21,7 @@ const ui = {
   unpair: $('unpair'), updateHost: $('update-host'), pair: $('pair'), deviceName: $('device-name'), pairStart: $('pair-start'),
   pairCode: $('pair-code'), pairConfirm: $('pair-confirm'), pairMsg: $('pair-msg'),
   resolution: $('resolution'), codec: $('codec'), bitrate: $('bitrate'), fps: $('fps'), quality: $('quality'),
-  keyframeScale: $('keyframe-scale'), recoverDrops: $('recover-drops'),
+  keyframeScale: $('keyframe-scale'), recoverDrops: $('recover-drops'), minScale: $('min-scale'),
   matchHost: $('match-host'), autotune: $('autotune'), mic: $('mic'),
   audioKbps: $('audio-kbps'), audioFrame: $('audio-frame'),
   moreToggle: $('more-toggle'), more: $('more'), kbdToggle: $('kbd-toggle'), keysToggle: $('keys-toggle'), keys: $('keys'),
@@ -261,6 +261,8 @@ fillSelect(ui.codec, decodable, (v) => CODEC_LABELS[v]);
 if (settings.codec && !decodable.includes(settings.codec)) settings.codec = null;
 fillSelect(ui.quality, settingsStore.QUALITIES, (v) => v[0].toUpperCase() + v.slice(1));
 fillSelect(ui.keyframeScale, settingsStore.KEYFRAME_SCALES, (v) => (v === 1 ? '1x (fastest)' : v === 4 ? '4x (sharpest)' : `${v}x`));
+const MIN_SCALE_LABELS = { 0: 'On', 50: 'On, down to half', 75: 'On, down to 3/4', 100: 'Off (always full size)' };
+fillSelect(ui.minScale, settingsStore.MIN_SCALES, (v) => MIN_SCALE_LABELS[v]);
 fillSelect(ui.audioKbps, settingsStore.AUDIO_KBPS, (v) => (v === 'host' ? 'Host setting' : `${v} kb/s`));
 fillSelect(ui.statsLevel, settingsStore.STATS_LEVELS, (v) => v[0].toUpperCase() + v.slice(1));
 fillSelect(ui.audioFrame, settingsStore.AUDIO_FRAMES, (v) => (v === 'host' ? 'Host setting' : v === '10' ? '10 ms (lowest delay)' : '20 ms (better sound)'));
@@ -280,6 +282,7 @@ function showSettings() {
   ui.fps.value = String(settings.fps);
   ui.quality.value = settings.quality;
   ui.keyframeScale.value = String(settings.keyframeScale);
+  ui.minScale.value = String(settings.minScale);
   ui.recoverDrops.checked = !!settings.recoverDrops;
   ui.matchHost.checked = !!settings.matchHost;
   ui.mic.checked = !!settings.mic;
@@ -293,9 +296,9 @@ function showCodec() {
 }
 showSettings();
 
-for (const [el, key] of [[ui.resolution, 'resolution'], [ui.codec, 'codec'], [ui.bitrate, 'bitrate'], [ui.fps, 'fps'], [ui.quality, 'quality'], [ui.keyframeScale, 'keyframeScale']]) {
+for (const [el, key] of [[ui.resolution, 'resolution'], [ui.codec, 'codec'], [ui.bitrate, 'bitrate'], [ui.fps, 'fps'], [ui.quality, 'quality'], [ui.keyframeScale, 'keyframeScale'], [ui.minScale, 'minScale']]) {
   el.addEventListener('change', () => {
-    settings[key] = key === 'fps' || key === 'keyframeScale' ? Number(el.value) : el.value;
+    settings[key] = ['fps', 'keyframeScale', 'minScale'].includes(key) ? Number(el.value) : el.value;
     settingsStore.save(settings);
     applySettings();
   });
@@ -417,7 +420,7 @@ async function autoTune() {
     onProgress: (text) => setStatus(text, 'connecting'),
   });
   ui.autotune.textContent = 'Stop auto-tune';
-  for (const el of [ui.resolution, ui.codec, ui.bitrate, ui.fps, ui.quality, ui.keyframeScale, ui.recoverDrops, ui.display, ui.matchHost]) el.disabled = true;
+  for (const el of [ui.resolution, ui.codec, ui.bitrate, ui.fps, ui.quality, ui.keyframeScale, ui.minScale, ui.recoverDrops, ui.display, ui.matchHost]) el.disabled = true;
   try {
     const { config, summary } = await tuning.run();
     settings.bitrate = String(config.bitrateKbps);
@@ -431,7 +434,7 @@ async function autoTune() {
     tuning = null;
     tuneWindow = null;
     ui.autotune.textContent = 'Auto-tune (test)';
-    for (const el of [ui.resolution, ui.codec, ui.bitrate, ui.fps, ui.quality, ui.keyframeScale, ui.recoverDrops, ui.matchHost]) el.disabled = false;
+    for (const el of [ui.resolution, ui.codec, ui.bitrate, ui.fps, ui.quality, ui.keyframeScale, ui.minScale, ui.recoverDrops, ui.matchHost]) el.disabled = false;
     ui.display.disabled = ui.display.options.length < 2;
     showSettings();
     if (session) applySettings();

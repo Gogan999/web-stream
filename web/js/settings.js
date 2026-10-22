@@ -13,6 +13,10 @@ export const KEYFRAME_SCALES = Object.freeze([1, 2, 3, 4]);
 // display's shape (never above its own size).
 export const RESOLUTIONS = Object.freeze(['screen', 'native', '2160', '1440', '1080', '720']);
 
+// Auto resolution: the smallest share of the chosen width and height the host may drop to when the
+// bitrate is too low for it. 0 lets it go as low as it ever does (360 lines); 100 turns it off.
+export const MIN_SCALES = Object.freeze([0, 50, 75, 100]);
+
 // Game audio: Opus kb/s and frame length in ms; 'host' keeps the host's own setting.
 export const AUDIO_KBPS = Object.freeze(['host', '96', '128', '192', '256', '320', '510']);
 export const AUDIO_FRAMES = Object.freeze(['host', '10', '20']);
@@ -22,7 +26,7 @@ export const STATS_LEVELS = Object.freeze(['essential', 'detailed', 'debug']);
 // codec null: stream whatever the host streams now.
 export const DEFAULTS = Object.freeze({
   codec: null, mouseMode: 'relative',
-  bitrate: 'auto', resolution: 'screen', fps: 60, quality: 'balanced', keyframeScale: 2, recoverDrops: true,
+  bitrate: 'auto', resolution: 'screen', fps: 60, quality: 'balanced', keyframeScale: 2, recoverDrops: true, minScale: 0,
   matchHost: false, mic: false,
   audioKbps: 'host', audioFrame: 'host', statsLevel: 'essential',
 });
@@ -69,7 +73,10 @@ export function videoConfig(settings, { screen, display, codec = 'h264', rotate 
   const fps = Number(settings.fps) || DEFAULTS.fps;
   const bitrateKbps = settings.bitrate === 'auto' ? autoKbps(width, height, fps) : Number(settings.bitrate);
   const quality = QUALITIES.includes(settings.quality) ? settings.quality : DEFAULTS.quality;
-  return { codec, width, height, fps, bitrateKbps, quality, keyframeScale: settings.keyframeScale, recoverDrops: settings.recoverDrops };
+  return {
+    codec, width, height, fps, bitrateKbps, quality,
+    keyframeScale: settings.keyframeScale, recoverDrops: settings.recoverDrops, minScalePercent: settings.minScale,
+  };
 }
 
 // The setAudioConfig message for the audio settings; null fields keep the host's own.
@@ -83,10 +90,10 @@ export function audioConfig(settings) {
 }
 
 // A host that predates a field leaves it out: it runs that field's default.
-const HOST_DEFAULTS = { quality: 'balanced', keyframeScale: 2, recoverDrops: true };
+const HOST_DEFAULTS = { quality: 'balanced', keyframeScale: 2, recoverDrops: true, minScalePercent: 0 };
 
 export function sameConfig(a, b) {
-  return !!a && !!b && ['codec', 'width', 'height', 'fps', 'bitrateKbps', 'quality', 'keyframeScale', 'recoverDrops']
+  return !!a && !!b && ['codec', 'width', 'height', 'fps', 'bitrateKbps', 'quality', 'keyframeScale', 'recoverDrops', 'minScalePercent']
     .every((k) => (a[k] ?? HOST_DEFAULTS[k]) === (b[k] ?? HOST_DEFAULTS[k]));
 }
 
@@ -119,6 +126,7 @@ export function sanitize(saved) {
     quality: QUALITIES.includes(v.quality) ? v.quality : DEFAULTS.quality,
     keyframeScale: KEYFRAME_SCALES.includes(Number(v.keyframeScale)) ? Number(v.keyframeScale) : DEFAULTS.keyframeScale,
     recoverDrops: v.recoverDrops !== false,
+    minScale: MIN_SCALES.includes(Number(v.minScale)) ? Number(v.minScale) : DEFAULTS.minScale,
     matchHost: v.matchHost === true,
     mic: v.mic === true,
     audioKbps: AUDIO_KBPS.includes(v.audioKbps) ? v.audioKbps : DEFAULTS.audioKbps,

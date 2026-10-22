@@ -8,6 +8,16 @@
 //! bitrate falls and back up only once it has stayed well above what the
 //! larger size needs, since every change restarts the encoder (a keyframe
 //! and a short pause).
+//!
+//! A low bandwidth estimate alone is not enough to step down. The estimate
+//! only grows to about 1.5 times what the stream actually sends, and on a
+//! loss or delay spike it drops to 0.85 times that. A still desktop sends
+//! almost nothing (a tiny repeat frame ten times a second), so after a
+//! minute of it the estimate sits far below the link's real capacity, and
+//! stepping down on it shrank the picture again and again with nothing on
+//! screen. So a step down also needs the stream to be using its bitrate, or
+//! frames to be dropping for lack of it: then the bitrate really is too
+//! small for the size.
 
 use std::time::{Duration, Instant};
 
@@ -26,6 +36,15 @@ const DOWN_AFTER: Duration = Duration::from_secs(2);
 const UP_AFTER: Duration = Duration::from_secs(10);
 /// "Comfortably": this many times what the next size up needs.
 const UP_MARGIN: f64 = 1.5;
+/// A second in which the stream sent at least this share of the encoder's
+/// target counts as using it. A still desktop sends a few percent; moving
+/// content near 100%, and more when its frames overrun.
+const BUSY_SHARE: f64 = 0.5;
+/// A step down this soon after a step up means the larger size didn't hold:
+/// wait twice as long before trying it again.
+const FLAP_WINDOW: Duration = Duration::from_secs(30);
+/// The longest that doubling makes the wait for a step up.
+const MAX_UP_AFTER: Duration = Duration::from_secs(80);
 /// No step down this soon after a connection starts or the size changes:
 /// the bandwidth estimate starts at 10 Mb/s (a 7.5 Mb/s target, under what
 /// 1440p60 needs) and takes a moment to climb.
@@ -48,12 +67,32 @@ pub(crate) fn min_kbps(width: u32, height: u32, fps: u32) -> f64 {
     f64::from(width) * f64::from(height) * f64::from(fps) * MIN_BITS_PER_PIXEL / 1000.0
 }
 
-/// The smallest step allowed for a configured size.
-fn last_step(width: u32, height: u32) -> usize {
+/// The smallest step allowed for a configured size, and for the browser's
+/// floor (see [`ws_proto::VideoConfig::min_scale_percent`]).
+fn last_step(width: u32, height: u32, min_percent: u8) -> usize {
+    let floor = f64::from(min_percent.min(100)) / 100.0;
     (0..STEPS.len())
         .rev()
-        .find(|&s| size(width, height, s).1 >= MIN_HEIGHT.min(height))
+        .find(|&s| STEPS[s] >= floor && size(width, height, s).1 >= MIN_HEIGHT.min(height))
         .unwrap_or(0)
+}
+
+/// What the stream did over the last second.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Load {
+    /// The encoder's target, from the bandwidth estimate.
+    pub kbps: u32,
+    /// What the encoder actually produced.
+    pub sent_kbps: u32,
+    /// Frames were dropped or refused for lack of bandwidth.
+    pub dropped: bool,
+}
+
+impl Load {
+    /// Whether the stream used its bitrate, so a low estimate is real.
+    fn busy(&self) -> bool {
+        self.dropped || f64::from(self.sent_kbps) >= f64::from(self.kbps) * BUSY_SHARE
+    }
 }
 
 #[derive(Debug, Default)]
@@ -65,6 +104,11 @@ pub(crate) struct AutoScale {
     low_since: Option<Instant>,
     /// Since when it has been enough for the step above.
     high_since: Option<Instant>,
+    /// The last step up, to spot a size that doesn't hold.
+    last_up: Option<Instant>,
+    /// How long the headroom must last before a step up; [`UP_AFTER`]
+    /// until a step up fails.
+    up_after: Option<Duration>,
 }
 
 impl AutoScale {
@@ -78,34 +122,67 @@ impl AutoScale {
         *self = Self::default();
     }
 
-    /// Takes the encoder's target bitrate. Returns the new step when the
-    /// encode size should change.
+    /// Steps back up to the browser's floor if the current step is below
+    /// it. Returns the new step when the encode size should change.
+    pub(crate) fn limit(
+        &mut self,
+        now: Instant,
+        width: u32,
+        height: u32,
+        min_percent: u8,
+    ) -> Option<usize> {
+        let last = last_step(width, height, min_percent);
+        if self.step <= last {
+            return None;
+        }
+        self.step = last;
+        self.changed(now);
+        Some(last)
+    }
+
+    /// Takes the last second's [`Load`], once a second. Returns the new
+    /// step when the encode size should change.
     pub(crate) fn update(
         &mut self,
         now: Instant,
-        kbps: u32,
+        load: Load,
         width: u32,
         height: u32,
         fps: u32,
+        min_percent: u8,
     ) -> Option<usize> {
-        let kbps = f64::from(kbps);
+        if let Some(step) = self.limit(now, width, height, min_percent) {
+            return Some(step);
+        }
+        let kbps = f64::from(load.kbps);
         let need = |step: usize| {
             let (w, h) = size(width, height, step);
             min_kbps(w, h, fps)
         };
-        let last = last_step(width, height);
+        let last = last_step(width, height, min_percent);
         let settled =
             now.saturating_duration_since(*self.since_change.get_or_insert(now)) >= SETTLE;
-        if settled && self.step < last && kbps < need(self.step) {
+        if self.step < last && kbps < need(self.step) {
             self.high_since = None;
+            // Too low, but the stream isn't using what it has: the estimate
+            // says nothing about the link, so wait for a busy stretch.
+            if !settled || !load.busy() {
+                self.low_since = None;
+                return None;
+            }
             let since = *self.low_since.get_or_insert(now);
             if now.saturating_duration_since(since) >= DOWN_AFTER {
                 // Straight to the largest size the bitrate holds up.
                 self.step = (self.step + 1..=last)
                     .find(|&s| kbps >= need(s))
                     .unwrap_or(last);
-                self.low_since = None;
-                self.since_change = Some(now);
+                if self
+                    .last_up
+                    .is_some_and(|t| now.saturating_duration_since(t) < FLAP_WINDOW)
+                {
+                    self.up_after = Some((self.up_after() * 2).min(MAX_UP_AFTER));
+                }
+                self.changed(now);
                 return Some(self.step);
             }
             return None;
@@ -113,16 +190,26 @@ impl AutoScale {
         self.low_since = None;
         if self.step > 0 && kbps >= need(self.step - 1) * UP_MARGIN {
             let since = *self.high_since.get_or_insert(now);
-            if now.saturating_duration_since(since) >= UP_AFTER {
+            if now.saturating_duration_since(since) >= self.up_after() {
                 self.step -= 1;
-                self.high_since = None;
-                self.since_change = Some(now);
+                self.last_up = Some(now);
+                self.changed(now);
                 return Some(self.step);
             }
         } else {
             self.high_since = None;
         }
         None
+    }
+
+    fn up_after(&self) -> Duration {
+        self.up_after.unwrap_or(UP_AFTER)
+    }
+
+    fn changed(&mut self, now: Instant) {
+        self.low_since = None;
+        self.high_since = None;
+        self.since_change = Some(now);
     }
 }
 
@@ -132,10 +219,33 @@ mod tests {
 
     const S: Duration = Duration::from_secs(1);
 
+    /// A second of moving content using all of `kbps`.
+    fn busy(kbps: u32) -> Load {
+        Load {
+            kbps,
+            sent_kbps: kbps,
+            dropped: false,
+        }
+    }
+
+    /// A second of still desktop: a target of `kbps` and almost nothing sent.
+    fn idle(kbps: u32) -> Load {
+        Load {
+            kbps,
+            sent_kbps: 20,
+            dropped: false,
+        }
+    }
+
+    /// 1440p60 with no floor.
+    fn up(a: &mut AutoScale, t: Instant, load: Load) -> Option<usize> {
+        a.update(t, load, 2560, 1440, 60, 0)
+    }
+
     /// A scaler whose settling time after connecting is over by `t`.
     fn settled(t: Instant) -> AutoScale {
         let mut a = AutoScale::default();
-        a.update(t - SETTLE, 1_000_000, 2560, 1440, 60);
+        up(&mut a, t - SETTLE, busy(1_000_000));
         a
     }
 
@@ -151,9 +261,20 @@ mod tests {
 
     #[test]
     fn stops_at_360_lines() {
-        assert_eq!(last_step(2560, 1440), 3);
-        assert_eq!(last_step(1280, 720), 2);
-        assert_eq!(last_step(640, 360), 0);
+        assert_eq!(last_step(2560, 1440, 0), 3);
+        assert_eq!(last_step(1280, 720, 0), 2);
+        assert_eq!(last_step(640, 360, 0), 0);
+    }
+
+    #[test]
+    fn the_browser_floor_limits_the_last_step() {
+        assert_eq!(last_step(2560, 1440, 100), 0);
+        assert_eq!(last_step(2560, 1440, 75), 1);
+        assert_eq!(last_step(2560, 1440, 60), 1);
+        assert_eq!(last_step(2560, 1440, 50), 2);
+        assert_eq!(last_step(2560, 1440, 1), 3);
+        // The 360-line limit still applies under a low floor.
+        assert_eq!(last_step(1280, 720, 1), 2);
     }
 
     #[test]
@@ -161,42 +282,124 @@ mod tests {
         let t = Instant::now();
         let mut a = settled(t);
         // 1440p60 needs about 8.8 Mb/s.
-        assert_eq!(a.update(t, 3000, 2560, 1440, 60), None);
-        assert_eq!(a.update(t + S, 3000, 2560, 1440, 60), None);
+        assert_eq!(up(&mut a, t, busy(3000)), None);
+        assert_eq!(up(&mut a, t + S, busy(3000)), None);
         // A blip back up restarts the wait.
-        assert_eq!(a.update(t + S, 20_000, 2560, 1440, 60), None);
-        assert_eq!(a.update(t + S * 2, 3000, 2560, 1440, 60), None);
+        assert_eq!(up(&mut a, t + S, busy(20_000)), None);
+        assert_eq!(up(&mut a, t + S * 2, busy(3000)), None);
         // 3 Mb/s holds up 720p60 (about 2.2 Mb/s) but not 1080p60.
-        assert_eq!(a.update(t + S * 4, 3000, 2560, 1440, 60), Some(2));
+        assert_eq!(up(&mut a, t + S * 4, busy(3000)), Some(2));
         assert_eq!(a.step(), 2);
-        assert_eq!(a.update(t + S * 10, 3000, 2560, 1440, 60), None);
+        assert_eq!(up(&mut a, t + S * 10, busy(3000)), None);
+    }
+
+    #[test]
+    fn a_still_desktop_never_steps_down() {
+        // The estimate collapses to a fraction of the tiny repeat frames'
+        // rate; nothing moves, so it says nothing about the link.
+        let t = Instant::now();
+        let mut a = settled(t);
+        for i in 0..120 {
+            assert_eq!(up(&mut a, t + S * i, idle(300)), None);
+        }
+        assert_eq!(a.step(), 0);
+    }
+
+    #[test]
+    fn idle_seconds_restart_the_wait() {
+        let t = Instant::now();
+        let mut a = settled(t);
+        assert_eq!(up(&mut a, t, busy(3000)), None);
+        assert_eq!(up(&mut a, t + S, busy(3000)), None);
+        assert_eq!(up(&mut a, t + S * 2, idle(3000)), None);
+        assert_eq!(up(&mut a, t + S * 3, busy(3000)), None);
+        assert_eq!(up(&mut a, t + S * 4, busy(3000)), None);
+        assert_eq!(up(&mut a, t + S * 5, busy(3000)), Some(2));
+    }
+
+    #[test]
+    fn dropped_frames_count_as_busy() {
+        // Frames held back or dropped: the queue is full even if what got
+        // out was under half the target.
+        let t = Instant::now();
+        let mut a = settled(t);
+        let held = Load {
+            kbps: 3000,
+            sent_kbps: 900,
+            dropped: true,
+        };
+        assert_eq!(up(&mut a, t, held), None);
+        assert_eq!(up(&mut a, t + S * 2, held), Some(2));
     }
 
     #[test]
     fn goes_no_lower_than_the_last_step() {
         let t = Instant::now();
         let mut a = settled(t);
-        a.update(t, 200, 2560, 1440, 60);
-        assert_eq!(a.update(t + S * 2, 200, 2560, 1440, 60), Some(3));
-        assert_eq!(a.update(t + S * 10, 200, 2560, 1440, 60), None);
+        up(&mut a, t, busy(200));
+        assert_eq!(up(&mut a, t + S * 2, busy(200)), Some(3));
+        assert_eq!(up(&mut a, t + S * 10, busy(200)), None);
+    }
+
+    #[test]
+    fn goes_no_lower_than_the_browser_floor() {
+        let t = Instant::now();
+        let mut a = settled(t);
+        a.update(t, busy(200), 2560, 1440, 60, 75);
+        assert_eq!(a.update(t + S * 2, busy(200), 2560, 1440, 60, 75), Some(1));
+        assert_eq!(a.update(t + S * 10, busy(200), 2560, 1440, 60, 75), None);
+        // Off: never scales.
+        let mut a = settled(t);
+        a.update(t, busy(200), 2560, 1440, 60, 100);
+        assert_eq!(a.update(t + S * 2, busy(200), 2560, 1440, 60, 100), None);
+        assert_eq!(a.step(), 0);
+    }
+
+    #[test]
+    fn raising_the_floor_steps_straight_back_up() {
+        let t = Instant::now();
+        let mut a = settled(t);
+        up(&mut a, t, busy(200));
+        assert_eq!(up(&mut a, t + S * 2, busy(200)), Some(3));
+        assert_eq!(a.limit(t + S * 3, 2560, 1440, 50), Some(2));
+        assert_eq!(a.limit(t + S * 3, 2560, 1440, 50), None);
+        assert_eq!(a.update(t + S * 4, busy(200), 2560, 1440, 60, 100), Some(0));
     }
 
     #[test]
     fn steps_up_one_at_a_time_after_a_long_stretch_of_headroom() {
         let t = Instant::now();
         let mut a = settled(t);
-        a.update(t, 1000, 2560, 1440, 60);
-        assert_eq!(a.update(t + S * 2, 1000, 2560, 1440, 60), Some(3));
+        up(&mut a, t, busy(1000));
+        assert_eq!(up(&mut a, t + S * 2, busy(1000)), Some(3));
         // Enough for 720p, but not with margin: stay.
-        assert_eq!(a.update(t + S * 3, 2500, 2560, 1440, 60), None);
-        assert_eq!(a.update(t + S * 20, 2500, 2560, 1440, 60), None);
+        assert_eq!(up(&mut a, t + S * 3, busy(2500)), None);
+        assert_eq!(up(&mut a, t + S * 20, busy(2500)), None);
         // Plenty: up one step after ten seconds.
-        assert_eq!(a.update(t + S * 21, 30_000, 2560, 1440, 60), None);
-        assert_eq!(a.update(t + S * 30, 30_000, 2560, 1440, 60), None);
-        assert_eq!(a.update(t + S * 31, 30_000, 2560, 1440, 60), Some(2));
-        assert_eq!(a.update(t + S * 41, 30_000, 2560, 1440, 60), None);
-        assert_eq!(a.update(t + S * 50, 30_000, 2560, 1440, 60), None);
-        assert_eq!(a.update(t + S * 51, 30_000, 2560, 1440, 60), Some(1));
+        assert_eq!(up(&mut a, t + S * 21, busy(30_000)), None);
+        assert_eq!(up(&mut a, t + S * 30, busy(30_000)), None);
+        assert_eq!(up(&mut a, t + S * 31, busy(30_000)), Some(2));
+        assert_eq!(up(&mut a, t + S * 41, busy(30_000)), None);
+        assert_eq!(up(&mut a, t + S * 50, busy(30_000)), None);
+        assert_eq!(up(&mut a, t + S * 51, busy(30_000)), Some(1));
+    }
+
+    #[test]
+    fn a_size_that_does_not_hold_waits_longer_next_time() {
+        let t = Instant::now();
+        let mut a = settled(t);
+        up(&mut a, t, busy(3000));
+        assert_eq!(up(&mut a, t + S * 2, busy(3000)), Some(2));
+        up(&mut a, t + S * 3, busy(30_000));
+        assert_eq!(up(&mut a, t + S * 13, busy(30_000)), Some(1));
+        // Down again within half a minute of going up.
+        up(&mut a, t + S * 18, busy(3000));
+        assert_eq!(up(&mut a, t + S * 20, busy(3000)), Some(2));
+        // Now twenty seconds of headroom before the next try.
+        up(&mut a, t + S * 21, busy(30_000));
+        assert_eq!(up(&mut a, t + S * 31, busy(30_000)), None);
+        assert_eq!(up(&mut a, t + S * 40, busy(30_000)), None);
+        assert_eq!(up(&mut a, t + S * 41, busy(30_000)), Some(1));
     }
 
     #[test]
@@ -205,35 +408,35 @@ mod tests {
         // the estimate climbs.
         let t = Instant::now();
         let mut a = AutoScale::default();
-        assert_eq!(a.update(t, 7500, 2560, 1440, 60), None);
-        assert_eq!(a.update(t + S * 4, 7500, 2560, 1440, 60), None);
-        assert_eq!(a.update(t + S * 5, 30_000, 2560, 1440, 60), None);
-        assert_eq!(a.update(t + S * 30, 30_000, 2560, 1440, 60), None);
+        assert_eq!(up(&mut a, t, busy(7500)), None);
+        assert_eq!(up(&mut a, t + S * 4, busy(7500)), None);
+        assert_eq!(up(&mut a, t + S * 5, busy(30_000)), None);
+        assert_eq!(up(&mut a, t + S * 30, busy(30_000)), None);
         assert_eq!(a.step(), 0);
         // Still low once settled: step down after the usual wait.
-        assert_eq!(a.update(t + S * 31, 3000, 2560, 1440, 60), None);
-        assert_eq!(a.update(t + S * 33, 3000, 2560, 1440, 60), Some(2));
+        assert_eq!(up(&mut a, t + S * 31, busy(3000)), None);
+        assert_eq!(up(&mut a, t + S * 33, busy(3000)), Some(2));
     }
 
     #[test]
     fn no_second_step_down_right_after_a_change() {
         let t = Instant::now();
         let mut a = settled(t);
-        a.update(t, 3000, 2560, 1440, 60);
-        assert_eq!(a.update(t + S * 2, 3000, 2560, 1440, 60), Some(2));
+        up(&mut a, t, busy(3000));
+        assert_eq!(up(&mut a, t + S * 2, busy(3000)), Some(2));
         // The new size needs a moment too.
-        a.update(t + S * 3, 200, 2560, 1440, 60);
-        assert_eq!(a.update(t + S * 6, 200, 2560, 1440, 60), None);
-        assert_eq!(a.update(t + S * 7, 200, 2560, 1440, 60), None);
-        assert_eq!(a.update(t + S * 9, 200, 2560, 1440, 60), Some(3));
+        up(&mut a, t + S * 3, busy(200));
+        assert_eq!(up(&mut a, t + S * 6, busy(200)), None);
+        assert_eq!(up(&mut a, t + S * 7, busy(200)), None);
+        assert_eq!(up(&mut a, t + S * 9, busy(200)), Some(3));
     }
 
     #[test]
     fn a_small_configured_size_never_scales() {
         let t = Instant::now();
         let mut a = AutoScale::default();
-        a.update(t, 100, 640, 360, 60);
-        assert_eq!(a.update(t + S * 5, 100, 640, 360, 60), None);
+        a.update(t, busy(100), 640, 360, 60, 0);
+        assert_eq!(a.update(t + S * 5, busy(100), 640, 360, 60, 0), None);
         assert_eq!(a.step(), 0);
     }
 }

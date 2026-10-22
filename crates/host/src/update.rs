@@ -67,7 +67,7 @@ pub fn start(
                     format!("couldn't watch the update: {e}")
                 })?;
             Ok(format!(
-                "Building the latest main on the host. It restarts when the build is done, \
+                "Building the latest main (or newest signed release) on the host. It restarts when the build is done, \
                  which can take several minutes; the stream keeps running until then. \
                  Log: {}",
                 log.display()

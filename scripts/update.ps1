@@ -21,6 +21,14 @@
     It installs nothing; run install.ps1 again for new build dependencies or
     drivers.
 
+    Signed releases: with an allowed-signers file at
+    .git\web-stream-allowed-signers (SSH keys, in git's allowed signers
+    format), it builds the newest tag named host-* whose SSH signature
+    verifies against those keys, instead of whatever is on main. Then a
+    commit merged to main (by anyone with access to the GitHub repository)
+    only reaches this PC once the owner of one of those keys has signed a
+    tag for it. See docs/host-setup.md.
+
 .PARAMETER Force
     Rebuild and restart even when the build is already the latest main.
 
@@ -201,9 +209,44 @@ if (Invoke-Git status --porcelain --untracked-files=no) {
     throw 'The checkout has local changes. Commit or discard them (git status) and run this again.'
 }
 
-Write-Step 'Fetching main'
-Invoke-Git fetch origin main | Out-Host
-$new = @(Invoke-Git log --oneline HEAD..origin/main)
+# The newest host-* tag whose signature verifies against $Signers, as a
+# commit id, or $null if none does.
+function Find-SignedRelease([string]$Signers) {
+    $tags = @(Invoke-Git tag --list 'host-*' --sort=-creatordate)
+    foreach ($tag in $tags) {
+        $tag = $tag.Trim()
+        if (-not $tag) { continue }
+        & git -C $repo -c "gpg.ssh.allowedSignersFile=$Signers" verify-tag $tag 2>$null | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "Newest signed release: $tag"
+            return (Invoke-Git rev-parse "$tag^{commit}").Trim()
+        }
+        Write-Host "  $tag is not signed by an allowed key; skipped" -ForegroundColor Yellow
+    }
+    $null
+}
+
+$signers = Join-Path $repo '.git\web-stream-allowed-signers'
+if (Test-Path $signers) {
+    Write-Step 'Fetching signed releases'
+    Invoke-Git fetch origin main --tags --force | Out-Host
+    $target = Find-SignedRelease $signers
+    if (-not $target) {
+        throw "No host-* tag is signed by a key in $signers, so there is nothing to build. Sign one (git tag -s host-<date>) and push it."
+    }
+    # Only forward along main: a signed tag older than this build changes nothing.
+    & git -C $repo merge-base --is-ancestor HEAD $target
+    if ($LASTEXITCODE -ne 0) {
+        & git -C $repo merge-base --is-ancestor $target HEAD
+        if ($LASTEXITCODE -eq 0) { $target = (Invoke-Git rev-parse HEAD).Trim() }
+        else { throw "The signed release $($target.Substring(0, 8)) is not on main's history; not building it." }
+    }
+} else {
+    Write-Step 'Fetching main'
+    Invoke-Git fetch origin main | Out-Host
+    $target = (Invoke-Git rev-parse origin/main).Trim()
+}
+$new = @(Invoke-Git log --oneline "HEAD..$target")
 $built = if (Test-Path $commitFile) { (Get-Content $commitFile).Trim() } else { $null }
 $head = (Invoke-Git rev-parse HEAD).Trim()
 if (-not $new -and $built -eq $head -and -not $Force) {
@@ -213,7 +256,7 @@ if (-not $new -and $built -eq $head -and -not $Force) {
 if ($new) {
     Write-Host "New on main:"
     $new | ForEach-Object { Write-Host "  $_" }
-    Invoke-Git merge --ff-only origin/main | Out-Host
+    Invoke-Git merge --ff-only $target | Out-Host
     $head = (Invoke-Git rev-parse HEAD).Trim()
 }
 

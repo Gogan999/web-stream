@@ -1,4 +1,6 @@
-//! Command-line options for `ws-host serve`.
+//! The host's options, as flags: the tray app turns its settings into
+//! these (its "More options" field takes any of them), and so does the
+//! service's `install`.
 
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
@@ -9,12 +11,7 @@ use ws_input::GamepadKind;
 use ws_proto::{DisplayId, VideoCodec, VideoConfig, VideoQuality};
 
 pub const USAGE: &str = "\
-ws-host [serve] [options]      run the host (the default)
-ws-host displays               list capturable displays
-ws-host audio-devices          list playback devices (for --mic-device, --audio-device)
-ws-host capture-test [...]     encode a display to a file, see --help there
-
-serve options:
+host options:
   --port P             HTTPS (TCP) and media (UDP) port, default 8443
   --ice-tcp-port P     ICE-TCP fallback port, default port+1
   --no-ice-tcp         don't listen for ICE-TCP
@@ -45,7 +42,7 @@ serve options:
                        in --upload-dir and never opened by the host
   --upload-dir DIR     where received files go, default Downloads\\web-stream
   --allow-remote-update  let the browser update the host to the latest main and
-                       restart it (scripts\\update.ps1; tray app only)
+                       restart it (scripts\\update.ps1)
   --pair               open pairing for two minutes at startup
 ";
 

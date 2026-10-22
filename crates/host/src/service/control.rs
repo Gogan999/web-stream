@@ -4,12 +4,14 @@
 //! normal user must not be able to.
 
 use std::ffi::c_void;
-use std::io::{BufRead, Write};
+use std::io::Write;
 use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::AsRawHandle;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::options::ServeOptions;
+use crate::serve::{self, Event};
 use anyhow::Context;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeServer, ServerOptions};
@@ -22,8 +24,6 @@ use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
 use windows::Win32::Storage::FileSystem::{SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT};
 use windows::Win32::System::Pipes::GetNamedPipeServerProcessId;
 use windows::core::PCWSTR;
-use ws_host::options::ServeOptions;
-use ws_host::serve::{self, Event};
 
 use super::launch::wide;
 use crate::console::{CONSOLE_HELP, Line, describe, parse_line};
@@ -181,10 +181,9 @@ async fn client_session(
 
 fn open_error(e: std::io::Error) -> anyhow::Error {
     match e.raw_os_error() {
-        Some(ERROR_ACCESS_DENIED) => anyhow::anyhow!(
-            "access denied: controlling the service takes an administrator prompt \
-             (Run as administrator)"
-        ),
+        Some(ERROR_ACCESS_DENIED) => {
+            anyhow::anyhow!("access denied: controlling the service takes administrator rights")
+        }
         Some(ERROR_FILE_NOT_FOUND) => anyhow::anyhow!(
             "the service's host is not running. Is the service installed and started \
              (`sc query web-stream`)? Its log is host.log in the service's data folder."
@@ -227,58 +226,98 @@ fn check_server(handle: HANDLE, name: &str, pid: u32) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `ws-host service console` and `pair`: types commands into the service's
-/// host and prints what it says, until Ctrl+C or the host stops.
-pub fn console(first: Option<&str>) -> anyhow::Result<()> {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-    rt.block_on(async {
-        let (pipe, pid) = current_pipe()?;
-        let client = loop {
-            match ClientOptions::new().open(&pipe) {
-                Ok(c) => break c,
-                Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await
+/// A connection to the service's host on its control pipe: what the host
+/// says, and the commands typed into it. The tray app's service console
+/// window, run as an elevated administrator, is the one user.
+pub struct ServiceConsole {
+    /// Lines from the host; disconnected once the host stops or the pipe
+    /// breaks.
+    pub lines: std::sync::mpsc::Receiver<String>,
+    commands: mpsc::UnboundedSender<String>,
+}
+
+impl ServiceConsole {
+    /// Types `line` (`pair`, `drop`, `unpair-all`, `send <path>`) into the
+    /// host; false once the connection is gone.
+    pub fn send(&self, line: &str) -> bool {
+        self.commands.send(line.to_owned()).is_ok()
+    }
+}
+
+/// Connects to the service's host, checking it is the process the service
+/// started. `notify` is called (on another thread) after each line.
+pub fn connect(notify: impl Fn() + Send + 'static) -> anyhow::Result<ServiceConsole> {
+    let (lines_tx, lines) = std::sync::mpsc::channel();
+    let (commands, mut commands_rx) = mpsc::unbounded_channel::<String>();
+    let (ready_tx, ready) = std::sync::mpsc::sync_channel::<anyhow::Result<()>>(1);
+    std::thread::Builder::new()
+        .name("ws-service-console".into())
+        .spawn(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    let _ = ready_tx.send(Err(e.into()));
+                    return;
                 }
-                Err(e) => return Err(open_error(e)),
-            }
-        };
-        check_server(HANDLE(client.as_raw_handle()), &pipe, pid)?;
-        let (read, mut write) = tokio::io::split(client);
-        if let Some(cmd) = first {
-            write.write_all(format!("{cmd}\n").as_bytes()).await?;
-        }
-        println!("connected to the web-stream service; Ctrl+C leaves (the host keeps running)");
-        let (typed_tx, mut typed) = mpsc::channel::<String>(8);
-        std::thread::Builder::new()
-            .name("ws-console".into())
-            .spawn(move || {
-                for line in std::io::stdin().lock().lines() {
-                    let Ok(line) = line else { break };
-                    if typed_tx.blocking_send(line).is_err() {
-                        break;
+            };
+            rt.block_on(async move {
+                let client = match open_client().await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let _ = ready_tx.send(Err(e));
+                        return;
+                    }
+                };
+                let _ = ready_tx.send(Ok(()));
+                let (read, mut write) = tokio::io::split(client);
+                let mut read = BufReader::new(read).lines();
+                loop {
+                    tokio::select! {
+                        line = read.next_line() => {
+                            let Ok(Some(line)) = line else {
+                                let _ = lines_tx.send(
+                                    "the service's host stopped; the service starts it again".into(),
+                                );
+                                notify();
+                                return;
+                            };
+                            if lines_tx.send(line).is_err() {
+                                return;
+                            }
+                            notify();
+                        }
+                        cmd = commands_rx.recv() => {
+                            let Some(cmd) = cmd else { return };
+                            if write.write_all(format!("{cmd}\n").as_bytes()).await.is_err() {
+                                return;
+                            }
+                        }
                     }
                 }
-            })?;
-        let mut read = BufReader::new(read).lines();
-        loop {
-            tokio::select! {
-                line = read.next_line() => match line? {
-                    Some(line) => println!("{line}"),
-                    None => {
-                        println!("the host stopped; the service starts it again");
-                        return Ok(());
-                    }
-                },
-                Some(line) = typed.recv() => {
-                    write.write_all(format!("{line}\n").as_bytes()).await?;
-                }
+            });
+        })?;
+    ready
+        .recv()
+        .unwrap_or_else(|_| Err(anyhow::anyhow!("the control pipe thread stopped")))?;
+    Ok(ServiceConsole { lines, commands })
+}
+
+async fn open_client() -> anyhow::Result<tokio::net::windows::named_pipe::NamedPipeClient> {
+    let (pipe, pid) = current_pipe()?;
+    let client = loop {
+        match ClientOptions::new().open(&pipe) {
+            Ok(c) => break c,
+            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await
             }
+            Err(e) => return Err(open_error(e)),
         }
-    })?;
-    // The stdin thread may still be blocked reading.
-    std::process::exit(0)
+    };
+    check_server(HANDLE(client.as_raw_handle()), &pipe, pid)?;
+    Ok(client)
 }
 
 /// Tells the host (process `pid`) to quit, retrying for a moment while

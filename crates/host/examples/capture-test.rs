@@ -1,34 +1,27 @@
-//! Host agent entry point.
+//! Encodes a display to a file and prints frame rate, drops and
+//! capture-to-encoded latency once a second. For checking capture and the
+//! encoder on their own, without a browser:
 //!
 //! ```text
-//! ws-host [serve] [options]   run the host: web client, pairing, signaling,
-//!                             WebRTC, capture, audio and input (see --help)
-//! ws-host displays
-//! ws-host audio-devices
-//! ws-host capture-test [--display N] [--seconds S] [--fps F] [--kbps K]
-//!                      [--size WxH] [--codec h264|h265|av1]
-//!                      [--quality speed|balanced|clarity] [--out FILE]
-//! ws-host service install|update|uninstall|pair|console   (Windows, see service)
+//! cargo run --release -p ws-host --example capture-test -- [--display N] [--seconds S]
+//!     [--fps F] [--kbps K] [--size WxH] [--codec h264|h265|av1]
+//!     [--quality speed|balanced|clarity] [--out FILE]
 //! ```
 //!
-//! `capture-test` writes the raw bitstream (play it with `ffplay FILE`) and
-//! prints frame rate, drops and capture-to-encoded latency once a second.
+//! It writes the raw bitstream; play it with `ffplay FILE`.
 
-mod console;
-mod service;
-
-use std::io::{IsTerminal, Write};
+use std::io::Write;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, bail};
 use tokio::sync::mpsc;
 use ws_proto::{DisplayId, VideoCodec, VideoConfig, mono_now};
 
-use ws_host::options::{self, ServeOptions, parse_codec, parse_quality, parse_size};
+use ws_host::options::{parse_codec, parse_quality, parse_size};
 
 const CAPTURE_TEST_USAGE: &str = "\
-ws-host capture-test [options]   encode a display to a file and print fps,
-                                 drops and latency once a second
+capture-test [options]   encode a display to a file and print fps,
+                         drops and latency once a second
   --display N          display to capture, default the primary
   --seconds S          how long, default 10
   --codec h264|h265|av1  --size WxH  --fps F  --kbps K
@@ -37,81 +30,13 @@ ws-host capture-test [options]   encode a display to a file and print fps,
 ";
 
 fn main() -> anyhow::Result<()> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    init_logging(&args);
-    match args.first().map(String::as_str) {
-        Some("displays") => list_displays(),
-        Some("audio-devices") => list_audio_devices(),
-        Some("capture-test") => capture_test(&args[1..]),
-        Some("serve") => run_serve(&args[1..]),
-        Some("service") => service::main(&args[1..]),
-        Some(flag) if flag.starts_with('-') => run_serve(&args),
-        None => run_serve(&[]),
-        Some(other) => bail!(
-            "unknown command {other:?}\n\n{}\n{}",
-            options::USAGE,
-            service::USAGE
-        ),
-    }
-}
-
-fn init_logging(args: &[String]) {
-    let logs = tracing_subscriber::fmt()
+    tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,str0m=warn".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
-        // No colour codes in a log file (the service's host writes to one).
-        .with_ansi(std::io::stdout().is_terminal());
-    // The service itself has no stdout: it logs to service.log.
-    #[cfg(windows)]
-    if args.len() >= 2 && args[0] == "service" && args[1] == "run" {
-        if let Some(file) = service::service_log() {
-            return logs
-                .with_ansi(false)
-                .with_writer(std::sync::Mutex::new(file))
-                .init();
-        }
-    }
-    #[cfg(not(windows))]
-    let _ = args;
-    logs.init();
-}
-
-fn run_serve(args: &[String]) -> anyhow::Result<()> {
-    if args.iter().any(|a| a == "-h" || a == "--help") {
-        print!("{}", options::USAGE);
-        return Ok(());
-    }
-    let opts = ServeOptions::parse(args)?;
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?
-        .block_on(console::run(opts))
-}
-
-fn list_displays() -> anyhow::Result<()> {
-    for d in ws_capture::list_displays()? {
-        println!(
-            "{:>3}  {}x{} @ {:.2} Hz at ({}, {}){}  {}",
-            d.id.0,
-            d.width,
-            d.height,
-            f64::from(d.refresh_mhz) / 1000.0,
-            d.x,
-            d.y,
-            if d.primary { " primary" } else { "" },
-            d.name
-        );
-    }
-    Ok(())
-}
-
-fn list_audio_devices() -> anyhow::Result<()> {
-    for name in ws_host::audio_devices()? {
-        println!("{name}");
-    }
-    Ok(())
+        .init();
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    capture_test(&args)
 }
 
 fn capture_test(args: &[String]) -> anyhow::Result<()> {

@@ -1,6 +1,8 @@
-//! The host agent as a library: the `ws-host` console program and the
-//! `ws-host-gui` tray app both run [`serve::serve`].
+//! The host agent as a library. The `ws-host-gui` tray app runs
+//! [`serve::serve`], and its exe also runs the Windows service
+//! ([`service`]).
 
+pub mod console;
 mod cursor;
 mod files;
 mod input;
@@ -10,6 +12,7 @@ mod platform;
 pub mod sas;
 mod scale;
 pub mod serve;
+pub mod service;
 pub mod update;
 mod uploads;
 

@@ -6,7 +6,7 @@
 //! the desktop it is attached to, so the threads that do call
 //! [`follow_input_desktop`] when that stops working. Only a process running
 //! as SYSTEM may open the Winlogon desktop (the service starts the host that
-//! way, see `ws-host service`); for anyone else the call changes nothing.
+//! way, see `ws_host::service`); for anyone else the call changes nothing.
 
 #[cfg(windows)]
 mod imp {

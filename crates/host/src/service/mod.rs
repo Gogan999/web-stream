@@ -1,15 +1,16 @@
-//! `ws-host service`: the host as a Windows service, so a browser can also
-//! use the sign-in and lock screens, UAC prompts and programs running as
-//! administrator.
+//! The host as a Windows service, so a browser can also use the sign-in
+//! and lock screens, UAC prompts and programs running as administrator.
+//! The tray app's exe runs it: `ws-host-gui service ...` (see [`main`]),
+//! started elevated from the tray app's settings.
 //!
 //! The service (LocalSystem, in session 0) only supervises. It starts
-//! `ws-host service session-host` in the session on the PC's own screen,
+//! `<exe> service session-host` in the session on the PC's own screen,
 //! as SYSTEM with nearly every privilege removed, and starts it again when
 //! that session changes (signing out, switching users) or the host exits.
 //! Running as SYSTEM on the user's screen is what lets capture and input
 //! follow Windows onto the secure desktop and into elevated windows. The
 //! host has no console; elevated administrators control it through a named
-//! pipe (`ws-host service pair`, `ws-host service console`).
+//! pipe: the tray app's service console window ([`control::connect`]).
 
 // Off Windows only the tests use most of this.
 #![cfg_attr(not(windows), allow(dead_code))]
@@ -17,11 +18,11 @@
 use std::path::Path;
 use std::time::Duration;
 
+use crate::options::ServeOptions;
 use anyhow::bail;
-use ws_host::options::ServeOptions;
 
 #[cfg(windows)]
-mod control;
+pub mod control;
 #[cfg(windows)]
 mod launch;
 #[cfg(windows)]
@@ -30,15 +31,13 @@ mod sas;
 pub(crate) mod scm;
 
 pub const USAGE: &str = "\
-ws-host service install [serve options]
-                       install (or reinstall) the host as a Windows service that
-                       starts with Windows and streams the sign-in screen, UAC
-                       prompts and programs run as administrator; copies this
-                       ws-host.exe to Program Files. Administrator prompt.
-ws-host service update copy this ws-host.exe over the installed one and restart
-ws-host service uninstall
-ws-host service pair   open pairing and show the code (administrator prompt)
-ws-host service console  type host commands (pair, drop, unpair-all, send <path>)
+service install [host options]
+                 install (or reinstall) the host as a Windows service that
+                 starts with Windows and streams the sign-in screen, UAC
+                 prompts and programs run as administrator; copies this exe
+                 to Program Files. Needs administrator rights.
+service update   copy this exe over the installed one and restart the service
+service uninstall
 ";
 
 /// Serve options the service refuses, and why.
@@ -60,33 +59,57 @@ const REFUSED: &[(&str, &str)] = &[
     ("--upload-dir", "the service can't receive files yet"),
     (
         "--allow-remote-update",
-        "the service runs its own copy of ws-host.exe from Program Files; update it on the PC \
+        "the service runs its own copy of the host from Program Files; update it on the PC \
          with scripts\\update.ps1",
     ),
     (
         "--pair",
-        "it would open pairing every time the host starts; use `ws-host service pair`",
+        "it would open pairing every time the host starts; pair from the tray app's service \
+         console",
     ),
 ];
 
-pub fn main(args: &[String]) -> anyhow::Result<()> {
+/// Runs `service <args>`; what it did, for the administrator who asked
+/// (empty for the service and the session host, which run until stopped).
+pub fn main(args: &[String]) -> anyhow::Result<String> {
     let rest = args.get(1..).unwrap_or_default();
     match args.first().map(String::as_str) {
         Some("install") => imp::install(rest),
         Some("update") => imp::update(),
         Some("uninstall") => imp::uninstall(),
-        Some("pair") => imp::console(Some("pair")),
-        Some("console") => imp::console(None),
         // Started by the service control manager.
-        Some("run") => imp::run(rest),
+        Some("run") => imp::run(rest).map(|()| String::new()),
         // Started by the service in the user's session.
-        Some("session-host") => imp::session_host(rest),
-        Some("-h" | "--help") | None => {
-            print!("{USAGE}");
-            Ok(())
-        }
+        Some("session-host") => imp::session_host(rest).map(|()| String::new()),
+        Some("-h" | "--help") | None => Ok(USAGE.into()),
         Some(other) => bail!("unknown service command {other:?}\n\n{USAGE}"),
     }
+}
+
+/// Logging for `service <args>`: the service writes to service.log (it has
+/// no stdout); the session host's stdout is its host.log.
+pub fn init_logging(args: &[String]) {
+    let logs = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info,str0m=warn".into()),
+        )
+        .with_ansi(false);
+    #[cfg(windows)]
+    if args.first().is_some_and(|a| a == "run") {
+        if let Some(file) = service_log() {
+            return logs.with_writer(std::sync::Mutex::new(file)).init();
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = args;
+    logs.init();
+}
+
+/// Whether the service is installed, and if so whether it runs. Needs no
+/// administrator rights.
+pub fn query() -> anyhow::Result<Option<bool>> {
+    imp::query()
 }
 
 /// The control pipe's name starts with this; the rest is random, picked by
@@ -257,8 +280,7 @@ pub use scm::service_log;
 
 #[cfg(windows)]
 mod imp {
-    pub use super::control::console;
-    pub use super::scm::{install, run, uninstall, update};
+    pub use super::scm::{install, query, run, uninstall, update};
 
     /// Running as SYSTEM, load DLLs only from System32 and the exe's
     /// folder, never the current directory or PATH.
@@ -280,7 +302,7 @@ mod imp {
         let host = super::parse_session_host_args(args)?;
         if host.sas_event != 0 {
             let event = host.sas_event;
-            ws_host::sas::install(move || super::sas::request(event));
+            crate::sas::install(move || super::sas::request(event));
         }
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -294,18 +316,18 @@ mod imp {
     fn windows_only() -> anyhow::Result<()> {
         anyhow::bail!("the host service is Windows only")
     }
-    pub fn install(args: &[String]) -> anyhow::Result<()> {
+    pub fn install(args: &[String]) -> anyhow::Result<String> {
         super::check_install_args(args)?;
-        windows_only()
+        windows_only().map(|()| String::new())
     }
-    pub fn update() -> anyhow::Result<()> {
-        windows_only()
+    pub fn update() -> anyhow::Result<String> {
+        windows_only().map(|()| String::new())
     }
-    pub fn uninstall() -> anyhow::Result<()> {
-        windows_only()
+    pub fn uninstall() -> anyhow::Result<String> {
+        windows_only().map(|()| String::new())
     }
-    pub fn console(_: Option<&str>) -> anyhow::Result<()> {
-        windows_only()
+    pub fn query() -> anyhow::Result<Option<bool>> {
+        Ok(None)
     }
     pub fn run(_: &[String]) -> anyhow::Result<()> {
         windows_only()

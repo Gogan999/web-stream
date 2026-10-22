@@ -28,6 +28,8 @@ pub const SERVICE_NAME: &str = "web-stream";
 const DISPLAY_NAME: &str = "web-stream host";
 const DESCRIPTION: &str = "Streams this PC to a paired browser, including the sign-in \
      screen, UAC prompts and programs running as administrator.";
+/// The service's copy of the tray app's exe. Named after the console
+/// program it used to be, so installs from then update in place.
 const EXE_NAME: &str = "ws-host.exe";
 const ACCESS: ServiceAccess = ServiceAccess::QUERY_STATUS
     .union(ServiceAccess::START)
@@ -52,7 +54,7 @@ fn known_folder(id: &GUID) -> anyhow::Result<PathBuf> {
     Ok(path?)
 }
 
-/// Where the service's copy of ws-host.exe lives: under Program Files, so
+/// Where the service's copy of the host lives: under Program Files, so
 /// only administrators can replace what runs as SYSTEM. (Not from an
 /// environment variable, which the user could point elsewhere.)
 fn install_dir() -> anyhow::Result<PathBuf> {
@@ -92,7 +94,7 @@ fn open_installed(manager: &ServiceManager) -> anyhow::Result<Option<Service>> {
     }
 }
 
-pub fn install(args: &[String]) -> anyhow::Result<()> {
+pub fn install(args: &[String]) -> anyhow::Result<String> {
     let opts = super::check_install_args(args)?;
     let args = &copy_certificate(args, &opts)?;
     let manager = manager(ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE)?;
@@ -142,19 +144,27 @@ pub fn install(args: &[String]) -> anyhow::Result<()> {
         ]),
     })?;
     service.start::<&str>(&[]).context("start the service")?;
-    println!(
-        "installed and started the {SERVICE_NAME} service ({})",
-        exe.display()
-    );
-    println!(
-        "data (certificate, paired browsers, logs) in {}",
+    Ok(format!(
+        "Installed and started the {SERVICE_NAME} service ({}).\n\
+         Its data (certificate, paired browsers, logs) is in {}.\n\n\
+         It uses the same ports as the tray app's own host, so the tray app stops hosting \
+         while the service runs. The service has its own certificate and paired browsers: \
+         pair again with \"Pair through the service\" in the tray app.",
+        exe.display(),
         data_dir()?.display()
-    );
-    println!();
-    println!("It uses the same ports as the tray app: quit the tray app and turn off its");
-    println!("\"Start with Windows\". The service has its own certificate and paired browsers,");
-    println!("so pair again: run `ws-host service pair` from an administrator prompt.");
-    Ok(())
+    ))
+}
+
+/// Whether the service is installed (`Some`), and running.
+pub fn query() -> anyhow::Result<Option<bool>> {
+    let manager = manager(ServiceManagerAccess::CONNECT)?;
+    match manager.open_service(SERVICE_NAME, ServiceAccess::QUERY_STATUS) {
+        Ok(s) => Ok(Some(
+            s.query_status()?.current_state != ServiceState::Stopped,
+        )),
+        Err(windows_service::Error::Winapi(e)) if e.raw_os_error() == Some(1060) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// The host reads `--cert` and `--key` as SYSTEM: copies them into the
@@ -162,7 +172,7 @@ pub fn install(args: &[String]) -> anyhow::Result<()> {
 /// who can write where they came from can't swap them later.
 fn copy_certificate(
     args: &[String],
-    opts: &ws_host::options::ServeOptions,
+    opts: &crate::options::ServeOptions,
 ) -> anyhow::Result<Vec<String>> {
     let Some((cert, key)) = &opts.cert else {
         return Ok(args.to_vec());
@@ -185,23 +195,24 @@ fn copy_certificate(
     Ok(args)
 }
 
-pub fn update() -> anyhow::Result<()> {
+pub fn update() -> anyhow::Result<String> {
     let manager = manager(ServiceManagerAccess::CONNECT)?;
     let Some(service) = open_installed(&manager)? else {
-        bail!("the service is not installed: run `ws-host service install`");
+        bail!("the service is not installed: install it from the tray app's settings");
     };
     stop_and_wait(&service)?;
     let exe = install_exe()?;
     service.start::<&str>(&[]).context("start the service")?;
-    println!("updated {} and restarted the service", exe.display());
-    Ok(())
+    Ok(format!(
+        "Updated {} and restarted the service.",
+        exe.display()
+    ))
 }
 
-pub fn uninstall() -> anyhow::Result<()> {
+pub fn uninstall() -> anyhow::Result<String> {
     let manager = manager(ServiceManagerAccess::CONNECT)?;
     let Some(service) = open_installed(&manager)? else {
-        println!("the service is not installed");
-        return Ok(());
+        return Ok("The service is not installed.".into());
     };
     stop_and_wait(&service)?;
     service.delete().context("delete the service")?;
@@ -209,11 +220,10 @@ pub fn uninstall() -> anyhow::Result<()> {
     let dir = install_dir()?;
     let _ = std::fs::remove_file(dir.join(EXE_NAME));
     let _ = std::fs::remove_dir(&dir);
-    println!(
-        "removed the service; its data stays in {}",
+    Ok(format!(
+        "Removed the service; its data stays in {}.",
         data_dir()?.display()
-    );
-    Ok(())
+    ))
 }
 
 fn stop_and_wait(service: &Service) -> anyhow::Result<()> {
@@ -276,8 +286,9 @@ define_windows_service!(ffi_service_main, service_main);
 pub fn run(args: &[String]) -> anyhow::Result<()> {
     super::imp::harden_dll_search();
     let _ = SERVE_ARGS.set(args.to_vec());
-    service_dispatcher::start(SERVICE_NAME, ffi_service_main)
-        .context("not started by the service control manager (use `ws-host service install`)")?;
+    service_dispatcher::start(SERVICE_NAME, ffi_service_main).context(
+        "not started by the service control manager (install it from the tray app's settings)",
+    )?;
     Ok(())
 }
 

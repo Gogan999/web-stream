@@ -16,8 +16,8 @@ HTTPS port (see `docs/signaling.md`).
 | `crates/signaling` | `ws-signaling` | HTTPS server in the host: web client, device pairing, `/ws` signaling |
 | `crates/input` | `ws-input` | Keyboard/mouse injection on the host |
 | `crates/audio` | `ws-audio` | Loopback capture + Opus, browser mic to virtual mic |
-| `crates/host` | `ws-host` (lib, bin) | Host agent wiring the crates together; console front end |
-| `crates/gui` | `ws-host-gui` (bin) | Tray app and status/settings window around the same host |
+| `crates/host` | `ws-host` (lib) | Host agent wiring the crates together, and the Windows service; `examples/` has a headless test host and a capture test |
+| `crates/gui` | `ws-host-gui` (bin) | The host program: tray app with status/settings window, which also runs the Windows service |
 | `web/` | | Browser client, plain and fast |
 
 Data flow on the host: `capture` emits `EncodedFrame`s and `audio` emits
@@ -33,6 +33,7 @@ cargo test --workspace
 ```
 
 The host crates build on any OS but only capture/encode on Windows. To run
-the host see `docs/host-setup.md`; elsewhere `ws-host` still serves the web
-client, pairing, signaling and data channels (input is logged, not
-injected), which is handy for testing the browser side.
+the host see `docs/host-setup.md`. Elsewhere the tray app, or the headless
+test host (`cargo run -p ws-host --example test-host -- --pair`), still
+serves the web client, pairing, signaling and data channels (input is
+logged, not injected), which is handy for testing the browser side.

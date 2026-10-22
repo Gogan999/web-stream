@@ -92,6 +92,8 @@ and paired browsers in `%LOCALAPPDATA%\web-stream`.
 --public-ip IP       public address that forwards to the host (repeatable)
 --hostname NAME      extra name or IP for the self-signed certificate (repeatable)
 --cert FILE --key FILE   PEM certificate instead of a self-signed one
+--duckdns NAME       Let's Encrypt certificate for NAME.duckdns.org (see below)
+--duckdns-token-file FILE  --no-duckdns-address  --acme-email ADDR  --acme-staging
 --data-dir DIR       certificate and paired devices
 --forget-after DAYS  unpair a browser unused for this long, default 30
 --allow-origin URL   extra origin allowed to use the API (repeatable)
@@ -174,12 +176,57 @@ The file is inside `.git`, so nothing pulled from GitHub can change it.
    Localhost works without this, which can make a firewall block look like
    a network problem.
 3. Open the host by its WAN address or a DDNS name that points at it, for
-   example `https://home.example.net:8443/`.
+   example `https://home.example.net:8443/`. Better, give it a real
+   certificate (next section), so the browser never shows a warning to
+   click past.
 
 The host advertises the address in the browser's URL (resolving a DDNS name)
 as a media address. `--public-ip` adds more, for when browsers reach the
 host by some other name. If pairing works but the stream never starts, a
 media port is not forwarded or the firewall is blocking it.
+
+### A certificate browsers trust
+
+Out of the box the host makes its own (self-signed) certificate, and each
+browser warns about it once. That is fine at home, where you can compare the
+fingerprint the tray app shows with the browser's. Away from home it's a
+risk: on a network you don't control, someone could show the browser a
+different certificate, and clicking past that warning hands them a paired
+browser. With a real certificate there is no warning to click past.
+
+The easy way is a free [DuckDNS](https://www.duckdns.org) name:
+
+1. Sign in at duckdns.org and add a subdomain, say `my-pc`.
+2. In the tray app's Settings, type `my-pc` as the DuckDNS name and paste
+   the account token shown on duckdns.org. (Flags: `--duckdns my-pc`, with
+   the token in `duckdns-token.txt` in the data folder, or
+   `--duckdns-token-file FILE`.)
+3. Open `https://my-pc.duckdns.org:8443/`.
+
+The host keeps the name pointing at this PC's public address, and asks
+Let's Encrypt for a certificate for it. Let's Encrypt checks a DNS record
+that the host sets through DuckDNS, so no port beyond the three above needs
+forwarding. The first certificate takes a minute or so; until then the host
+serves its self-signed one. It renews by itself when a third of its life is
+left, and the browser gets the new one on its next connection. Problems
+(a wrong token, Let's Encrypt unreachable) show in the tray app's log and
+are retried.
+
+- `--no-duckdns-address` leaves the name's address alone, if the router
+  already updates it.
+- `--acme-email` gives Let's Encrypt a contact address for the account (it
+  no longer sends expiry warnings; the host renews by itself).
+- `--acme-staging` uses Let's Encrypt's staging server, whose rate limits
+  are looser but whose certificates browsers don't trust, to try things
+  out. A staging certificate is dropped as soon as staging is turned off.
+
+After a failed order the host waits an hour before the next, doubling up to
+12 hours, and remembers this across restarts, so restarting it doesn't run
+into Let's Encrypt's limits.
+
+The certificate, its key and the Let's Encrypt account key are kept in the
+data folder. With another DNS provider, get a certificate with a tool such
+as win-acme and pass it with `--cert` and `--key`.
 
 Capture, game audio, the mic and input start when a browser connects and
 stop when it leaves; dropping the session releases every held key and
@@ -303,6 +350,10 @@ The service then keeps a host running on the PC's screen, as SYSTEM, from
 the sign-in screen on: before anyone signs in, while the PC is locked,
 after signing out, and when switching users. It follows Windows onto the
 UAC and lock screens and types into programs running as administrator.
+The host runs as two processes: the part on the screen (capture, encoding,
+input, audio) as SYSTEM, and the part that talks to the network (the web
+server, pairing, the peer connection) as LocalService with no privileges
+(see the security notes below).
 
 - **The tray app stops its own host** when installing, and doesn't start it
   while the service is installed: they use the same ports. It keeps running
@@ -317,8 +368,9 @@ UAC and lock screens and types into programs running as administrator.
   prompt). By hand: build, then **Update the service** in the tray app.
 - **Logs and data** are in
   `C:\Windows\System32\config\systemprofile\AppData\Local\web-stream`:
-  `host.log` (the host) and `service.log` (the service starting and
-  restarting it).
+  `host.log` (the part on the screen), `network.log` (the network part)
+  and `service.log` (the service starting and restarting them). The
+  certificate and paired browsers are in its `network` folder.
 - **Uninstall** (an administrator prompt) removes the service and the
   Program Files copy, and leaves its data. Click **Start** in the tray app
   to host from it again.
@@ -341,16 +393,32 @@ What this changes for security:
   only an administrator can see it: the service's host is controlled only
   through a pipe that takes an elevated prompt, so a program running as a
   normal user can't open pairing.
-- The host runs as SYSTEM, which is effectively full control of the PC.
-  Its privileges are removed (it can't load drivers, debug other processes
-  or take ownership of files), but it keeps the SYSTEM account itself:
-  anyone who got code running in it through a bug could still write to
-  System32 and the registry, or install a service of their own. Treat a
-  bug in the network-facing host as a full compromise of the PC.
+- Everything that reads what comes off the network (HTTPS and TLS, the
+  signaling socket, the peer connection's DTLS, SRTP and data channels,
+  Let's Encrypt) runs in the network process, as LocalService with every
+  privilege removed but one (it can't impersonate other accounts, which
+  would be a way back to SYSTEM). It can read and write only its own data
+  folder. A bug there gives an attacker that process: they could stream
+  the screen and send input, as a paired browser can, but not write to
+  System32 or the registry or install a service.
+- The part on the screen runs as SYSTEM, which is effectively full control
+  of the PC. Its privileges are removed (it can't load drivers, debug other
+  processes or take ownership of files), but it keeps the SYSTEM account
+  itself. It takes from the network process only what a browser could
+  send (input, control messages, files it asked for), size-limited and
+  checked as before. The browser mic's audio is still decoded there.
+- If the network process can't be started at all (Windows refuses it a
+  logon, or a window station before any of its code runs), the service runs
+  the whole host as SYSTEM, as before the split, and `service.log` and `host.log` say so. It then keeps
+  its certificate and paired browsers in the service's own data folder, not
+  the `network` folder, so browsers have to pair again. A network process
+  that crashes, or a `network` folder that can't be set up, is retried
+  later, never replaced by a SYSTEM one.
 - What runs as SYSTEM is the copy in Program Files, which only
   administrators can change, never the build folder in your checkout.
-- `--cert` and `--key` are copied into the service's data folder when you
-  install, so a user who can write where they came from can't swap them.
+- `--cert` and `--key`, and the DuckDNS token, are copied into the
+  network process's data folder when you install, so a user who can write
+  where they came from can't swap them.
 - The service picks a new random name for its control pipe each time it
   starts the host and keeps it, with the host's process id, in its data
   folder. The service console connects only if that process

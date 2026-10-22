@@ -70,6 +70,56 @@ pub fn data_dir() -> anyhow::Result<PathBuf> {
         .join(r"System32\config\systemprofile\AppData\Local\web-stream"))
 }
 
+/// The network host's data (certificate, paired browsers), which it can
+/// read and write as LocalService: a folder in [`data_dir`], with its own
+/// permissions.
+pub fn network_dir() -> anyhow::Result<PathBuf> {
+    Ok(data_dir()?.join("network"))
+}
+
+/// Makes the network host's folder and sets its permissions, and moves in
+/// what the service kept in its own folder before the split.
+///
+/// LocalService can write in it, so nothing here goes by a path in it
+/// that could lead elsewhere: the folder's own permissions are set through
+/// a handle that refuses a junction, its files are never re-permitted (one
+/// could be a hard link to a SYSTEM file), and files are only ever created
+/// new, never written through what is there.
+fn prepare_network_dir() -> anyhow::Result<PathBuf> {
+    let dir = network_dir()?;
+    // Inside the service's own folder, which only SYSTEM and administrators
+    // can change: making it can't be redirected.
+    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    launch::secure_dir(&dir, launch::NETWORK_DIR_SDDL)?;
+    let old = data_dir()?;
+    for name in super::NETWORK_FILES {
+        let from = old.join(name);
+        let Ok(contents) = std::fs::read(&from) else {
+            continue;
+        };
+        match write_new(&dir.join(name), &contents) {
+            Ok(()) => {}
+            // Already moved: the network host's copy is the current one.
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e).with_context(|| format!("move {name} for the network host")),
+        }
+        let _ = std::fs::remove_file(&from);
+    }
+    Ok(dir)
+}
+
+/// Creates `path` with `contents`, failing if anything is there already
+/// (so never writing through a link someone put there). The new file takes
+/// its folder's permissions.
+fn write_new(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    file.write_all(contents)
+}
+
 fn manager(access: ServiceManagerAccess) -> anyhow::Result<ServiceManager> {
     ServiceManager::local_computer(None::<&str>, access).map_err(admin_hint)
 }
@@ -167,27 +217,47 @@ pub fn query() -> anyhow::Result<Option<bool>> {
     }
 }
 
-/// The host reads `--cert` and `--key` as SYSTEM: copies them into the
-/// service's data folder, which only administrators can change, so a user
-/// who can write where they came from can't swap them later.
+/// The host reads `--cert` and `--key` as LocalService (or SYSTEM): copies
+/// them into the network host's data folder, which only administrators (and
+/// that host) can change, so a user who can write where they came from
+/// can't swap them later.
+/// The same goes for `--duckdns`'s token, which is always passed as a
+/// file in that folder.
 fn copy_certificate(
     args: &[String],
     opts: &crate::options::ServeOptions,
 ) -> anyhow::Result<Vec<String>> {
-    let Some((cert, key)) = &opts.cert else {
-        return Ok(args.to_vec());
-    };
-    let dir = data_dir()?;
-    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    let mut copies = Vec::new();
+    if let Some((cert, key)) = &opts.cert {
+        copies.push(("--cert", cert, super::CERT_COPY));
+        copies.push(("--key", key, super::KEY_COPY));
+    }
     let mut args = args.to_vec();
-    for (flag, src, name) in [
-        ("--cert", cert, "service-cert.pem"),
-        ("--key", key, "service-key.pem"),
-    ] {
+    if let Some(duck) = &opts.duckdns {
+        if !args.iter().any(|a| a == "--duckdns-token-file") {
+            args.extend(["--duckdns-token-file".into(), String::new()]);
+        }
+        copies.push(("--duckdns-token-file", &duck.token_file, super::TOKEN_COPY));
+    }
+    if copies.is_empty() {
+        return Ok(args);
+    }
+    // Where the network host reads them.
+    let dir = prepare_network_dir()?;
+    for (flag, src, name) in copies {
         let dest = dir.join(name);
         // Installing again with the copy itself: nothing to copy.
         if !same_file(src, &dest) {
-            std::fs::copy(src, &dest)
+            let contents = std::fs::read(src).with_context(|| format!("read {}", src.display()))?;
+            // Whatever is there goes (a link goes, not what it points at),
+            // and the copy is made new.
+            match std::fs::remove_file(&dest) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                    return Err(e).with_context(|| format!("replace {}", dest.display()));
+                }
+                _ => {}
+            }
+            write_new(&dest, &contents)
                 .with_context(|| format!("copy {} to {}", src.display(), dest.display()))?;
         }
         args = super::replace_value(&args, flag, &dest.display().to_string());
@@ -364,9 +434,31 @@ fn run_service() -> anyhow::Result<()> {
 
 struct Host {
     child: launch::Child,
+    /// The network host it serves the browser through, unless it runs the
+    /// whole host itself.
+    network: Option<Network>,
     pipe: String,
     started: Instant,
 }
+
+struct Network {
+    child: launch::Child,
+    /// The read end of its alive pipe (see [`launch::alive_pipe`]).
+    alive: launch::Owned,
+}
+
+enum NetworkStart {
+    /// With the session host's end of the link.
+    Started(Network, launch::Owned),
+    /// Run the whole host in the session host, as SYSTEM.
+    CantSplit,
+    /// Try again later.
+    Failed(anyhow::Error),
+}
+
+/// How long the network host gets to end the session and close its
+/// sockets once the session host has gone.
+const NETWORK_QUIT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Keeps one session host running in the console session.
 struct Supervisor {
@@ -376,6 +468,9 @@ struct Supervisor {
     /// Set by the host to ask for Ctrl+Alt+Del; 0 if it couldn't be made.
     sas_event: usize,
     host: Option<Host>,
+    /// The network host can't start on this PC (see [`STARTUP_FAILED`]):
+    /// the session host runs the whole host until the service restarts.
+    split_broken: bool,
     backoff: Duration,
     next_start: Instant,
 }
@@ -402,6 +497,7 @@ impl Supervisor {
             data_dir,
             sas_event,
             host: None,
+            split_broken: false,
             backoff: Duration::ZERO,
             next_start: Instant::now(),
         })
@@ -434,32 +530,94 @@ impl Supervisor {
         }
     }
 
+    /// Starts the network host. Only a refused LocalService logon (or, see
+    /// [`stop_network`], a window station) means running the whole host as
+    /// SYSTEM instead: anything else could be the network host's own doing,
+    /// from a previous run (its folder is writable to it), and is retried.
+    fn start_network(&self) -> NetworkStart {
+        if self.split_broken {
+            tracing::warn!(
+                "the network host can't start here; the session host runs the whole host, \
+                 with its own paired browsers (pair again)"
+            );
+            return NetworkStart::CantSplit;
+        }
+        let token = match launch::network_token() {
+            Ok(token) => token,
+            Err(e) => {
+                tracing::error!(
+                    "no LocalService logon for the network host, so the session host runs the \
+                     whole host as SYSTEM, with its own paired browsers (pair again): {e:#}"
+                );
+                return NetworkStart::CantSplit;
+            }
+        };
+        let started = (|| {
+            let dir = prepare_network_dir()?;
+            let args = super::relocate_files(&self.args, &self.data_dir, &dir);
+            let (ours, theirs) = launch::link_pipe()?;
+            let (alive, alive_theirs) = launch::alive_pipe()?;
+            let args = super::network_host_args(theirs.value(), alive_theirs.value(), &args, &dir);
+            let log = self.data_dir.join("network.log");
+            let inherit = [theirs.value(), alive_theirs.value()];
+            let child = launch::spawn_network(&token, &self.exe, &args, &log, &inherit)?;
+            anyhow::Ok((Network { child, alive }, ours))
+        })();
+        match started {
+            Ok((network, ours)) => {
+                tracing::info!(pid = network.child.pid, "started the network host");
+                NetworkStart::Started(network, ours)
+            }
+            Err(e) => NetworkStart::Failed(e),
+        }
+    }
+
     fn start_host(&mut self, session: u32) {
+        let mut network = match self.start_network() {
+            NetworkStart::Started(child, link) => Some((child, link)),
+            NetworkStart::CantSplit => None,
+            NetworkStart::Failed(e) => {
+                tracing::error!("could not start the network host: {e:#}");
+                return self.retry_later(Duration::ZERO);
+            }
+        };
         let started = super::random_pipe_name().and_then(|pipe| {
-            let args = super::session_host_args(&pipe, self.sas_event, &self.args, &self.data_dir);
-            let inherit: &[usize] = match self.sas_event {
-                0 => &[],
-                event => &[event],
-            };
+            let link = network.as_ref().map_or(0, |(_, link)| link.value());
+            // The service's own folder, never the network host's: in the
+            // fallback this process keeps the certificate and paired
+            // browsers, as SYSTEM, where LocalService can't reach.
+            let args =
+                super::session_host_args(&pipe, self.sas_event, link, &self.args, &self.data_dir);
+            let inherit: Vec<usize> = [self.sas_event, link]
+                .into_iter()
+                .filter(|&h| h != 0)
+                .collect();
             let log = self.data_dir.join("host.log");
-            let child = launch::spawn(session, &self.exe, &args, &log, inherit)?;
+            let child = launch::spawn(session, &self.exe, &args, &log, &inherit)?;
             // For `console`, which checks the pipe is served by this process.
             let file = self.pipe_file();
             std::fs::write(&file, super::pipe_file_contents(&pipe, child.pid))
                 .with_context(|| format!("write {}", file.display()))?;
             Ok((child, pipe))
         });
+        // The children have their ends of the link; this process's copy of
+        // the session host's goes (the network host's went with `theirs`).
+        let network = network.take().map(|(child, _link)| child);
         match started {
             Ok((child, pipe)) => {
                 tracing::info!(session, pid = child.pid, "started the host");
                 self.host = Some(Host {
                     child,
+                    network,
                     pipe,
                     started: Instant::now(),
                 });
             }
             Err(e) => {
                 tracing::error!(session, "could not start the host: {e:#}");
+                if let Some(network) = network {
+                    network.child.kill();
+                }
                 self.retry_later(Duration::ZERO);
             }
         }
@@ -490,6 +648,9 @@ impl Supervisor {
             ran_secs = ran.as_secs(),
             "the host exited (its log is host.log)"
         );
+        if let Some(network) = &host.network {
+            self.split_broken |= stop_network(network);
+        }
         self.host = None;
         self.forget_pipe();
         self.retry_later(ran);
@@ -516,9 +677,48 @@ impl Supervisor {
             tracing::warn!("the host did not quit, killing it");
             host.child.kill();
         }
+        if let Some(network) = &host.network {
+            self.split_broken |= stop_network(network);
+        }
         self.backoff = Duration::ZERO;
         self.next_start = Instant::now();
     }
+}
+
+/// STATUS_DLL_INIT_FAILED: a process that died before any of its own code
+/// ran, which for the network host means Windows wouldn't give it a window
+/// station. It is the one exit that makes the service stop splitting the
+/// host (falling back on a crash would let whoever can crash it get the
+/// network code running as SYSTEM), and only when the network host never
+/// wrote to its alive pipe: once its code has run, a network host taken
+/// over from the network could exit with this code itself.
+const STARTUP_FAILED: u32 = 0xC000_0142;
+
+/// Waits for the network host to stop, which it does once the session host
+/// is gone (its link closes), and kills it if it doesn't: the next one
+/// needs its ports. True if it never started ([`STARTUP_FAILED`]).
+fn stop_network(
+    Network {
+        child: network,
+        alive,
+    }: &Network,
+) -> bool {
+    if let Some(code) = network.exit_code() {
+        tracing::warn!(code, "the network host had exited (its log is network.log)");
+        if code == STARTUP_FAILED && !launch::pipe_has_data(alive) {
+            tracing::error!(
+                "the network host could not start (no window station for LocalService); \
+                 the session host runs the whole host as SYSTEM, with its own paired browsers \
+                 (pair again), until the service restarts"
+            );
+            return true;
+        }
+    } else if !network.wait(NETWORK_QUIT_TIMEOUT) {
+        tracing::warn!("the network host did not stop, killing it");
+        network.kill();
+        network.wait(Duration::from_secs(2));
+    }
+    false
 }
 
 /// The supervisor's own log, `service.log` in the data folder.

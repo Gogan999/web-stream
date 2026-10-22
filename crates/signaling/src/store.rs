@@ -123,7 +123,7 @@ impl DeviceStore {
 }
 
 /// Write a file readable only by the current user, replacing it atomically.
-pub(crate) fn write_private(path: &Path, contents: &[u8]) -> Result<(), Error> {
+pub fn write_private(path: &Path, contents: &[u8]) -> Result<(), Error> {
     let dir = path.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(dir)?;
     // A fresh random name with `create_new`, so a pre-planted file or link

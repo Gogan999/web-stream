@@ -21,10 +21,12 @@
 //! public addresses that forward to them.
 
 mod net;
+mod remote;
 mod session;
 mod timer;
 
 pub use net::lan_ips;
+pub use remote::{Remote, RemoteCmd};
 
 use std::collections::{HashSet, VecDeque};
 use std::net::{IpAddr, SocketAddr};
@@ -332,6 +334,9 @@ enum Cmd {
     /// End the run loop and the thread, whatever handles remain.
     Shutdown,
     MaxBitrate(u64),
+    /// A video sink was set (true) or cleared. Only a [`Remote`] run loop
+    /// needs telling: the real one reads the sink from [`Shared`].
+    VideoSink(bool),
     Data {
         channel: String,
         binary: bool,
@@ -501,6 +506,16 @@ pub struct Transport {
     audio: mpsc::Sender<AudioPacket>,
 }
 
+/// What a run loop holds: the real one ([`Transport::start`]) or a
+/// [`Remote`] one.
+struct Ends {
+    cmds: mpsc::Receiver<Cmd>,
+    audio: mpsc::Receiver<AudioPacket>,
+    shared: Arc<Shared>,
+    /// Dropped once the run loop is gone.
+    exit: oneshot::Sender<()>,
+}
+
 impl Transport {
     /// Bind the sockets and start the transport on its own thread. Events
     /// arrive on the returned receiver.
@@ -521,27 +536,13 @@ impl Transport {
                 "no local IPv4 address to listen on",
             )));
         }
-        let (cmds, cmd_rx) = mpsc::channel(CMD_QUEUE);
-        let (events_tx, events) = mpsc::unbounded_channel();
-        let queued_data = Arc::new(AtomicUsize::new(0));
-        // About 80 ms of 10 ms Opus packets; beyond that, old audio is useless.
-        let (audio, audio_rx) = mpsc::channel(8);
-        let (exit_tx, exit_rx) = oneshot::channel();
-        let shared = Arc::new(Shared {
-            frames: Mutex::new(VecDeque::new()),
-            notify: Notify::new(),
-            connected: AtomicBool::new(false),
-            keyframe_asked: Mutex::new(None),
-            recovering: Mutex::new(None),
-            trouble: TroubleCounts::default(),
-            events: events_tx,
-            queued_data: queued_data.clone(),
-            input: Mutex::default(),
-            video: Mutex::default(),
-            backlog: SendBacklog::default(),
-            forget_estimate: AtomicBool::new(false),
-            exited: Mutex::new(Some(exit_rx)),
-        });
+        let (transport, events, ends) = Transport::new();
+        let Ends {
+            cmds: cmd_rx,
+            audio: audio_rx,
+            shared,
+            exit: exit_tx,
+        } = ends;
 
         let (ready_tx, ready_rx) = oneshot::channel();
         let thread_shared = shared.clone();
@@ -600,17 +601,49 @@ impl Transport {
                 let _ = exit_tx.send(());
             })?;
         ready_rx.await.map_err(|_| Error::Stopped)??;
-        Ok((
+        Ok((transport, events))
+    }
+
+    /// A handle, its events, and the ends a run loop drives.
+    fn new() -> (Transport, Events, Ends) {
+        let (cmds, cmd_rx) = mpsc::channel(CMD_QUEUE);
+        let (events_tx, events) = mpsc::unbounded_channel();
+        let queued_data = Arc::new(AtomicUsize::new(0));
+        // About 80 ms of 10 ms Opus packets; beyond that, old audio is useless.
+        let (audio, audio_rx) = mpsc::channel(8);
+        let (exit_tx, exit_rx) = oneshot::channel();
+        let shared = Arc::new(Shared {
+            frames: Mutex::new(VecDeque::new()),
+            notify: Notify::new(),
+            connected: AtomicBool::new(false),
+            keyframe_asked: Mutex::new(None),
+            recovering: Mutex::new(None),
+            trouble: TroubleCounts::default(),
+            events: events_tx,
+            queued_data: queued_data.clone(),
+            input: Mutex::default(),
+            video: Mutex::default(),
+            backlog: SendBacklog::default(),
+            forget_estimate: AtomicBool::new(false),
+            exited: Mutex::new(Some(exit_rx)),
+        });
+        (
             Transport {
                 cmds,
-                shared,
+                shared: shared.clone(),
                 audio,
             },
             Events {
                 rx: events,
                 queued_data,
             },
-        ))
+            Ends {
+                cmds: cmd_rx,
+                audio: audio_rx,
+                shared,
+                exit: exit_tx,
+            },
+        )
     }
 
     /// Start a new peer connection (replacing any current one) and return
@@ -672,7 +705,12 @@ impl Transport {
     }
 
     pub fn close(&self) {
-        if let Err(mpsc::error::TrySendError::Full(cmd)) = self.cmds.try_send(Cmd::Close) {
+        self.send_cmd(Cmd::Close);
+    }
+
+    /// Sends a command that must not be lost, without waiting.
+    fn send_cmd(&self, cmd: Cmd) {
+        if let Err(mpsc::error::TrySendError::Full(cmd)) = self.cmds.try_send(cmd) {
             let cmds = self.cmds.clone();
             tokio::spawn(async move {
                 let _ = cmds.send(cmd).await;
@@ -756,6 +794,8 @@ impl Transport {
         self.shared.frames.lock().expect("video queue lock").clear();
         self.shared.recovering.lock().expect("recovery lock").take();
         *video = Some(sink);
+        drop(video);
+        self.send_cmd(Cmd::VideoSink(true));
     }
 
     /// The next offer is for another device: its estimate starts from
@@ -773,6 +813,7 @@ impl Transport {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .take();
+        self.send_cmd(Cmd::VideoSink(false));
     }
 
     /// Stop handing input to the sink; it waits for the next one.
@@ -1095,6 +1136,7 @@ impl Driver {
             }
             Cmd::Close => self.end_session(),
             Cmd::Shutdown => unreachable!("handled by the run loop"),
+            Cmd::VideoSink(_) => {}
             Cmd::MaxBitrate(bps) => {
                 self.config.max_bitrate_bps = bps;
                 if let Some(s) = &mut self.session {

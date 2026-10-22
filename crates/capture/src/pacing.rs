@@ -336,6 +336,12 @@ impl Scheduler {
         })
     }
 
+    /// A frame already encoded was dropped (the consumer's channel was
+    /// full) and can't be skipped: the next paced encode is an IDR.
+    pub(crate) fn dropped(&mut self) {
+        self.idr_next = true;
+    }
+
     /// Records the outcome of `job`. `delivered` is false when the frame was
     /// dropped because the consumer's channel was full.
     pub(crate) fn encoded(&mut self, now: Instant, job: EncodeJob, delivered: bool) {
@@ -567,6 +573,25 @@ mod scheduler_tests {
         assert!(s.wait(t0) > Duration::ZERO);
         // The next paced encode carries the IDR.
         let later = t0 + Duration::from_millis(20);
+        s.new_image(later);
+        let job = s.poll(later).unwrap();
+        assert!(job.idr);
+        s.encoded(later, job, true);
+        let after = later + Duration::from_millis(17);
+        s.new_image(after);
+        assert!(!s.poll(after).unwrap().idr);
+    }
+
+    #[test]
+    fn a_lost_frame_makes_the_next_encode_an_idr() {
+        let t0 = Instant::now();
+        let mut s = Scheduler::new(60);
+        s.new_image(t0);
+        let job = s.poll(t0).unwrap();
+        s.encoded(t0, job, true);
+        // Async encoding: the frame turned out undeliverable after the fact.
+        s.dropped();
+        let later = t0 + Duration::from_millis(17);
         s.new_image(later);
         let job = s.poll(later).unwrap();
         assert!(job.idr);

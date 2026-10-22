@@ -58,6 +58,11 @@ fn describe_notice(n: Notice) -> String {
         }
         Notice::SessionStarted { device_name } => format!("{device_name:?} connected"),
         Notice::SessionEnded { device_name } => format!("{device_name:?} disconnected"),
+        Notice::Certificate {
+            domain,
+            fingerprint,
+        } => format!("certificate from Let's Encrypt for {domain} in use, SHA-256 {fingerprint}"),
+        Notice::Warning(w) => w,
     }
 }
 

@@ -16,7 +16,7 @@ use tower_http::services::ServeDir;
 use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::timeout::TimeoutLayer;
 
-use crate::config::SignalingConfig;
+use crate::config::{SignalingConfig, TlsSource};
 use crate::pairing::{CODE_TTL, ConfirmError, DEFAULT_WINDOW, Pairing, StartError};
 use crate::store::DeviceStore;
 use crate::{Error, tls};
@@ -44,7 +44,7 @@ const PERMISSIONS_POLICY: &str = "microphone=(self), camera=(), geolocation=(), 
                                   usb=(), serial=(), hid=(), display-capture=()";
 
 /// Things the host should show its user.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Notice {
     /// Show this code until it expires or `Paired`/`PairingFailed` arrives.
     PairingCode {
@@ -67,6 +67,14 @@ pub enum Notice {
     SessionEnded {
         device_name: String,
     },
+    /// A certificate from Let's Encrypt is in use from now on.
+    Certificate {
+        domain: String,
+        fingerprint: String,
+    },
+    /// Something the host user should know about (a certificate that could
+    /// not be issued, say); the host keeps running.
+    Warning(String),
 }
 
 /// An authenticated browser on the signaling socket. Dropping it closes the
@@ -224,10 +232,10 @@ impl SignalingServer {
         Ok((Self { shared, tls }, SignalingEvents { sessions, notices }))
     }
 
-    /// SHA-256 fingerprint of the TLS certificate, for the user to compare
-    /// with what the browser shows.
-    pub fn fingerprint(&self) -> &str {
-        &self.tls.fingerprint
+    /// The TLS certificate in use: its SHA-256 fingerprint is for the user
+    /// to compare with what the browser shows.
+    pub fn certificate(&self) -> crate::CertInfo {
+        self.tls.certs.info()
     }
 
     pub fn handle(&self) -> SignalingHandle {
@@ -244,8 +252,27 @@ impl SignalingServer {
     pub async fn serve(self) -> Result<(), Error> {
         let addr = self.shared.config.bind;
         let app = router(self.shared.clone());
-        tracing::info!(%addr, fingerprint = %self.tls.fingerprint, "signaling listening");
+        tracing::info!(%addr, fingerprint = %self.tls.certs.info().fingerprint, "signaling listening");
+        // Issues and renews the certificate while the server runs; ends
+        // with it.
+        let _acme = match &self.shared.config.tls {
+            TlsSource::DuckDns(duck) => Some(AbortOnDrop(tokio::spawn(crate::acme::maintain(
+                self.tls.certs.clone(),
+                duck.clone(),
+                self.shared.config.data_dir.clone(),
+                self.shared.notices.clone(),
+            )))),
+            _ => None,
+        };
         crate::listen::serve(addr, self.tls.config.clone(), app).await
+    }
+}
+
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 

@@ -27,6 +27,15 @@ pub struct Settings {
     /// Names or IPs browsers reach this PC by (a DDNS name), for the
     /// self-signed certificate; separated like `public_ips`.
     pub hostnames: String,
+    /// A DuckDNS subdomain: the host gets a Let's Encrypt certificate for
+    /// it and keeps it pointing here (`--duckdns`). Empty: none.
+    pub duckdns: String,
+    /// A newly typed DuckDNS token, until saved to its own file in the data
+    /// folder ([`ws_host::options::DUCKDNS_TOKEN_FILE`]); never in the JSON.
+    #[serde(skip)]
+    pub duckdns_token: String,
+    /// Where Let's Encrypt sends expiry warnings (optional).
+    pub acme_email: String,
     /// A paired browser unused for this many days is unpaired.
     pub forget_after_days: u32,
     /// Empty: the web client built into the host.
@@ -73,6 +82,9 @@ impl Default for Settings {
             ice_tcp_port: None,
             public_ips: String::new(),
             hostnames: String::new(),
+            duckdns: String::new(),
+            duckdns_token: String::new(),
+            acme_email: String::new(),
             forget_after_days: 30,
             web_root: String::new(),
             display: None,
@@ -112,6 +124,10 @@ impl Settings {
 
     pub fn save(&self, dir: &Path) -> anyhow::Result<()> {
         std::fs::create_dir_all(dir)?;
+        let token = self.duckdns_token.trim();
+        if !token.is_empty() {
+            ws_host::options::save_duckdns_token(dir, token)?;
+        }
         let path = dir.join(FILE_NAME);
         let tmp = path.with_extension("json.tmp");
         std::fs::write(&tmp, serde_json::to_string_pretty(self)?)?;
@@ -131,6 +147,14 @@ impl Settings {
         }
         for name in list(&self.hostnames) {
             args.extend(["--hostname".into(), name.into()]);
+        }
+        let duckdns = self.duckdns.trim();
+        if !duckdns.is_empty() {
+            args.extend(["--duckdns".into(), duckdns.into()]);
+            let email = self.acme_email.trim();
+            if !email.is_empty() {
+                args.extend(["--acme-email".into(), email.into()]);
+            }
         }
         args.extend(["--forget-after".into(), self.forget_after_days.to_string()]);
         let web_root = self.web_root.trim();
@@ -321,6 +345,25 @@ mod tests {
         assert_eq!(o.hostnames, vec!["home.example.net", "192.168.1.20"]);
         assert_eq!((o.media.upload_dir, o.media.update_log), (None, None));
         assert!(!service.iter().any(|a| a.contains("some dir")));
+    }
+
+    #[test]
+    fn duckdns_token_goes_to_its_own_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Settings {
+            duckdns: "my-pc".into(),
+            duckdns_token: " a7c4d0ad-token \n".into(),
+            acme_email: "me@example.com".into(),
+            ..Settings::default()
+        };
+        s.save(dir.path()).unwrap();
+        let token = dir.path().join(ws_host::options::DUCKDNS_TOKEN_FILE);
+        assert_eq!(std::fs::read_to_string(token).unwrap(), "a7c4d0ad-token");
+        let saved = std::fs::read_to_string(dir.path().join(FILE_NAME)).unwrap();
+        assert!(!saved.contains("a7c4d0ad"));
+        let o = s.serve_options().unwrap().duckdns.unwrap();
+        assert_eq!(o.name, "my-pc");
+        assert_eq!(o.email.as_deref(), Some("me@example.com"));
     }
 
     #[test]

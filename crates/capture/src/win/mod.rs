@@ -13,7 +13,7 @@ use windows::Win32::Graphics::Direct3D::{
 };
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_SDK_VERSION,
-    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext,
+    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Multithread,
 };
 use windows::Win32::Graphics::Dxgi::{IDXGIAdapter1, IDXGIDevice};
 use windows::Win32::UI::HiDpi::{
@@ -75,6 +75,10 @@ impl Gpu {
         let device: ID3D11Device =
             device.ok_or(CaptureError::Platform("no D3D11 device".into()))?;
         let context = context.ok_or(CaptureError::Platform("no D3D11 context".into()))?;
+        // The encoder's output thread works alongside the capture thread.
+        if let Ok(mt) = context.cast::<ID3D11Multithread>() {
+            let _ = unsafe { mt.SetMultithreadProtected(true) };
+        }
         // Keep our GPU work ahead of a game's when the GPU is saturated.
         // Best effort: higher priorities may need privileges we don't have.
         if let Ok(dxgi) = device.cast::<IDXGIDevice>() {

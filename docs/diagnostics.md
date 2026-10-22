@@ -35,13 +35,13 @@ connect, reproduce, then Settings > Save diag log.
 | kind | what it says |
 |---|---|
 | `dxgi` | Desktop Duplication delivered an image: gap since the last, `acc` updates folded into it (>1 means DWM produced frames we missed), convert time |
-| `frame` | One encode: `idr`, `why` (requested by the transport or the start/a hand-off drop), `intra`/`repair` after invalidation, `repeat` (idle re-encode), size, `held_ms` capture to encode start, `enc_ms`, `out` (`sent`, `full_*` = the hand-off channel to the transport was full) |
+| `frame` | One encode, logged as it comes out of the encoder: `idr`, `why` (requested by the transport or the start/a hand-off drop), `intra`/`repair` after invalidation, `repeat` (idle re-encode), size, `held_ms` capture to into the encoder, `enc_ms` into the encoder to out (including any wait behind the frame before it), `out` (`sent`, `full` = the hand-off channel to the transport was full) |
 | `handoff` | The frame reached the host's forwarding task, `since_enc_ms` after encode |
 | `send` | The transport loop wrote it: result (`Sent`, `Late`, `Broken`, `Skipped`), `since_enc_ms`, `batch` frames taken at once, the pacer queue's age/bytes/packets before the write |
 | `late_drop`, `broken_drop`, `video_queue_drop` | A frame did not go out, and why |
 | `frames_lost`, `keyframe_needed` | What the transport asked the encoder for, and the cause (`browser`, `repair_timed_out`, `keyframe_lost`, `connected`, ...; `suppressed` = within 300 ms of the last ask) |
 | `browser_keyframe_request` | PLI/FIR from the browser |
-| `cap_cmd` | The capture thread got a keyframe, recover (invalidated or not) or bitrate command |
+| `cap_cmd` | The capture thread got a keyframe, recover (invalidated or not) or bitrate command, or heard a frame was `lost` on the way out |
 | `bwe`, `encoder_bitrate`, `transport_stats`, `video_egress` | Bandwidth estimate, encoder rate changes, and once-a-second totals (NACKs, PLIs, loss, RTT) |
 | `loop_timer_late` | The transport's timer fired more than 4 ms late (pool busy or coarse timer) |
 | `media_slow_event` | The media task took over 5 ms on one event, holding up those behind it |

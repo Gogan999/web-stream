@@ -22,6 +22,8 @@ pub enum Status {
         port: u16,
         ips: Vec<IpAddr>,
         fingerprint: String,
+        /// Browsers warn until the user accepts the certificate.
+        self_signed: bool,
         web_root: Option<PathBuf>,
     },
     Stopping,
@@ -84,6 +86,7 @@ impl State {
                 port,
                 ips,
                 fingerprint,
+                self_signed,
                 web_root,
                 ..
             } => {
@@ -95,6 +98,7 @@ impl State {
                     port,
                     ips,
                     fingerprint,
+                    self_signed,
                     web_root,
                 };
             }
@@ -143,6 +147,24 @@ impl State {
                         self.connected = None;
                     }
                 }
+                Notice::Certificate {
+                    domain,
+                    fingerprint: new,
+                } => {
+                    self.log(format!(
+                        "certificate from Let's Encrypt for {domain} in use"
+                    ));
+                    if let Status::Running {
+                        fingerprint,
+                        self_signed,
+                        ..
+                    } = &mut self.status
+                    {
+                        *fingerprint = new;
+                        *self_signed = false;
+                    }
+                }
+                Notice::Warning(w) => self.log(w),
             },
         }
     }

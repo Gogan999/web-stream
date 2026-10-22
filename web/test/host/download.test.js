@@ -1,7 +1,8 @@
 // End-to-end against the real host: a file shared from the test host's console reaches the browser's
 // downloads, or its save dialog. Runs when WS_HOST_BIN names a built test host (CI's Linux job;
 // cargo build -p ws-host --example test-host);
-// display capture isn't there, but pairing, the control and file channels are.
+// display capture isn't there, but pairing, the control and file channels are. Runs again with the
+// host split in two processes as the Windows service runs it (--split).
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -14,11 +15,12 @@ import { chromium, devices } from 'playwright';
 
 const bin = process.env.WS_HOST_BIN;
 
-test('a shared file opens a download or the save dialog', { skip: !bin && 'WS_HOST_BIN not set', timeout: 120000 }, async (t) => {
+for (const split of [false, true]) {
+test(`a shared file opens a download or the save dialog${split ? ' (split host)' : ''}`, { skip: !bin && 'WS_HOST_BIN not set', timeout: 120000 }, async (t) => {
   const dir = await mkdtemp(join(tmpdir(), 'ws-download-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const port = 20000 + Math.floor(Math.random() * 2000);
-  const host = spawn(bin, ['serve', '--port', String(port), '--data-dir', join(dir, 'data'), '--ip', '127.0.0.1', '--no-audio', '--no-mic', '--web-root', fileURLToPath(new URL('../..', import.meta.url))], { stdio: ['pipe', 'pipe', 'pipe'] });
+  const host = spawn(bin, ['serve', ...(split ? ['--split'] : []), '--port', String(port), '--data-dir', join(dir, 'data'), '--ip', '127.0.0.1', '--no-audio', '--no-mic', '--web-root', fileURLToPath(new URL('../..', import.meta.url))], { stdio: ['pipe', 'pipe', 'pipe'] });
   t.after(() => host.kill());
   let out = '';
   host.stdout.on('data', (d) => { out += d; });
@@ -122,3 +124,4 @@ test('a shared file opens a download or the save dialog', { skip: !bin && 'WS_HO
   await saveToDownloads(s.page, await share(s.page, 1024 * 1024));
   assert.deepEqual(s.errors, []);
 });
+}

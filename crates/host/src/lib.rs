@@ -13,6 +13,7 @@ pub mod sas;
 mod scale;
 pub mod serve;
 pub mod service;
+pub mod split;
 pub mod update;
 mod uploads;
 

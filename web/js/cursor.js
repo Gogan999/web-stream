@@ -4,6 +4,8 @@
 // drawn over the video where the host says its pointer is; the host sends positions only while the
 // browser asks for them (setCursorPositions).
 
+import { pictureRect } from './picture.js';
+
 const CSS_KINDS = new Set(['default', 'pointer', 'text', 'wait', 'progress', 'crosshair', 'move', 'ew-resize',
   'ns-resize', 'nwse-resize', 'nesw-resize', 'not-allowed', 'help', 'none']);
 const MAX_SIDE = 128; // what the host sends at most; also Chrome's limit for CSS cursor images
@@ -37,18 +39,19 @@ export function cssCursor(kind, image) {
 
 // Where the overlay goes inside a letterboxed (object-fit: contain) video of size `box`, in CSS px, or
 // null when the pointer is off the streamed display. `pos` is in host pixels from the display's
-// top-left; the picture shows the whole display, as absolute mouse input assumes.
+// top-left; the display fills the frame except for any bars the host drew (see pictureRect).
 export function overlayBox(pos, image, display, box, videoW, videoH) {
   if (!pos || !image || !display?.width || !display?.height || !videoW || !videoH) return null;
   if (pos.x < 0 || pos.y < 0 || pos.x >= display.width || pos.y >= display.height) return null;
   const scale = Math.min(box.width / videoW, box.height / videoH);
-  const w = videoW * scale;
-  const h = videoH * scale;
-  const sx = w / display.width;
-  const sy = h / display.height;
+  const pic = pictureRect(videoW, videoH, display);
+  const left = (box.width - videoW * scale) / 2 + pic.x * scale;
+  const top = (box.height - videoH * scale) / 2 + pic.y * scale;
+  const sx = pic.width * scale / display.width;
+  const sy = pic.height * scale / display.height;
   return {
-    left: (box.width - w) / 2 + (pos.x - image.hotX) * sx,
-    top: (box.height - h) / 2 + (pos.y - image.hotY) * sy,
+    left: left + (pos.x - image.hotX) * sx,
+    top: top + (pos.y - image.hotY) * sy,
     width: image.width * sx,
     height: image.height * sy,
   };

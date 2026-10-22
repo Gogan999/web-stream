@@ -5,6 +5,9 @@ import { hidUsage } from './keymap.js';
 import { toXInput, sameState } from './gamepad.js';
 import { CHANNELS } from './session.js';
 import { TouchGestures, HOLD_MS, SECOND_FINGER_MS } from './touch.js';
+import { pictureRect } from './picture.js';
+
+export { pictureRect };
 
 const GAMEPAD_KEEPALIVE_MS = 100;
 const MAX_PADS = 4;
@@ -31,15 +34,17 @@ export function pictureScale(rect, videoW, videoH) {
   return Math.max(videoW / rect.width, videoH / rect.height);
 }
 
-// Map a client point to 0..1 over the actual picture inside a letterboxed (object-fit: contain) video.
+// Map a client point to 0..1 over the host display inside a letterboxed (object-fit: contain) video,
+// leaving out both the page's bars and any the host drew into the frame (see pictureRect).
 // With `clamp`, points in the black bars snap to the nearest edge instead of being dropped.
-export function videoPoint(clientX, clientY, rect, videoW, videoH, clamp = false) {
+export function videoPoint(clientX, clientY, rect, videoW, videoH, clamp = false, display = null) {
   if (!videoW || !videoH) return null;
   const scale = Math.min(rect.width / videoW, rect.height / videoH);
-  const w = videoW * scale;
-  const h = videoH * scale;
-  const left = rect.left + (rect.width - w) / 2;
-  const top = rect.top + (rect.height - h) / 2;
+  const pic = pictureRect(videoW, videoH, display);
+  const w = pic.width * scale;
+  const h = pic.height * scale;
+  const left = rect.left + (rect.width - videoW * scale) / 2 + pic.x * scale;
+  const top = rect.top + (rect.height - videoH * scale) / 2 + pic.y * scale;
   const x = (clientX - left) / w;
   const y = (clientY - top) / h;
   if (clamp) return { x: Math.min(1, Math.max(0, x)), y: Math.min(1, Math.max(0, y)) };
@@ -260,7 +265,7 @@ export class InputCapture {
       this.motion.dy += e.movementY;
     } else if (this.mode === 'absolute') {
       const p = videoPoint(e.clientX, e.clientY, this.video.getBoundingClientRect(),
-        this.video.videoWidth, this.video.videoHeight);
+        this.video.videoWidth, this.video.videoHeight, false, this.displaySize?.());
       if (p) this.motion.abs = p;
     }
     const wait = this.motionSentAt + MOTION_GAP_MS - performance.now();
@@ -347,7 +352,8 @@ export class InputCapture {
     // Relative motion is in host display pixels, so scale CSS px -> video px -> display px.
     const vw = this.video.videoWidth;
     const d = this.displaySize?.();
-    const toDisplay = d?.width && vw ? d.width / vw : 1;
+    const pic = pictureRect(vw, this.video.videoHeight, d);
+    const toDisplay = d?.width && pic.width ? d.width / pic.width : 1;
     const scale = pictureScale(this.video.getBoundingClientRect(), vw, this.video.videoHeight) * toDisplay;
     const r = this.touchRest;
     r.x += dx * scale;
@@ -364,7 +370,8 @@ export class InputCapture {
   // `reliable`: where a click is about to land (touch down, drag start), the position goes on the
   // ordered reliable channel ahead of the button, so a lost or held motion packet can't misplace it.
   touchMoveTo(x, y, reliable) {
-    const p = videoPoint(x, y, this.video.getBoundingClientRect(), this.video.videoWidth, this.video.videoHeight, true);
+    const p = videoPoint(x, y, this.video.getBoundingClientRect(), this.video.videoWidth, this.video.videoHeight,
+      true, this.displaySize?.());
     if (!p) return;
     if (reliable) {
       this.motion.abs = null;

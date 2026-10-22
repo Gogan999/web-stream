@@ -67,13 +67,18 @@ pub struct DuckDns {
     pub name: String,
     /// The DuckDNS account token.
     pub token: String,
-    /// Where Let's Encrypt sends expiry warnings (optional).
+    /// The contact Let's Encrypt keeps for the account (optional; it no
+    /// longer sends expiry warnings).
     pub email: Option<String>,
     /// The ACME directory: [`LETS_ENCRYPT`], or [`LETS_ENCRYPT_STAGING`]
-    /// to try things out without its rate limits.
+    /// to try things out under looser rate limits.
     pub directory: String,
     /// Also update the name's address every few minutes (a DDNS client).
     pub update_address: bool,
+    /// Other names the self-signed stand-in covers until Let's Encrypt has
+    /// issued one (as [`TlsSource::SelfSigned`]'s), so the LAN fingerprint
+    /// stays the same with and without DuckDNS.
+    pub hostnames: Vec<String>,
 }
 
 impl DuckDns {
@@ -90,6 +95,7 @@ impl std::fmt::Debug for DuckDns {
             .field("email", &self.email)
             .field("directory", &self.directory)
             .field("update_address", &self.update_address)
+            .field("hostnames", &self.hostnames)
             .finish()
     }
 }

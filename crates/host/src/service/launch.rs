@@ -27,19 +27,24 @@ use windows::Win32::Foundation::{
     HANDLE_FLAG_INHERIT, HLOCAL, LUID, LocalFree, SetHandleInformation, WAIT_OBJECT_0,
 };
 use windows::Win32::Security::Authorization::{
-    ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1, SE_FILE_OBJECT,
+    SetSecurityInfo,
 };
 use windows::Win32::Security::{
-    AdjustTokenPrivileges, DACL_SECURITY_INFORMATION, DuplicateTokenEx, GetTokenInformation,
-    LOGON32_LOGON_SERVICE, LOGON32_PROVIDER_DEFAULT, LogonUserW, LookupPrivilegeValueW,
-    PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SE_PRIVILEGE_REMOVED,
-    SECURITY_ATTRIBUTES, SecurityIdentification, SetFileSecurityW, SetTokenInformation,
+    AdjustTokenPrivileges, DACL_SECURITY_INFORMATION, DuplicateTokenEx, GetSecurityDescriptorDacl,
+    GetTokenInformation, LOGON32_LOGON_SERVICE, LOGON32_PROVIDER_DEFAULT, LogonUserW,
+    LookupPrivilegeValueW, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+    SE_PRIVILEGE_REMOVED, SECURITY_ATTRIBUTES, SecurityIdentification, SetTokenInformation,
     TOKEN_ALL_ACCESS, TOKEN_DUPLICATE, TOKEN_PRIVILEGES, TOKEN_QUERY, TokenPrimary,
     TokenPrivileges, TokenSessionId,
 };
 use windows::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, FILE_SHARE_NONE,
-    OPEN_EXISTING, PIPE_ACCESS_DUPLEX, SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT,
+    BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_ATTRIBUTE_DIRECTORY,
+    FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_FIRST_PIPE_INSTANCE,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_OVERLAPPED, FILE_FLAGS_AND_ATTRIBUTES,
+    FILE_READ_ATTRIBUTES, FILE_SHARE_NONE, FILE_SHARE_READ, GetFileInformationByHandle,
+    OPEN_EXISTING, PIPE_ACCESS_DUPLEX, READ_CONTROL, SECURITY_IDENTIFICATION,
+    SECURITY_SQOS_PRESENT, WRITE_DAC,
 };
 use windows::Win32::System::Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock};
 use windows::Win32::System::JobObjects::{
@@ -165,18 +170,18 @@ pub fn spawn(
     spawn_as(&token, r"winsta0\default", session, exe, args, log, inherit)
 }
 
-/// Starts `exe args` as LocalService with no privilege but
-/// [`NETWORK_KEEP_PRIVILEGES`], in session 0, like [`spawn`] otherwise.
+/// Starts `exe args` with `token` (from [`network_token`]), in session 0,
+/// like [`spawn`] otherwise.
 pub fn spawn_network(
+    token: &Owned,
     exe: &Path,
     args: &[String],
     log: &Path,
     inherit: &[usize],
 ) -> anyhow::Result<Child> {
-    let token = network_token()?;
     // Empty: a window station of its own logon session's, which Windows
     // makes for it, rather than the service's, which it may not open.
-    spawn_as(&token, "", 0, exe, args, log, inherit)
+    spawn_as(token, "", 0, exe, args, log, inherit)
 }
 
 fn spawn_as(
@@ -321,10 +326,10 @@ fn host_token(session: u32) -> anyhow::Result<Owned> {
     Ok(token)
 }
 
-/// A LocalService token without the privileges the network host doesn't
-/// need. LocalService has impersonation and token assignment, either of
+/// A LocalService token with no privilege but [`NETWORK_KEEP_PRIVILEGES`],
+/// for the network host. LocalService has impersonation and token assignment, either of
 /// which could turn a compromised network host back into SYSTEM.
-fn network_token() -> anyhow::Result<Owned> {
+pub fn network_token() -> anyhow::Result<Owned> {
     let (user, domain) = (wide("LocalService"), wide("NT AUTHORITY"));
     let mut token = HANDLE::default();
     // SAFETY: NUL-terminated strings; `token` receives a handle we own.
@@ -525,16 +530,55 @@ pub fn link_pipe() -> anyhow::Result<(Owned, Owned)> {
     Ok((server, Owned(client)))
 }
 
-/// Sets `path`'s DACL from `sddl`, replacing what it inherited.
-pub fn set_dacl(path: &Path, sddl: &str) -> anyhow::Result<()> {
+/// Sets the DACL of the folder `path` from `sddl`, replacing what it
+/// inherited, through a handle: refused if the folder is a junction or other
+/// reparse point (whoever can write the folder could have made it one, to
+/// send this change elsewhere).
+pub fn secure_dir(path: &Path, sddl: &str) -> anyhow::Result<()> {
     let sd = SecurityDescriptor::new(sddl)?;
     let path_w = wide(&path.display().to_string());
-    // SAFETY: a NUL-terminated path and a valid descriptor.
+    // SAFETY: a NUL-terminated path; the handle is closed by `Owned`.
+    let dir = Owned(
+        unsafe {
+            CreateFileW(
+                PCWSTR(path_w.as_ptr()),
+                (READ_CONTROL | WRITE_DAC | FILE_READ_ATTRIBUTES).0,
+                FILE_SHARE_READ,
+                None,
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                None,
+            )
+        }
+        .with_context(|| format!("open {}", path.display()))?,
+    );
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: a valid handle and a structure to fill.
+    unsafe { GetFileInformationByHandle(dir.0, &mut info) }
+        .context("GetFileInformationByHandle")?;
+    let attributes = FILE_FLAGS_AND_ATTRIBUTES(info.dwFileAttributes);
+    if !attributes.contains(FILE_ATTRIBUTE_DIRECTORY)
+        || attributes.contains(FILE_ATTRIBUTE_REPARSE_POINT)
+    {
+        anyhow::bail!("{} is not a plain folder", path.display());
+    }
+    let mut present = windows::core::BOOL::default();
+    let mut defaulted = windows::core::BOOL::default();
+    let mut dacl = std::ptr::null_mut();
+    // SAFETY: `sd` is a valid descriptor; `dacl` points into it.
+    unsafe { GetSecurityDescriptorDacl(sd.0, &mut present, &mut dacl, &mut defaulted) }
+        .context("GetSecurityDescriptorDacl")?;
+    // SAFETY: a valid handle opened with WRITE_DAC, and a DACL that
+    // outlives the call.
     unsafe {
-        SetFileSecurityW(
-            PCWSTR(path_w.as_ptr()),
+        SetSecurityInfo(
+            dir.0,
+            SE_FILE_OBJECT,
             DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-            sd.0,
+            None,
+            None,
+            Some(dacl.cast_const()),
+            None,
         )
     }
     .ok()

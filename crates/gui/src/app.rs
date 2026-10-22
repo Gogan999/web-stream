@@ -476,7 +476,7 @@ impl App {
                     ui.label("Certificate email");
                     ui.add(
                         egui::TextEdit::singleline(&mut d.acme_email)
-                            .hint_text("for Let's Encrypt's expiry warnings (optional)"),
+                            .hint_text("a contact for Let's Encrypt (optional)"),
                     );
                     ui.end_row();
                 }

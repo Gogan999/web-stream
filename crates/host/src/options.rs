@@ -24,9 +24,9 @@ host options:
   --duckdns-token-file FILE  the DuckDNS token, default duckdns-token.txt in
                        --data-dir
   --no-duckdns-address  only the certificate: leave the name's address alone
-  --acme-email ADDR    where Let's Encrypt sends expiry warnings (optional)
+  --acme-email ADDR    a contact address for the Let's Encrypt account (optional)
   --acme-staging       Let's Encrypt's staging server (untrusted certificates,
-                       no rate limits), for trying --duckdns out
+                       looser rate limits), for trying --duckdns out
   --data-dir DIR       certificate and paired devices
   --forget-after DAYS  unpair a browser unused for this long, default 30
   --allow-origin URL   extra origin allowed to use the API, e.g. a reverse
@@ -87,6 +87,14 @@ pub struct DuckDnsOptions {
 
 /// The DuckDNS token's file when `--duckdns-token-file` isn't given.
 pub const DUCKDNS_TOKEN_FILE: &str = "duckdns-token.txt";
+
+/// Saves the DuckDNS token in `dir`'s [`DUCKDNS_TOKEN_FILE`], readable only
+/// by this user (and SYSTEM).
+pub fn save_duckdns_token(dir: &std::path::Path, token: &str) -> anyhow::Result<()> {
+    let path = dir.join(DUCKDNS_TOKEN_FILE);
+    ws_signaling::write_private(&path, token.as_bytes())
+        .with_context(|| format!("{}", path.display()))
+}
 
 /// What [`crate::media`] needs to know.
 #[derive(Debug, Clone, PartialEq)]

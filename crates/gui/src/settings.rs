@@ -126,8 +126,7 @@ impl Settings {
         std::fs::create_dir_all(dir)?;
         let token = self.duckdns_token.trim();
         if !token.is_empty() {
-            let path = dir.join(ws_host::options::DUCKDNS_TOKEN_FILE);
-            std::fs::write(&path, token).with_context(|| format!("{}", path.display()))?;
+            ws_host::options::save_duckdns_token(dir, token)?;
         }
         let path = dir.join(FILE_NAME);
         let tmp = path.with_extension("json.tmp");

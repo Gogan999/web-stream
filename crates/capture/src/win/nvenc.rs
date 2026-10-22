@@ -127,6 +127,8 @@ macro_rules! call {
 pub(crate) const SLOTS: usize = 2;
 /// A frame not out of the encoder in this long means the GPU hung.
 const FRAME_TIMEOUT: Duration = Duration::from_secs(2);
+/// Sent in place of a slot once a frame has failed: the encoder is done for.
+const FAILED_SLOT: usize = usize::MAX;
 
 /// One frame out of the encoder, with what the capture thread tagged it
 /// with when it went in.
@@ -607,9 +609,7 @@ impl<M: Send + 'static> NvEncoder<M> {
     /// to the callback).
     pub(crate) fn drain(&mut self) -> Result<()> {
         while self.free.len() < self.slots.len() {
-            let slot = self.returned.recv_timeout(FRAME_TIMEOUT * 2).map_err(|_| {
-                CaptureError::Platform("the encoder stopped returning frames".into())
-            })?;
+            let slot = self.returned_slot()?;
             self.free.push(slot);
         }
         for index in 0..self.slots.len() {
@@ -623,12 +623,26 @@ impl<M: Send + 'static> NvEncoder<M> {
     fn take_slot(&mut self) -> Result<usize> {
         let slot = match self.free.pop() {
             Some(slot) => slot,
-            None => self.returned.recv_timeout(FRAME_TIMEOUT * 2).map_err(|_| {
-                CaptureError::Platform("the encoder stopped returning frames".into())
-            })?,
+            None => self.returned_slot()?,
         };
         self.unmap(slot);
         Ok(slot)
+    }
+
+    /// The next slot the output thread gives back.
+    fn returned_slot(&mut self) -> Result<usize> {
+        match self.returned.recv_timeout(FRAME_TIMEOUT * 2) {
+            Ok(FAILED_SLOT) => {
+                let e = self.failed.lock().unwrap_or_else(|e| e.into_inner()).take();
+                Err(CaptureError::Platform(
+                    e.unwrap_or_else(|| "a frame failed in the encoder".into()),
+                ))
+            }
+            Ok(slot) => Ok(slot),
+            Err(_) => Err(CaptureError::Platform(
+                "the encoder stopped returning frames".into(),
+            )),
+        }
     }
 
     /// Queues `src` (NV12, the stream size) for encoding and returns; the
@@ -871,23 +885,39 @@ fn output_loop<M: Send>(
     failed: Arc<Mutex<Option<String>>>,
     mut on_output: impl FnMut(Finished<M>),
 ) {
+    let mut broken = false;
     while let Ok(p) = pending.recv() {
-        let result = finish(session, &p);
+        let result = if broken {
+            Err(CaptureError::Platform("an earlier frame failed".into()))
+        } else {
+            finish(session, &p)
+        };
         let encode_time = p.submitted.elapsed();
-        // Back first: the capture thread may be waiting for it.
-        let _ = returned.send(p.slot);
-        on_output(match result {
-            Ok((data, keyframe)) => Ok(Encoded {
-                data,
-                keyframe,
-                meta: p.meta,
-                encode_time,
-            }),
-            Err(e) => {
-                *failed.lock().unwrap_or_else(|e| e.into_inner()) = Some(e.to_string());
-                Err((p.meta, e))
+        match result {
+            Ok((data, keyframe)) => {
+                // Back first: the capture thread may be waiting for it.
+                let _ = returned.send(p.slot);
+                on_output(Ok(Encoded {
+                    data,
+                    keyframe,
+                    meta: p.meta,
+                    encode_time,
+                }));
             }
-        });
+            Err(e) => {
+                // The slot never goes back: after a timeout the GPU may still
+                // own its texture, bitstream and event, and a late finish
+                // would signal whatever frame used the event next. Failed is
+                // set first, so the next submit stops, and a capture thread
+                // already waiting for a slot hears it at once.
+                *failed.lock().unwrap_or_else(|e| e.into_inner()) = Some(e.to_string());
+                if !broken {
+                    let _ = returned.send(FAILED_SLOT);
+                }
+                broken = true;
+                on_output(Err((p.meta, e)));
+            }
+        }
     }
 }
 

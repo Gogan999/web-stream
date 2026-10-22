@@ -20,6 +20,7 @@ pub use config::{
 pub use server::{
     Notice, SessionEvent, SignalingEvents, SignalingHandle, SignalingServer, SignalingSession,
 };
+pub use store::write_private;
 pub use tls::CertInfo;
 
 #[derive(Debug, thiserror::Error)]

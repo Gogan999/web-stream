@@ -28,9 +28,13 @@ use tokio::sync::mpsc;
 use crate::Error;
 use crate::config::DuckDns;
 use crate::server::Notice;
-use crate::tls::{ACME_CERT_FILE, ACME_KEY_FILE, CertInfo, CertStore};
+use crate::tls::{CertInfo, CertStore, StoredCert};
 
 const ACCOUNT_FILE: &str = "acme-account.json";
+/// When the next order may be made after failures, kept across restarts so
+/// a host restarted again and again (a bad token, settings saved) stays
+/// within Let's Encrypt's limits on failed validations and new orders.
+const RETRY_FILE: &str = "acme-retry.json";
 const DUCKDNS: &str = "https://www.duckdns.org";
 /// How often the name's address is refreshed.
 const ADDRESS_EVERY: Duration = Duration::from_secs(5 * 60);
@@ -114,17 +118,29 @@ pub(crate) async fn maintain(
         }
     };
     let certificate = async {
-        let mut retry = RETRY_FIRST;
+        let key = RetryKey {
+            domain: api.domain.clone(),
+            directory: issuer.directory.clone(),
+        };
+        let mut retry = load_retry(&data_dir, &key);
         loop {
             let info = certs.info();
             if !renewal_due(&info, now()) {
                 tokio::time::sleep(CHECK_EVERY).await;
                 continue;
             }
+            if let Some(r) = &retry {
+                let wait = r.next_attempt - now();
+                if wait > 0 {
+                    tracing::info!(domain = %api.domain, "next certificate order in {} min", wait / 60 + 1);
+                    tokio::time::sleep(Duration::from_secs(wait as u64)).await;
+                }
+            }
             tracing::info!(domain = %api.domain, "asking Let's Encrypt for a certificate");
             match renew(&certs, &issuer, &data_dir, &api, duck.email.as_deref()).await {
                 Ok(info) => {
-                    retry = RETRY_FIRST;
+                    retry = None;
+                    let _ = std::fs::remove_file(data_dir.join(RETRY_FILE));
                     tracing::info!(domain = %api.domain, fingerprint = %info.fingerprint, "certificate issued");
                     let _ = notices.send(Notice::Certificate {
                         domain: api.domain.clone(),
@@ -132,13 +148,19 @@ pub(crate) async fn maintain(
                     });
                 }
                 Err(e) => {
+                    let next = next_retry(retry.as_ref(), &key, now());
+                    if let Err(e) = crate::store::write_private(
+                        &data_dir.join(RETRY_FILE),
+                        &serde_json::to_vec(&next).expect("retry serializes"),
+                    ) {
+                        tracing::warn!("could not record the certificate retry: {e}");
+                    }
                     warn(format!(
                         "no certificate for {} yet ({e}); trying again in {} min",
                         api.domain,
-                        retry.as_secs() / 60
+                        next.backoff_secs / 60
                     ));
-                    tokio::time::sleep(retry).await;
-                    retry = (retry * 2).min(CHECK_EVERY);
+                    retry = Some(next);
                 }
             }
         }
@@ -157,9 +179,50 @@ async fn renew(
     let (cert, key) = issue(issuer, data_dir, &api.domain, email, api).await?;
     // Checked before anything is stored or served.
     let info = certs.replace(cert.as_bytes(), key.as_bytes())?;
-    crate::store::write_private(&data_dir.join(ACME_KEY_FILE), key.as_bytes())?;
-    std::fs::write(data_dir.join(ACME_CERT_FILE), cert.as_bytes())?;
+    crate::tls::store_acme(
+        data_dir,
+        &StoredCert {
+            directory: issuer.directory.clone(),
+            cert,
+            key,
+        },
+    )?;
     Ok(info)
+}
+
+/// What a recorded retry applies to: a new name or directory starts afresh.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct RetryKey {
+    domain: String,
+    directory: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct Retry {
+    #[serde(flatten)]
+    key: RetryKey,
+    /// Unix seconds.
+    next_attempt: i64,
+    backoff_secs: u64,
+}
+
+fn load_retry(data_dir: &Path, key: &RetryKey) -> Option<Retry> {
+    let retry: Retry =
+        serde_json::from_slice(&std::fs::read(data_dir.join(RETRY_FILE)).ok()?).ok()?;
+    (retry.key == *key).then_some(retry)
+}
+
+/// After another failure: wait an hour, doubling up to [`CHECK_EVERY`].
+fn next_retry(last: Option<&Retry>, key: &RetryKey, now: i64) -> Retry {
+    let backoff = match last {
+        Some(r) => (r.backoff_secs * 2).min(CHECK_EVERY.as_secs()),
+        None => RETRY_FIRST.as_secs(),
+    };
+    Retry {
+        key: key.clone(),
+        next_attempt: now + backoff as i64,
+        backoff_secs: backoff,
+    }
 }
 
 /// A self-signed certificate is replaced at once; a real one once two
@@ -188,32 +251,36 @@ pub(crate) async fn issue(
         .await
         .map_err(acme_error)?;
     let mut record_set = false;
-    let mut authorizations = order.authorizations();
-    while let Some(authz) = authorizations.next().await {
-        let mut authz = authz.map_err(acme_error)?;
-        match authz.status {
-            AuthorizationStatus::Pending => {}
-            AuthorizationStatus::Valid => continue,
-            status => return Err(Error::Acme(format!("authorization is {status:?}"))),
-        }
-        let mut challenge = authz
-            .challenge(ChallengeType::Dns01)
-            .ok_or_else(|| Error::Acme("no DNS challenge offered".into()))?;
-        txt.set(&challenge.key_authorization().dns_value()).await?;
-        record_set = true;
-        tokio::time::sleep(issuer.dns_wait).await;
-        challenge.set_ready().await.map_err(acme_error)?;
-    }
     let retries = RetryPolicy::new()
         .initial_delay(Duration::from_secs(2))
         .timeout(ORDER_TIMEOUT);
-    let status = order.poll_ready(&retries).await;
+    // Whatever happens once the record is set, it is cleared after.
+    let status = async {
+        let mut authorizations = order.authorizations();
+        while let Some(authz) = authorizations.next().await {
+            let mut authz = authz.map_err(acme_error)?;
+            match authz.status {
+                AuthorizationStatus::Pending => {}
+                AuthorizationStatus::Valid => continue,
+                status => return Err(Error::Acme(format!("authorization is {status:?}"))),
+            }
+            let mut challenge = authz
+                .challenge(ChallengeType::Dns01)
+                .ok_or_else(|| Error::Acme("no DNS challenge offered".into()))?;
+            record_set = true;
+            txt.set(&challenge.key_authorization().dns_value()).await?;
+            tokio::time::sleep(issuer.dns_wait).await;
+            challenge.set_ready().await.map_err(acme_error)?;
+        }
+        order.poll_ready(&retries).await.map_err(acme_error)
+    }
+    .await;
     if record_set {
         if let Err(e) = txt.clear().await {
             tracing::debug!("could not clear the challenge record: {e}");
         }
     }
-    match status.map_err(acme_error)? {
+    match status? {
         OrderStatus::Ready => {}
         status => {
             return Err(Error::Acme(format!(
@@ -416,6 +483,35 @@ mod tests {
     }
 
     #[test]
+    fn retries_back_off_across_restarts() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = RetryKey {
+            domain: "my-pc.duckdns.org".into(),
+            directory: "prod".into(),
+        };
+        let first = next_retry(None, &key, 1000);
+        assert_eq!(first.next_attempt, 1000 + 3600);
+        let second = next_retry(Some(&first), &key, 5000);
+        assert_eq!(second.backoff_secs, 7200);
+        let mut r = second.clone();
+        for _ in 0..10 {
+            r = next_retry(Some(&r), &key, 0);
+        }
+        assert_eq!(r.backoff_secs, CHECK_EVERY.as_secs());
+        std::fs::write(
+            dir.path().join(RETRY_FILE),
+            serde_json::to_vec(&second).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(load_retry(dir.path(), &key), Some(second));
+        let staging = RetryKey {
+            directory: "staging".into(),
+            ..key
+        };
+        assert_eq!(load_retry(dir.path(), &staging), None);
+    }
+
+    #[test]
     fn duckdns_names_are_checked_before_they_go_in_a_url() {
         assert!(valid_name("my-pc"));
         assert!(!valid_name("my-pc.duckdns.org"));
@@ -428,6 +524,7 @@ mod tests {
             email: None,
             directory: String::new(),
             update_address: true,
+            hostnames: Vec::new(),
         };
         assert!(
             DuckDnsApi::new(

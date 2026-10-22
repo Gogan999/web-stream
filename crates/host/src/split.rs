@@ -12,8 +12,10 @@
 //! device is connected), notices and the console's pairing commands.
 //!
 //! The media side treats everything from the network process as untrusted,
-//! as it treats a browser: messages are size-limited, carry no paths, and
-//! input and control messages go through the same parsing as before.
+//! as it treats a browser: messages are size-limited and read with
+//! back-pressure, input and control messages go through the same parsing
+//! as before, and text for the console is cleaned and labelled. The only
+//! paths it sends (the data folder and web root) are shown, never opened.
 //!
 //! Each message is a frame: a little-endian u32 length, then a u32 header
 //! length, a JSON header and the raw payload (a frame's bitstream, a data
@@ -40,8 +42,14 @@ use crate::media;
 use crate::options::ServeOptions;
 use crate::serve::{self, Command, Event, Network};
 
-/// The largest frame either side accepts: well above any keyframe.
-const MAX_FRAME: usize = 64 << 20;
+/// The largest frame the network side accepts: well above any keyframe.
+const MAX_UP: usize = 64 << 20;
+/// The largest frame the media side accepts from the network process: a
+/// data channel message or a mic packet, never anywhere near this.
+const MAX_DOWN: usize = 4 << 20;
+/// Frames read but not yet handled. Past this the reader stops reading,
+/// so a flood from the other side waits in the pipe, not in memory.
+const READ_QUEUE: usize = 256;
 /// How often the network side checks the connection state and send
 /// backlog, which the encoder reads to hold frames back.
 const STATE_POLL: Duration = Duration::from_millis(5);
@@ -208,6 +216,7 @@ fn frame<H: Serialize>(header: &H, payload: &[u8]) -> Vec<u8> {
 /// The next frame's header and payload; `None` at a clean end of stream.
 async fn read_frame<H: DeserializeOwned>(
     read: &mut (impl AsyncRead + Unpin),
+    max: usize,
 ) -> anyhow::Result<Option<(H, Vec<u8>)>> {
     let mut len = [0u8; 4];
     match read.read_exact(&mut len).await {
@@ -216,7 +225,8 @@ async fn read_frame<H: DeserializeOwned>(
         Err(e) => return Err(e.into()),
     }
     let len = u32::from_le_bytes(len) as usize;
-    if !(4..=MAX_FRAME).contains(&len) {
+    // Checked before anything is allocated for it.
+    if !(4..=max).contains(&len) {
         anyhow::bail!("bad frame length {len}");
     }
     let mut buf = vec![0u8; len];
@@ -230,18 +240,20 @@ async fn read_frame<H: DeserializeOwned>(
     Ok(Some((header, buf)))
 }
 
-/// Reads frames into a channel until the stream ends or breaks; the
-/// channel then closes. Never waits on the other direction, so neither
-/// side can block the other.
+/// Reads frames of up to `max` bytes into a channel until the stream ends
+/// or breaks; the channel then closes. Waits while [`READ_QUEUE`] frames
+/// are unhandled. Each side handles what it reads without waiting on its
+/// own writes, so neither can stall the other.
 fn spawn_reader<H: DeserializeOwned + Send + 'static>(
     mut read: impl AsyncRead + Unpin + Send + 'static,
-) -> mpsc::UnboundedReceiver<(H, Vec<u8>)> {
-    let (tx, rx) = mpsc::unbounded_channel();
+    max: usize,
+) -> mpsc::Receiver<(H, Vec<u8>)> {
+    let (tx, rx) = mpsc::channel(READ_QUEUE);
     tokio::spawn(async move {
         loop {
-            match read_frame(&mut read).await {
+            match read_frame(&mut read, max).await {
                 Ok(Some(msg)) => {
-                    if tx.send(msg).is_err() {
+                    if tx.send(msg).await.is_err() {
                         return;
                     }
                 }
@@ -325,7 +337,7 @@ pub async fn serve_network(
     // turned back into a time.
     let _ = mono_now();
     let (read, write) = tokio::io::split(link);
-    let mut incoming = spawn_reader::<Up>(read);
+    let mut incoming = spawn_reader::<Up>(read, MAX_UP);
     let (out, writer) = spawn_writer(write);
     let send = |msg: &Down, payload: &[u8]| {
         out.send(frame(msg, payload));
@@ -618,7 +630,7 @@ pub async fn serve_media(
     events: mpsc::UnboundedSender<Event>,
 ) -> anyhow::Result<()> {
     let (read, write) = tokio::io::split(link);
-    let mut incoming = spawn_reader::<Down>(read);
+    let mut incoming = spawn_reader::<Down>(read, MAX_DOWN);
     let (out, writer) = spawn_writer(write);
     let send = |msg: &Up, payload: &[u8]| {
         out.send(frame(msg, payload));
@@ -679,8 +691,8 @@ pub async fn serve_media(
                     }
                     Down::PairingOpened => { let _ = events.send(Event::PairingOpened); }
                     Down::UnpairedAll => { let _ = events.send(Event::UnpairedAll); }
-                    Down::Notice(n) => { let _ = events.send(Event::Notice(n)); }
-                    Down::Error(e) => { let _ = events.send(Event::Error(e)); }
+                    Down::Notice(n) => { let _ = events.send(Event::Notice(clean_notice(n))); }
+                    Down::Error(e) => { let _ = events.send(Event::Error(format!("network host: {}", clean(&e)))); }
                 }
             }
             cmd = remote.next() => match cmd {
@@ -744,6 +756,54 @@ pub async fn serve_media(
     result
 }
 
+/// Text from the network process, fit for the administrator's console: no
+/// control or invisible characters (which could rewrite what the console
+/// shows), and not too long.
+fn clean(text: &str) -> String {
+    const MAX: usize = 300;
+    let mut out: String = text
+        .chars()
+        .filter(|c| ws_proto::names::printable(*c))
+        .take(MAX)
+        .collect();
+    if text.chars().count() > MAX {
+        out.push('…');
+    }
+    out
+}
+
+fn clean_notice(n: Notice) -> Notice {
+    match n {
+        Notice::PairingCode {
+            code,
+            device_name,
+            expires_in_secs,
+        } => Notice::PairingCode {
+            code: clean(&code),
+            device_name: clean(&device_name),
+            expires_in_secs,
+        },
+        Notice::Paired { device_name } => Notice::Paired {
+            device_name: clean(&device_name),
+        },
+        Notice::SessionStarted { device_name } => Notice::SessionStarted {
+            device_name: clean(&device_name),
+        },
+        Notice::SessionEnded { device_name } => Notice::SessionEnded {
+            device_name: clean(&device_name),
+        },
+        Notice::Certificate {
+            domain,
+            fingerprint,
+        } => Notice::Certificate {
+            domain: clean(&domain),
+            fingerprint: clean(&fingerprint),
+        },
+        Notice::Warning(w) => Notice::Warning(format!("network host: {}", clean(&w))),
+        n @ (Notice::PairingFailed { .. } | Notice::PairingLocked) => n,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -757,7 +817,7 @@ mod tests {
             binary: true,
         };
         a.write_all(&frame(&msg, b"payload")).await.unwrap();
-        let (got, payload) = read_frame::<Up>(&mut b).await.unwrap().unwrap();
+        let (got, payload) = read_frame::<Up>(&mut b, MAX_DOWN).await.unwrap().unwrap();
         assert!(matches!(
             got,
             Up::Data {
@@ -768,19 +828,19 @@ mod tests {
         ));
         assert_eq!(payload, b"payload");
 
-        a.write_all(&((MAX_FRAME as u32) + 1).to_le_bytes())
+        a.write_all(&((MAX_DOWN as u32) + 1).to_le_bytes())
             .await
             .unwrap();
-        assert!(read_frame::<Up>(&mut b).await.is_err());
+        assert!(read_frame::<Up>(&mut b, MAX_DOWN).await.is_err());
 
         let (mut a, mut b) = tokio::io::duplex(1 << 16);
         // A header longer than its frame.
         a.write_all(&8u32.to_le_bytes()).await.unwrap();
         a.write_all(&100u32.to_le_bytes()).await.unwrap();
         a.write_all(b"{}{}").await.unwrap();
-        assert!(read_frame::<Up>(&mut b).await.is_err());
+        assert!(read_frame::<Up>(&mut b, MAX_DOWN).await.is_err());
         drop(a);
-        assert!(read_frame::<Up>(&mut b).await.unwrap().is_none());
+        assert!(read_frame::<Up>(&mut b, MAX_DOWN).await.unwrap().is_none());
     }
 
     #[test]

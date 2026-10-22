@@ -249,8 +249,8 @@ pub const NETWORK_FILES: &[&str] = &[
     "devices.json",
     "pairing.json",
     "acme-account.json",
-    "acme-cert.pem",
-    "acme-key.pem",
+    "acme-cert.json",
+    "acme-retry.json",
     CERT_COPY,
     KEY_COPY,
     TOKEN_COPY,
@@ -329,7 +329,12 @@ pub fn check_install_args(args: &[String]) -> anyhow::Result<ServeOptions> {
 /// `--data-dir` itself.
 pub fn check_session_host_options(opts: &ServeOptions) -> anyhow::Result<()> {
     if opts.web_root.is_some() || opts.media.upload_dir.is_some() {
-        bail!("the session host never serves a web root or receives files");
+        bail!("the service's host never serves a web root or receives files");
+    }
+    // Refused at install too; checked again in case the service's command
+    // line was edited.
+    if opts.media.update_log.is_some() || opts.pair_at_start {
+        bail!("the service's host never updates from the browser or pairs at start");
     }
     Ok(())
 }
@@ -471,8 +476,14 @@ mod tests {
         let o = check_install_args(&args(&["--port", "9000", "--codec", "av1"])).unwrap();
         assert_eq!(o.port, 9000);
         assert!(check_session_host_options(&o).is_ok());
-        let o = ServeOptions::parse(&args(&["--allow-upload", "--upload-dir", "x"])).unwrap();
-        assert!(check_session_host_options(&o).is_err());
+        for refused in [
+            &["--allow-upload", "--upload-dir", "x"][..],
+            &["--allow-remote-update"],
+            &["--pair"],
+        ] {
+            let o = ServeOptions::parse(&args(refused)).unwrap();
+            assert!(check_session_host_options(&o).is_err(), "{refused:?}");
+        }
     }
 
     #[test]

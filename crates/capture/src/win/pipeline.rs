@@ -462,6 +462,7 @@ impl Session {
         }
         let invalidated = self.enc.encoder.can_invalidate()
             && next - from <= MAX_INVALIDATE
+            && self.settle_for_invalidate()
             && (from..next)
                 .try_for_each(|i| self.enc.encoder.invalidate(i))
                 .is_ok();
@@ -478,6 +479,21 @@ impl Session {
         }
     }
 
+    /// Lets every frame still in the encoder finish, so each one about to
+    /// be invalidated has its reconstructed picture: a driver may ignore an
+    /// invalidation for a frame it hasn't finished, and the next frame
+    /// would then still predict from it. Only on loss, so the wait is rare.
+    /// False if the encoder is stuck (a keyframe follows instead).
+    fn settle_for_invalidate(&mut self) -> bool {
+        match self.enc.encoder.drain() {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::debug!("encoder drain before invalidating: {e}");
+                false
+            }
+        }
+    }
+
     /// A frame never reached the consumer, and nor will the frames after it
     /// still in the encoder (they build on it). Invalidates all of them so
     /// the next paced frame skips the gap, or makes it an IDR if the
@@ -489,6 +505,7 @@ impl Session {
             && from < next
             && self.enc.encoder.can_invalidate()
             && next - from <= MAX_INVALIDATE
+            && self.settle_for_invalidate()
             && (from..next)
                 .try_for_each(|i| self.enc.encoder.invalidate(i))
                 .is_ok();

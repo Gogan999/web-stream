@@ -157,7 +157,7 @@ impl Network {
                 cert: cert.clone(),
                 key: key.clone(),
             },
-            (None, Some(duck)) => TlsSource::DuckDns(duckdns(duck)?),
+            (None, Some(duck)) => TlsSource::DuckDns(duckdns(duck, &opts.hostnames)?),
             (None, None) => TlsSource::SelfSigned {
                 hostnames: opts.hostnames.clone(),
             },
@@ -269,7 +269,10 @@ pub(crate) async fn unpair_all(signaling: &SignalingHandle, events: &mpsc::Unbou
 }
 
 /// `--duckdns`'s settings, with the token read from its file.
-fn duckdns(opts: &crate::options::DuckDnsOptions) -> anyhow::Result<ws_signaling::DuckDns> {
+fn duckdns(
+    opts: &crate::options::DuckDnsOptions,
+    hostnames: &[String],
+) -> anyhow::Result<ws_signaling::DuckDns> {
     let token = std::fs::read_to_string(&opts.token_file)
         .with_context(|| {
             format!(
@@ -290,6 +293,7 @@ fn duckdns(opts: &crate::options::DuckDnsOptions) -> anyhow::Result<ws_signaling
         }
         .into(),
         update_address: opts.update_address,
+        hostnames: hostnames.to_vec(),
     })
 }
 

@@ -214,9 +214,15 @@ are retried.
 
 - `--no-duckdns-address` leaves the name's address alone, if the router
   already updates it.
-- `--acme-email` gives Let's Encrypt an address for expiry warnings.
-- `--acme-staging` uses Let's Encrypt's staging server, which has no rate
-  limits but whose certificates browsers don't trust, to try things out.
+- `--acme-email` gives Let's Encrypt a contact address for the account (it
+  no longer sends expiry warnings; the host renews by itself).
+- `--acme-staging` uses Let's Encrypt's staging server, whose rate limits
+  are looser but whose certificates browsers don't trust, to try things
+  out. A staging certificate is dropped as soon as staging is turned off.
+
+After a failed order the host waits an hour before the next, doubling up to
+12 hours, and remembers this across restarts, so restarting it doesn't run
+into Let's Encrypt's limits.
 
 The certificate, its key and the Let's Encrypt account key are kept in the
 data folder. With another DNS provider, get a certificate with a tool such
@@ -403,8 +409,11 @@ What this changes for security:
   checked as before. The browser mic's audio is still decoded there.
 - If the network process can't be started at all (Windows refuses it a
   logon or a window station), the service runs the whole host as SYSTEM, as
-  before the split, and `service.log` and `host.log` say so. A network
-  process that crashes is restarted, never replaced by a SYSTEM one.
+  before the split, and `service.log` and `host.log` say so. It then keeps
+  its certificate and paired browsers in the service's own data folder, not
+  the `network` folder, so browsers have to pair again. A network process
+  that crashes, or a `network` folder that can't be set up, is retried
+  later, never replaced by a SYSTEM one.
 - What runs as SYSTEM is the copy in Program Files, which only
   administrators can change, never the build folder in your checkout.
 - `--cert` and `--key`, and the DuckDNS token, are copied into the

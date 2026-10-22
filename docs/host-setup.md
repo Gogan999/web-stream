@@ -408,8 +408,8 @@ What this changes for security:
   send (input, control messages, files it asked for), size-limited and
   checked as before. The browser mic's audio is still decoded there.
 - If the network process can't be started at all (Windows refuses it a
-  logon or a window station), the service runs the whole host as SYSTEM, as
-  before the split, and `service.log` and `host.log` say so. It then keeps
+  logon, or a window station before any of its code runs), the service runs
+  the whole host as SYSTEM, as before the split, and `service.log` and `host.log` say so. It then keeps
   its certificate and paired browsers in the service's own data folder, not
   the `network` folder, so browsers have to pair again. A network process
   that crashes, or a `network` folder that can't be set up, is retried

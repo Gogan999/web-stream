@@ -53,7 +53,8 @@ use windows::Win32::System::JobObjects::{
     SetInformationJobObject, TerminateJobObject,
 };
 use windows::Win32::System::Pipes::{
-    CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
+    CreateNamedPipeW, CreatePipe, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
+    PIPE_WAIT, PeekNamedPipe,
 };
 use windows::Win32::System::RemoteDesktop::WTSGetActiveConsoleSessionId;
 use windows::Win32::System::Threading::{
@@ -528,6 +529,30 @@ pub fn link_pipe() -> anyhow::Result<(Owned, Owned)> {
     }
     .context("open the link pipe")?;
     Ok((server, Owned(client)))
+}
+
+/// A pipe the network host writes one byte to as the first thing its own
+/// code does, before it touches the network: (the service's read end, the
+/// inheritable write end). What was written stays there for the service to
+/// see, whatever the network host does afterwards.
+pub fn alive_pipe() -> anyhow::Result<(Owned, Owned)> {
+    let sa = SECURITY_ATTRIBUTES {
+        nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: std::ptr::null_mut(),
+        bInheritHandle: true.into(),
+    };
+    let (mut read, mut write) = (HANDLE::default(), HANDLE::default());
+    // SAFETY: the out pointers and `sa` are valid for the call.
+    unsafe { CreatePipe(&mut read, &mut write, Some(&sa), 0) }.context("CreatePipe")?;
+    Ok((Owned(read), Owned(write)))
+}
+
+/// Whether anything was written to the pipe whose read end this is.
+pub fn pipe_has_data(read: &Owned) -> bool {
+    let mut available = 0u32;
+    // SAFETY: `read` is an open pipe handle and `available` valid.
+    unsafe { PeekNamedPipe(read.0, None, 0, None, Some(&mut available), None) }.is_ok()
+        && available > 0
 }
 
 /// Sets the DACL of the folder `path` from `sddl`, replacing what it

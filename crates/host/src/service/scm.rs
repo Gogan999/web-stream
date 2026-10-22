@@ -436,14 +436,20 @@ struct Host {
     child: launch::Child,
     /// The network host it serves the browser through, unless it runs the
     /// whole host itself.
-    network: Option<launch::Child>,
+    network: Option<Network>,
     pipe: String,
     started: Instant,
 }
 
+struct Network {
+    child: launch::Child,
+    /// The read end of its alive pipe (see [`launch::alive_pipe`]).
+    alive: launch::Owned,
+}
+
 enum NetworkStart {
     /// With the session host's end of the link.
-    Started(launch::Child, launch::Owned),
+    Started(Network, launch::Owned),
     /// Run the whole host in the session host, as SYSTEM.
     CantSplit,
     /// Try again later.
@@ -531,7 +537,8 @@ impl Supervisor {
     fn start_network(&self) -> NetworkStart {
         if self.split_broken {
             tracing::warn!(
-                "the network host can't start here; the session host runs the whole host"
+                "the network host can't start here; the session host runs the whole host, \
+                 with its own paired browsers (pair again)"
             );
             return NetworkStart::CantSplit;
         }
@@ -540,7 +547,7 @@ impl Supervisor {
             Err(e) => {
                 tracing::error!(
                     "no LocalService logon for the network host, so the session host runs the \
-                     whole host as SYSTEM: {e:#}"
+                     whole host as SYSTEM, with its own paired browsers (pair again): {e:#}"
                 );
                 return NetworkStart::CantSplit;
             }
@@ -549,15 +556,17 @@ impl Supervisor {
             let dir = prepare_network_dir()?;
             let args = super::relocate_files(&self.args, &self.data_dir, &dir);
             let (ours, theirs) = launch::link_pipe()?;
-            let args = super::network_host_args(theirs.value(), &args, &dir);
+            let (alive, alive_theirs) = launch::alive_pipe()?;
+            let args = super::network_host_args(theirs.value(), alive_theirs.value(), &args, &dir);
             let log = self.data_dir.join("network.log");
-            let child = launch::spawn_network(&token, &self.exe, &args, &log, &[theirs.value()])?;
-            anyhow::Ok((child, ours))
+            let inherit = [theirs.value(), alive_theirs.value()];
+            let child = launch::spawn_network(&token, &self.exe, &args, &log, &inherit)?;
+            anyhow::Ok((Network { child, alive }, ours))
         })();
         match started {
-            Ok((child, ours)) => {
-                tracing::info!(pid = child.pid, "started the network host");
-                NetworkStart::Started(child, ours)
+            Ok((network, ours)) => {
+                tracing::info!(pid = network.child.pid, "started the network host");
+                NetworkStart::Started(network, ours)
             }
             Err(e) => NetworkStart::Failed(e),
         }
@@ -607,7 +616,7 @@ impl Supervisor {
             Err(e) => {
                 tracing::error!(session, "could not start the host: {e:#}");
                 if let Some(network) = network {
-                    network.kill();
+                    network.child.kill();
                 }
                 self.retry_later(Duration::ZERO);
             }
@@ -678,22 +687,29 @@ impl Supervisor {
 
 /// STATUS_DLL_INIT_FAILED: a process that died before any of its own code
 /// ran, which for the network host means Windows wouldn't give it a window
-/// station. Nothing from the network can cause it, unlike a crash, so it is
-/// the one exit that makes the service stop splitting the host (falling
-/// back on a crash would let whoever can crash it get the network code
-/// running as SYSTEM).
+/// station. It is the one exit that makes the service stop splitting the
+/// host (falling back on a crash would let whoever can crash it get the
+/// network code running as SYSTEM), and only when the network host never
+/// wrote to its alive pipe: once its code has run, a network host taken
+/// over from the network could exit with this code itself.
 const STARTUP_FAILED: u32 = 0xC000_0142;
 
 /// Waits for the network host to stop, which it does once the session host
 /// is gone (its link closes), and kills it if it doesn't: the next one
 /// needs its ports. True if it never started ([`STARTUP_FAILED`]).
-fn stop_network(network: &launch::Child) -> bool {
+fn stop_network(
+    Network {
+        child: network,
+        alive,
+    }: &Network,
+) -> bool {
     if let Some(code) = network.exit_code() {
         tracing::warn!(code, "the network host had exited (its log is network.log)");
-        if code == STARTUP_FAILED {
+        if code == STARTUP_FAILED && !launch::pipe_has_data(alive) {
             tracing::error!(
                 "the network host could not start (no window station for LocalService); \
-                 the session host runs the whole host as SYSTEM until the service restarts"
+                 the session host runs the whole host as SYSTEM, with its own paired browsers \
+                 (pair again), until the service restarts"
             );
             return true;
         }

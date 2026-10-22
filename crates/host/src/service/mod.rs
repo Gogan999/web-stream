@@ -181,10 +181,20 @@ pub fn session_host_args(
     args
 }
 
-/// The network host's arguments: the link it inherits, and as for
-/// [`session_host_args`].
-pub fn network_host_args(link: usize, serve_args: &[String], data_dir: &Path) -> Vec<String> {
-    let mut args = vec!["service".into(), "network-host".into(), link.to_string()];
+/// The network host's arguments: the link and the alive pipe (see
+/// `launch::alive_pipe`) it inherits, and as for [`session_host_args`].
+pub fn network_host_args(
+    link: usize,
+    alive: usize,
+    serve_args: &[String],
+    data_dir: &Path,
+) -> Vec<String> {
+    let mut args = vec![
+        "service".into(),
+        "network-host".into(),
+        link.to_string(),
+        alive.to_string(),
+    ];
     args.extend(serve_args.iter().cloned());
     args.push("--data-dir".into());
     args.push(data_dir.display().to_string());
@@ -222,17 +232,17 @@ pub fn parse_session_host_args(args: &[String]) -> anyhow::Result<SessionHost> {
 }
 
 /// Parses what follows `service network-host`: the link and the options.
-pub fn parse_network_host_args(args: &[String]) -> anyhow::Result<(usize, ServeOptions)> {
-    let [link, rest @ ..] = args else {
-        bail!("network-host needs a handle");
+pub fn parse_network_host_args(args: &[String]) -> anyhow::Result<(usize, usize, ServeOptions)> {
+    let [link, alive, rest @ ..] = args else {
+        bail!("network-host needs two handles");
     };
-    let link = parse_handle(link)?;
-    if link == 0 {
-        bail!("network-host needs its link to the session host");
+    let (link, alive) = (parse_handle(link)?, parse_handle(alive)?);
+    if link == 0 || alive == 0 {
+        bail!("network-host needs its link to the session host and its alive pipe");
     }
     let opts = ServeOptions::parse(rest)?;
     check_session_host_options(&opts)?;
-    Ok((link, opts))
+    Ok((link, alive, opts))
 }
 
 fn parse_handle(text: &str) -> anyhow::Result<usize> {
@@ -410,7 +420,19 @@ mod imp {
         if ws_desktop::running_as_system() {
             anyhow::bail!("network-host must not run as SYSTEM");
         }
-        let (link, opts) = super::parse_network_host_args(args)?;
+        let (link, alive, opts) = super::parse_network_host_args(args)?;
+        // Before anything from the network can reach this process: tells the
+        // service its code ran (see `scm::STARTUP_FAILED`).
+        {
+            use std::io::Write;
+            use std::os::windows::io::FromRawHandle;
+            // SAFETY: the service handed this process the pipe's write end,
+            // and nothing else here owns it.
+            let mut alive = unsafe { std::fs::File::from_raw_handle(alive as *mut _) };
+            alive
+                .write_all(&[1])
+                .map_err(|e| anyhow::anyhow!("write the alive pipe: {e}"))?;
+        }
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?
@@ -510,13 +532,14 @@ mod tests {
         let uploads = session_host_args(&pipe, 0, 0, &args(&["--allow-upload"]), dir);
         assert!(parse_session_host_args(&uploads[2..]).is_err());
 
-        let built = network_host_args(0x2bc, &serve, dir);
+        let built = network_host_args(0x2bc, 0x2c0, &serve, dir);
         assert_eq!(&built[..2], ["service", "network-host"]);
-        let (link, opts) = parse_network_host_args(&built[2..]).unwrap();
-        assert_eq!(link, 0x2bc);
+        let (link, alive, opts) = parse_network_host_args(&built[2..]).unwrap();
+        assert_eq!((link, alive), (0x2bc, 0x2c0));
         assert_eq!((opts.port, &*opts.data_dir), (9000, dir));
-        assert!(parse_network_host_args(&network_host_args(0, &serve, dir)[2..]).is_err());
-        let uploads = network_host_args(1, &args(&["--allow-upload"]), dir);
+        assert!(parse_network_host_args(&network_host_args(0, 1, &serve, dir)[2..]).is_err());
+        assert!(parse_network_host_args(&network_host_args(1, 0, &serve, dir)[2..]).is_err());
+        let uploads = network_host_args(1, 1, &args(&["--allow-upload"]), dir);
         assert!(parse_network_host_args(&uploads[2..]).is_err());
     }
 

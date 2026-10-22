@@ -1,5 +1,7 @@
-//! The capture thread: duplicate -> convert -> encode -> hand off, one frame
-//! at a time, newest image wins.
+//! The capture thread: duplicate -> convert -> queue for encoding, newest
+//! image wins. Frames come out of the encoder on its own thread, which
+//! hands them off ([`deliver`]); meanwhile the capture thread is already
+//! taking the next image.
 
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Weak};
@@ -12,12 +14,14 @@ use windows::Win32::System::Threading::{
     GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_HIGHEST,
 };
 use ws_diag::diag;
-use ws_proto::{DisplayId, EncodedFrame, SendBacklog, VideoConfig, mono_micros, mono_now};
+use ws_proto::{
+    DisplayId, EncodedFrame, SendBacklog, VideoCodec, VideoConfig, mono_micros, mono_now,
+};
 
 use super::convert::Converter;
 use super::display::{self, Output};
 use super::duplication::{Acquired, Duplicator};
-use super::nvenc::{DPB_FRAMES, NvEncoder};
+use super::nvenc::{DPB_FRAMES, Finished, NvEncoder};
 use super::{Gpu, init_process};
 use crate::pacing::{Backpressure, BitrateGate, EncodeJob, Scheduler};
 use crate::{CaptureError, Result};
@@ -158,20 +162,61 @@ impl Drop for PipelineHandle {
     }
 }
 
+/// What the capture thread tags a frame with when it goes into the
+/// encoder, for [`deliver`] when it comes out.
+struct FrameMeta {
+    index: u64,
+    display: DisplayId,
+    codec: VideoCodec,
+    width: u32,
+    height: u32,
+    captured: Instant,
+    /// The frame skips frames from this index on (see `recovers_from` in
+    /// [`EncodedFrame`]).
+    recovers_from: Option<u64>,
+    // For diagnostics.
+    idr: bool,
+    intra: bool,
+    repair: bool,
+    why: Option<&'static str>,
+    /// Re-encodes the last image because the desktop was still.
+    repeat: bool,
+    /// Captured -> into the encoder.
+    held: Duration,
+    kbps: u32,
+}
+
+/// From the encoder's output thread back to the capture thread.
+enum Report {
+    /// The frame `index` was not handed off (the consumer's channel was
+    /// full), nor anything after it still in the encoder that built on
+    /// it; frames from `from` on are missing.
+    Lost { from: u64, keyframe: bool },
+    /// The consumer has gone away.
+    Closed,
+}
+
 /// GPU objects for one adapter. Field order is drop order: the encoder
-/// unregisters the converter's texture, so it goes first.
+/// (whose output thread finishes first) before the device.
 struct Encode {
-    encoder: NvEncoder,
+    encoder: NvEncoder<FrameMeta>,
     converter: Converter,
     gpu: Gpu,
     luid: LUID,
 }
 
 impl Encode {
-    fn open(output: &Output, config: &VideoConfig, max: (u32, u32)) -> Result<Self> {
+    fn open(
+        output: &Output,
+        config: &VideoConfig,
+        max: (u32, u32),
+        frames: &mpsc::Sender<EncodedFrame>,
+        reports: &std_mpsc::Sender<Report>,
+    ) -> Result<Self> {
         let gpu = Gpu::new(&output.adapter)?;
         let converter = Converter::new(&gpu, config.width, config.height, config.fps)?;
-        let encoder = NvEncoder::new(&gpu, converter.output(), config, max).map_err(|e| match e {
+        let on_output = deliver(frames.clone(), reports.clone());
+        let encoder = NvEncoder::new(&gpu, config, max, on_output).map_err(|e| match e {
             CaptureError::NoEncoder(msg) if output.adapter_vendor != 0x10de => CaptureError::NoEncoder(format!(
                 "{msg}; display {:?} is driven by a non-NVIDIA adapter (AMF/QSV not supported yet)",
                 output.info.id
@@ -198,6 +243,9 @@ struct Stats {
 struct Session {
     // Drop order: duplication before the device it was created on.
     dup: Option<Duplicator>,
+    /// From the encoder's output thread.
+    reports: std_mpsc::Receiver<Report>,
+    reports_tx: std_mpsc::Sender<Report>,
     enc: Encode,
     display: DisplayId,
     config: VideoConfig,
@@ -220,7 +268,6 @@ struct Session {
     /// Recent GPU/encoder rebuilds, to give up on a persistently broken
     /// device instead of looping.
     recoveries: Vec<Instant>,
-    stats: Stats,
     /// When Desktop Duplication last delivered an image (diagnostics).
     last_dxgi: Option<Instant>,
 }
@@ -235,11 +282,14 @@ impl Session {
     ) -> Result<Self> {
         let output = display::find(id)?;
         let max = (max.0.max(config.width), max.1.max(config.height));
-        let enc = Encode::open(&output, &config, max)?;
+        let (reports_tx, reports) = std_mpsc::channel();
+        let enc = Encode::open(&output, &config, max, &frames, &reports_tx)?;
         let dup = Duplicator::new(&output.output, &enc.gpu)?;
         tracing::info!(display = id.0, name = %output.info.name, "capturing");
         Ok(Self {
             dup: Some(dup),
+            reports,
+            reports_tx,
             enc,
             display: id,
             sched: Scheduler::new(config.fps),
@@ -253,7 +303,6 @@ impl Session {
             recovers_from: None,
             intra_next: false,
             recoveries: Vec::new(),
-            stats: Stats::default(),
             last_dxgi: None,
         })
     }
@@ -265,6 +314,12 @@ impl Session {
                     Ok(cmd) => self.handle(cmd),
                     Err(std_mpsc::TryRecvError::Empty) => break,
                     Err(std_mpsc::TryRecvError::Disconnected) => return Ok(()),
+                }
+            }
+            while let Ok(report) = self.reports.try_recv() {
+                match report {
+                    Report::Lost { from, keyframe } => self.frame_lost(from, keyframe),
+                    Report::Closed => return Ok(()),
                 }
             }
             match self.step(commands) {
@@ -423,6 +478,32 @@ impl Session {
         }
     }
 
+    /// A frame never reached the consumer, and nor will the frames after it
+    /// still in the encoder (they build on it). Invalidates all of them so
+    /// the next paced frame skips the gap, or makes it an IDR if the
+    /// encoder can't (or the lost frame was a keyframe). Not at once: a
+    /// stalled consumer must not make the thread spin.
+    fn frame_lost(&mut self, from: u64, keyframe: bool) {
+        let next = self.frame_index;
+        let invalidated = !keyframe
+            && from < next
+            && self.enc.encoder.can_invalidate()
+            && next - from <= MAX_INVALIDATE
+            && (from..next)
+                .try_for_each(|i| self.enc.encoder.invalidate(i))
+                .is_ok();
+        diag!(
+            "cap_cmd",
+            "lost from={from} next={next} keyframe={keyframe} invalidated={invalidated}"
+        );
+        if invalidated {
+            self.recovers_from = Some(self.recovers_from.map_or(from, |r| r.min(from)));
+            self.intra_next |= next - from >= u64::from(DPB_FRAMES);
+        } else {
+            self.sched.dropped();
+        }
+    }
+
     /// Changes the stream size. In place where the encoder allows it: a new
     /// converter output on the same device and the encoder reset to the new
     /// size, so there is no stall for a new device and session. Otherwise
@@ -437,7 +518,7 @@ impl Session {
         let converter = Converter::new(&self.enc.gpu, width, height, self.config.fps)?;
         self.config.width = width;
         self.config.height = height;
-        let in_place = self.enc.encoder.resize(converter.output(), width, height);
+        let in_place = self.enc.encoder.resize(width, height);
         diag!(
             "capture_resize",
             "size={width}x{height} in_place={} ms={:.2}",
@@ -446,7 +527,6 @@ impl Session {
         );
         match in_place {
             Ok(()) => {
-                // The encoder no longer reads the old output: safe to drop.
                 self.enc.converter = converter;
                 // A new duplication hands over the whole desktop at once,
                 // which a still desktop otherwise wouldn't.
@@ -467,7 +547,13 @@ impl Session {
     fn switch_to(&mut self, id: DisplayId, rebuild: bool) -> Result<()> {
         let output = display::find(id)?;
         if rebuild || !same_luid(output.adapter_luid, self.enc.luid) {
-            let enc = Encode::open(&output, &self.config, self.max)?;
+            let enc = Encode::open(
+                &output,
+                &self.config,
+                self.max,
+                &self.frames,
+                &self.reports_tx,
+            )?;
             let dup = Duplicator::new(&output.output, &enc.gpu)?;
             self.dup = None;
             self.enc = enc;
@@ -530,11 +616,9 @@ impl Session {
         }
     }
 
-    /// Encodes the converter's current image and hands it off. Returns false
-    /// once the consumer has gone away.
+    /// Queues the converter's current image for encoding; it is handed off
+    /// once it comes out ([`deliver`]).
     fn encode(&mut self, now: Instant, job: EncodeJob) -> Result<bool> {
-        let idr_cause = self.sched.idr_cause();
-        let repair = self.sched.repair_requested();
         let start = Instant::now();
         let intra = std::mem::take(&mut self.intra_next);
         // A keyframe already reconfigures the encoder (for its larger
@@ -544,11 +628,33 @@ impl Session {
         } else {
             self.bitrate.take_due(now)
         };
-        let bits = self
-            .enc
-            .encoder
-            .encode(self.frame_index, job.idr, intra, kbps)?;
-        let done = Instant::now();
+        let meta = FrameMeta {
+            index: self.frame_index,
+            display: self.display,
+            codec: self.config.codec,
+            width: self.config.width,
+            height: self.config.height,
+            captured: job.captured,
+            // Only the first frame after an invalidation needs the tag;
+            // later ones build on it. A keyframe needs none.
+            recovers_from: self.recovers_from.take().filter(|_| !job.idr),
+            idr: job.idr,
+            intra,
+            repair: self.sched.repair_requested(),
+            why: self.sched.idr_cause(),
+            repeat: job.captured == now,
+            held: start.saturating_duration_since(job.captured),
+            kbps: kbps.unwrap_or(self.config.bitrate_kbps),
+        };
+        self.enc.encoder.submit(
+            &self.enc.gpu.context,
+            self.enc.converter.output(),
+            self.frame_index,
+            job.idr,
+            intra,
+            kbps,
+            meta,
+        )?;
         if let Some(kbps) = kbps {
             let actual = self.enc.encoder.bitrate_kbps();
             if actual != kbps {
@@ -558,72 +664,83 @@ impl Session {
             self.config.bitrate_kbps = actual;
             self.bitrate.applied(now, actual);
         }
-
-        // Only the first frame after an invalidation needs the tag; later
-        // ones build on it. A keyframe needs none.
-        let recovers_from = self.recovers_from.take().filter(|_| !bits.keyframe);
-        let bytes = bits.data.len();
-        let frame = EncodedFrame {
-            display: self.display,
-            codec: self.config.codec,
-            frame_index: self.frame_index,
-            keyframe: bits.keyframe,
-            recovers_from,
-            capture_time: mono_micros(job.captured),
-            encode_done_time: mono_now(),
-            width: self.config.width,
-            height: self.config.height,
-            data: bits.data,
-        };
         self.frame_index += 1;
+        // A frame lost on the way out comes back as a report.
+        self.sched.encoded(now, job, true);
+        Ok(true)
+    }
+}
 
-        let stats = &mut self.stats;
-        let dropped_before = stats.dropped;
-        stats.encode_time += done - start;
-        let delivered = match self.frames.try_send(frame) {
+/// Hands each frame out of the encoder to the consumer, on the encoder's
+/// output thread, and tells the capture thread about any that didn't go.
+fn deliver(
+    frames: mpsc::Sender<EncodedFrame>,
+    reports: std_mpsc::Sender<Report>,
+) -> impl FnMut(Finished<FrameMeta>) + Send + 'static {
+    let mut stats = Stats::default();
+    move |out| {
+        let encoded = match out {
+            Ok(encoded) => encoded,
+            Err((meta, e)) => {
+                // The capture thread rebuilds the encoder on its next frame.
+                tracing::warn!(index = meta.index, "encoding failed: {e}");
+                let _ = reports.send(Report::Lost {
+                    from: meta.recovers_from.unwrap_or(meta.index),
+                    keyframe: true,
+                });
+                return;
+            }
+        };
+        let meta = encoded.meta;
+        let keyframe = encoded.keyframe;
+        let bytes = encoded.data.len();
+        let frame = EncodedFrame {
+            display: meta.display,
+            codec: meta.codec,
+            frame_index: meta.index,
+            keyframe,
+            recovers_from: meta.recovers_from.filter(|_| !keyframe),
+            capture_time: mono_micros(meta.captured),
+            encode_done_time: mono_now(),
+            width: meta.width,
+            height: meta.height,
+            data: encoded.data,
+        };
+        let out = match frames.try_send(frame) {
             Ok(()) => {
                 stats.encoded += 1;
-                true
+                "sent"
             }
             Err(TrySendError::Full(frame)) => {
-                // The receiver sees a gap in frame_index. The next frame
-                // skips over it, or is an IDR if this was one (the browser
-                // may be waiting for it) or the encoder can't skip.
+                // The receiver sees a gap in frame_index: the capture
+                // thread has the next frame skip it, or be an IDR.
                 stats.dropped += 1;
-                if !frame.keyframe && self.enc.encoder.invalidate(frame.frame_index).is_ok() {
-                    let from = frame.recovers_from.unwrap_or(frame.frame_index);
-                    self.recovers_from = Some(self.recovers_from.map_or(from, |r| r.min(from)));
-                    true
-                } else {
-                    false
-                }
+                let _ = reports.send(Report::Lost {
+                    from: frame.recovers_from.unwrap_or(frame.frame_index),
+                    keyframe: frame.keyframe,
+                });
+                "full"
             }
-            Err(TrySendError::Closed(_)) => return Ok(false),
+            Err(TrySendError::Closed(_)) => {
+                let _ = reports.send(Report::Closed);
+                return;
+            }
         };
-        if ws_diag::enabled() {
-            // held: captured -> encode start; a repeat re-encodes the last
-            // image because the desktop was still.
-            let index = self.frame_index - 1;
-            let out = if delivered && stats.dropped == dropped_before {
-                "sent"
-            } else if delivered {
-                "full_skipped"
-            } else {
-                "full_idr_next"
-            };
-            diag!(
-                "frame",
-                "idx={index} idr={} intra={intra} repair={repair} why={} repeat={} bytes={bytes} held_ms={:.2} enc_ms={:.2} kbps={} out={out}",
-                job.idr,
-                idr_cause.unwrap_or("-"),
-                job.captured == now,
-                start.saturating_duration_since(job.captured).as_secs_f64() * 1000.0,
-                (done - start).as_secs_f64() * 1000.0,
-                self.config.bitrate_kbps,
-            );
-        }
-        self.sched.encoded(now, job, delivered);
-
+        stats.encode_time += encoded.encode_time;
+        diag!(
+            "frame",
+            "idx={} idr={} intra={} repair={} why={} repeat={} bytes={bytes} held_ms={:.2} enc_ms={:.2} kbps={} out={out}",
+            meta.index,
+            meta.idr,
+            meta.intra,
+            meta.repair,
+            meta.why.unwrap_or("-"),
+            meta.repeat,
+            meta.held.as_secs_f64() * 1000.0,
+            encoded.encode_time.as_secs_f64() * 1000.0,
+            meta.kbps,
+        );
+        let done = Instant::now();
         let since = *stats.since.get_or_insert(done);
         if done - since >= Duration::from_secs(5) {
             let n = (stats.encoded + stats.dropped).max(1);
@@ -633,12 +750,11 @@ impl Session {
                 avg_encode_ms = stats.encode_time.as_secs_f64() * 1000.0 / f64::from(n),
                 "video stats"
             );
-            *stats = Stats {
+            stats = Stats {
                 since: Some(done),
                 ..Default::default()
             };
         }
-        Ok(true)
     }
 }
 

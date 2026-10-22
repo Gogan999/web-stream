@@ -14,17 +14,31 @@
 //! is needed. Frames are tagged with their `frame_index` as NVENC's input
 //! timestamp so they can be named.
 //!
-//! Runs synchronously: one frame in flight, and `encode` returns once the
-//! bitstream is ready. That is the lowest-latency mode for a single stream.
+//! Frames are queued ([`NvEncoder::submit`]) and come out on a thread of
+//! the encoder's own (NVENC's async mode, with completion events), so the
+//! capture thread takes and converts the next desktop image while one
+//! encodes. At most [`SLOTS`] frames are in the encoder: one encoding and
+//! one queued, never a backlog.
 
 use std::ffi::{CStr, c_void};
 use std::ptr;
-use std::sync::OnceLock;
+use std::sync::mpsc as std_mpsc;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
+use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
+use windows::Win32::Graphics::Direct3D11::{
+    D3D11_BIND_RENDER_TARGET, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, ID3D11Device,
+    ID3D11DeviceContext, ID3D11Texture2D,
+};
+use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_NV12, DXGI_SAMPLE_DESC};
 use windows::Win32::System::LibraryLoader::{
     GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
+};
+use windows::Win32::System::Threading::{
+    CreateEventW, GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_HIGHEST, WaitForSingleObject,
 };
 use windows::core::{Interface, s, w};
 use ws_nvenc_sys as nv;
@@ -107,14 +121,76 @@ macro_rules! call {
     }};
 }
 
-pub(crate) struct EncodedBits {
+/// Frames in the encoder at once: one being encoded while the next is
+/// copied in and queued behind it. More would only queue frames, which is
+/// latency.
+pub(crate) const SLOTS: usize = 2;
+/// A frame not out of the encoder in this long means the GPU hung.
+const FRAME_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// One frame out of the encoder, with what the capture thread tagged it
+/// with when it went in.
+pub(crate) struct Encoded<M> {
     pub data: Bytes,
     pub keyframe: bool,
+    pub meta: M,
+    /// From going in to the bitstream being ready.
+    pub encode_time: Duration,
 }
 
-pub(crate) struct NvEncoder {
+/// What the output thread hands on for each frame.
+pub(crate) type Finished<M> = std::result::Result<Encoded<M>, (M, CaptureError)>;
+
+/// An input texture registered with the encoder, and the bitstream buffer
+/// (and in async mode the event) its frame comes out through.
+struct Slot {
+    /// NV12 at the stream size: a copy of the converter's output, so the
+    /// converter can take the next desktop image while this one encodes.
+    texture: ID3D11Texture2D,
+    registered: nv::NV_ENC_REGISTERED_PTR,
+    bitstream: nv::NV_ENC_OUTPUT_PTR,
+    /// Signalled when the frame is encoded; null when synchronous (the
+    /// lock then waits instead).
+    event: *mut c_void,
+    /// Mapped for a frame in the encoder; unmapped once the slot is back.
+    mapped: nv::NV_ENC_INPUT_PTR,
+}
+
+/// A frame in the encoder, for the output thread.
+struct Pending<M> {
+    slot: usize,
+    bitstream: nv::NV_ENC_OUTPUT_PTR,
+    event: *mut c_void,
+    submitted: Instant,
+    meta: M,
+}
+
+// SAFETY: the pointers are NVENC and event handles. The output thread only
+// waits on the event and locks and unlocks the bitstream, which NVENC
+// allows from a thread of its own; the capture thread keeps the slot alive
+// until the slot comes back.
+unsafe impl<M: Send> Send for Pending<M> {}
+
+/// The encoder session, for the output thread.
+#[derive(Clone, Copy)]
+struct Session {
     api: &'static nv::NV_ENCODE_API_FUNCTION_LIST,
     encoder: *mut c_void,
+}
+
+// SAFETY: as for Pending; the session outlives the output thread (Drop
+// joins it before destroying the encoder).
+unsafe impl Send for Session {}
+
+/// An NVENC session that encodes in the background: [`Self::submit`]
+/// returns once the frame is queued, and a thread of its own hands each
+/// finished frame to the callback given to [`Self::new`], in order. The
+/// capture thread meanwhile takes and converts the next desktop image, so
+/// capture, conversion and encoding overlap instead of running in turn.
+pub(crate) struct NvEncoder<M: Send + 'static> {
+    api: &'static nv::NV_ENCODE_API_FUNCTION_LIST,
+    encoder: *mut c_void,
+    device: ID3D11Device,
     // Boxed: `init.encodeConfig` points at `config`, and both are handed back
     // to the driver on reconfigure.
     init: Box<nv::NV_ENC_INITIALIZE_PARAMS>,
@@ -124,19 +200,32 @@ pub(crate) struct NvEncoder {
     keyframe_scale: u8,
     /// The GPU can invalidate reference frames, and the config asks for it.
     can_invalidate: bool,
-    input: nv::NV_ENC_REGISTERED_PTR,
-    bitstream: nv::NV_ENC_OUTPUT_PTR,
+    /// Completion events (NVENC's async mode); otherwise the output thread
+    /// waits in the bitstream lock.
+    async_mode: bool,
+    slots: Vec<Slot>,
+    /// Slots ready for a frame.
+    free: Vec<usize>,
+    /// Slots the output thread is done with.
+    returned: std_mpsc::Receiver<usize>,
+    returned_tx: std_mpsc::Sender<usize>,
+    pending: Option<std_mpsc::Sender<Pending<M>>>,
+    output: Option<JoinHandle<()>>,
+    /// What went wrong on the output thread, for the next submit to report
+    /// (the pipeline then rebuilds the encoder).
+    failed: Arc<Mutex<Option<String>>>,
 }
 
-impl NvEncoder {
-    /// Opens an encoder on `gpu` that reads from `input` (NV12, the stream
-    /// size). [`Self::resize`] can later change the size in place up to
-    /// `max` (width, height); at least the stream size.
+impl<M: Send + 'static> NvEncoder<M> {
+    /// Opens an encoder on `gpu` for `cfg`'s stream size. [`Self::resize`]
+    /// can later change the size in place up to `max` (width, height); at
+    /// least the stream size. `on_output` gets every frame, on the
+    /// encoder's output thread.
     pub(crate) fn new(
         gpu: &Gpu,
-        input: &ID3D11Texture2D,
         cfg: &VideoConfig,
         max: (u32, u32),
+        on_output: impl FnMut(Finished<M>) + Send + 'static,
     ) -> Result<Self> {
         let api = api()?;
         let mut session = nv::NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS {
@@ -156,32 +245,48 @@ impl NvEncoder {
                 status.0
             )));
         }
+        let (returned_tx, returned) = std_mpsc::channel();
         // From here on Drop cleans up whatever has been created.
         let mut this = Self {
             api,
             encoder,
+            device: gpu.device.clone(),
             init: Box::default(),
             config: Box::default(),
             fps: cfg.fps,
             vbv_frames: 1.0,
             keyframe_scale: 1,
             can_invalidate: false,
-            input: ptr::null_mut(),
-            bitstream: ptr::null_mut(),
+            async_mode: false,
+            slots: Vec::new(),
+            free: Vec::new(),
+            returned,
+            returned_tx,
+            pending: None,
+            output: None,
+            failed: Arc::default(),
         };
         this.initialize(cfg, max)?;
-        this.register_input(input, cfg.width, cfg.height)?;
+        for _ in 0..SLOTS {
+            this.add_slot(cfg.width, cfg.height)?;
+        }
+        this.free = (0..SLOTS).rev().collect();
 
-        let mut bs = nv::NV_ENC_CREATE_BITSTREAM_BUFFER {
-            version: nv::NV_ENC_CREATE_BITSTREAM_BUFFER_VER,
-            ..Default::default()
-        };
-        this.check(
-            unsafe { call!(api, nvEncCreateBitstreamBuffer(encoder, &mut bs)) },
-            "nvEncCreateBitstreamBuffer",
-        )?;
-        this.bitstream = bs.bitstreamBuffer;
-        tracing::info!(codec = ?cfg.codec, cfg.width, cfg.height, cfg.fps, cfg.bitrate_kbps, quality = ?cfg.quality, keyframe_scale = this.keyframe_scale, invalidation = this.can_invalidate, two_pass = this.config.rcParams.multiPass.0 != 0, "NVENC ready");
+        let (pending_tx, pending) = std_mpsc::channel();
+        let session = Session { api, encoder };
+        let (returned_tx, failed) = (this.returned_tx.clone(), this.failed.clone());
+        this.output = Some(
+            std::thread::Builder::new()
+                .name("ws-encode-out".into())
+                .spawn(move || {
+                    let _ =
+                        unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST) };
+                    output_loop(session, pending, returned_tx, failed, on_output)
+                })
+                .map_err(|e| CaptureError::Platform(format!("spawn encoder output thread: {e}")))?,
+        );
+        this.pending = Some(pending_tx);
+        tracing::info!(codec = ?cfg.codec, cfg.width, cfg.height, cfg.fps, cfg.bitrate_kbps, quality = ?cfg.quality, keyframe_scale = this.keyframe_scale, invalidation = this.can_invalidate, two_pass = this.config.rcParams.multiPass.0 != 0, async_mode = this.async_mode, "NVENC ready");
         Ok(this)
     }
 
@@ -243,6 +348,12 @@ impl NvEncoder {
         // With invalidation the encoder needs older pictures to fall back
         // on; one reference (the ultra-low-latency default) leaves it none.
         let refs = if self.can_invalidate { DPB_FRAMES } else { 0 };
+        self.async_mode = self
+            .cap(
+                codec_guid,
+                nv::NV_ENC_CAPS::NV_ENC_CAPS_ASYNC_ENCODE_SUPPORT,
+            )
+            .is_ok_and(|v| v > 0);
 
         let mut config = preset.presetCfg;
         config.gopLength = nv::NVENC_INFINITE_GOPLENGTH;
@@ -323,7 +434,7 @@ impl NvEncoder {
             darHeight: cfg.height,
             frameRateNum: cfg.fps,
             frameRateDen: 1,
-            enableEncodeAsync: 0,
+            enableEncodeAsync: u32::from(self.async_mode),
             enablePTD: 1,
             encodeConfig: &mut *self.config,
             maxEncodeWidth: max.0.max(cfg.width),
@@ -360,24 +471,103 @@ impl NvEncoder {
         Ok(())
     }
 
-    /// Changes the encoded size in place, reading from `input` (NV12, the
-    /// new size) from now on; the next frame is an IDR. Cheaper than a new
-    /// session: no new device or encoder, so no stall. Fails if the size is
-    /// over the maximum the encoder was opened for, or the driver refuses;
-    /// the encoder then has no input and must be replaced.
-    pub(crate) fn resize(
-        &mut self,
-        input: &ID3D11Texture2D,
-        width: u32,
-        height: u32,
-    ) -> Result<()> {
+    /// Adds an input texture of `width` x `height`, with its bitstream
+    /// buffer and, in async mode, its completion event.
+    fn add_slot(&mut self, width: u32, height: u32) -> Result<()> {
+        let texture = nv12_texture(&self.device, width, height)?;
+        let mut bs = nv::NV_ENC_CREATE_BITSTREAM_BUFFER {
+            version: nv::NV_ENC_CREATE_BITSTREAM_BUFFER_VER,
+            ..Default::default()
+        };
+        self.check(
+            unsafe { call!(self.api, nvEncCreateBitstreamBuffer(self.encoder, &mut bs)) },
+            "nvEncCreateBitstreamBuffer",
+        )?;
+        // Pushed before anything else can fail, so Drop frees what was made.
+        self.slots.push(Slot {
+            texture,
+            registered: ptr::null_mut(),
+            bitstream: bs.bitstreamBuffer,
+            event: ptr::null_mut(),
+            mapped: ptr::null_mut(),
+        });
+        let index = self.slots.len() - 1;
+        if self.async_mode {
+            let event = unsafe { CreateEventW(None, false, false, None) }
+                .map_err(|e| CaptureError::Platform(format!("CreateEvent: {e}")))?;
+            self.slots[index].event = event.0;
+            // SAFETY: plain data; zero is every reserved field's value.
+            let mut params: nv::NV_ENC_EVENT_PARAMS = unsafe { std::mem::zeroed() };
+            params.version = nv::NV_ENC_EVENT_PARAMS_VER;
+            params.completionEvent = event.0;
+            let status =
+                unsafe { call!(self.api, nvEncRegisterAsyncEvent(self.encoder, &mut params)) };
+            if let Err(e) = self.check(status, "nvEncRegisterAsyncEvent") {
+                unsafe {
+                    let _ = CloseHandle(event);
+                }
+                self.slots[index].event = ptr::null_mut();
+                return Err(e);
+            }
+        }
+        self.register(index, width, height)
+    }
+
+    fn register(&mut self, index: usize, width: u32, height: u32) -> Result<()> {
+        let mut reg = nv::NV_ENC_REGISTER_RESOURCE {
+            version: nv::NV_ENC_REGISTER_RESOURCE_VER,
+            resourceType: nv::NV_ENC_INPUT_RESOURCE_TYPE::NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX,
+            width,
+            height,
+            pitch: 0,
+            resourceToRegister: self.slots[index].texture.as_raw(),
+            bufferFormat: nv::NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_NV12,
+            bufferUsage: nv::NV_ENC_BUFFER_USAGE::NV_ENC_INPUT_IMAGE,
+            ..Default::default()
+        };
+        let status = unsafe { call!(self.api, nvEncRegisterResource(self.encoder, &mut reg)) };
+        self.check(status, "nvEncRegisterResource")?;
+        self.slots[index].registered = reg.registeredResource;
+        Ok(())
+    }
+
+    fn unregister(&mut self, index: usize) {
+        self.unmap(index);
+        let slot = &mut self.slots[index];
+        if !slot.registered.is_null() {
+            if let Some(f) = self.api.nvEncUnregisterResource {
+                unsafe { f(self.encoder, slot.registered) };
+            }
+            slot.registered = ptr::null_mut();
+        }
+    }
+
+    fn unmap(&mut self, index: usize) {
+        let slot = &mut self.slots[index];
+        if !slot.mapped.is_null() {
+            if let Some(f) = self.api.nvEncUnmapInputResource {
+                unsafe { f(self.encoder, slot.mapped) };
+            }
+            slot.mapped = ptr::null_mut();
+        }
+    }
+
+    /// Changes the encoded size in place; the next frame is an IDR. Cheaper
+    /// than a new session: no new device or encoder, so no stall. Waits for
+    /// the frames in the encoder first. Fails if the size is over the
+    /// maximum the encoder was opened for, or the driver refuses; the
+    /// encoder must then be replaced.
+    pub(crate) fn resize(&mut self, width: u32, height: u32) -> Result<()> {
         if width > self.init.maxEncodeWidth || height > self.init.maxEncodeHeight {
             return Err(CaptureError::InvalidConfig(format!(
                 "{width}x{height} is larger than the encoder was opened for ({}x{})",
                 self.init.maxEncodeWidth, self.init.maxEncodeHeight
             )));
         }
-        self.unregister_input();
+        self.drain()?;
+        for index in 0..self.slots.len() {
+            self.unregister(index);
+        }
         let previous = (
             self.init.encodeWidth,
             self.init.encodeHeight,
@@ -406,53 +596,112 @@ impl NvEncoder {
             ) = previous;
             return Err(e);
         }
-        self.register_input(input, width, height)
-    }
-
-    fn unregister_input(&mut self) {
-        if !self.input.is_null() {
-            if let Some(f) = self.api.nvEncUnregisterResource {
-                unsafe { f(self.encoder, self.input) };
-            }
-            self.input = ptr::null_mut();
+        for index in 0..self.slots.len() {
+            self.slots[index].texture = nv12_texture(&self.device, width, height)?;
+            self.register(index, width, height)?;
         }
-    }
-
-    fn register_input(&mut self, input: &ID3D11Texture2D, width: u32, height: u32) -> Result<()> {
-        let mut reg = nv::NV_ENC_REGISTER_RESOURCE {
-            version: nv::NV_ENC_REGISTER_RESOURCE_VER,
-            resourceType: nv::NV_ENC_INPUT_RESOURCE_TYPE::NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX,
-            width,
-            height,
-            pitch: 0,
-            resourceToRegister: input.as_raw(),
-            bufferFormat: nv::NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_NV12,
-            bufferUsage: nv::NV_ENC_BUFFER_USAGE::NV_ENC_INPUT_IMAGE,
-            ..Default::default()
-        };
-        let status = unsafe { call!(self.api, nvEncRegisterResource(self.encoder, &mut reg)) };
-        self.check(status, "nvEncRegisterResource")?;
-        self.input = reg.registeredResource;
         Ok(())
     }
 
-    /// Encodes the current contents of the registered input texture.
-    /// `timestamp` names the frame for [`Self::invalidate`]. `intra` says
-    /// the frame will be coded from scratch without being an IDR (every
-    /// reference was invalidated), so it gets a keyframe's budget too.
+    /// Waits until every frame in the encoder has come out (and been handed
+    /// to the callback).
+    pub(crate) fn drain(&mut self) -> Result<()> {
+        while self.free.len() < self.slots.len() {
+            let slot = self.returned.recv_timeout(FRAME_TIMEOUT * 2).map_err(|_| {
+                CaptureError::Platform("the encoder stopped returning frames".into())
+            })?;
+            self.free.push(slot);
+        }
+        for index in 0..self.slots.len() {
+            self.unmap(index);
+        }
+        Ok(())
+    }
+
+    /// A slot for the next frame, waiting for one to come back if the
+    /// encoder holds them all.
+    fn take_slot(&mut self) -> Result<usize> {
+        let slot = match self.free.pop() {
+            Some(slot) => slot,
+            None => self.returned.recv_timeout(FRAME_TIMEOUT * 2).map_err(|_| {
+                CaptureError::Platform("the encoder stopped returning frames".into())
+            })?,
+        };
+        self.unmap(slot);
+        Ok(slot)
+    }
+
+    /// Queues `src` (NV12, the stream size) for encoding and returns; the
+    /// frame comes out on the output thread with `meta`. `timestamp` names
+    /// the frame for [`Self::invalidate`]. `intra` says the frame will be
+    /// coded from scratch without being an IDR (every reference was
+    /// invalidated), so it gets a keyframe's budget too.
     ///
     /// `kbps` is a new bitrate to use from this frame on (after it, for a
     /// keyframe, so the change shares the reconfigure that restores the
     /// ordinary frame budget). [`Self::bitrate_kbps`] says what took.
-    pub(crate) fn encode(
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn submit(
         &mut self,
+        context: &ID3D11DeviceContext,
+        src: &ID3D11Texture2D,
         timestamp: u64,
         force_idr: bool,
         intra: bool,
         kbps: Option<u32>,
-    ) -> Result<EncodedBits> {
+        meta: M,
+    ) -> Result<()> {
+        if let Some(e) = self.failed.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            return Err(CaptureError::Platform(e));
+        }
+        let index = self.take_slot()?;
+        let result = self.submit_to(index, context, src, timestamp, force_idr, intra, kbps);
+        let Err(e) = result else {
+            let slot = &self.slots[index];
+            let pending = Pending {
+                slot: index,
+                bitstream: slot.bitstream,
+                event: slot.event,
+                submitted: Instant::now(),
+                meta,
+            };
+            return match self.pending.as_ref().map(|p| p.send(pending)) {
+                Some(Ok(())) => Ok(()),
+                _ => Err(CaptureError::Platform(
+                    "the encoder output thread stopped".into(),
+                )),
+            };
+        };
+        self.unmap(index);
+        self.free.push(index);
+        Err(e)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn submit_to(
+        &mut self,
+        index: usize,
+        context: &ID3D11DeviceContext,
+        src: &ID3D11Texture2D,
+        timestamp: u64,
+        force_idr: bool,
+        intra: bool,
+        kbps: Option<u32>,
+    ) -> Result<()> {
+        unsafe { context.CopyResource(&self.slots[index].texture, src) };
+        let mut map = nv::NV_ENC_MAP_INPUT_RESOURCE {
+            version: nv::NV_ENC_MAP_INPUT_RESOURCE_VER,
+            registeredResource: self.slots[index].registered,
+            ..Default::default()
+        };
+        let status = unsafe { call!(self.api, nvEncMapInputResource(self.encoder, &mut map)) };
+        self.check(status, "nvEncMapInputResource")?;
+        self.slots[index].mapped = map.mappedResource;
+
         // Let the keyframe take a few frames' worth of bits, then go back.
-        // A failed change only costs keyframe sharpness.
+        // Reconfiguring applies to the frames queued after it, so the
+        // budget goes back as soon as this one is queued. A failed change
+        // only costs keyframe sharpness.
         let big_keyframe = (force_idr || intra) && self.keyframe_scale > 1;
         if big_keyframe {
             let vbv = self.vbv_frames * f64::from(self.keyframe_scale);
@@ -464,47 +713,12 @@ impl NvEncoder {
                 tracing::debug!("bitrate change to {kbps} kbps refused: {e}");
             }
         }
-        let bits = self.encode_input(timestamp, force_idr);
-        if big_keyframe {
-            let kbps = kbps.unwrap_or(self.kbps());
-            if let Err(e) = self.reconfigure_rate(kbps, self.vbv_frames, 1) {
-                tracing::warn!("restoring the frame budget after a keyframe failed: {e}");
-            }
-        }
-        bits
-    }
-
-    fn encode_input(&mut self, timestamp: u64, force_idr: bool) -> Result<EncodedBits> {
-        let mut map = nv::NV_ENC_MAP_INPUT_RESOURCE {
-            version: nv::NV_ENC_MAP_INPUT_RESOURCE_VER,
-            registeredResource: self.input,
-            ..Default::default()
-        };
-        let status = unsafe { call!(self.api, nvEncMapInputResource(self.encoder, &mut map)) };
-        self.check(status, "nvEncMapInputResource")?;
-        let result = self.encode_mapped(&map, timestamp, force_idr);
-        let status = unsafe {
-            call!(
-                self.api,
-                nvEncUnmapInputResource(self.encoder, map.mappedResource)
-            )
-        };
-        let bits = result?;
-        self.check(status, "nvEncUnmapInputResource")?;
-        Ok(bits)
-    }
-
-    fn encode_mapped(
-        &self,
-        map: &nv::NV_ENC_MAP_INPUT_RESOURCE,
-        timestamp: u64,
-        force_idr: bool,
-    ) -> Result<EncodedBits> {
         let mut flags = 0;
         if force_idr {
             flags |= nv::NV_ENC_PIC_FLAGS::NV_ENC_PIC_FLAG_FORCEIDR.0
                 | nv::NV_ENC_PIC_FLAGS::NV_ENC_PIC_FLAG_OUTPUT_SPSPPS.0;
         }
+        let slot = &self.slots[index];
         let mut pic = nv::NV_ENC_PIC_PARAMS {
             version: nv::NV_ENC_PIC_PARAMS_VER,
             inputWidth: self.init.encodeWidth,
@@ -512,40 +726,22 @@ impl NvEncoder {
             encodePicFlags: flags,
             inputTimeStamp: timestamp,
             inputBuffer: map.mappedResource,
-            outputBitstream: self.bitstream,
+            outputBitstream: slot.bitstream,
+            completionEvent: slot.event,
             bufferFmt: map.mappedBufferFmt,
             pictureStruct: nv::NV_ENC_PIC_STRUCT::NV_ENC_PIC_STRUCT_FRAME,
             ..Default::default()
         };
         let status = unsafe { call!(self.api, nvEncEncodePicture(self.encoder, &mut pic)) };
-        self.check(status, "nvEncEncodePicture")?;
-
-        let mut lock = nv::NV_ENC_LOCK_BITSTREAM {
-            version: nv::NV_ENC_LOCK_BITSTREAM_VER,
-            outputBitstream: self.bitstream,
-            ..Default::default()
-        };
-        let status = unsafe { call!(self.api, nvEncLockBitstream(self.encoder, &mut lock)) };
-        self.check(status, "nvEncLockBitstream")?;
-        // SAFETY: NVENC guarantees the pointer/size describe the locked
-        // bitstream until nvEncUnlockBitstream.
-        let data: &[u8] = if lock.bitstreamBufferPtr.is_null() || lock.bitstreamSizeInBytes == 0 {
-            &[]
-        } else {
-            unsafe {
-                std::slice::from_raw_parts(
-                    lock.bitstreamBufferPtr as *const u8,
-                    lock.bitstreamSizeInBytes as usize,
-                )
+        if big_keyframe {
+            let kbps = kbps.unwrap_or(self.kbps());
+            if let Err(e) = self.reconfigure_rate(kbps, self.vbv_frames, 1) {
+                tracing::warn!("restoring the frame budget after a keyframe failed: {e}");
             }
-        };
-        let bits = EncodedBits {
-            data: Bytes::copy_from_slice(data),
-            keyframe: lock.pictureType == nv::NV_ENC_PIC_TYPE::NV_ENC_PIC_TYPE_IDR,
-        };
-        let status = unsafe { call!(self.api, nvEncUnlockBitstream(self.encoder, self.bitstream)) };
-        self.check(status, "nvEncUnlockBitstream")?;
-        Ok(bits)
+        }
+        // No B-frames, so never NV_ENC_ERR_NEED_MORE_INPUT: every frame
+        // comes out in order.
+        self.check(status, "nvEncEncodePicture")
     }
 
     /// Stops the encoder referencing the frame encoded with `timestamp`.
@@ -625,34 +821,160 @@ impl NvEncoder {
     }
 
     fn last_error(&self, status: nv::NVENCSTATUS) -> String {
-        let detail = self
-            .api
-            .nvEncGetLastErrorString
-            .map(|f| unsafe { f(self.encoder) })
-            .filter(|p| !p.is_null())
-            .map(|p| unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        format!("NVENCSTATUS {} {detail}", status.0)
+        last_error(self.api, self.encoder, status)
     }
 }
 
-impl Drop for NvEncoder {
+impl<M: Send + 'static> Drop for NvEncoder<M> {
     fn drop(&mut self) {
+        // The output thread finishes the frames in the encoder and exits.
+        self.pending.take();
+        if let Some(t) = self.output.take() {
+            let _ = t.join();
+        }
         let api = self.api;
-        unsafe {
-            if !self.bitstream.is_null() {
-                if let Some(f) = api.nvEncDestroyBitstreamBuffer {
-                    f(self.encoder, self.bitstream);
+        for index in 0..self.slots.len() {
+            self.unregister(index);
+            let slot = &self.slots[index];
+            unsafe {
+                if !slot.bitstream.is_null() {
+                    if let Some(f) = api.nvEncDestroyBitstreamBuffer {
+                        f(self.encoder, slot.bitstream);
+                    }
+                }
+                if !slot.event.is_null() {
+                    // SAFETY: plain data; zero is every reserved field's value.
+                    let mut params: nv::NV_ENC_EVENT_PARAMS = std::mem::zeroed();
+                    params.version = nv::NV_ENC_EVENT_PARAMS_VER;
+                    params.completionEvent = slot.event;
+                    if let Some(f) = api.nvEncUnregisterAsyncEvent {
+                        f(self.encoder, &mut params);
+                    }
+                    let _ = CloseHandle(HANDLE(slot.event));
                 }
             }
         }
-        self.unregister_input();
         unsafe {
             if let Some(f) = api.nvEncDestroyEncoder {
                 f(self.encoder);
             }
         }
     }
+}
+
+/// The output thread: takes each frame out of the encoder, in order, gives
+/// its slot back, and hands it on.
+fn output_loop<M: Send>(
+    session: Session,
+    pending: std_mpsc::Receiver<Pending<M>>,
+    returned: std_mpsc::Sender<usize>,
+    failed: Arc<Mutex<Option<String>>>,
+    mut on_output: impl FnMut(Finished<M>),
+) {
+    while let Ok(p) = pending.recv() {
+        let result = finish(session, &p);
+        let encode_time = p.submitted.elapsed();
+        // Back first: the capture thread may be waiting for it.
+        let _ = returned.send(p.slot);
+        on_output(match result {
+            Ok((data, keyframe)) => Ok(Encoded {
+                data,
+                keyframe,
+                meta: p.meta,
+                encode_time,
+            }),
+            Err(e) => {
+                *failed.lock().unwrap_or_else(|e| e.into_inner()) = Some(e.to_string());
+                Err((p.meta, e))
+            }
+        });
+    }
+}
+
+/// Waits for one frame and copies its bitstream out.
+fn finish<M>(session: Session, p: &Pending<M>) -> Result<(Bytes, bool)> {
+    let Session { api, encoder } = session;
+    if !p.event.is_null() {
+        let waited =
+            unsafe { WaitForSingleObject(HANDLE(p.event), FRAME_TIMEOUT.as_millis() as u32) };
+        if waited != WAIT_OBJECT_0 {
+            return Err(CaptureError::Platform(format!(
+                "the encoder did not finish a frame in {} s",
+                FRAME_TIMEOUT.as_secs()
+            )));
+        }
+    }
+    let mut lock = nv::NV_ENC_LOCK_BITSTREAM {
+        version: nv::NV_ENC_LOCK_BITSTREAM_VER,
+        outputBitstream: p.bitstream,
+        ..Default::default()
+    };
+    let status = unsafe { call!(api, nvEncLockBitstream(encoder, &mut lock)) };
+    if status != nv::NVENCSTATUS::NV_ENC_SUCCESS {
+        return Err(CaptureError::Platform(format!(
+            "nvEncLockBitstream: {}",
+            last_error(api, encoder, status)
+        )));
+    }
+    // SAFETY: NVENC guarantees the pointer/size describe the locked
+    // bitstream until nvEncUnlockBitstream.
+    let data: &[u8] = if lock.bitstreamBufferPtr.is_null() || lock.bitstreamSizeInBytes == 0 {
+        &[]
+    } else {
+        unsafe {
+            std::slice::from_raw_parts(
+                lock.bitstreamBufferPtr as *const u8,
+                lock.bitstreamSizeInBytes as usize,
+            )
+        }
+    };
+    let data = Bytes::copy_from_slice(data);
+    let keyframe = lock.pictureType == nv::NV_ENC_PIC_TYPE::NV_ENC_PIC_TYPE_IDR;
+    let status = unsafe { call!(api, nvEncUnlockBitstream(encoder, p.bitstream)) };
+    if status != nv::NVENCSTATUS::NV_ENC_SUCCESS {
+        return Err(CaptureError::Platform(format!(
+            "nvEncUnlockBitstream: {}",
+            last_error(api, encoder, status)
+        )));
+    }
+    Ok((data, keyframe))
+}
+
+fn last_error(
+    api: &nv::NV_ENCODE_API_FUNCTION_LIST,
+    encoder: *mut c_void,
+    status: nv::NVENCSTATUS,
+) -> String {
+    let detail = api
+        .nvEncGetLastErrorString
+        .map(|f| unsafe { f(encoder) })
+        .filter(|p| !p.is_null())
+        .map(|p| unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    format!("NVENCSTATUS {} {detail}", status.0)
+}
+
+/// An NV12 texture the encoder can read.
+fn nv12_texture(device: &ID3D11Device, width: u32, height: u32) -> Result<ID3D11Texture2D> {
+    let desc = D3D11_TEXTURE2D_DESC {
+        Width: width,
+        Height: height,
+        MipLevels: 1,
+        ArraySize: 1,
+        Format: DXGI_FORMAT_NV12,
+        SampleDesc: DXGI_SAMPLE_DESC {
+            Count: 1,
+            Quality: 0,
+        },
+        Usage: D3D11_USAGE_DEFAULT,
+        BindFlags: D3D11_BIND_RENDER_TARGET.0 as u32,
+        CPUAccessFlags: 0,
+        MiscFlags: 0,
+    };
+    let mut texture = None;
+    unsafe { device.CreateTexture2D(&desc, None, Some(&mut texture)) }
+        .map_err(|e| CaptureError::Platform(format!("CreateTexture2D NV12: {e}")))?;
+    texture.ok_or(CaptureError::Platform("no NV12 texture".into()))
 }
 
 /// Reference pictures kept when invalidation is on: how far back the encoder

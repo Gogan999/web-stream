@@ -378,6 +378,12 @@ impl NvEncoder {
             )));
         }
         self.unregister_input();
+        let previous = (
+            self.init.encodeWidth,
+            self.init.encodeHeight,
+            self.init.darWidth,
+            self.init.darHeight,
+        );
         self.init.encodeWidth = width;
         self.init.encodeHeight = height;
         self.init.darWidth = width;
@@ -390,7 +396,16 @@ impl NvEncoder {
         params.set_resetEncoder(1);
         params.set_forceIDR(1);
         let status = unsafe { call!(self.api, nvEncReconfigureEncoder(self.encoder, &mut params)) };
-        self.check(status, "nvEncReconfigureEncoder (resize)")?;
+        if let Err(e) = self.check(status, "nvEncReconfigureEncoder (resize)") {
+            // Keep our copy in sync with what the encoder is still running.
+            (
+                self.init.encodeWidth,
+                self.init.encodeHeight,
+                self.init.darWidth,
+                self.init.darHeight,
+            ) = previous;
+            return Err(e);
+        }
         self.register_input(input, width, height)
     }
 

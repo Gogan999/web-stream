@@ -151,7 +151,11 @@ signing key in `.git\web-stream-allowed-signers` in the clone (git's
 [allowed signers](https://git-scm.com/docs/git-config#Documentation/git-config.txt-gpgsshallowedSignersFile)
 format, for example `you@example.com ssh-ed25519 AAAA...`). From then on
 `update.ps1`, from the PC or the browser, builds the newest tag named
-`host-*` whose signature verifies against that file, and nothing else.
+`host-*` on `main` whose SSH signature verifies against that file, and
+nothing else: an OpenPGP or X.509 signature is refused, and so is a tag
+object whose own name isn't the `host-*` name it was pushed under. A
+checkout that has moved past the newest release (a hand `git pull`) is
+refused until it is reset to a signed release.
 Release a build by signing a tag on `main` with that key and pushing it:
 
 ```

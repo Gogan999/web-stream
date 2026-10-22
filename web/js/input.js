@@ -12,7 +12,7 @@ export { pictureRect };
 const GAMEPAD_KEEPALIVE_MS = 100;
 const MAX_PADS = 4;
 // Once the pointer has rested this long, its last absolute position is re-sent reliably.
-const ABS_SETTLE_MS = 100;
+export const ABS_SETTLE_MS = 100;
 // Chrome reads gamepads every 4 ms; polling only once per animation frame would leave a press waiting
 // up to a display frame (16 ms at 60 Hz) before it is even seen.
 export const GAMEPAD_POLL_MS = 4;
@@ -374,8 +374,14 @@ export class InputCapture {
       true, this.displaySize?.());
     if (!p) return;
     if (reliable) {
+      // Numbered and newest: no lossy position still in flight, nor a pending re-send of
+      // one, can move the pointer off it afterwards.
       this.motion.abs = null;
-      this.rel(P.mouseAbs(p.x, p.y));
+      this.absLast = null;
+      clearTimeout(this.absSettleTimer);
+      this.absSettleTimer = 0;
+      this.absSeq = (this.absSeq + 1) & 0xffff;
+      this.rel(P.mouseAbs(p.x, p.y, this.absSeq));
       return;
     }
     this.motion.abs = p;

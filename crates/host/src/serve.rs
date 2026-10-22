@@ -182,6 +182,14 @@ pub async fn serve(
     transport.close();
     let _ = media_stop.send(());
     let _ = media_task.await;
+    // The sockets close on the transport's own thread: wait for it, so a
+    // host started right after can bind the same ports.
+    if tokio::time::timeout(Duration::from_secs(2), transport.shutdown())
+        .await
+        .is_err()
+    {
+        tracing::warn!("transport did not stop in time");
+    }
     result
 }
 
@@ -258,7 +266,12 @@ async fn run_signaling(
                 if current.is_some() && handed_off {
                     say_bye(&transport, ByeReason::Replaced).await;
                 }
-                let device = s.device_name.clone();
+                let device = s.device_id.clone();
+                if peers.borrow().device != device {
+                    // The last connection's bandwidth says nothing about
+                    // this device's path.
+                    transport.forget_estimate();
+                }
                 current = Some(s);
                 handed_off = false;
                 // Until this browser answers, its codecs are unknown.

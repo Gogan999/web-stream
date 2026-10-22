@@ -26,7 +26,7 @@ One binary frame per message, little-endian, first byte is the type. The host in
 | Type | Name | Layout | Size | Channel |
 |---|---|---|---|---|
 | `0x01` | mouse relative | `u8 type, i16 dx, i16 dy` | 5 | input-motion |
-| `0x02` | mouse absolute | `u8 type, u16 x, u16 y [, u16 seq]` (0..65535 across the active display) | 5 or 7 | input-motion, numbered (input: unnumbered before a touch click, numbered once the pointer rests) |
+| `0x02` | mouse absolute | `u8 type, u16 x, u16 y [, u16 seq]` (0..65535 across the active display) | 5 or 7 | input-motion, numbered (input: before a touch click and once the pointer rests, numbered too) |
 | `0x03` | mouse button | `u8 type, u8 button, u8 down` (0 left, 1 middle, 2 right, 3 back, 4 forward; down 1/0) | 3 | input |
 | `0x04` | wheel | `u8 type, i16 dx, i16 dy` (120 = one notch; +dy away from the user, +dx right, as Windows) | 5 | input |
 | `0x05` | key | `u8 type, u16 usage, u8 down` (USB HID usage, Keyboard page 0x07, physical position) | 4 | input |

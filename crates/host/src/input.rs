@@ -416,6 +416,19 @@ mod tests {
     }
 
     #[test]
+    fn numbered_positions_merge_by_seq() {
+        let abs = |x, seq| InputEvent::MouseAbs { x, y: 0, seq };
+        let mut m = Motion::default();
+        m.merge(abs(1, None));
+        m.merge(abs(2, Some(7)));
+        assert_eq!(m.abs, Some((2, 0, Some(7))), "numbered after unnumbered");
+        m.merge(abs(3, Some(6)));
+        assert_eq!(m.abs, Some((2, 0, Some(7))), "an overtaken one is dropped");
+        m.merge(abs(4, Some(8)));
+        assert_eq!(m.abs, Some((4, 0, Some(8))));
+    }
+
+    #[test]
     fn motion_stays_on_its_side_of_a_press() {
         use ws_proto::MouseButton;
         let abs = |x| Msg::Event(InputEvent::MouseAbs { x, y: 0, seq: None });

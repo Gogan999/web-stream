@@ -76,7 +76,7 @@ pub type PeerCount = watch::Receiver<Peer>;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Peer {
     pub count: u64,
-    /// The paired device the current one is for.
+    /// The paired device the current one is for (its id, not its name).
     pub device: String,
 }
 
@@ -231,6 +231,8 @@ struct Parked {
     video: Video,
     /// The display it captures.
     display: DisplayId,
+    /// The rate its encoder runs at (changed in place since it started).
+    bitrate_kbps: u32,
     audio: Option<platform::Loopback>,
 }
 
@@ -340,7 +342,7 @@ struct Media {
     transfers: Option<Transfers>,
     /// The current peer connection.
     peer: u64,
-    /// The device `transfers` belong to.
+    /// The device `transfers` and `previous_bwe` belong to.
     transfer_device: String,
     peers: PeerCount,
     /// Connected and Disconnected events handled, for
@@ -508,7 +510,7 @@ impl Media {
                 // Capturing some other display than this browser gets: start
                 // afresh.
                 let video = if display == Some(p.display) {
-                    Some(p.video)
+                    Some((p.video, p.bitrate_kbps))
                 } else {
                     drop_blocking(p.video);
                     None
@@ -558,12 +560,12 @@ impl Media {
         if self.mic_enabled {
             self.start_mic();
         }
-        if let Some(video) = parked_video {
+        if let Some((video, bitrate_kbps)) = parked_video {
             tracing::info!("picking up the running capture");
             self.attach_video(&video.pipeline);
             video.pipeline.request_keyframe();
             let live = self.live.as_mut().expect("just set");
-            live.bitrate_kbps = video.config.bitrate_kbps;
+            live.bitrate_kbps = bitrate_kbps;
             live.video = Some(video);
             self.apply_bitrate(true);
             // This browser may want another size or codec.
@@ -642,6 +644,7 @@ impl Media {
                     self.parked = Some(Parked {
                         video,
                         display,
+                        bitrate_kbps: live.bitrate_kbps,
                         audio: live.audio.take(),
                     });
                     let (tx, session) = (self.later_tx.clone(), self.session);
@@ -677,6 +680,8 @@ impl Media {
         if device != self.transfer_device {
             self.transfer_device = device;
             self.transfers = None;
+            // Nor does another device start from this one's bandwidth.
+            self.previous_bwe = None;
         } else if self.transfers.is_some() {
             self.to_files(FileMsg::Reconnected);
             let uploads = self.new_uploads();

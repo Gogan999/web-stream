@@ -112,9 +112,10 @@ impl<S: InputSink> InputHandler<S> {
         match event {
             InputEvent::MouseMove { dx, dy } => self.sink.mouse_move(dx.into(), dy.into())?,
             InputEvent::MouseAbs { x, y, seq } => {
-                // Unordered and unreliable: one overtaken by a newer
-                // position is stale. Unnumbered ones (ahead of a touch
-                // click, on the ordered channel) always apply.
+                // One overtaken by a newer position is stale. The browser
+                // numbers its reliable positions (ahead of a touch click)
+                // too, so a lossy one still in flight can't follow them.
+                // Unnumbered ones (from older pages) always apply.
                 if let Some(seq) = seq {
                     if self.abs_seq.is_some_and(|last| !seq_newer(seq, last)) {
                         return Ok(());

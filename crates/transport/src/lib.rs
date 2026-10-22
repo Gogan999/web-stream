@@ -57,7 +57,9 @@ const RECOVERY_WAIT: Duration = Duration::from_millis(150);
 /// A new peer connection this soon after the last estimate (a restart after
 /// a network blip, say) starts from that estimate rather than from
 /// [`TransportConfig::initial_bitrate_bps`], so the stream doesn't spend
-/// seconds climbing back.
+/// seconds climbing back. Unless [`Transport::forget_estimate`] said the
+/// next one is for another device, whose path the estimate says nothing
+/// about.
 pub const ESTIMATE_KEPT_FOR: Duration = Duration::from_secs(60);
 /// It starts a little under it: the path may have changed.
 pub const KEPT_ESTIMATE_SHARE: f64 = 0.8;
@@ -217,12 +219,15 @@ impl Events {
 }
 
 /// Events that are many and bulky (uploads, mic audio): bounded, dropped
-/// when the app is behind.
+/// when the app is behind. Messages on `control` are few, and losing one
+/// (a keyframe request, a size change) would go unnoticed, so they are
+/// never dropped.
 fn is_data(ev: &TransportEvent) -> bool {
-    matches!(
-        ev,
-        TransportEvent::Data { .. } | TransportEvent::MicAudio(_)
-    )
+    match ev {
+        TransportEvent::Data { channel, .. } => *channel != channels::CONTROL,
+        TransportEvent::MicAudio(_) => true,
+        _ => false,
+    }
 }
 
 /// A short name for an event, for logs (data events carry bulk payloads).
@@ -324,6 +329,8 @@ enum Cmd {
     Answer(String, oneshot::Sender<Result<(), Error>>),
     Candidate(String),
     Close,
+    /// End the run loop and the thread, whatever handles remain.
+    Shutdown,
     MaxBitrate(u64),
     Data {
         channel: String,
@@ -355,6 +362,11 @@ struct Shared {
     video: Mutex<Option<VideoSink>>,
     /// Age of the oldest unsent video packet, for the encoder.
     backlog: SendBacklog,
+    /// The next offer starts from the configured estimate.
+    forget_estimate: AtomicBool,
+    /// Fires once the transport thread has dropped its runtime, and with it
+    /// every socket.
+    exited: Mutex<Option<oneshot::Receiver<()>>>,
 }
 
 impl Shared {
@@ -514,6 +526,7 @@ impl Transport {
         let queued_data = Arc::new(AtomicUsize::new(0));
         // About 80 ms of 10 ms Opus packets; beyond that, old audio is useless.
         let (audio, audio_rx) = mpsc::channel(8);
+        let (exit_tx, exit_rx) = oneshot::channel();
         let shared = Arc::new(Shared {
             frames: Mutex::new(VecDeque::new()),
             notify: Notify::new(),
@@ -526,6 +539,8 @@ impl Transport {
             input: Mutex::default(),
             video: Mutex::default(),
             backlog: SendBacklog::default(),
+            forget_estimate: AtomicBool::new(false),
+            exited: Mutex::new(Some(exit_rx)),
         });
 
         let (ready_tx, ready_rx) = oneshot::channel();
@@ -576,10 +591,13 @@ impl Transport {
                     if ready_tx.send(Ok(())).is_err() {
                         return;
                     }
-                    // Ends once every Transport handle is gone; dropping the
-                    // runtime then stops the socket tasks.
+                    // Ends on Transport::shutdown, or once every Transport
+                    // handle is gone; dropping the runtime then stops the
+                    // socket tasks.
                     driver.run(cmd_rx, pkt_rx, audio_rx).await;
                 });
+                drop(runtime);
+                let _ = exit_tx.send(());
             })?;
         ready_rx.await.map_err(|_| Error::Stopped)??;
         Ok((
@@ -637,6 +655,22 @@ impl Transport {
     }
 
     /// End the current peer connection.
+    /// Stops the transport for good, and returns once its thread has closed
+    /// every socket, so another transport can bind the same ports. Every
+    /// handle fails with [`Error::Stopped`] from then on.
+    pub async fn shutdown(&self) {
+        let _ = self.cmds.send(Cmd::Shutdown).await;
+        let exited = self
+            .shared
+            .exited
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some(exited) = exited {
+            let _ = exited.await;
+        }
+    }
+
     pub fn close(&self) {
         if let Err(mpsc::error::TrySendError::Full(cmd)) = self.cmds.try_send(Cmd::Close) {
             let cmds = self.cmds.clone();
@@ -724,6 +758,14 @@ impl Transport {
         *video = Some(sink);
     }
 
+    /// The next offer is for another device: its estimate starts from
+    /// [`TransportConfig::initial_bitrate_bps`], not from the last
+    /// connection's (see [`ESTIMATE_KEPT_FOR`]). Call before
+    /// [`Transport::offer`].
+    pub fn forget_estimate(&self) {
+        self.shared.forget_estimate.store(true, Ordering::Relaxed);
+    }
+
     /// Keyframe requests and repairs go back to being events.
     pub fn clear_video_sink(&self) {
         self.shared
@@ -809,6 +851,10 @@ impl Driver {
             // the others.
             tokio::select! {
                 cmd = cmds.recv() => match cmd {
+                    Some(Cmd::Shutdown) => {
+                        self.end_session();
+                        return;
+                    }
                     Some(cmd) => self.command(cmd),
                     None => return,
                 },
@@ -1018,6 +1064,9 @@ impl Driver {
         match cmd {
             Cmd::Offer(extra, reply) => {
                 self.end_session();
+                if self.shared.forget_estimate.swap(false, Ordering::Relaxed) {
+                    self.last_estimate = None;
+                }
                 let candidates = self.candidates(&extra);
                 let now = Instant::now();
                 let config = TransportConfig {
@@ -1045,6 +1094,7 @@ impl Driver {
                 }
             }
             Cmd::Close => self.end_session(),
+            Cmd::Shutdown => unreachable!("handled by the run loop"),
             Cmd::MaxBitrate(bps) => {
                 self.config.max_bitrate_bps = bps;
                 if let Some(s) = &mut self.session {
@@ -1144,16 +1194,45 @@ mod tests {
         for _ in 0..DATA_QUEUE + 10 {
             shared.emit(data());
         }
+        let control = TransportEvent::Data {
+            channel: channels::CONTROL,
+            binary: false,
+            data: b"{}".to_vec(),
+        };
+        shared.emit(control.clone());
         shared.emit(TransportEvent::Connected);
         let mut got = Vec::new();
         while let Ok(ev) = events.try_recv() {
             got.push(ev);
         }
-        assert_eq!(got.len(), DATA_QUEUE + 1);
+        assert_eq!(got.len(), DATA_QUEUE + 2);
+        assert_eq!(got[DATA_QUEUE], control);
         assert_eq!(got.last(), Some(&TransportEvent::Connected));
         // Taking them makes room again.
         shared.emit(data());
         assert_eq!(events.try_recv().ok(), Some(data()));
+    }
+
+    #[tokio::test]
+    async fn shutdown_frees_the_port() {
+        let port = std::net::UdpSocket::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let (transport, _events) = Transport::start(TransportConfig {
+            ips: vec![[127, 0, 0, 1].into()],
+            udp_port: port,
+            tcp_port: None,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let other = transport.clone();
+        transport.shutdown().await;
+        // Even with a handle left, the sockets are gone.
+        std::net::UdpSocket::bind(("127.0.0.1", port)).unwrap();
+        assert!(matches!(other.offer().await, Err(Error::Stopped)));
     }
 
     #[tokio::test]

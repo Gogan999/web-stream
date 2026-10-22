@@ -253,7 +253,11 @@ impl MicSource {
                     self.decoder
                         .decode_float(&[], &mut self.scratch[..n], false)
                 }
-                Pull::Empty => break,
+                Pull::Empty => {
+                    // Silence follows: nothing to fade into.
+                    self.fade = None;
+                    break;
+                }
             };
             match decoded {
                 Ok(frames) => {

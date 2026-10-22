@@ -6,7 +6,7 @@
 // Direct (absolute mouse mode): the cursor goes where the finger is; tap clicks there, drag drags
 // with the left button, hold right-clicks, two-finger tap right-clicks, two-finger drag scrolls.
 // Both: pinching zooms the view (the stream, not the host) and moving the pinch pans it; while
-// zoomed in, any two-finger drag pans instead of scrolling. Lifting one finger of a pinch and putting
+// with Pan on (zoomed in only), any two-finger drag pans instead of scrolling. Lifting one finger of a pinch and putting
 // it back carries on pinching.
 //
 // Real fingers don't land together: the first often slides past the slop before the second lands.
@@ -35,7 +35,8 @@ export class TouchGestures {
   // Times are ms on one clock (performance.now() in input.js); move's `t` may be left out, which
   // counts as late enough for anything.
   // out: { move(dx, dy), moveTo(x, y, reliable), button(b, down), wheel(dx, dy), haptic(),
-  //        pinch(ratio, midX, midY, panX, panY), zoomed() }
+  //        pinch(ratio, midX, midY, panX, panY), pans() }
+  // pans(): two-finger drags pan the view rather than scroll the host (the Pan button).
   // moveTo's `reliable` is true where a button event follows at that point (touch down, drag start).
   // pinch: the spread changed by `ratio` around the midpoint, which moved by (panX, panY).
   constructor(out, mode = 'trackpad') {
@@ -117,7 +118,7 @@ export class TouchGestures {
           const s = this.spread0;
           const spread = Math.abs(now.d - s.d);
           const pan = Math.hypot(now.x - s.x, now.y - s.y);
-          if (this.out.zoomed?.() && Math.hypot(x - p.sx, y - p.sy) >= SLOP_PX) this.two = 'pinch';
+          if (this.out.pans?.() && Math.hypot(x - p.sx, y - p.sy) >= SLOP_PX) this.two = 'pinch';
           else if (spread >= PINCH_PX && spread > pan) this.two = 'pinch';
           else if (pan >= SCROLL_PX && pan > spread) this.two = 'scroll';
           else return;

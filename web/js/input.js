@@ -78,7 +78,7 @@ export class InputCapture {
       },
       haptic: () => navigator.vibrate?.(15),
       pinch: (ratio, x, y, dx, dy) => this.zoom?.pinch(ratio, x, y, dx, dy),
-      zoomed: () => !!this.zoom?.zoomed,
+      pans: () => !!this.zoom?.pans,
     });
     this.mode = 'relative'; // 'relative' (pointer lock) or 'absolute'
     this.heldKeys = new Set();

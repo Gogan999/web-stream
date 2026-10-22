@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { TouchGestures, HOLD_MS, TAP_DRAG_MS, SECOND_FINGER_MS } from '../../js/touch.js';
 
-function rig(mode, zoomed = false) {
+function rig(mode, pans = false) {
   const log = [];
   const g = new TouchGestures({
     move: (dx, dy) => log.push(['move', dx, dy]),
@@ -11,7 +11,7 @@ function rig(mode, zoomed = false) {
     wheel: (dx, dy) => log.push(['wheel', dx, dy]),
     haptic: () => log.push(['haptic']),
     pinch: (ratio, x, y, dx, dy) => log.push(['pinch', ratio, x, y, dx, dy]),
-    zoomed: () => zoomed,
+    pans: () => pans,
   }, mode);
   return { g, log };
 }
@@ -141,7 +141,7 @@ test('pinch zooms around the midpoint and pans with it; no scroll or click', () 
   assert.ok(pinches.every((e) => Math.abs(e[2] - 150) <= 5 && e[3] === 100));
 });
 
-test('zoomed in, a two-finger drag pans the view instead of scrolling', () => {
+test('with Pan on, a two-finger drag pans the view instead of scrolling', () => {
   const { g, log } = rig('trackpad', true);
   g.down(1, 100, 100, 0);
   g.down(2, 200, 100, 10);

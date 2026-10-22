@@ -120,6 +120,9 @@ test('client streams from mock host, sends input and switches display', { timeou
   assert.equal(await client.evaluate(() => window.__pcs.at(-1).getSenders().find((x) => x.track)?.track ?? null), null);
   // Audio quality: the host's own setting at first, then what is picked.
   assert.ok((await hostLog()).some((e) => e.type === 'setAudioConfig' && e.bitrateKbps === null && e.frameMs === null));
+  // Audio quality is under Advanced, folded by default.
+  assert.equal(await client.isVisible('#audio-kbps'), false);
+  await client.click('#set-advanced > summary');
   await client.selectOption('#audio-kbps', '256');
   await client.selectOption('#audio-frame', '20');
   await host.waitForFunction(() => window.mockLog.some((e) => e.type === 'setAudioConfig' && e.bitrateKbps === 256 && e.frameMs === 20));
@@ -229,6 +232,7 @@ test('client streams from mock host, sends input and switches display', { timeou
   // Clicking the stream closed the dropdown. Stats overlay fills in.
   assert.equal(await client.isVisible('#more'), false);
   await client.click('#more-toggle');
+  // Advanced stays unfolded from the audio step.
   await client.selectOption('#stats-level', 'detailed');
   await client.click('#stats-toggle');
   await client.keyboard.press('Escape');
@@ -268,6 +272,7 @@ test('client streams from mock host, sends input and switches display', { timeou
 
   // Update host: off until the host allows it, asks first, then waits for the restart.
   await client.click('#more-toggle');
+  await client.click('#set-host > summary');
   assert.equal(await client.isDisabled('#update-host'), true);
   await sendHost({ type: 'remoteUpdate', enabled: true });
   await client.waitForSelector('#update-host:not([disabled])');

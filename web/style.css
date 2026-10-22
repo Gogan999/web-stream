@@ -23,6 +23,19 @@ body.more-open #more, body.files-open #files { display: block; }
 .panel section { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding: 8px 0; border-bottom: 1px solid #2c2c2c; }
 .panel section:last-child { border-bottom: 0; }
 .panel h2 { margin: 0; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: #888; }
+/* Settings: foldable groups; the summary is the group's heading. */
+#more details { padding: 2px 0; border-bottom: 1px solid #2c2c2c; }
+#more details:last-child { border-bottom: 0; }
+#more .group { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding-bottom: 8px; }
+#more summary { align-self: stretch; padding: 6px 0; cursor: pointer; list-style: none; user-select: none; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: #888; }
+#more summary::-webkit-details-marker { display: none; }
+#more summary::before { content: "▸"; display: inline-block; width: 1.2em; }
+#more details[open] > summary::before { content: "▾"; }
+#more summary:hover { color: #bbb; }
+#more h3 { margin: 4px 0 0; font-size: 11px; font-weight: 600; color: #777; }
+#more .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; align-self: stretch; }
+#more .row > label { margin-right: auto; }
+#more .hint p { margin: 0 0 8px; }
 #more label:has(select) { display: flex; align-self: stretch; justify-content: space-between; align-items: center; gap: 8px; }
 #more select { min-width: 150px; }
 .hint { color: #777; margin: 0; }
@@ -75,6 +88,7 @@ body.fake-fs #bar { display: none; }
 }
 @media (pointer: coarse) {
   .hint { display: none; }
+  #set-host { border-bottom: 0; } /* Shortcuts, below it, is hidden */
   #bar { gap: 6px; padding: 6px max(8px, env(safe-area-inset-right)) 6px max(8px, env(safe-area-inset-left)); }
   #bar button, #bar select { font-size: 15px; min-height: 36px; padding: 4px 10px; }
   #bar input[type="checkbox"] { width: 20px; height: 20px; }

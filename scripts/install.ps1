@@ -12,9 +12,8 @@
       - ViGEmBus, the gamepad driver, with -GamepadDriver
       - Steam's Streaming Microphone driver, from Steam's own folder, with
         -MicDriver (needs Steam; nothing is downloaded)
-    Then builds the host (the ws-host-gui tray app and the ws-host console
-    program), copies the web client next to them and adds a "web-stream host"
-    shortcut to the Start menu.
+    Then builds the host (the ws-host-gui tray app) and adds a "web-stream
+    host" shortcut to the Start menu.
 
     Run it from a checkout:
         powershell -ExecutionPolicy Bypass -File scripts\install.ps1
@@ -241,7 +240,7 @@ Update-Checkout $repo
 Write-Step 'Building the host (release)'
 Push-Location $repo
 try {
-    & cargo build --release -p ws-host -p ws-host-gui
+    & cargo build --release -p ws-host-gui
     if ($LASTEXITCODE -ne 0) { throw 'cargo build failed.' }
 } finally {
     Pop-Location
@@ -250,10 +249,15 @@ try {
 $bin = Join-Path $repo 'target\release'
 $gui = Join-Path $bin 'ws-host-gui.exe'
 
-# The web client is built into the host now; an old copy next to it would
-# only confuse.
+# The web client is built into the host now, and the console host
+# (ws-host.exe) is retired; old copies next to the tray app would only
+# confuse.
 $oldWeb = Join-Path $bin 'web'
 if (Test-Path $oldWeb) { Remove-Item -Recurse -Force $oldWeb }
+foreach ($old in 'ws-host.exe', 'ws-host.exe.old') {
+    $f = Join-Path $bin $old
+    if (Test-Path $f) { Remove-Item -Force $f -ErrorAction SilentlyContinue }
+}
 
 Write-Step 'Adding web-stream host to the Start menu'
 $shortcutPath = Join-Path ([Environment]::GetFolderPath('Programs')) 'web-stream host.lnk'
@@ -269,7 +273,6 @@ Write-Host "Built $gui" -ForegroundColor Green
 Write-Host 'Start "web-stream host" from the Start menu. It runs in the tray; closing'
 Write-Host 'its window keeps it running, and Quit in the tray menu stops it.'
 Write-Host 'Allow it through Windows Firewall (Private and Public) when Windows asks.'
-Write-Host "The console version still works: `"$(Join-Path $bin 'ws-host.exe')`" --pair"
 if (-not $GamepadDriver) {
     Write-Host 'Gamepads need ViGEmBus: run this script again with -GamepadDriver.'
 }

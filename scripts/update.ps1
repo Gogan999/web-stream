@@ -4,7 +4,8 @@
 
 .DESCRIPTION
     For a PC already set up with install.ps1. Pulls the latest main into the
-    checkout, builds the host and restarts the tray app on the new build.
+    checkout, builds the host (the ws-host-gui tray app) and restarts the
+    tray app on the new build.
 
     The running host keeps serving during the build: its executables are
     renamed to .old first (Windows allows renaming a running program), so
@@ -38,18 +39,27 @@
 .PARAMETER NoRestart
     Build, but leave the running host alone. The new build starts the next
     time the host is started.
+
+.PARAMETER FromHost
+    Used by the tray app when a browser asks for an update: build, but
+    leave restarting to the tray app, which started this script and would
+    take it down if the script stopped it. Exits with 3 when a new build is
+    ready for the tray app to restart on, 0 when there was nothing to do.
 #>
 [CmdletBinding()]
 param(
     [switch]$Force,
     [switch]$Rollback,
-    [switch]$NoRestart
+    [switch]$NoRestart,
+    [switch]$FromHost
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$Exes = 'ws-host-gui.exe', 'ws-host.exe'
+$Exes = @('ws-host-gui.exe')
+# update.ps1 -FromHost: a new build is ready, restart on it.
+$RestartExit = 3
 
 function Write-Step([string]$Message) {
     Write-Host "==> $Message" -ForegroundColor Cyan
@@ -105,19 +115,19 @@ function Restore-Build {
     if (Test-Path "$commitFile.old") { Move-Item -Force "$commitFile.old" $commitFile }
 }
 
-# The web-stream service runs its own copy of ws-host.exe from Program Files.
+# The web-stream service runs its own copy of the host from Program Files.
 # Copying the new build there takes administrator rights: one UAC prompt,
 # which a browser connected through the service can answer.
 function Update-Service {
     if (-not (Get-Service -Name 'web-stream' -ErrorAction SilentlyContinue)) { return }
-    $exe = Join-Path $bin 'ws-host.exe'
+    $exe = Join-Path $bin 'ws-host-gui.exe'
     if ($NoRestart) {
-        Write-Host "The service keeps running the old build until you run `"$exe`" service update as administrator."
+        Write-Host 'The service keeps running the old build until you click "Update the service" in the tray app.'
         return
     }
     Write-Step 'Updating the web-stream service (asks for administrator rights)'
     try {
-        $p = Start-Process -FilePath $exe -ArgumentList 'service', 'update' -Verb RunAs -Wait -PassThru -WindowStyle Hidden
+        $p = Start-Process -FilePath $exe -ArgumentList 'service', 'update', '--quiet' -Verb RunAs -Wait -PassThru
         $code = $p.ExitCode
     } catch {
         $code = 'declined'
@@ -125,12 +135,31 @@ function Update-Service {
     if ($null -eq $code) {
         Write-Host 'Could not tell whether the service was updated; check with: sc query web-stream' -ForegroundColor Yellow
     } elseif ($code -ne 0) {
-        Write-Host "The service was not updated ($code). Run `"$exe`" service update as administrator." -ForegroundColor Yellow
+        Write-Host "The service was not updated ($code). Click `"Update the service`" in the tray app." -ForegroundColor Yellow
+    }
+}
+
+# The console host (ws-host.exe) is retired: the tray app does everything
+# it did. Removes what earlier builds left, unless it still runs.
+function Remove-ConsoleHost {
+    $console = Join-Path $bin 'ws-host.exe'
+    if (-not (Test-Path $console) -and -not (Test-Path "$console.old")) { return }
+    if (Get-HostProcess 'ws-host') {
+        Write-Host 'The retired console host (ws-host.exe) is still running. Quit it; the tray app replaces it.' -ForegroundColor Yellow
+        return
+    }
+    foreach ($f in $console, "$console.old") {
+        if (Test-Path $f) { Remove-Item -Force $f -ErrorAction SilentlyContinue }
     }
 }
 
 function Restart-Host {
     Update-Service
+    Remove-ConsoleHost
+    if ($FromHost) {
+        # The tray app that started this script restarts itself.
+        return
+    }
     $gui = Join-Path $bin 'ws-host-gui.exe'
     $running = Get-HostProcess 'ws-host-gui'
     # With the service hosting, the tray app would only fight it for the ports.
@@ -164,9 +193,6 @@ function Restart-Host {
         if ($running) { $start.ArgumentList = '--hidden' }
         Start-Process @start
     }
-    if (Get-HostProcess 'ws-host') {
-        Write-Host 'The console host (ws-host.exe) is still running the old build; restart it yourself.' -ForegroundColor Yellow
-    }
 }
 
 Update-SessionPath
@@ -178,9 +204,7 @@ $bin = Join-Path $repo 'target\release'
 $commitFile = Join-Path $bin 'built-commit.txt'
 
 if ($Rollback) {
-    # Both or neither, so the two executables stay on the same build.
-    $missing = @($Exes | Where-Object { (Test-Path (Join-Path $bin $_)) -and -not (Test-Path (Join-Path $bin "$_.old")) })
-    if ($missing -or -not (Test-Path (Join-Path $bin 'ws-host-gui.exe.old'))) {
+    if (-not (Test-Path (Join-Path $bin 'ws-host-gui.exe.old'))) {
         throw 'There is no previous build to roll back to.'
     }
     Write-Step 'Switching back to the previous build'
@@ -294,7 +318,7 @@ if (Test-Path $deps) {
     }
     $stamp = Get-Date -Format 'yyyyMMddHHmmss'
     Get-ChildItem -Path $deps -Filter '*.exe' | Where-Object {
-        $_.Name -like 'ws_host-*.exe' -or $_.Name -like 'ws_host_gui-*.exe'
+        $_.Name -like 'ws_host_gui-*.exe'
     } | ForEach-Object {
         Move-Item $_.FullName (Join-Path $deps "$($_.Name).$stamp.old")
     }
@@ -305,7 +329,7 @@ Push-Location $repo
 try {
     # --target-dir: a CARGO_TARGET_DIR in the environment would put the build
     # somewhere other than $bin.
-    & cargo build --release --target-dir (Join-Path $repo 'target') -p ws-host -p ws-host-gui
+    & cargo build --release --target-dir (Join-Path $repo 'target') -p ws-host-gui
     $ok = $LASTEXITCODE -eq 0
 } finally {
     Pop-Location
@@ -317,4 +341,8 @@ if (-not $ok) {
 Set-Content -Path $commitFile -Value $head
 
 Restart-Host
+if ($FromHost) {
+    Write-Host "Built $($head.Substring(0, 8))."
+    exit $RestartExit
+}
 Write-Host "Updated to $($head.Substring(0, 8)). Run update.ps1 -Rollback to go back." -ForegroundColor Green

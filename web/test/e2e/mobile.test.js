@@ -108,9 +108,10 @@ test('phone: touch input, on-screen keyboard and small-screen toolbar', { timeou
   assert.equal(await client.isVisible('#zoom-reset'), true);
   await client.waitForTimeout(200);
   assert.ok(!(await inputs()).some((e) => e.type === 'wheel' || e.type === 'mouse-button'));
-  // The pointer keeps its size on screen.
+  // The pointer zooms with the picture, staying in scale with what is around it.
   const zp = await client.locator('#cursor').boundingBox();
-  assert.ok(Math.abs(zp.width - pointer.width) < 1, `pointer ${pointer.width} -> ${zp.width}`);
+  const grew = zoomed.width / box.width;
+  assert.ok(Math.abs(zp.width - pointer.width * grew) < 1, `pointer ${pointer.width} -> ${zp.width}, zoom ${grew}`);
   // Zoomed in, a two-finger drag still scrolls; with Pan on it moves the view instead.
   const drag = async () => {
     await touch('touchStart', [{ x: cx - 50, y: cy, id: 1 }, { x: cx + 50, y: cy, id: 2 }]);

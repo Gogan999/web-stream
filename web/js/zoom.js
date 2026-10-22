@@ -34,19 +34,14 @@ export function followView(v, px, py, w, h, margin = FOLLOW_MARGIN) {
 
 export class ZoomView {
   // el: the transformed element; it fills `stage`, which clips it.
-  constructor({ el, stage, onChange, onView = null }) {
+  constructor({ el, stage, onChange }) {
     this.el = el;
     this.stage = stage;
     this.onChange = onChange; // (zoomed) when it zooms in from fit or back to it
-    this.onView = onView; // () on every change of scale or offset
     this.v = { s: 1, x: 0, y: 0 };
     this.panMode = false; // the Pan button: two-finger drags pan instead of scrolling the host
     // Rotation, a resized window or the phone keyboard opening: keep the zoom, stay covering.
     new ResizeObserver(() => this.set(clampView(this.v, stage.clientWidth, stage.clientHeight))).observe(stage);
-  }
-
-  get scale() {
-    return this.v.s;
   }
 
   get zoomed() {
@@ -81,6 +76,5 @@ export class ZoomView {
     if (same) return;
     this.el.style.transform = v.s === 1 ? '' : `translate(${v.x}px, ${v.y}px) scale(${v.s})`;
     if (was !== this.zoomed) this.onChange?.(this.zoomed);
-    this.onView?.();
   }
 }

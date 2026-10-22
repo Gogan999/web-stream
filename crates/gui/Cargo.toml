@@ -19,6 +19,7 @@ eframe = { version = "0.32", default-features = false, features = ["default_font
 
 [dev-dependencies]
 ws-input.workspace = true
+tempfile = "3"
 
 [target.'cfg(windows)'.dependencies]
 tray-icon = "0.21"

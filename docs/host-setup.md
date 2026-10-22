@@ -92,6 +92,8 @@ and paired browsers in `%LOCALAPPDATA%\web-stream`.
 --public-ip IP       public address that forwards to the host (repeatable)
 --hostname NAME      extra name or IP for the self-signed certificate (repeatable)
 --cert FILE --key FILE   PEM certificate instead of a self-signed one
+--duckdns NAME       Let's Encrypt certificate for NAME.duckdns.org (see below)
+--duckdns-token-file FILE  --no-duckdns-address  --acme-email ADDR  --acme-staging
 --data-dir DIR       certificate and paired devices
 --forget-after DAYS  unpair a browser unused for this long, default 30
 --allow-origin URL   extra origin allowed to use the API (repeatable)
@@ -174,12 +176,51 @@ The file is inside `.git`, so nothing pulled from GitHub can change it.
    Localhost works without this, which can make a firewall block look like
    a network problem.
 3. Open the host by its WAN address or a DDNS name that points at it, for
-   example `https://home.example.net:8443/`.
+   example `https://home.example.net:8443/`. Better, give it a real
+   certificate (next section), so the browser never shows a warning to
+   click past.
 
 The host advertises the address in the browser's URL (resolving a DDNS name)
 as a media address. `--public-ip` adds more, for when browsers reach the
 host by some other name. If pairing works but the stream never starts, a
 media port is not forwarded or the firewall is blocking it.
+
+### A certificate browsers trust
+
+Out of the box the host makes its own (self-signed) certificate, and each
+browser warns about it once. That is fine at home, where you can compare the
+fingerprint the tray app shows with the browser's. Away from home it's a
+risk: on a network you don't control, someone could show the browser a
+different certificate, and clicking past that warning hands them a paired
+browser. With a real certificate there is no warning to click past.
+
+The easy way is a free [DuckDNS](https://www.duckdns.org) name:
+
+1. Sign in at duckdns.org and add a subdomain, say `my-pc`.
+2. In the tray app's Settings, type `my-pc` as the DuckDNS name and paste
+   the account token shown on duckdns.org. (Flags: `--duckdns my-pc`, with
+   the token in `duckdns-token.txt` in the data folder, or
+   `--duckdns-token-file FILE`.)
+3. Open `https://my-pc.duckdns.org:8443/`.
+
+The host keeps the name pointing at this PC's public address, and asks
+Let's Encrypt for a certificate for it. Let's Encrypt checks a DNS record
+that the host sets through DuckDNS, so no port beyond the three above needs
+forwarding. The first certificate takes a minute or so; until then the host
+serves its self-signed one. It renews by itself when a third of its life is
+left, and the browser gets the new one on its next connection. Problems
+(a wrong token, Let's Encrypt unreachable) show in the tray app's log and
+are retried.
+
+- `--no-duckdns-address` leaves the name's address alone, if the router
+  already updates it.
+- `--acme-email` gives Let's Encrypt an address for expiry warnings.
+- `--acme-staging` uses Let's Encrypt's staging server, which has no rate
+  limits but whose certificates browsers don't trust, to try things out.
+
+The certificate, its key and the Let's Encrypt account key are kept in the
+data folder. With another DNS provider, get a certificate with a tool such
+as win-acme and pass it with `--cert` and `--key`.
 
 Capture, game audio, the mic and input start when a browser connects and
 stop when it leaves; dropping the session releases every held key and
@@ -349,8 +390,9 @@ What this changes for security:
   bug in the network-facing host as a full compromise of the PC.
 - What runs as SYSTEM is the copy in Program Files, which only
   administrators can change, never the build folder in your checkout.
-- `--cert` and `--key` are copied into the service's data folder when you
-  install, so a user who can write where they came from can't swap them.
+- `--cert` and `--key`, and the DuckDNS token, are copied into the
+  service's data folder when you install, so a user who can write where
+  they came from can't swap them.
 - The service picks a new random name for its control pipe each time it
   starts the host and keeps it, with the host's process id, in its data
   folder. The service console connects only if that process

@@ -170,20 +170,34 @@ pub fn query() -> anyhow::Result<Option<bool>> {
 /// The host reads `--cert` and `--key` as SYSTEM: copies them into the
 /// service's data folder, which only administrators can change, so a user
 /// who can write where they came from can't swap them later.
+/// The same goes for `--duckdns`'s token, which is always passed as a
+/// file in that folder.
 fn copy_certificate(
     args: &[String],
     opts: &crate::options::ServeOptions,
 ) -> anyhow::Result<Vec<String>> {
-    let Some((cert, key)) = &opts.cert else {
-        return Ok(args.to_vec());
-    };
+    let mut copies = Vec::new();
+    if let Some((cert, key)) = &opts.cert {
+        copies.push(("--cert", cert, "service-cert.pem"));
+        copies.push(("--key", key, "service-key.pem"));
+    }
+    let mut args = args.to_vec();
+    if let Some(duck) = &opts.duckdns {
+        if !args.iter().any(|a| a == "--duckdns-token-file") {
+            args.extend(["--duckdns-token-file".into(), String::new()]);
+        }
+        copies.push((
+            "--duckdns-token-file",
+            &duck.token_file,
+            "service-duckdns-token.txt",
+        ));
+    }
+    if copies.is_empty() {
+        return Ok(args);
+    }
     let dir = data_dir()?;
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
-    let mut args = args.to_vec();
-    for (flag, src, name) in [
-        ("--cert", cert, "service-cert.pem"),
-        ("--key", key, "service-key.pem"),
-    ] {
+    for (flag, src, name) in copies {
         let dest = dir.join(name);
         // Installing again with the copy itself: nothing to copy.
         if !same_file(src, &dest) {

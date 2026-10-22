@@ -48,6 +48,10 @@ pub enum Event {
         /// LAN addresses the host listens on.
         ips: Vec<IpAddr>,
         fingerprint: String,
+        /// Browsers warn about the certificate until the user accepts it
+        /// (no `--cert` or `--duckdns`, or Let's Encrypt hasn't issued one
+        /// yet).
+        self_signed: bool,
         web_root: Option<PathBuf>,
         data_dir: PathBuf,
     },
@@ -78,12 +82,13 @@ pub async fn serve(
     config.embedded_web = crate::web::WEB_FILES;
     config.device_idle_expiry = opts.device_idle_expiry;
     config.extra_origins = opts.extra_origins.clone();
-    config.tls = match &opts.cert {
-        Some((cert, key)) => TlsSource::Files {
+    config.tls = match (&opts.cert, &opts.duckdns) {
+        (Some((cert, key)), _) => TlsSource::Files {
             cert: cert.clone(),
             key: key.clone(),
         },
-        None => TlsSource::SelfSigned {
+        (None, Some(duck)) => TlsSource::DuckDns(duckdns(duck)?),
+        (None, None) => TlsSource::SelfSigned {
             hostnames: opts.hostnames.clone(),
         },
     };
@@ -91,7 +96,13 @@ pub async fn serve(
         .map_err(|e| data_dir_error(e, &opts.data_dir))
         .context("signaling server")?;
     let signaling = server.handle();
-    let fingerprint = server.fingerprint().to_string();
+    let certificate = server.certificate();
+    if certificate.self_signed && opts.duckdns.is_none() {
+        tracing::info!(
+            "self-signed certificate: browsers warn until it is accepted. For use away from \
+             home, a real one (--duckdns, or --cert/--key) means no warning to click past"
+        );
+    }
 
     let (transport, transport_events) = Transport::start(TransportConfig {
         ips: opts.ips.clone(),
@@ -134,7 +145,8 @@ pub async fn serve(
         } else {
             opts.ips.clone()
         },
-        fingerprint,
+        fingerprint: certificate.fingerprint,
+        self_signed: certificate.self_signed,
         web_root: opts.web_root.clone(),
         data_dir: opts.data_dir.clone(),
     });
@@ -191,6 +203,31 @@ pub async fn serve(
         tracing::warn!("transport did not stop in time");
     }
     result
+}
+
+/// `--duckdns`'s settings, with the token read from its file.
+fn duckdns(opts: &crate::options::DuckDnsOptions) -> anyhow::Result<ws_signaling::DuckDns> {
+    let token = std::fs::read_to_string(&opts.token_file)
+        .with_context(|| {
+            format!(
+                "--duckdns needs the DuckDNS token (from duckdns.org, after signing in) in {}",
+                opts.token_file.display()
+            )
+        })?
+        .trim()
+        .to_string();
+    Ok(ws_signaling::DuckDns {
+        name: opts.name.clone(),
+        token,
+        email: opts.email.clone(),
+        directory: if opts.staging {
+            ws_signaling::LETS_ENCRYPT_STAGING
+        } else {
+            ws_signaling::LETS_ENCRYPT
+        }
+        .into(),
+        update_address: opts.update_address,
+    })
 }
 
 /// Access denied on the data dir usually means the host once ran as

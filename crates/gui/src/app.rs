@@ -148,6 +148,8 @@ impl App {
             self.settings_error = Some(format!("could not save the settings: {e:#}"));
             return false;
         }
+        // Saved to its own file; the form doesn't keep it.
+        self.draft.duckdns_token.clear();
         self.settings_error = None;
         self.settings = self.draft.clone();
         true
@@ -203,6 +205,7 @@ impl App {
                 port,
                 ips,
                 fingerprint,
+                self_signed,
                 web_root,
             } => {
                 egui::Grid::new("running").num_columns(2).show(ui, |ui| {
@@ -228,7 +231,22 @@ impl App {
                     ui.monospace(forward_ports(&self.settings));
                     ui.end_row();
                     ui.label("Certificate SHA-256");
-                    ui.add(egui::Label::new(RichText::new(fingerprint).monospace().small()).wrap());
+                    ui.vertical(|ui| {
+                        ui.add(
+                            egui::Label::new(RichText::new(fingerprint).monospace().small()).wrap(),
+                        );
+                        if *self_signed {
+                            ui.weak(
+                                "Self-signed: browsers warn until you accept it. Compare this \
+                                 fingerprint before you do. Away from home, a DuckDNS name \
+                                 (Settings) gets a certificate with no warning.",
+                            )
+                            .on_hover_text(
+                                "Someone on the network could show a different certificate; \
+                                 clicking past that warning would let them pair",
+                            );
+                        }
+                    });
                     ui.end_row();
                     if let Some(dir) = web_root {
                         ui.label("Web client");
@@ -424,6 +442,44 @@ impl App {
                         .hint_text("e.g. a DDNS name (optional)"),
                 );
                 ui.end_row();
+                ui.label("DuckDNS name").on_hover_text(
+                    "For use away from home: a free name from duckdns.org. The host keeps it \
+                     pointing at this PC and gets a Let's Encrypt certificate for it, so \
+                     browsers open https://NAME.duckdns.org:PORT/ without a warning. No \
+                     extra ports to forward",
+                );
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut d.duckdns)
+                            .desired_width(120.0)
+                            .hint_text("e.g. my-pc"),
+                    );
+                    ui.weak(".duckdns.org");
+                });
+                ui.end_row();
+                if !d.duckdns.trim().is_empty() {
+                    let saved = self
+                        .data_dir
+                        .join(ws_host::options::DUCKDNS_TOKEN_FILE)
+                        .exists();
+                    ui.label("DuckDNS token");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut d.duckdns_token)
+                            .password(true)
+                            .hint_text(if saved {
+                                "saved (type to replace)"
+                            } else {
+                                "from duckdns.org, after signing in"
+                            }),
+                    );
+                    ui.end_row();
+                    ui.label("Certificate email");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut d.acme_email)
+                            .hint_text("for Let's Encrypt's expiry warnings (optional)"),
+                    );
+                    ui.end_row();
+                }
                 ui.label("Forget browsers");
                 ui.add(
                     egui::DragValue::new(&mut d.forget_after_days)

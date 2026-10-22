@@ -19,6 +19,14 @@ host options:
   --public-ip IP       public address that forwards to the host (repeatable)
   --hostname NAME      extra name or IP for the self-signed certificate (repeatable)
   --cert FILE --key FILE   PEM certificate instead of a self-signed one
+  --duckdns NAME       get a Let's Encrypt certificate for NAME.duckdns.org, and
+                       keep that name pointing at this PC (no extra ports)
+  --duckdns-token-file FILE  the DuckDNS token, default duckdns-token.txt in
+                       --data-dir
+  --no-duckdns-address  only the certificate: leave the name's address alone
+  --acme-email ADDR    where Let's Encrypt sends expiry warnings (optional)
+  --acme-staging       Let's Encrypt's staging server (untrusted certificates,
+                       no rate limits), for trying --duckdns out
   --data-dir DIR       certificate and paired devices
   --forget-after DAYS  unpair a browser unused for this long, default 30
   --allow-origin URL   extra origin allowed to use the API, e.g. a reverse
@@ -54,6 +62,8 @@ pub struct ServeOptions {
     pub public_ips: Vec<IpAddr>,
     pub hostnames: Vec<String>,
     pub cert: Option<(PathBuf, PathBuf)>,
+    /// A Let's Encrypt certificate for a DuckDNS name (`--duckdns`).
+    pub duckdns: Option<DuckDnsOptions>,
     pub data_dir: PathBuf,
     /// A paired browser unused for this long is unpaired.
     pub device_idle_expiry: Duration,
@@ -63,6 +73,20 @@ pub struct ServeOptions {
     pub media: MediaOptions,
     pub pair_at_start: bool,
 }
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DuckDnsOptions {
+    /// The subdomain, without `.duckdns.org`.
+    pub name: String,
+    /// Holds the token, so it is never on a command line.
+    pub token_file: PathBuf,
+    pub email: Option<String>,
+    pub staging: bool,
+    pub update_address: bool,
+}
+
+/// The DuckDNS token's file when `--duckdns-token-file` isn't given.
+pub const DUCKDNS_TOKEN_FILE: &str = "duckdns-token.txt";
 
 /// What [`crate::media`] needs to know.
 #[derive(Debug, Clone, PartialEq)]
@@ -102,6 +126,11 @@ impl ServeOptions {
         let mut public_ips = Vec::new();
         let mut hostnames = Vec::new();
         let (mut cert, mut key) = (None, None);
+        let mut duckdns: Option<String> = None;
+        let mut duckdns_token_file = None;
+        let mut duckdns_address = true;
+        let mut acme_email = None;
+        let mut acme_staging = false;
         let mut data_dir = None;
         let mut web_root = None;
         let mut forget_after_days = 30u32;
@@ -139,6 +168,27 @@ impl ServeOptions {
                 "--hostname" => hostnames.push(value()?.clone()),
                 "--cert" => cert = Some(PathBuf::from(value()?)),
                 "--key" => key = Some(PathBuf::from(value()?)),
+                "--duckdns" => {
+                    let name = value()?.to_ascii_lowercase();
+                    let name = name
+                        .strip_suffix(".duckdns.org")
+                        .unwrap_or(&name)
+                        .to_string();
+                    if !ws_signaling::valid_duckdns_name(&name) {
+                        bail!("--duckdns {name:?}: give the DuckDNS subdomain, e.g. my-pc");
+                    }
+                    duckdns = Some(name);
+                }
+                "--duckdns-token-file" => duckdns_token_file = Some(PathBuf::from(value()?)),
+                "--no-duckdns-address" => duckdns_address = false,
+                "--acme-email" => {
+                    let email = value()?.clone();
+                    if !email.contains('@') || email.contains([' ', ',', '/']) {
+                        bail!("--acme-email {email:?} is not an email address");
+                    }
+                    acme_email = Some(email);
+                }
+                "--acme-staging" => acme_staging = true,
                 "--data-dir" => data_dir = Some(PathBuf::from(value()?)),
                 "--web-root" => web_root = Some(PathBuf::from(value()?)),
                 "--forget-after" => {
@@ -212,6 +262,26 @@ impl ServeOptions {
             );
         }
         let data_dir = data_dir.unwrap_or_else(default_data_dir);
+        if duckdns.is_some() && cert.is_some() {
+            bail!("--duckdns gets its own certificate: leave out --cert and --key");
+        }
+        if duckdns.is_none()
+            && (duckdns_token_file.is_some()
+                || acme_email.is_some()
+                || acme_staging
+                || !duckdns_address)
+        {
+            bail!(
+                "--duckdns-token-file, --no-duckdns-address, --acme-email and --acme-staging go with --duckdns"
+            );
+        }
+        let duckdns = duckdns.map(|name| DuckDnsOptions {
+            name,
+            token_file: duckdns_token_file.unwrap_or_else(|| data_dir.join(DUCKDNS_TOKEN_FILE)),
+            email: acme_email,
+            staging: acme_staging,
+            update_address: duckdns_address,
+        });
         if allow_remote_update {
             media.update_log = Some(data_dir.join("update.log"));
         }
@@ -222,6 +292,7 @@ impl ServeOptions {
             public_ips,
             hostnames,
             cert,
+            duckdns,
             data_dir,
             device_idle_expiry: Duration::from_secs(u64::from(forget_after_days) * 24 * 3600),
             extra_origins,
@@ -413,6 +484,42 @@ mod tests {
         assert_eq!(o.media.display, Some(DisplayId(2)));
         assert!(o.pair_at_start);
         assert_eq!(parse(&["--no-ice-tcp"]).unwrap().ice_tcp_port, None);
+    }
+
+    #[test]
+    fn duckdns() {
+        assert_eq!(parse(&[]).unwrap().duckdns, None);
+        let o = parse(&["--duckdns", "My-PC.duckdns.org", "--data-dir", "d"]).unwrap();
+        assert_eq!(
+            o.duckdns,
+            Some(DuckDnsOptions {
+                name: "my-pc".into(),
+                token_file: PathBuf::from("d").join(DUCKDNS_TOKEN_FILE),
+                email: None,
+                staging: false,
+                update_address: true,
+            })
+        );
+        let o = parse(&[
+            "--duckdns",
+            "my-pc",
+            "--duckdns-token-file",
+            "t.txt",
+            "--acme-email",
+            "me@example.com",
+            "--acme-staging",
+            "--no-duckdns-address",
+        ])
+        .unwrap()
+        .duckdns
+        .unwrap();
+        assert_eq!(o.token_file, PathBuf::from("t.txt"));
+        assert_eq!(o.email.as_deref(), Some("me@example.com"));
+        assert!(o.staging && !o.update_address);
+        assert!(parse(&["--duckdns", "a&b"]).is_err());
+        assert!(parse(&["--duckdns", "x", "--cert", "c", "--key", "k"]).is_err());
+        assert!(parse(&["--acme-staging"]).is_err());
+        assert!(parse(&["--duckdns", "x", "--acme-email", "nope"]).is_err());
     }
 
     #[test]

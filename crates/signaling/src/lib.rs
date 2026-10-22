@@ -4,6 +4,7 @@
 //! [`ws_proto::ClientSignal`]; the full contract is in `docs/signaling.md`.
 
 mod acl;
+mod acme;
 pub mod config;
 mod listen;
 mod pairing;
@@ -12,10 +13,14 @@ mod store;
 mod tls;
 mod turn;
 
-pub use config::{SignalingConfig, TlsSource, TurnServer};
+pub use acme::valid_name as valid_duckdns_name;
+pub use config::{
+    DuckDns, LETS_ENCRYPT, LETS_ENCRYPT_STAGING, SignalingConfig, TlsSource, TurnServer,
+};
 pub use server::{
     Notice, SessionEvent, SignalingEvents, SignalingHandle, SignalingServer, SignalingSession,
 };
+pub use tls::CertInfo;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -27,4 +32,6 @@ pub enum Error {
     Store(String),
     #[error("random source: {0}")]
     Random(String),
+    #[error("{0}")]
+    Acme(String),
 }

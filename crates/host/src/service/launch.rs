@@ -1,11 +1,19 @@
-//! Starting the session host: a SYSTEM process on the user's screen.
+//! Starting the host's two processes.
 //!
-//! The service's own token is copied, moved to the console session and
-//! stripped of every privilege the host doesn't need (debugging, loading
-//! drivers, taking ownership, acting as part of the OS and so on), then the
-//! host is started on that session's interactive desktop with its output
-//! going to a log file. It runs in a job object, so it never outlives the
-//! service.
+//! The session host is a SYSTEM process on the user's screen: the service's
+//! own token is copied, moved to the console session and stripped of every
+//! privilege the host doesn't need (debugging, loading drivers, taking
+//! ownership, acting as part of the OS and so on), then the host is started
+//! on that session's interactive desktop.
+//!
+//! The network host runs as LocalService with every privilege but one
+//! removed (in particular impersonation, which would let it borrow a SYSTEM
+//! token), in session 0, away from the user's desktop. It holds everything
+//! that parses what comes off the network.
+//!
+//! Each writes to a log file and runs in a job object, so it never outlives
+//! the service. A pipe made here links the two ([`link_pipe`]); each end is
+//! inherited by one of them, so nothing else can ever connect to it.
 
 use std::ffi::c_void;
 use std::fs::File;
@@ -15,19 +23,32 @@ use std::time::Duration;
 
 use anyhow::Context;
 use windows::Win32::Foundation::{
-    CloseHandle, ERROR_NOT_ALL_ASSIGNED, GetLastError, HANDLE, HANDLE_FLAG_INHERIT, LUID,
-    SetHandleInformation, WAIT_OBJECT_0,
+    CloseHandle, ERROR_NOT_ALL_ASSIGNED, GENERIC_READ, GENERIC_WRITE, GetLastError, HANDLE,
+    HANDLE_FLAG_INHERIT, HLOCAL, LUID, LocalFree, SetHandleInformation, WAIT_OBJECT_0,
+};
+use windows::Win32::Security::Authorization::{
+    ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
 };
 use windows::Win32::Security::{
-    AdjustTokenPrivileges, DuplicateTokenEx, GetTokenInformation, LookupPrivilegeValueW,
-    SE_PRIVILEGE_REMOVED, SecurityIdentification, SetTokenInformation, TOKEN_ALL_ACCESS,
-    TOKEN_DUPLICATE, TOKEN_PRIVILEGES, TOKEN_QUERY, TokenPrimary, TokenPrivileges, TokenSessionId,
+    AdjustTokenPrivileges, DACL_SECURITY_INFORMATION, DuplicateTokenEx, GetTokenInformation,
+    LOGON32_LOGON_SERVICE, LOGON32_PROVIDER_DEFAULT, LogonUserW, LookupPrivilegeValueW,
+    PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SE_PRIVILEGE_REMOVED,
+    SECURITY_ATTRIBUTES, SecurityIdentification, SetFileSecurityW, SetTokenInformation,
+    TOKEN_ALL_ACCESS, TOKEN_DUPLICATE, TOKEN_PRIVILEGES, TOKEN_QUERY, TokenPrimary,
+    TokenPrivileges, TokenSessionId,
+};
+use windows::Win32::Storage::FileSystem::{
+    CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, FILE_SHARE_NONE,
+    OPEN_EXISTING, PIPE_ACCESS_DUPLEX, SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT,
 };
 use windows::Win32::System::Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock};
 use windows::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
     SetInformationJobObject, TerminateJobObject,
+};
+use windows::Win32::System::Pipes::{
+    CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
 };
 use windows::Win32::System::RemoteDesktop::WTSGetActiveConsoleSessionId;
 use windows::Win32::System::Threading::{
@@ -42,8 +63,8 @@ use windows::core::{PCWSTR, PWSTR};
 
 use super::quote_arg;
 
-/// Privileges the host keeps; every other one is removed from its token.
-/// Capture, encoding, audio and input need none beyond these.
+/// Privileges the session host keeps; every other one is removed from its
+/// token. Capture, encoding, audio and input need none beyond these.
 const KEEP_PRIVILEGES: &[&str] = &[
     "SeChangeNotifyPrivilege",
     // Raising the GPU and capture thread priority.
@@ -51,12 +72,34 @@ const KEEP_PRIVILEGES: &[&str] = &[
     "SeCreateGlobalPrivilege",
 ];
 
+/// The network host's only privilege: opening its files by path without
+/// rights on every folder above them (its data folder is inside SYSTEM's
+/// profile).
+const NETWORK_KEEP_PRIVILEGES: &[&str] = &["SeChangeNotifyPrivilege"];
+
+/// The network host's data folder: full access for SYSTEM, administrators
+/// and LocalService, inherited by what is created inside; nothing from the
+/// folder above.
+pub const NETWORK_DIR_SDDL: &str = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;LS)";
+
+/// The link pipe: SYSTEM only. Both ends are opened here and handed down,
+/// so no process ever opens it by name.
+const LINK_SDDL: &str = "D:P(A;;GA;;;SY)";
+const LINK_BUFFER: u32 = 1 << 20;
+
 /// Log files are started over above this size; the previous one is kept
 /// as `.old`.
 const MAX_LOG: u64 = 10 * 1024 * 1024;
 
 /// A handle closed on drop.
-struct Owned(HANDLE);
+pub struct Owned(HANDLE);
+
+impl Owned {
+    /// The raw value, as a child that inherits it sees it.
+    pub fn value(&self) -> usize {
+        self.0.0 as usize
+    }
+}
 
 impl Drop for Owned {
     fn drop(&mut self) {
@@ -119,7 +162,33 @@ pub fn spawn(
     inherit: &[usize],
 ) -> anyhow::Result<Child> {
     let token = host_token(session)?;
-    let env = Environment::new(&token)?;
+    spawn_as(&token, r"winsta0\default", session, exe, args, log, inherit)
+}
+
+/// Starts `exe args` as LocalService with no privilege but
+/// [`NETWORK_KEEP_PRIVILEGES`], in session 0, like [`spawn`] otherwise.
+pub fn spawn_network(
+    exe: &Path,
+    args: &[String],
+    log: &Path,
+    inherit: &[usize],
+) -> anyhow::Result<Child> {
+    let token = network_token()?;
+    // Empty: a window station of its own logon session's, which Windows
+    // makes for it, rather than the service's, which it may not open.
+    spawn_as(&token, "", 0, exe, args, log, inherit)
+}
+
+fn spawn_as(
+    token: &Owned,
+    desktop: &str,
+    session: u32,
+    exe: &Path,
+    args: &[String],
+    log: &Path,
+    inherit: &[usize],
+) -> anyhow::Result<Child> {
+    let env = Environment::new(token)?;
     let log = open_log(log)?;
     let log_handle = HANDLE(log.as_raw_handle());
     // Inherited by the host as its stdout and stderr, and nothing else is
@@ -144,7 +213,7 @@ pub fn spawn(
             .display()
             .to_string(),
     );
-    let mut desktop = wide(r"winsta0\default");
+    let mut desktop = wide(desktop);
 
     let attrs = AttributeList::new(1)?;
     let handles: Vec<HANDLE> = std::iter::once(log_handle)
@@ -248,11 +317,34 @@ fn host_token(session: u32) -> anyhow::Result<Owned> {
         )
     }
     .context("SetTokenInformation(TokenSessionId)")?;
-    strip_privileges(&token)?;
+    strip_privileges(&token, KEEP_PRIVILEGES)?;
     Ok(token)
 }
 
-fn strip_privileges(token: &Owned) -> anyhow::Result<()> {
+/// A LocalService token without the privileges the network host doesn't
+/// need. LocalService has impersonation and token assignment, either of
+/// which could turn a compromised network host back into SYSTEM.
+fn network_token() -> anyhow::Result<Owned> {
+    let (user, domain) = (wide("LocalService"), wide("NT AUTHORITY"));
+    let mut token = HANDLE::default();
+    // SAFETY: NUL-terminated strings; `token` receives a handle we own.
+    unsafe {
+        LogonUserW(
+            PCWSTR(user.as_ptr()),
+            PCWSTR(domain.as_ptr()),
+            PCWSTR::null(),
+            LOGON32_LOGON_SERVICE,
+            LOGON32_PROVIDER_DEFAULT,
+            &mut token,
+        )
+    }
+    .context("LogonUser(LocalService)")?;
+    let token = Owned(token);
+    strip_privileges(&token, NETWORK_KEEP_PRIVILEGES)?;
+    Ok(token)
+}
+
+fn strip_privileges(token: &Owned, keep: &[&str]) -> anyhow::Result<()> {
     let mut len = 0u32;
     // SAFETY: a size query; fails with the size needed.
     let _ = unsafe { GetTokenInformation(token.0, TokenPrivileges, None, 0, &mut len) };
@@ -269,7 +361,7 @@ fn strip_privileges(token: &Owned) -> anyhow::Result<()> {
         )
     }
     .context("GetTokenInformation(TokenPrivileges)")?;
-    let keep: Vec<LUID> = KEEP_PRIVILEGES
+    let keep: Vec<LUID> = keep
         .iter()
         .filter_map(|name| {
             let mut luid = LUID::default();
@@ -386,4 +478,93 @@ pub fn open_log(path: &Path) -> anyhow::Result<File> {
 
 pub fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain([0]).collect()
+}
+
+/// Two connected ends of a fresh pipe, both inheritable: one for each
+/// process. Overlapped, as tokio needs. Opened for identification only, so
+/// neither end can act as the other.
+pub fn link_pipe() -> anyhow::Result<(Owned, Owned)> {
+    let name = format!(r"\\.\pipe\web-stream-link-{}", super::random_hex()?);
+    let name_w = wide(&name);
+    let sd = SecurityDescriptor::new(LINK_SDDL)?;
+    let sa = SECURITY_ATTRIBUTES {
+        nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: sd.0.0,
+        bInheritHandle: true.into(),
+    };
+    // SAFETY: `name_w` is NUL-terminated and `sa` valid for the call.
+    let server = unsafe {
+        CreateNamedPipeW(
+            PCWSTR(name_w.as_ptr()),
+            PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+            1,
+            LINK_BUFFER,
+            LINK_BUFFER,
+            0,
+            Some(&sa),
+        )
+    };
+    if server.is_invalid() {
+        return Err(windows::core::Error::from_thread()).context("CreateNamedPipe");
+    }
+    let server = Owned(server);
+    // SAFETY: as above.
+    let client = unsafe {
+        CreateFileW(
+            PCWSTR(name_w.as_ptr()),
+            (GENERIC_READ | GENERIC_WRITE).0,
+            FILE_SHARE_NONE,
+            Some(&sa),
+            OPEN_EXISTING,
+            FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION,
+            None,
+        )
+    }
+    .context("open the link pipe")?;
+    Ok((server, Owned(client)))
+}
+
+/// Sets `path`'s DACL from `sddl`, replacing what it inherited.
+pub fn set_dacl(path: &Path, sddl: &str) -> anyhow::Result<()> {
+    let sd = SecurityDescriptor::new(sddl)?;
+    let path_w = wide(&path.display().to_string());
+    // SAFETY: a NUL-terminated path and a valid descriptor.
+    unsafe {
+        SetFileSecurityW(
+            PCWSTR(path_w.as_ptr()),
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            sd.0,
+        )
+    }
+    .ok()
+    .with_context(|| format!("set the permissions of {}", path.display()))
+}
+
+/// A security descriptor from SDDL, freed on drop.
+struct SecurityDescriptor(PSECURITY_DESCRIPTOR);
+
+impl SecurityDescriptor {
+    fn new(sddl: &str) -> anyhow::Result<Self> {
+        let sddl = wide(sddl);
+        let mut sd = PSECURITY_DESCRIPTOR::default();
+        // SAFETY: `sddl` is NUL-terminated; `sd` is freed in drop.
+        unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                PCWSTR(sddl.as_ptr()),
+                SDDL_REVISION_1,
+                &mut sd,
+                None,
+            )
+        }
+        .context("security descriptor")?;
+        Ok(Self(sd))
+    }
+}
+
+impl Drop for SecurityDescriptor {
+    fn drop(&mut self) {
+        // SAFETY: allocated by ConvertStringSecurityDescriptorToSecurityDescriptorW.
+        unsafe { LocalFree(Some(HLOCAL(self.0.0))) };
+    }
 }

@@ -9,3 +9,11 @@ pub const INPUT: &str = "input";
 pub const INPUT_MOTION: &str = "input-motion";
 /// Ordered, reliable: file transfer, both ways.
 pub const FILE: &str = "file";
+
+/// Every channel, for turning a label back into its constant.
+pub const ALL: [&str; 4] = [CONTROL, INPUT, INPUT_MOTION, FILE];
+
+/// The constant for `label`, if it names a channel.
+pub fn known(label: &str) -> Option<&'static str> {
+    ALL.into_iter().find(|c| *c == label)
+}

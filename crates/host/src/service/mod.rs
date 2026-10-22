@@ -3,12 +3,20 @@
 //! The tray app's exe runs it: `ws-host-gui service ...` (see [`main`]),
 //! started elevated from the tray app's settings.
 //!
-//! The service (LocalSystem, in session 0) only supervises. It starts
-//! `<exe> service session-host` in the session on the PC's own screen,
-//! as SYSTEM with nearly every privilege removed, and starts it again when
-//! that session changes (signing out, switching users) or the host exits.
-//! Running as SYSTEM on the user's screen is what lets capture and input
-//! follow Windows onto the secure desktop and into elevated windows. The
+//! The service (LocalSystem, in session 0) only supervises. It runs the
+//! host as two processes, linked by a pipe (see [`crate::split`]):
+//!
+//! - `<exe> service session-host` in the session on the PC's own screen, as
+//!   SYSTEM with nearly every privilege removed: capture, encoding, input,
+//!   audio. Running as SYSTEM on the user's screen is what lets capture and
+//!   input follow Windows onto the secure desktop and into elevated windows.
+//! - `<exe> service network-host` as LocalService with no privileges, in
+//!   session 0: the signaling server and the peer connection, everything
+//!   that parses what comes off the network.
+//!
+//! It starts both again when that session changes (signing out, switching
+//! users) or either exits. If the network host can't be started, the
+//! session host runs the whole host, as before, and the log says why. The
 //! host has no console; elevated administrators control it through a named
 //! pipe: the tray app's service console window ([`control::connect`]).
 
@@ -81,13 +89,16 @@ pub fn main(args: &[String]) -> anyhow::Result<String> {
         Some("run") => imp::run(rest).map(|()| String::new()),
         // Started by the service in the user's session.
         Some("session-host") => imp::session_host(rest).map(|()| String::new()),
+        // Started by the service as LocalService.
+        Some("network-host") => imp::network_host(rest).map(|()| String::new()),
         Some("-h" | "--help") | None => Ok(USAGE.into()),
         Some(other) => bail!("unknown service command {other:?}\n\n{USAGE}"),
     }
 }
 
 /// Logging for `service <args>`: the service writes to service.log (it has
-/// no stdout); the session host's stdout is its host.log.
+/// no stdout); the session host's stdout is its host.log, the network
+/// host's network.log.
 pub fn init_logging(args: &[String]) {
     let logs = tracing_subscriber::fmt()
         .with_env_filter(
@@ -134,20 +145,26 @@ pub fn next_backoff(prev: Duration, ran: Duration) -> Duration {
     }
 }
 
+/// 32 random hex digits.
+pub fn random_hex() -> anyhow::Result<String> {
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes).map_err(|e| anyhow::anyhow!("random name: {e}"))?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
 /// A fresh control pipe name.
 pub fn random_pipe_name() -> anyhow::Result<String> {
-    let mut bytes = [0u8; 16];
-    getrandom::fill(&mut bytes).map_err(|e| anyhow::anyhow!("random pipe name: {e}"))?;
-    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-    Ok(format!("{PIPE_PREFIX}{hex}"))
+    Ok(format!("{PIPE_PREFIX}{}", random_hex()?))
 }
 
 /// The session host's arguments (after the exe), as the service builds
-/// them: the pipe, the Ctrl+Alt+Del event handle the host inherits, the
-/// installed serve options, and the service's data folder.
+/// them: the pipe, the Ctrl+Alt+Del event handle and the link to the
+/// network host (0: none, run the whole host) it inherits, the installed
+/// serve options, and the host's data folder.
 pub fn session_host_args(
     pipe: &str,
     sas_event: usize,
+    link: usize,
     serve_args: &[String],
     data_dir: &Path,
 ) -> Vec<String> {
@@ -156,7 +173,18 @@ pub fn session_host_args(
         "session-host".into(),
         pipe.into(),
         sas_event.to_string(),
+        link.to_string(),
     ];
+    args.extend(serve_args.iter().cloned());
+    args.push("--data-dir".into());
+    args.push(data_dir.display().to_string());
+    args
+}
+
+/// The network host's arguments: the link it inherits, and as for
+/// [`session_host_args`].
+pub fn network_host_args(link: usize, serve_args: &[String], data_dir: &Path) -> Vec<String> {
+    let mut args = vec!["service".into(), "network-host".into(), link.to_string()];
     args.extend(serve_args.iter().cloned());
     args.push("--data-dir".into());
     args.push(data_dir.display().to_string());
@@ -170,27 +198,88 @@ pub struct SessionHost {
     /// The inherited event the host sets to ask the service for
     /// Ctrl+Alt+Del; 0 for none.
     pub sas_event: usize,
+    /// The inherited end of the pipe to the network host; 0 for none.
+    pub link: usize,
     pub opts: ServeOptions,
 }
 
 /// Parses what follows `service session-host`, checking it.
 pub fn parse_session_host_args(args: &[String]) -> anyhow::Result<SessionHost> {
-    let [pipe, sas_event, rest @ ..] = args else {
-        bail!("session-host needs a pipe name and an event handle");
+    let [pipe, sas_event, link, rest @ ..] = args else {
+        bail!("session-host needs a pipe name and two handles");
     };
     if !valid_pipe_name(pipe) {
         bail!("bad control pipe name {pipe:?}");
     }
-    let sas_event = sas_event
-        .parse()
-        .map_err(|_| anyhow::anyhow!("bad event handle {sas_event:?}"))?;
     let opts = ServeOptions::parse(rest)?;
     check_session_host_options(&opts)?;
     Ok(SessionHost {
         pipe: pipe.clone(),
-        sas_event,
+        sas_event: parse_handle(sas_event)?,
+        link: parse_handle(link)?,
         opts,
     })
+}
+
+/// Parses what follows `service network-host`: the link and the options.
+pub fn parse_network_host_args(args: &[String]) -> anyhow::Result<(usize, ServeOptions)> {
+    let [link, rest @ ..] = args else {
+        bail!("network-host needs a handle");
+    };
+    let link = parse_handle(link)?;
+    if link == 0 {
+        bail!("network-host needs its link to the session host");
+    }
+    let opts = ServeOptions::parse(rest)?;
+    check_session_host_options(&opts)?;
+    Ok((link, opts))
+}
+
+fn parse_handle(text: &str) -> anyhow::Result<usize> {
+    text.parse()
+        .map_err(|_| anyhow::anyhow!("bad handle {text:?}"))
+}
+
+/// Files the network host keeps, which the service kept in its own data
+/// folder before the host was split: moved into the network host's folder.
+pub const NETWORK_FILES: &[&str] = &[
+    "tls-cert.pem",
+    "tls-key.pem",
+    "tls-cert.json",
+    "devices.json",
+    "pairing.json",
+    "acme-account.json",
+    "acme-cert.pem",
+    "acme-key.pem",
+    CERT_COPY,
+    KEY_COPY,
+    TOKEN_COPY,
+];
+
+/// The service's copies of `--cert`, `--key` and `--duckdns-token-file`.
+pub const CERT_COPY: &str = "service-cert.pem";
+pub const KEY_COPY: &str = "service-key.pem";
+pub const TOKEN_COPY: &str = "service-duckdns-token.txt";
+
+/// Points the file flags that name a file directly in `from` (an install
+/// from before the split) at the same file in `to`.
+pub fn relocate_files(args: &[String], from: &Path, to: &Path) -> Vec<String> {
+    let mut out = args.to_vec();
+    for i in 1..out.len() {
+        if !matches!(
+            out[i - 1].as_str(),
+            "--cert" | "--key" | "--duckdns-token-file"
+        ) {
+            continue;
+        }
+        let path = Path::new(&out[i]);
+        if let (Some(parent), Some(name)) = (path.parent(), path.file_name()) {
+            if parent == from {
+                out[i] = to.join(name).display().to_string();
+            }
+        }
+    }
+    out
 }
 
 pub fn valid_pipe_name(name: &str) -> bool {
@@ -307,7 +396,29 @@ mod imp {
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?
-            .block_on(super::control::serve(host.pipe, host.opts))
+            .block_on(super::control::serve(host.pipe, host.link, host.opts))
+    }
+
+    pub fn network_host(args: &[String]) -> anyhow::Result<()> {
+        harden_dll_search();
+        // The point of this process is that it isn't SYSTEM.
+        if ws_desktop::running_as_system() {
+            anyhow::bail!("network-host must not run as SYSTEM");
+        }
+        let (link, opts) = super::parse_network_host_args(args)?;
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?
+            .block_on(async move {
+                // SAFETY: the service handed this process the pipe's client
+                // end, overlapped, and nothing else here owns it.
+                let link = unsafe {
+                    tokio::net::windows::named_pipe::NamedPipeClient::from_raw_handle(
+                        link as *mut std::ffi::c_void,
+                    )
+                }?;
+                crate::split::serve_network(opts, link).await
+            })
     }
 }
 
@@ -333,6 +444,9 @@ mod imp {
         windows_only()
     }
     pub fn session_host(_: &[String]) -> anyhow::Result<()> {
+        windows_only()
+    }
+    pub fn network_host(_: &[String]) -> anyhow::Result<()> {
         windows_only()
     }
 }
@@ -366,26 +480,56 @@ mod tests {
         let pipe = random_pipe_name().unwrap();
         assert!(valid_pipe_name(&pipe));
         let dir = Path::new(r"C:\Windows\System32\config\systemprofile\App Data\web-stream");
-        let built = session_host_args(
-            &pipe,
-            0x1a4,
-            &args(&["--port", "9000", "--codec", "av1"]),
-            dir,
-        );
+        let serve = args(&["--port", "9000", "--codec", "av1"]);
+        let built = session_host_args(&pipe, 0x1a4, 0x2b8, &serve, dir);
         assert_eq!(&built[..2], ["service", "session-host"]);
         let host = parse_session_host_args(&built[2..]).unwrap();
         assert_eq!(host.pipe, pipe);
         assert_eq!(host.sas_event, 0x1a4);
+        assert_eq!(host.link, 0x2b8);
         assert_eq!(host.opts.port, 9000);
         assert_eq!(host.opts.data_dir, dir);
-        assert!(parse_session_host_args(&args(&[&pipe, "x"])).is_err());
+        assert!(parse_session_host_args(&args(&[&pipe, "x", "0"])).is_err());
+        assert!(parse_session_host_args(&args(&[&pipe, "0"])).is_err());
 
         assert!(parse_session_host_args(&[]).is_err());
         let squat = format!("{PIPE_PREFIX}x");
-        assert!(parse_session_host_args(&args(&[&squat])).is_err());
+        assert!(parse_session_host_args(&args(&[&squat, "0", "0"])).is_err());
         assert!(!valid_pipe_name(r"\\.\pipe\other"));
-        let uploads = session_host_args(&pipe, 0, &args(&["--allow-upload"]), dir);
+        let uploads = session_host_args(&pipe, 0, 0, &args(&["--allow-upload"]), dir);
         assert!(parse_session_host_args(&uploads[2..]).is_err());
+
+        let built = network_host_args(0x2bc, &serve, dir);
+        assert_eq!(&built[..2], ["service", "network-host"]);
+        let (link, opts) = parse_network_host_args(&built[2..]).unwrap();
+        assert_eq!(link, 0x2bc);
+        assert_eq!((opts.port, &*opts.data_dir), (9000, dir));
+        assert!(parse_network_host_args(&network_host_args(0, &serve, dir)[2..]).is_err());
+        let uploads = network_host_args(1, &args(&["--allow-upload"]), dir);
+        assert!(parse_network_host_args(&uploads[2..]).is_err());
+    }
+
+    #[test]
+    fn files_from_before_the_split_are_found_in_the_network_folder() {
+        let old = Path::new("data");
+        let new = old.join("network");
+        let other = Path::new("keys").join("k.pem");
+        let in_old = |name| old.join(name).display().to_string();
+        let a = vec![
+            "--cert".into(),
+            in_old(CERT_COPY),
+            "--key".into(),
+            other.display().to_string(),
+            "--duckdns-token-file".into(),
+            in_old(TOKEN_COPY),
+            "--web-root".into(),
+            in_old("x"),
+        ];
+        let moved = relocate_files(&a, old, &new);
+        assert_eq!(moved[1], new.join(CERT_COPY).display().to_string());
+        assert_eq!(moved[3], other.display().to_string());
+        assert_eq!(moved[5], new.join(TOKEN_COPY).display().to_string());
+        assert_eq!(moved[7], in_old("x"));
     }
 
     #[test]

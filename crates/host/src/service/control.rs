@@ -37,8 +37,10 @@ const ERROR_FILE_NOT_FOUND: i32 = 2;
 const ERROR_PIPE_BUSY: i32 = 231;
 
 /// Runs the host with its console on the pipe, until it is told to quit.
-/// `pipe` is the name the service picked (see `PIPE_PREFIX`).
-pub async fn serve(pipe: String, opts: ServeOptions) -> anyhow::Result<()> {
+/// `pipe` is the name the service picked (see `PIPE_PREFIX`). With a `link`
+/// (an inherited pipe handle; 0 for none) this is the media side, and the
+/// network host at the other end serves the browser.
+pub async fn serve(pipe: String, link: usize, opts: ServeOptions) -> anyhow::Result<()> {
     let (commands, commands_rx) = mpsc::channel(8);
     let (events_tx, mut events) = mpsc::unbounded_channel();
     let (lines, _) = broadcast::channel::<String>(256);
@@ -65,7 +67,18 @@ pub async fn serve(pipe: String, opts: ServeOptions) -> anyhow::Result<()> {
             let _ = lines.send(text);
         }
     });
-    serve::serve(opts, commands_rx, events_tx).await
+    if link == 0 {
+        tracing::warn!(
+            "running the whole host as SYSTEM: the network host could not be started \
+             (service.log says why)"
+        );
+        return serve::serve(opts, commands_rx, events_tx).await;
+    }
+    // SAFETY: the service handed this process the pipe's server end,
+    // overlapped and already connected, and nothing else here owns it.
+    let link = unsafe { NamedPipeServer::from_raw_handle(link as *mut c_void) }
+        .context("the link to the network host")?;
+    crate::split::serve_media(opts, link, commands_rx, events_tx).await
 }
 
 fn create(name: &str, first: bool) -> std::io::Result<NamedPipeServer> {

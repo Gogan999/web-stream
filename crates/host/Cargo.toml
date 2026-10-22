@@ -16,11 +16,16 @@ ws-audio.workspace = true
 ws-signaling = { path = "../signaling" }
 anyhow.workspace = true
 getrandom = "0.3"
+serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "signal", "io-util", "net"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 ws-desktop.workspace = true
+
+[dev-dependencies]
+# The test host's --split.
+tokio = { workspace = true, features = ["process"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.8"

@@ -344,6 +344,10 @@ The service then keeps a host running on the PC's screen, as SYSTEM, from
 the sign-in screen on: before anyone signs in, while the PC is locked,
 after signing out, and when switching users. It follows Windows onto the
 UAC and lock screens and types into programs running as administrator.
+The host runs as two processes: the part on the screen (capture, encoding,
+input, audio) as SYSTEM, and the part that talks to the network (the web
+server, pairing, the peer connection) as LocalService with no privileges
+(see the security notes below).
 
 - **The tray app stops its own host** when installing, and doesn't start it
   while the service is installed: they use the same ports. It keeps running
@@ -358,8 +362,9 @@ UAC and lock screens and types into programs running as administrator.
   prompt). By hand: build, then **Update the service** in the tray app.
 - **Logs and data** are in
   `C:\Windows\System32\config\systemprofile\AppData\Local\web-stream`:
-  `host.log` (the host) and `service.log` (the service starting and
-  restarting it).
+  `host.log` (the part on the screen), `network.log` (the network part)
+  and `service.log` (the service starting and restarting them). The
+  certificate and paired browsers are in its `network` folder.
 - **Uninstall** (an administrator prompt) removes the service and the
   Program Files copy, and leaves its data. Click **Start** in the tray app
   to host from it again.
@@ -382,17 +387,29 @@ What this changes for security:
   only an administrator can see it: the service's host is controlled only
   through a pipe that takes an elevated prompt, so a program running as a
   normal user can't open pairing.
-- The host runs as SYSTEM, which is effectively full control of the PC.
-  Its privileges are removed (it can't load drivers, debug other processes
-  or take ownership of files), but it keeps the SYSTEM account itself:
-  anyone who got code running in it through a bug could still write to
-  System32 and the registry, or install a service of their own. Treat a
-  bug in the network-facing host as a full compromise of the PC.
+- Everything that reads what comes off the network (HTTPS and TLS, the
+  signaling socket, the peer connection's DTLS, SRTP and data channels,
+  Let's Encrypt) runs in the network process, as LocalService with every
+  privilege removed but one (it can't impersonate other accounts, which
+  would be a way back to SYSTEM). It can read and write only its own data
+  folder. A bug there gives an attacker that process: they could stream
+  the screen and send input, as a paired browser can, but not write to
+  System32 or the registry or install a service.
+- The part on the screen runs as SYSTEM, which is effectively full control
+  of the PC. Its privileges are removed (it can't load drivers, debug other
+  processes or take ownership of files), but it keeps the SYSTEM account
+  itself. It takes from the network process only what a browser could
+  send (input, control messages, files it asked for), size-limited and
+  checked as before. The browser mic's audio is still decoded there.
+- If the network process can't be started at all (Windows refuses it a
+  logon or a window station), the service runs the whole host as SYSTEM, as
+  before the split, and `service.log` and `host.log` say so. A network
+  process that crashes is restarted, never replaced by a SYSTEM one.
 - What runs as SYSTEM is the copy in Program Files, which only
   administrators can change, never the build folder in your checkout.
 - `--cert` and `--key`, and the DuckDNS token, are copied into the
-  service's data folder when you install, so a user who can write where
-  they came from can't swap them.
+  network process's data folder when you install, so a user who can write
+  where they came from can't swap them.
 - The service picks a new random name for its control pipe each time it
   starts the host and keeps it, with the host's process id, in its data
   folder. The service console connects only if that process

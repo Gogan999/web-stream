@@ -77,99 +77,37 @@ pub async fn serve(
     mut commands: mpsc::Receiver<Command>,
     events: mpsc::UnboundedSender<Event>,
 ) -> anyhow::Result<()> {
-    let mut config = SignalingConfig::new(opts.bind(), opts.data_dir.clone());
-    config.web_root = opts.web_root.clone();
-    config.embedded_web = crate::web::WEB_FILES;
-    config.device_idle_expiry = opts.device_idle_expiry;
-    config.extra_origins = opts.extra_origins.clone();
-    config.tls = match (&opts.cert, &opts.duckdns) {
-        (Some((cert, key)), _) => TlsSource::Files {
-            cert: cert.clone(),
-            key: key.clone(),
-        },
-        (None, Some(duck)) => TlsSource::DuckDns(duckdns(duck)?),
-        (None, None) => TlsSource::SelfSigned {
-            hostnames: opts.hostnames.clone(),
-        },
-    };
-    let (server, signaling_events) = SignalingServer::new(config)
-        .map_err(|e| data_dir_error(e, &opts.data_dir))
-        .context("signaling server")?;
-    let signaling = server.handle();
-    let certificate = server.certificate();
-    if certificate.self_signed && opts.duckdns.is_none() {
-        tracing::info!(
-            "self-signed certificate: browsers warn until it is accepted. For use away from \
-             home, a real one (--duckdns, or --cert/--key) means no warning to click past"
-        );
-    }
-
-    let (transport, transport_events) = Transport::start(TransportConfig {
-        ips: opts.ips.clone(),
-        public_ips: opts.public_ips.clone(),
-        udp_port: opts.port,
-        tcp_port: opts.ice_tcp_port,
-        ..Default::default()
-    })
-    .await
-    .context("transport")?;
-
-    let mut server_task = tokio::spawn(server.serve());
+    let mut net = Network::start(&opts).await?;
     let (media_stop, media_stop_rx) = oneshot::channel();
-    let (codecs_tx, codecs) = watch::channel(None);
-    let (peers_tx, peers) = watch::channel(media::Peer::default());
     let (files, files_rx) = mpsc::channel(8);
+    let transport_events = net.transport_events.take().expect("events not taken yet");
     let media_task = tokio::spawn(media::run(
-        transport.clone(),
+        net.transport.clone(),
         transport_events,
         opts.media.clone(),
-        media::Signaled { codecs, peers },
+        media::Signaled {
+            codecs: net.codecs.clone(),
+            peers: net.peers.clone(),
+        },
         files_rx,
         events.clone(),
         media_stop_rx,
     ));
-    tokio::spawn(forward_notices(signaling_events.notices, events.clone()));
-    let (signaling_stop, signaling_stop_rx) = oneshot::channel();
-    let mut sessions = tokio::spawn(run_signaling(
-        signaling_events.sessions,
-        transport.clone(),
-        codecs_tx,
-        peers_tx,
-        signaling_stop_rx,
-    ));
+    let notices = net.notices.take().expect("notices not taken yet");
+    tokio::spawn(forward_notices(notices, events.clone()));
 
-    let _ = events.send(Event::Started {
-        port: opts.port,
-        ips: if opts.ips.is_empty() {
-            ws_transport::lan_ips()
-        } else {
-            opts.ips.clone()
-        },
-        fingerprint: certificate.fingerprint,
-        self_signed: certificate.self_signed,
-        web_root: opts.web_root.clone(),
-        data_dir: opts.data_dir.clone(),
-    });
+    let _ = events.send(net.started.clone());
     if opts.pair_at_start {
-        open_pairing(&signaling, &events).await;
+        open_pairing(&net.signaling, &events).await;
     }
 
     let result = loop {
         tokio::select! {
-            r = &mut server_task => break match r {
-                Ok(Ok(())) => Err(anyhow::anyhow!("signaling server stopped")),
-                Ok(Err(e)) => Err(e).context("signaling server"),
-                Err(e) => Err(e).context("signaling server"),
-            },
+            r = &mut net.server_task => break server_stopped(r),
             cmd = commands.recv() => match cmd {
-                Some(Command::OpenPairing) => open_pairing(&signaling, &events).await,
-                Some(Command::DropSession) => signaling.drop_session().await,
-                Some(Command::UnpairAll) => {
-                    let _ = events.send(match signaling.revoke_all().await {
-                        Ok(()) => Event::UnpairedAll,
-                        Err(e) => Event::Error(format!("could not remove paired browsers: {e}")),
-                    });
-                }
+                Some(Command::OpenPairing) => open_pairing(&net.signaling, &events).await,
+                Some(Command::DropSession) => net.signaling.drop_session().await,
+                Some(Command::UnpairAll) => unpair_all(&net.signaling, &events).await,
                 Some(Command::ShareFiles(paths)) => {
                     let _ = files.send(FileCommand::Share(paths)).await;
                 }
@@ -181,28 +119,153 @@ pub async fn serve(
         }
     };
 
-    signaling.drop_session().await;
-    // Lets a handed-off browser hear the `bye` over `control`.
-    let _ = signaling_stop.send(());
-    if tokio::time::timeout(Duration::from_secs(1), &mut sessions)
-        .await
-        .is_err()
-    {
-        sessions.abort();
-    }
-    server_task.abort();
-    transport.close();
+    net.close().await;
     let _ = media_stop.send(());
     let _ = media_task.await;
-    // The sockets close on the transport's own thread: wait for it, so a
-    // host started right after can bind the same ports.
-    if tokio::time::timeout(Duration::from_secs(2), transport.shutdown())
-        .await
-        .is_err()
-    {
-        tracing::warn!("transport did not stop in time");
-    }
+    net.shutdown().await;
     result
+}
+
+/// The network-facing half of the host: the signaling server (HTTPS and
+/// the signaling socket) and the transport (the peer connection), with
+/// signaling driving the transport. The Windows service runs it in a
+/// process of its own, with almost no rights ([`crate::split`]).
+pub(crate) struct Network {
+    pub signaling: SignalingHandle,
+    pub server_task: tokio::task::JoinHandle<Result<(), ws_signaling::Error>>,
+    pub transport: Transport,
+    /// Taken by whoever runs the media side.
+    pub transport_events: Option<ws_transport::Events>,
+    pub notices: Option<mpsc::UnboundedReceiver<Notice>>,
+    pub codecs: watch::Receiver<Option<Vec<VideoCodec>>>,
+    pub peers: watch::Receiver<media::Peer>,
+    /// [`Event::Started`], for the front end.
+    pub started: Event,
+    signaling_stop: Option<oneshot::Sender<()>>,
+    sessions: tokio::task::JoinHandle<()>,
+}
+
+impl Network {
+    pub async fn start(opts: &ServeOptions) -> anyhow::Result<Self> {
+        let mut config = SignalingConfig::new(opts.bind(), opts.data_dir.clone());
+        config.web_root = opts.web_root.clone();
+        config.embedded_web = crate::web::WEB_FILES;
+        config.device_idle_expiry = opts.device_idle_expiry;
+        config.extra_origins = opts.extra_origins.clone();
+        config.tls = match (&opts.cert, &opts.duckdns) {
+            (Some((cert, key)), _) => TlsSource::Files {
+                cert: cert.clone(),
+                key: key.clone(),
+            },
+            (None, Some(duck)) => TlsSource::DuckDns(duckdns(duck)?),
+            (None, None) => TlsSource::SelfSigned {
+                hostnames: opts.hostnames.clone(),
+            },
+        };
+        let (server, signaling_events) = SignalingServer::new(config)
+            .map_err(|e| data_dir_error(e, &opts.data_dir))
+            .context("signaling server")?;
+        let signaling = server.handle();
+        let certificate = server.certificate();
+        if certificate.self_signed && opts.duckdns.is_none() {
+            tracing::info!(
+                "self-signed certificate: browsers warn until it is accepted. For use away from \
+                 home, a real one (--duckdns, or --cert/--key) means no warning to click past"
+            );
+        }
+
+        let (transport, transport_events) = Transport::start(TransportConfig {
+            ips: opts.ips.clone(),
+            public_ips: opts.public_ips.clone(),
+            udp_port: opts.port,
+            tcp_port: opts.ice_tcp_port,
+            ..Default::default()
+        })
+        .await
+        .context("transport")?;
+
+        let server_task = tokio::spawn(server.serve());
+        let (codecs_tx, codecs) = watch::channel(None);
+        let (peers_tx, peers) = watch::channel(media::Peer::default());
+        let (signaling_stop, signaling_stop_rx) = oneshot::channel();
+        let sessions = tokio::spawn(run_signaling(
+            signaling_events.sessions,
+            transport.clone(),
+            codecs_tx,
+            peers_tx,
+            signaling_stop_rx,
+        ));
+        let started = Event::Started {
+            port: opts.port,
+            ips: if opts.ips.is_empty() {
+                ws_transport::lan_ips()
+            } else {
+                opts.ips.clone()
+            },
+            fingerprint: certificate.fingerprint,
+            self_signed: certificate.self_signed,
+            web_root: opts.web_root.clone(),
+            data_dir: opts.data_dir.clone(),
+        };
+        Ok(Self {
+            signaling,
+            server_task,
+            transport,
+            transport_events: Some(transport_events),
+            notices: Some(signaling_events.notices),
+            codecs,
+            peers,
+            started,
+            signaling_stop: Some(signaling_stop),
+            sessions,
+        })
+    }
+
+    /// Ends the session (a handed-off browser hears why) and stops
+    /// listening; the transport keeps its sockets until [`Network::shutdown`].
+    pub async fn close(&mut self) {
+        self.signaling.drop_session().await;
+        // Lets a handed-off browser hear the `bye` over `control`.
+        if let Some(stop) = self.signaling_stop.take() {
+            let _ = stop.send(());
+        }
+        if tokio::time::timeout(Duration::from_secs(1), &mut self.sessions)
+            .await
+            .is_err()
+        {
+            self.sessions.abort();
+        }
+        self.server_task.abort();
+        self.transport.close();
+    }
+
+    /// Closes the sockets, on the transport's own thread: waits for it, so
+    /// a host started right after can bind the same ports.
+    pub async fn shutdown(self) {
+        if tokio::time::timeout(Duration::from_secs(2), self.transport.shutdown())
+            .await
+            .is_err()
+        {
+            tracing::warn!("transport did not stop in time");
+        }
+    }
+}
+
+pub(crate) fn server_stopped(
+    r: Result<Result<(), ws_signaling::Error>, tokio::task::JoinError>,
+) -> anyhow::Result<()> {
+    match r {
+        Ok(Ok(())) => Err(anyhow::anyhow!("signaling server stopped")),
+        Ok(Err(e)) => Err(e).context("signaling server"),
+        Err(e) => Err(e).context("signaling server"),
+    }
+}
+
+pub(crate) async fn unpair_all(signaling: &SignalingHandle, events: &mpsc::UnboundedSender<Event>) {
+    let _ = events.send(match signaling.revoke_all().await {
+        Ok(()) => Event::UnpairedAll,
+        Err(e) => Event::Error(format!("could not remove paired browsers: {e}")),
+    });
 }
 
 /// `--duckdns`'s settings, with the token read from its file.
@@ -246,7 +309,10 @@ fn data_dir_error(e: ws_signaling::Error, data_dir: &std::path::Path) -> anyhow:
     ))
 }
 
-async fn open_pairing(signaling: &SignalingHandle, events: &mpsc::UnboundedSender<Event>) {
+pub(crate) async fn open_pairing(
+    signaling: &SignalingHandle,
+    events: &mpsc::UnboundedSender<Event>,
+) {
     let _ = events.send(match signaling.open_pairing().await {
         Ok(()) => Event::PairingOpened,
         Err(e) => Event::Error(format!("could not open pairing: {e}")),

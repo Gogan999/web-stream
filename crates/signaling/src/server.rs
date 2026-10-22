@@ -44,7 +44,7 @@ const PERMISSIONS_POLICY: &str = "microphone=(self), camera=(), geolocation=(), 
                                   usb=(), serial=(), hid=(), display-capture=()";
 
 /// Things the host should show its user.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Notice {
     /// Show this code until it expires or `Paired`/`PairingFailed` arrives.
     PairingCode {

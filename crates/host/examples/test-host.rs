@@ -4,8 +4,12 @@
 //! run the tray app (`ws-host-gui`) instead.
 //!
 //! ```text
-//! cargo run -p ws-host --example test-host -- [serve options, see --help]
+//! cargo run -p ws-host --example test-host -- [--split] [serve options, see --help]
 //! ```
+//!
+//! `--split` (Unix) runs it as the Windows service does: the network side
+//! (signaling, the transport) in a child process, linked to the media side
+//! in this one (see `ws_host::split`).
 
 use std::io::{BufRead, IsTerminal};
 
@@ -31,14 +35,28 @@ fn main() -> anyhow::Result<()> {
         print!("{}", options::USAGE);
         return Ok(());
     }
+    let network_half = args.first().is_some_and(|a| a == NETWORK_HALF);
+    if network_half {
+        args.remove(0);
+    }
+    let split = args.iter().any(|a| a == "--split");
+    args.retain(|a| a != "--split");
     let opts = ServeOptions::parse(&args)?;
-    tokio::runtime::Builder::new_multi_thread()
+    let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
-        .build()?
-        .block_on(run(opts))
+        .build()?;
+    if network_half {
+        return runtime.block_on(split::network_half(opts));
+    }
+    runtime.block_on(run(opts, split.then_some(args)))
 }
 
-async fn run(opts: ServeOptions) -> anyhow::Result<()> {
+/// The child's first argument under `--split`.
+const NETWORK_HALF: &str = "network-half";
+
+/// Runs the host, or with `split` (the serve arguments) its media side,
+/// with the network side in a child process.
+async fn run(opts: ServeOptions, split: Option<Vec<String>>) -> anyhow::Result<()> {
     let (commands, commands_rx) = mpsc::channel(8);
     let (events_tx, events) = mpsc::unbounded_channel();
     tokio::spawn(print_events(events));
@@ -48,7 +66,72 @@ async fn run(opts: ServeOptions) -> anyhow::Result<()> {
             let _ = commands.send(Command::Quit).await;
         }
     });
-    serve::serve(opts, commands_rx, events_tx).await
+    match split {
+        None => serve::serve(opts, commands_rx, events_tx).await,
+        Some(args) => split::media_half(opts, &args, commands_rx, events_tx).await,
+    }
+}
+
+#[cfg(unix)]
+mod split {
+    use std::os::fd::{FromRawFd, OwnedFd};
+    use std::os::unix::net::UnixStream;
+
+    use tokio::sync::mpsc;
+    use ws_host::options::ServeOptions;
+    use ws_host::serve::{Command, Event};
+
+    /// Starts the network side as a child, its stdin one end of a socket
+    /// pair, and serves the media side on the other.
+    pub async fn media_half(
+        opts: ServeOptions,
+        args: &[String],
+        commands: mpsc::Receiver<Command>,
+        events: mpsc::UnboundedSender<Event>,
+    ) -> anyhow::Result<()> {
+        let (ours, theirs) = UnixStream::pair()?;
+        let mut child = tokio::process::Command::new(std::env::current_exe()?)
+            .arg(super::NETWORK_HALF)
+            .args(args)
+            .stdin(OwnedFd::from(theirs))
+            .kill_on_drop(true)
+            .spawn()?;
+        ours.set_nonblocking(true)?;
+        let link = tokio::net::UnixStream::from_std(ours)?;
+        let result = ws_host::split::serve_media(opts, link, commands, events).await;
+        // It stops once the link closes.
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await;
+        result
+    }
+
+    pub async fn network_half(opts: ServeOptions) -> anyhow::Result<()> {
+        // SAFETY: stdin is the socket the parent handed over, and nothing
+        // else in this process uses it.
+        let link = unsafe { UnixStream::from_raw_fd(0) };
+        link.set_nonblocking(true)?;
+        let link = tokio::net::UnixStream::from_std(link)?;
+        ws_host::split::serve_network(opts, link).await
+    }
+}
+
+#[cfg(not(unix))]
+mod split {
+    use tokio::sync::mpsc;
+    use ws_host::options::ServeOptions;
+    use ws_host::serve::{Command, Event};
+
+    pub async fn media_half(
+        _: ServeOptions,
+        _: &[String],
+        _: mpsc::Receiver<Command>,
+        _: mpsc::UnboundedSender<Event>,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("--split needs Unix; the Windows service splits the host itself")
+    }
+
+    pub async fn network_half(_: ServeOptions) -> anyhow::Result<()> {
+        anyhow::bail!("--split needs Unix")
+    }
 }
 
 async fn print_events(mut events: mpsc::UnboundedReceiver<Event>) {

@@ -7,6 +7,7 @@
 //! done in place (`block_in_place`), as are the thread joins when a pipeline
 //! stops; events queue in the transport meanwhile.
 
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -19,7 +20,9 @@ use ws_proto::{
     ClientControl, DisplayId, DisplayInfo, EncodedFrame, HostControl, UpdateState, VideoCodec,
     VideoConfig, VideoStats, channels,
 };
-use ws_transport::{Transport, TransportConfig, TransportEvent, TransportStats};
+use ws_transport::{
+    Events, Transport, TransportConfig, TransportEvent, TransportStats, VideoSignal,
+};
 
 use crate::cursor::{CursorSession, CursorTarget};
 use crate::files::{FileCommand, FileMsg, FileSession};
@@ -31,9 +34,9 @@ use crate::serve::Event;
 use crate::update;
 use crate::uploads::{self, UploadMsg, UploadSession};
 
-/// Encoded frames waiting for the transport. The transport keeps only the
-/// newest frame anyway; a full channel makes the encoder drop and send a
-/// keyframe next.
+/// Encoded frames waiting for the hop to the transport (which queues a few
+/// more). A full channel makes the encoder drop the frame and skip over it
+/// next, or send a keyframe.
 const FRAME_QUEUE: usize = 1;
 /// About 40 ms of 10 ms Opus packets.
 const AUDIO_QUEUE: usize = 4;
@@ -78,7 +81,7 @@ pub struct Signaled {
 
 pub async fn run(
     transport: Transport,
-    mut events: mpsc::Receiver<TransportEvent>,
+    mut events: Events,
     opts: MediaOptions,
     signaled: Signaled,
     mut file_commands: mpsc::Receiver<FileCommand>,
@@ -119,7 +122,7 @@ pub async fn run(
         peers: peers.clone(),
         transitions: 0,
         sent: Arc::default(),
-        keyframe_requests: 0,
+        keyframe_requests: Arc::default(),
         changed_modes: ChangedModes::default(),
         mode_busy: false,
         last_mode_change: None,
@@ -285,7 +288,9 @@ struct Media {
     live: Option<Live>,
     /// Frames handed to the transport since the last stats report.
     sent: Arc<Mutex<SentFrames>>,
-    keyframe_requests: u32,
+    /// Keyframe requests passed to the encoder since the last stats
+    /// report; counted by the transport's video sink too.
+    keyframe_requests: Arc<AtomicU32>,
     /// Displays whose resolution this session changed, to put back.
     changed_modes: ChangedModes,
     /// A resolution change or restore is running.
@@ -327,6 +332,8 @@ struct Live {
 struct Video {
     pipeline: VideoPipeline,
     generation: u64,
+    /// What it was started with (its size changes with [`Media::rebuild`]).
+    config: VideoConfig,
 }
 
 impl Media {
@@ -343,7 +350,7 @@ impl Media {
             TransportEvent::KeyframeNeeded => {
                 ws_diag::diag!("media_event", "keyframe_needed");
                 if let Some(v) = self.live.as_ref().and_then(|l| l.video.as_ref()) {
-                    self.keyframe_requests += 1;
+                    self.keyframe_requests.fetch_add(1, Ordering::Relaxed);
                     v.pipeline.request_keyframe();
                 }
             }
@@ -504,7 +511,8 @@ impl Media {
         self.rebuild_pending = false;
         self.autoscale.reset();
         self.session += 1;
-        self.keyframe_requests = 0;
+        self.keyframe_requests.store(0, Ordering::Relaxed);
+        self.transport.clear_video_sink();
         self.cursor_target.send_replace(CursorTarget::default());
         // The next browser turns the mic on if it wants it, and sets its
         // own audio quality.
@@ -585,6 +593,7 @@ impl Media {
             return Ok(());
         };
         if let Some(video) = live.video.take() {
+            self.transport.clear_video_sink();
             drop_blocking(video);
         }
         let displays = ws_capture::list_displays()?;
@@ -614,8 +623,10 @@ impl Media {
         };
         let (tx, rx) = mpsc::channel(FRAME_QUEUE);
         let backlog = self.transport.send_backlog();
+        // Room to grow back to the browser's size without a new encoder.
+        let max = (self.config.width, self.config.height);
         let pipeline = match block_in_place(|| {
-            VideoPipeline::start(info.id, config.clone(), tx.clone(), backlog.clone())
+            VideoPipeline::start(info.id, config.clone(), max, tx.clone(), backlog.clone())
         }) {
             Ok(p) => p,
             // The GPU may not encode AV1 or HEVC: stream H.264 rather than
@@ -632,9 +643,10 @@ impl Media {
                 let msg = format!("this PC can't encode {refused:?} ({e}); streaming H264");
                 config.codec = VideoCodec::H264;
                 // H.264 failing too means the trouble isn't the codec.
-                let pipeline =
-                    block_in_place(|| VideoPipeline::start(info.id, config.clone(), tx, backlog))
-                        .map_err(|_| e)?;
+                let pipeline = block_in_place(|| {
+                    VideoPipeline::start(info.id, config.clone(), max, tx, backlog)
+                })
+                .map_err(|_| e)?;
                 tracing::warn!("{msg}");
                 self.error(msg);
                 self.refused_codecs.push(refused);
@@ -645,6 +657,20 @@ impl Media {
         let Some(live) = &mut self.live else {
             return Ok(());
         };
+        // Keyframe requests and repairs go from the transport's run loop
+        // straight to the capture thread, never waiting behind this loop
+        // (which may be busy rebuilding a pipeline). Set before the first
+        // frame reaches the transport.
+        let control = pipeline.control();
+        let requests = self.keyframe_requests.clone();
+        self.transport
+            .set_video_sink(Box::new(move |signal| match signal {
+                VideoSignal::Keyframe => {
+                    requests.fetch_add(1, Ordering::Relaxed);
+                    control.request_keyframe();
+                }
+                VideoSignal::FramesLost(from) => control.recover_from(from),
+            }));
         self.generation += 1;
         tokio::spawn(forward_video(
             rx,
@@ -656,6 +682,7 @@ impl Media {
         live.video = Some(Video {
             pipeline,
             generation: self.generation,
+            config: config.clone(),
         });
         live.bitrate_kbps = start_kbps;
         self.last_restart = Some(Instant::now());
@@ -707,7 +734,7 @@ impl Media {
         if live.video.is_none() || !self.control_open {
             return;
         }
-        let keyframe_requests = std::mem::take(&mut self.keyframe_requests);
+        let keyframe_requests = self.keyframe_requests.swap(0, Ordering::Relaxed);
         // Transport stats arrive once a second.
         self.reply(HostControl::VideoStats(VideoStats {
             encoder_kbps: live.bitrate_kbps,
@@ -825,7 +852,7 @@ impl Media {
             ClientControl::RequestKeyframe => {
                 ws_diag::diag!("media_event", "browser_control_keyframe_request");
                 if let Some(v) = self.live.as_ref().and_then(|l| l.video.as_ref()) {
-                    self.keyframe_requests += 1;
+                    self.keyframe_requests.fetch_add(1, Ordering::Relaxed);
                     v.pipeline.request_keyframe();
                 }
             }
@@ -1174,12 +1201,56 @@ impl Media {
 
     /// Restarts the pipeline with the current config.
     fn rebuild(&mut self) {
+        if self.resize_in_place() {
+            self.display_changed();
+            return;
+        }
         if let Err(e) = self.start_video() {
             tracing::error!("video: {e}");
             self.error(format!("could not apply video settings: {e}"));
             return;
         }
         self.display_changed();
+    }
+
+    /// Applies a change of stream size alone (a new size from the browser,
+    /// or an autoscale step) to the running pipeline without restarting it:
+    /// no new capture thread, device or encoder session, so no stall, and
+    /// this loop isn't held up. False if anything else changed too, or the
+    /// pipeline couldn't resize; the caller restarts it.
+    fn resize_in_place(&mut self) -> bool {
+        let codec = self.streaming_codec();
+        let (width, height) =
+            scale::size(self.config.width, self.config.height, self.autoscale.step());
+        let Some(live) = &mut self.live else {
+            return false;
+        };
+        let Some(video) = &mut live.video else {
+            return false;
+        };
+        let ignoring_size = |c: &VideoConfig| VideoConfig {
+            width: 0,
+            height: 0,
+            bitrate_kbps: 0,
+            ..c.clone()
+        };
+        let wanted = VideoConfig {
+            codec: codec.unwrap_or(self.config.codec),
+            ..self.config.clone()
+        };
+        if codec.is_none() || ignoring_size(&wanted) != ignoring_size(&video.config) {
+            return false;
+        }
+        if let Err(e) = block_in_place(|| video.pipeline.resize(width, height)) {
+            tracing::warn!("resize to {width}x{height} failed: {e}; restarting video");
+            return false;
+        }
+        video.config.width = width;
+        video.config.height = height;
+        self.last_restart = Some(Instant::now());
+        tracing::info!(width, height, "stream resized");
+        ws_diag::diag!("streaming", "resized={width}x{height}");
+        true
     }
 
     fn select_display(&mut self, id: DisplayId) {

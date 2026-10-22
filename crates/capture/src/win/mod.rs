@@ -23,7 +23,7 @@ use windows::core::Interface;
 use ws_proto::DisplayInfo;
 
 pub(crate) use mode::{restore_display_mode, set_display_mode};
-pub(crate) use pipeline::PipelineHandle;
+pub(crate) use pipeline::{Control, PipelineHandle};
 
 use crate::{CaptureError, Result};
 

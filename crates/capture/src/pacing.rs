@@ -174,6 +174,60 @@ impl Backpressure {
     }
 }
 
+/// Least time between two bitrate changes to the encoder. The bandwidth
+/// estimate moves several times a second, and every change is an
+/// `nvEncReconfigureEncoder` on the capture thread (342 in one logged run).
+pub(crate) const BITRATE_MIN_GAP: Duration = Duration::from_millis(250);
+/// A cut at least this deep goes through at once: an encoder above the send
+/// rate backs the queue up, and frames then go out late.
+pub(crate) const BITRATE_URGENT_CUT: f64 = 0.85;
+
+/// Coalesces bitrate changes so the encoder is reconfigured at most every
+/// [`BITRATE_MIN_GAP`], except for a deep cut. Only the newest request
+/// counts.
+#[derive(Debug)]
+pub(crate) struct BitrateGate {
+    current: u32,
+    pending: Option<u32>,
+    last_change: Option<Instant>,
+}
+
+impl BitrateGate {
+    pub(crate) fn new(kbps: u32) -> Self {
+        Self {
+            current: kbps,
+            pending: None,
+            last_change: None,
+        }
+    }
+
+    pub(crate) fn request(&mut self, kbps: u32) {
+        self.pending = (kbps != self.current).then_some(kbps);
+    }
+
+    /// The bitrate to change to with the next frame, if one is due.
+    pub(crate) fn take_due(&mut self, now: Instant) -> Option<u32> {
+        let kbps = self.pending?;
+        let urgent = f64::from(kbps) <= f64::from(self.current) * BITRATE_URGENT_CUT;
+        let rested = self
+            .last_change
+            .is_none_or(|t| now.saturating_duration_since(t) >= BITRATE_MIN_GAP);
+        (urgent || rested).then(|| self.pending.take()).flatten()
+    }
+
+    /// Any waiting change, due or not: the encoder is being reconfigured
+    /// anyway.
+    pub(crate) fn take_now(&mut self) -> Option<u32> {
+        self.pending.take()
+    }
+
+    /// The encoder now runs at `kbps`.
+    pub(crate) fn applied(&mut self, now: Instant, kbps: u32) {
+        self.current = kbps;
+        self.last_change = Some(now);
+    }
+}
+
 /// What the capture thread should encode next.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct EncodeJob {
@@ -568,5 +622,31 @@ mod scheduler_tests {
         let t1 = t0 + Duration::from_secs(1);
         s.new_image(t1);
         assert!(s.poll(t1).unwrap().idr);
+    }
+
+    #[test]
+    fn bitrate_changes_are_spaced_but_deep_cuts_are_not() {
+        let t0 = Instant::now();
+        let mut g = BitrateGate::new(10_000);
+        g.request(11_000);
+        assert_eq!(g.take_due(t0), Some(11_000));
+        g.applied(t0, 11_000);
+        // Too soon, and only the newest request counts.
+        g.request(12_000);
+        g.request(12_500);
+        assert_eq!(g.take_due(t0 + Duration::from_millis(100)), None);
+        assert_eq!(g.take_due(t0 + BITRATE_MIN_GAP), Some(12_500));
+        g.applied(t0 + BITRATE_MIN_GAP, 12_500);
+        // A deep cut goes at once.
+        let t1 = t0 + BITRATE_MIN_GAP + Duration::from_millis(10);
+        g.request(9_000);
+        assert_eq!(g.take_due(t1), Some(9_000));
+        g.applied(t1, 9_000);
+        // Asking for what it already runs at is nothing to do.
+        g.request(9_000);
+        assert_eq!(g.take_due(t1 + Duration::from_secs(1)), None);
+        // A keyframe takes whatever waits.
+        g.request(9_500);
+        assert_eq!(g.take_now(), Some(9_500));
     }
 }

@@ -43,21 +43,24 @@ test('a phone held upright is fitted as it will be turned', () => {
 
 test('video config from settings', () => {
   const c = videoConfig({ ...DEFAULTS }, { screen: { width: 1920, height: 1080 }, display: { width: 1920, height: 1080 }, codec: 'av1' });
-  assert.deepEqual(c, { codec: 'av1', width: 1920, height: 1080, fps: 60, bitrateKbps: 20000, quality: 'balanced', keyframeScale: 2, recoverDrops: true });
+  assert.deepEqual(c, { codec: 'av1', width: 1920, height: 1080, fps: 60, bitrateKbps: 20000, quality: 'balanced', keyframeScale: 2, recoverDrops: true, minScalePercent: 0 });
   const fixed = videoConfig({ ...DEFAULTS, bitrate: '50000', quality: 'clarity', fps: '120' }, { screen: { width: 1920, height: 1080 }, display: null });
   assert.equal(fixed.bitrateKbps, 50000);
   assert.equal(fixed.fps, 120);
   assert.equal(fixed.quality, 'clarity');
   assert.ok(sameConfig(c, { ...c }));
   // A host that doesn't send quality or the keyframe fields is on their defaults.
-  const { quality, keyframeScale, recoverDrops, ...old } = c;
+  const { quality, keyframeScale, recoverDrops, minScalePercent, ...old } = c;
   assert.ok(sameConfig(c, old));
   assert.ok(!sameConfig(c, { ...c, fps: 30 }));
   assert.ok(!sameConfig(c, { ...c, keyframeScale: 4 }));
   assert.ok(!sameConfig({ ...c, recoverDrops: false }, old));
+  assert.ok(!sameConfig({ ...c, minScalePercent: 100 }, old));
   const sharp = videoConfig({ ...DEFAULTS, keyframeScale: 4, recoverDrops: false }, { screen: { width: 1920, height: 1080 }, display: null });
   assert.equal(sharp.keyframeScale, 4);
   assert.equal(sharp.recoverDrops, false);
+  // Auto resolution off: the host never shrinks the stream.
+  assert.equal(videoConfig({ ...DEFAULTS, minScale: 100 }, { screen: { width: 1920, height: 1080 }, display: null }).minScalePercent, 100);
 });
 
 test('settings survive broken storage', () => {
@@ -76,7 +79,7 @@ test('settings survive broken storage', () => {
 });
 
 test('junk in storage falls back field by field', () => {
-  const map = new Map([['ws-stream-settings', JSON.stringify({ bitrate: 'abc', resolution: 'foo', fps: 59.5, quality: 'max', keyframeScale: 9, recoverDrops: 'no', matchHost: 'yes', mic: 1 })]]);
+  const map = new Map([['ws-stream-settings', JSON.stringify({ bitrate: 'abc', resolution: 'foo', fps: 59.5, quality: 'max', keyframeScale: 9, recoverDrops: 'no', minScale: 33, matchHost: 'yes', mic: 1 })]]);
   const mem = { getItem: (k) => map.get(k) ?? null, setItem: (k, v) => map.set(k, v) };
   assert.deepEqual(load(mem), { ...DEFAULTS });
   map.set('ws-stream-settings', JSON.stringify({ bitrate: '999999', fps: '120', quality: 'clarity' }));

@@ -376,7 +376,9 @@ impl Media {
             }
             TransportEvent::Stats(s) => {
                 tracing::debug!(?s, "transport stats");
-                self.report_stats(&s);
+                let sent = std::mem::take(&mut *self.sent.lock().expect("sent stats lock"));
+                self.check_scale(&s, &sent);
+                self.report_stats(&s, sent);
             }
             TransportEvent::ChannelOpen(c) => {
                 tracing::debug!(channel = c, "channel open");
@@ -700,12 +702,11 @@ impl Media {
     }
 
     /// Tells the browser how the host side of the stream is doing.
-    fn report_stats(&mut self, s: &TransportStats) {
+    fn report_stats(&mut self, s: &TransportStats, sent: SentFrames) {
         let Some(live) = &self.live else { return };
         if live.video.is_none() || !self.control_open {
             return;
         }
-        let sent = std::mem::take(&mut *self.sent.lock().expect("sent stats lock"));
         let keyframe_requests = std::mem::take(&mut self.keyframe_requests);
         // Transport stats arrive once a second.
         self.reply(HostControl::VideoStats(VideoStats {
@@ -732,31 +733,52 @@ impl Media {
     fn target_bitrate(&mut self, bps: u64) {
         self.last_bwe = Some(bps);
         self.apply_bitrate(false);
-        self.check_scale();
     }
 
     /// Restarts the pipeline at another size when the bitrate has been too
-    /// low (or plenty) for the current one for a while.
-    fn check_scale(&mut self) {
+    /// low (or plenty) for the current one for a while. Runs on the
+    /// transport's stats, once a second.
+    fn check_scale(&mut self, s: &TransportStats, sent: &SentFrames) {
         if !self.live.as_ref().is_some_and(|l| l.video.is_some()) {
             return;
         }
-        let kbps = self.start_kbps();
-        let c = &self.config;
-        let Some(step) = self
-            .autoscale
-            .update(Instant::now(), kbps, c.width, c.height, c.fps)
-        else {
-            return;
+        let load = scale::Load {
+            kbps: self.start_kbps(),
+            sent_kbps: (sent.bytes * 8 / 1000) as u32,
+            dropped: s.trouble.late_frames + s.trouble.lost_frames + s.trouble.send_drops > 0,
         };
+        let c = &self.config;
+        let step = self.autoscale.update(
+            Instant::now(),
+            load,
+            c.width,
+            c.height,
+            c.fps,
+            c.min_scale_percent,
+        );
+        ws_diag::diag!(
+            "autoscale_tick",
+            "step={} kbps={} sent_kbps={} dropped={}",
+            self.autoscale.step(),
+            load.kbps,
+            load.sent_kbps,
+            load.dropped
+        );
+        let Some(step) = step else { return };
         let (width, height) = scale::size(c.width, c.height, step);
         tracing::info!(
-            kbps,
+            kbps = load.kbps,
+            sent_kbps = load.sent_kbps,
             width,
             height,
             "bitrate changed; encoding at a new size"
         );
-        ws_diag::diag!("autoscale", "step={step} size={width}x{height} kbps={kbps}");
+        ws_diag::diag!(
+            "autoscale",
+            "step={step} size={width}x{height} kbps={} sent_kbps={}",
+            load.kbps,
+            load.sent_kbps
+        );
         self.request_rebuild();
     }
 
@@ -1096,22 +1118,34 @@ impl Media {
         }
         let same_but_bitrate = VideoConfig {
             bitrate_kbps: self.config.bitrate_kbps,
+            min_scale_percent: self.config.min_scale_percent,
             ..config.clone()
         } == self.config;
         let video_running = self.live.as_ref().is_some_and(|l| l.video.is_some());
         if same_but_bitrate || !video_running {
-            // Nothing to rebuild: the bitrate changes in place, and anything
-            // else applies when the pipeline next starts.
+            // Nothing to rebuild: the bitrate changes in place, a lower
+            // scale floor waits for the next step, and anything else applies
+            // when the pipeline next starts.
             let bitrate_changed = config.bitrate_kbps != self.config.bitrate_kbps;
             self.config = config;
             if bitrate_changed {
                 self.set_ceiling();
                 self.apply_bitrate(true);
             }
+            let c = &self.config;
+            let above_floor =
+                self.autoscale
+                    .limit(Instant::now(), c.width, c.height, c.min_scale_percent);
+            if above_floor.is_some() && video_running {
+                self.request_rebuild();
+            }
             self.display_changed();
             return;
         }
         self.config = config;
+        let c = &self.config;
+        self.autoscale
+            .limit(Instant::now(), c.width, c.height, c.min_scale_percent);
         self.set_ceiling();
         self.request_rebuild();
     }

@@ -8,7 +8,8 @@ when off. Everything lives in `crates/diag` (host) and `web/js/diag.js`
 
 Host, any of:
 
-- Console host: `$env:WS_DIAG = 1; .\target\release\ws-host.exe --pair`
+- From a terminal: `$env:WS_DIAG = 1; .\target\release\ws-host-gui.exe`
+  (quit the running tray app first)
 - Tray app or the web-stream service: create an empty file `ws-diag.on` next
   to the exe that runs the stream (`target\release\` for the tray app built by
   `update.ps1`, `C:\Program Files\web-stream\` for the service), then restart

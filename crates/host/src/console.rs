@@ -1,35 +1,11 @@
-//! `ws-host serve`: the host with a small console for the host user.
+//! The host's events as lines of text and typed commands, for the
+//! service's control pipe (and the test host in `examples`).
 
-use std::io::BufRead;
-
-use tokio::sync::mpsc;
-use ws_host::options::ServeOptions;
-use ws_host::serve::{self, Command, Event, FileEvent, Notice};
+use crate::serve::{Command, Event, FileEvent, Notice};
 
 pub const CONSOLE_HELP: &str = "\
 commands: pair (let a browser pair for two minutes), unpair-all, drop (end the session),
           send <path> (offer a file to the connected browser), quit";
-
-pub async fn run(opts: ServeOptions) -> anyhow::Result<()> {
-    let (commands, commands_rx) = mpsc::channel(8);
-    let (events_tx, events) = mpsc::unbounded_channel();
-    tokio::spawn(print_events(events));
-    console(commands.clone());
-    tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            let _ = commands.send(Command::Quit).await;
-        }
-    });
-    serve::serve(opts, commands_rx, events_tx).await
-}
-
-async fn print_events(mut events: mpsc::UnboundedReceiver<Event>) {
-    while let Some(e) = events.recv().await {
-        if let Some(text) = describe(e) {
-            println!("{text}");
-        }
-    }
-}
 
 /// An event as the host user reads it; `None` for those not worth a line.
 pub fn describe(e: Event) -> Option<String> {
@@ -127,31 +103,6 @@ pub fn parse_line(line: &str) -> Line {
         "" => return Line::Empty,
         _ => return Line::Help,
     })
-}
-
-/// Reads commands typed on stdin. A thread, since tokio's stdin would block
-/// shutdown. When stdin closes (run without a console) the host keeps
-/// serving: `commands` lives on in the ctrl-c task.
-fn console(commands: mpsc::Sender<Command>) {
-    std::thread::Builder::new()
-        .name("ws-console".into())
-        .spawn(move || {
-            for line in std::io::stdin().lock().lines() {
-                let Ok(line) = line else { break };
-                let cmd = match parse_line(&line) {
-                    Line::Command(cmd) => cmd,
-                    Line::Empty => continue,
-                    Line::Help => {
-                        println!("{CONSOLE_HELP}");
-                        continue;
-                    }
-                };
-                if commands.blocking_send(cmd).is_err() {
-                    break;
-                }
-            }
-        })
-        .expect("spawn console thread");
 }
 
 #[cfg(test)]

@@ -1,37 +1,45 @@
 //! Updating and restarting the host from the browser
 //! (`--allow-remote-update`): runs `scripts\update.ps1` from the checkout
-//! the running host was built in. The script pulls `main`, builds beside
-//! the running host and restarts the tray app once the build succeeded, so
-//! the browser drops for a few seconds and reconnects to the new build.
+//! the running host was built in. The script pulls `main` and builds beside
+//! the running host (`-FromHost`); once the build succeeded it exits with
+//! [`RESTART_EXIT`] and the tray app restarts itself on the new build, so
+//! the browser drops for a few seconds and reconnects. The script never
+//! stops or starts the tray app itself: it is the tray app's child, and
+//! the program that restarts the host must not be one the restart kills.
 //!
-//! Only the tray app can be restarted by the script, so it says so with
-//! [`enable`]; the console host and the service answer with an error.
-//! The browser chooses nothing: no flags, no branch, no path.
+//! Only the tray app can restart itself, so it says how with [`enable`];
+//! the service answers with an error. The browser chooses nothing: no
+//! flags, no branch, no path.
 
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use ws_proto::UpdateState;
 
-static ENABLED: AtomicBool = AtomicBool::new(false);
+/// update.ps1 -FromHost's exit code for "a new build is ready: restart".
+pub const RESTART_EXIT: i32 = 3;
+
+type Restart = Box<dyn Fn() + Send + Sync>;
+static RESTART: OnceLock<Restart> = OnceLock::new();
 /// An update runs; another is refused until it exits.
 static RUNNING: AtomicBool = AtomicBool::new(false);
 
-/// Called by the tray app: update.ps1 knows how to restart it.
-pub fn enable() {
-    ENABLED.store(true, Ordering::Relaxed);
+/// Called by the tray app with how to restart it on the new build; called
+/// on the update's thread, it does not return.
+pub fn enable(restart: impl Fn() + Send + Sync + 'static) {
+    let _ = RESTART.set(Box::new(restart));
 }
 
 /// Whether this host can update itself at all (it still needs
 /// `--allow-remote-update`).
 pub fn available() -> bool {
-    ENABLED.load(Ordering::Relaxed)
+    RESTART.get().is_some()
 }
 
-/// Starts update.ps1 with its output in `log`. `done` gets how it ended if
-/// the script exits without restarting this host (nothing to update, or the
-/// build failed); a restart ends this process first. The error and the
+/// Starts update.ps1 with its output in `log`. `done` gets how it ended;
+/// after a build, the host restarts right after. The error and the
 /// returned message are for the browser.
 pub fn start(
     log: &Path,
@@ -39,8 +47,8 @@ pub fn start(
 ) -> Result<String, String> {
     if !available() {
         return Err(
-            "only the tray app (ws-host-gui) can update and restart itself; \
-                    the console host and the service are updated with scripts\\update.ps1 on the PC"
+            "only the tray app can update and restart itself; the service is updated \
+             with scripts\\update.ps1 on the PC"
                 .into(),
         );
     }
@@ -57,10 +65,17 @@ pub fn start(
                 .name("ws-update".into())
                 .spawn(move || {
                     let status = wait(child);
-                    RUNNING.store(false, Ordering::Release);
                     let (state, message) = outcome(status, &log_path);
-                    tracing::info!(?state, message, "update script exited");
+                    tracing::info!(?state, message, ?status, "update script exited");
                     done(state, message);
+                    if status == Some(RESTART_EXIT) {
+                        // Let the browser read that the host restarts.
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        if let Some(restart) = RESTART.get() {
+                            restart();
+                        }
+                    }
+                    RUNNING.store(false, Ordering::Release);
                 })
                 .map_err(|e| {
                     RUNNING.store(false, Ordering::Release);
@@ -127,8 +142,7 @@ fn spawn(script: &Path, log: &Path) -> Result<std::process::Child, String> {
         .try_clone()
         .map_err(|e| format!("can't write {}: {e}", log.display()))?;
     let repo = script.parent().and_then(Path::parent).unwrap_or(script);
-    // A process group of its own and no console: the script outlives this
-    // host, which it stops before starting the new build.
+    // A process group of its own and no console window.
     Command::new(powershell)
         .args([
             "-NoProfile",
@@ -138,6 +152,7 @@ fn spawn(script: &Path, log: &Path) -> Result<std::process::Child, String> {
             "-File",
         ])
         .arg(script)
+        .arg("-FromHost")
         .current_dir(repo)
         .stdin(Stdio::null())
         .stdout(out)
@@ -191,11 +206,13 @@ fn outcome(code: Option<i32>, log: &Path) -> (UpdateState, String) {
 
 fn summarize(code: Option<i32>, lines: &[String], log: &Path) -> (UpdateState, String) {
     let clip = |s: &str| s.chars().take(300).collect::<String>();
+    let last = lines.last().map_or("", String::as_str);
     match code {
-        Some(0) => {
-            let last = lines.last().map_or("", String::as_str);
-            (UpdateState::Finished, clip(last))
-        }
+        Some(0) => (UpdateState::Finished, clip(last)),
+        Some(RESTART_EXIT) => (
+            UpdateState::Finished,
+            format!("{} Restarting the host on the new build.", clip(last)),
+        ),
         _ => {
             // A PowerShell error prints its message first, then where it
             // happened; the first line that isn't one of update.ps1's own
@@ -277,5 +294,12 @@ mod tests {
         assert!(message.contains("exit code 1"), "{message}");
         assert!(message.contains("cargo build failed."), "{message}");
         assert!(!message.contains("char:5"), "{message}");
+        let (state, message) = summarize(
+            Some(RESTART_EXIT),
+            &lines(&["==> Building the host (release)", "Built 1234abcd."]),
+            log,
+        );
+        assert_eq!(state, UpdateState::Finished);
+        assert!(message.starts_with("Built 1234abcd."), "{message}");
     }
 }

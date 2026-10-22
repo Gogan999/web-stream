@@ -1,6 +1,7 @@
 //! What the settings window edits, saved as JSON in the data dir. The host
-//! is started from the equivalent `ws-host` command line, so the GUI and the
-//! console accept and check exactly the same things.
+//! is started from the equivalent host options (`ws_host::options`), so the
+//! window, its "More options" field and the service check exactly the same
+//! things.
 
 use std::path::Path;
 
@@ -58,7 +59,7 @@ pub struct Settings {
     /// Let a paired browser update the host to the latest `main` and
     /// restart it (`scripts\update.ps1`).
     pub allow_remote_update: bool,
-    /// More `ws-host` options, for what the window has no field for.
+    /// More host options, for what the window has no field for.
     pub extra_args: String,
     /// Start hosting as soon as the app opens.
     pub start_hosting: bool,
@@ -117,7 +118,7 @@ impl Settings {
         std::fs::rename(&tmp, &path).with_context(|| format!("{}", path.display()))
     }
 
-    /// The `ws-host` options these settings stand for.
+    /// The host options these settings stand for.
     pub fn to_args(&self) -> anyhow::Result<Vec<String>> {
         let mut args = vec!["--port".to_string(), self.port.to_string()];
         if !self.ice_tcp {
@@ -191,20 +192,23 @@ impl Settings {
         ServeOptions::parse(&self.to_args()?)
     }
 
-    /// The same host as a `ws-host` command line, to copy into a console.
-    pub fn command_line(&self) -> anyhow::Result<String> {
-        let args = self.to_args()?;
-        let quoted: Vec<String> = args
-            .iter()
-            .map(|a| {
-                if a.is_empty() || a.contains([' ', '\t']) {
-                    format!("\"{a}\"")
-                } else {
-                    a.clone()
-                }
-            })
-            .collect();
-        Ok(format!("ws-host {}", quoted.join(" ")))
+    /// The options for `service install`: these settings without what
+    /// belongs to the tray app's own host (its web root, data folder,
+    /// uploads and updates from the browser), which the service refuses.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn service_args(&self) -> anyhow::Result<Vec<String>> {
+        const WITH_VALUE: &[&str] = &["--web-root", "--data-dir", "--upload-dir"];
+        const ALONE: &[&str] = &["--allow-upload", "--allow-remote-update", "--pair"];
+        let mut out = Vec::new();
+        let mut it = self.to_args()?.into_iter();
+        while let Some(arg) = it.next() {
+            if WITH_VALUE.contains(&arg.as_str()) {
+                it.next();
+            } else if !ALONE.contains(&arg.as_str()) {
+                out.push(arg);
+            }
+        }
+        Ok(out)
     }
 }
 
@@ -250,7 +254,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn defaults_match_the_console_defaults() {
+    fn defaults_match_the_option_defaults() {
         let gui = Settings::default().serve_options().unwrap();
         let cli = ServeOptions::parse(&[]).unwrap();
         assert_eq!(gui, cli);
@@ -307,13 +311,16 @@ mod tests {
         );
         assert_eq!(o.media.audio_device.as_deref(), Some("Speakers (Realtek)"));
         assert_eq!(o.media.gamepad, ws_input::GamepadKind::DualShock4);
-        assert!(
-            s.command_line()
-                .unwrap()
-                .contains(r#""Speakers (Realtek)""#)
-        );
         assert_eq!(o.data_dir, std::path::PathBuf::from(r"C:\some dir"));
-        assert!(s.command_line().unwrap().contains(r#""C:\some dir""#));
+
+        // What the service may run with.
+        let service = s.service_args().unwrap();
+        let o = ws_host::service::check_install_args(&service).unwrap();
+        assert_eq!((o.port, o.ice_tcp_port), (9000, None));
+        assert_eq!(o.media.gamepad, ws_input::GamepadKind::DualShock4);
+        assert_eq!(o.hostnames, vec!["home.example.net", "192.168.1.20"]);
+        assert_eq!((o.media.upload_dir, o.media.update_log), (None, None));
+        assert!(!service.iter().any(|a| a.contains("some dir")));
     }
 
     #[test]

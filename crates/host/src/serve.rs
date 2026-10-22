@@ -1,6 +1,7 @@
 //! The host: the signaling server, the transport and the media side wired
-//! together. A front end (the console in `ws-host`, the tray app in
-//! `ws-host-gui`) drives it with [`Command`]s and shows its [`Event`]s.
+//! together. A front end (the tray app in `ws-host-gui`, the service's
+//! control pipe, the test host in `examples`) drives it with [`Command`]s
+//! and shows its [`Event`]s.
 
 use std::net::IpAddr;
 use std::path::PathBuf;

@@ -1,5 +1,6 @@
-// End-to-end against the real host: a file shared from the ws-host console reaches the browser's
-// downloads, or its save dialog. Runs when WS_HOST_BIN names a built ws-host (CI's Linux job);
+// End-to-end against the real host: a file shared from the test host's console reaches the browser's
+// downloads, or its save dialog. Runs when WS_HOST_BIN names a built test host (CI's Linux job;
+// cargo build -p ws-host --example test-host);
 // display capture isn't there, but pairing, the control and file channels are.
 import test from 'node:test';
 import assert from 'node:assert/strict';

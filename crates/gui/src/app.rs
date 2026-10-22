@@ -28,6 +28,10 @@ pub struct App {
     settings_error: Option<String>,
     #[cfg(windows)]
     autostart: bool,
+    /// The web-stream service: installed (`Some`) and running, and when
+    /// that was last asked.
+    #[cfg(windows)]
+    service: (Option<bool>, Option<Instant>),
     /// Frames until the window hides itself, for `--hidden`. eframe shows
     /// the window after the first frame whatever it was built with.
     #[cfg_attr(not(windows), allow(dead_code))]
@@ -95,9 +99,26 @@ impl App {
             settings_error: None,
             #[cfg(windows)]
             autostart: crate::win::autostart_enabled(),
+            #[cfg(windows)]
+            service: (None, None),
             hide_in_frames: hidden.then_some(2),
         };
-        if app.settings.start_hosting {
+        // A browser may ask for an update (when the settings allow it):
+        // update.ps1 builds, then this app restarts itself on the build.
+        let restarting = app.host.clone();
+        ws_host::update::enable(move || crate::restart_after_update(&restarting));
+
+        // The service hosts on the same ports.
+        #[cfg(windows)]
+        let service_installed = app.service_installed().is_some();
+        #[cfg(not(windows))]
+        let service_installed = false;
+        if service_installed {
+            app.host.log(
+                "the web-stream service is installed and hosts this PC, so this app doesn't \
+                 start its own host (Start does, once the service is uninstalled)",
+            );
+        } else if app.settings.start_hosting {
             app.start();
         }
         app
@@ -565,14 +586,14 @@ impl App {
                 )
                 .on_hover_text(
                     "Adds \"Update host\" to the browser's settings: it runs \
-                     scripts\\update.ps1 here (pull main, build, restart). Only paired \
-                     browsers can use it",
+                     scripts\\update.ps1 here (pull main, build), then this app restarts on \
+                     the new build. Only paired browsers can use it",
                 );
                 ui.end_row();
                 ui.label("More options");
                 ui.add(
                     egui::TextEdit::singleline(&mut d.extra_args)
-                        .hint_text("ws-host flags, e.g. --cert a.pem --key b.pem"),
+                        .hint_text("host flags, e.g. --cert a.pem --key b.pem"),
                 );
                 ui.end_row();
                 ui.label("On launch");
@@ -616,17 +637,132 @@ impl App {
                 self.draft = self.settings.clone();
                 self.settings_error = None;
             }
-            if ui
-                .button("Copy command line")
-                .on_hover_text("The same host as a ws-host command")
-                .clicked()
-            {
-                match self.draft.command_line() {
-                    Ok(cmd) => ui.ctx().copy_text(cmd),
-                    Err(e) => self.settings_error = Some(format!("{e:#}")),
+        });
+
+        #[cfg(windows)]
+        {
+            ui.separator();
+            self.service_ui(ui);
+        }
+    }
+
+    /// Whether the service is installed (`Some`) and running; asked again
+    /// every few seconds.
+    #[cfg(windows)]
+    fn service_installed(&mut self) -> Option<bool> {
+        let stale = self
+            .service
+            .1
+            .is_none_or(|t| t.elapsed() > Duration::from_secs(3));
+        if stale {
+            self.service = (
+                ws_host::service::query().unwrap_or_else(|e| {
+                    tracing::warn!("could not ask about the service: {e:#}");
+                    None
+                }),
+                Some(Instant::now()),
+            );
+        }
+        self.service.0
+    }
+
+    /// The web-stream service: streams the sign-in screen, UAC prompts and
+    /// elevated programs. Each action is a UAC prompt.
+    #[cfg(windows)]
+    fn service_ui(&mut self, ui: &mut egui::Ui) {
+        let installed = self.service_installed();
+        ui.label(RichText::new("Windows service").strong())
+            .on_hover_text(
+                "Runs the host as a Windows service, so the browser can also use the sign-in \
+                 screen, UAC prompts and programs running as administrator. It uses the saved \
+                 settings except the web client folder, received files and browser updates, \
+                 and has its own paired browsers",
+            );
+        ui.label(match installed {
+            None => "Not installed",
+            Some(true) => "Installed and running: it hosts this PC instead of this app",
+            Some(false) => "Installed, not running",
+        });
+        // (args, stop this app's host first)
+        let mut run: Option<(Vec<String>, bool)> = None;
+        let service = |rest: &[&str]| -> Vec<String> {
+            std::iter::once("service")
+                .chain(rest.iter().copied())
+                .map(String::from)
+                .collect()
+        };
+        let mut install = |run: &mut Option<(Vec<String>, bool)>, stop: bool| match self
+            .settings
+            .service_args()
+        {
+            Ok(rest) => {
+                let mut args = service(&["install"]);
+                args.extend(rest);
+                *run = Some((args, stop));
+            }
+            Err(e) => self.settings_error = Some(format!("{e:#}")),
+        };
+        ui.horizontal_wrapped(|ui| match installed {
+            None => {
+                if ui
+                    .button("Install the service")
+                    .on_hover_text(
+                        "With the saved settings. This app stops its own host first: they \
+                         share the ports",
+                    )
+                    .clicked()
+                {
+                    install(&mut run, true);
+                }
+            }
+            Some(_) => {
+                let buttons: [(&str, &str, &[&str]); 3] = [
+                    (
+                        "Pair through the service",
+                        "Opens the service console and pairing",
+                        &["console", "--pair"],
+                    ),
+                    (
+                        "Service console",
+                        "Pairing, the connected browser and files, for the service's host",
+                        &["console"],
+                    ),
+                    (
+                        "Update the service",
+                        "Copies this build to the service and restarts it",
+                        &["update"],
+                    ),
+                ];
+                for (label, hover, rest) in buttons {
+                    if ui.button(label).on_hover_text(hover).clicked() {
+                        run = Some((service(rest), false));
+                    }
+                }
+                if ui
+                    .button("Reinstall with these settings")
+                    .on_hover_text("The service takes the saved settings")
+                    .clicked()
+                {
+                    install(&mut run, false);
+                }
+                if ui
+                    .button("Uninstall")
+                    .on_hover_text("Removes the service; its paired browsers and logs stay")
+                    .clicked()
+                {
+                    run = Some((service(&["uninstall"]), false));
                 }
             }
         });
+        if let Some((args, stop_host)) = run {
+            match crate::win::run_elevated(&args) {
+                // The service retries until the ports are free.
+                Ok(()) if stop_host => self.host.stop(),
+                Ok(()) => {}
+                Err(e) => self.host.log(format!("service: {e:#}")),
+            }
+            self.service.1 = None;
+        }
     }
 
     fn log_ui(&self, ui: &mut egui::Ui) {

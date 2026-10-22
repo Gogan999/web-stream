@@ -8,14 +8,19 @@ use std::time::Duration;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{MouseButton, TrayIcon, TrayIconBuilder, TrayIconEvent};
-use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, ERROR_SUCCESS, GetLastError, HWND};
+use windows::Win32::Foundation::{
+    CloseHandle, ERROR_ALREADY_EXISTS, ERROR_SUCCESS, GetLastError, HWND,
+};
 use windows::Win32::System::Registry::{
     HKEY_CURRENT_USER, REG_SZ, RRF_RT_REG_SZ, RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW,
 };
-use windows::Win32::System::Threading::CreateMutexW;
+use windows::Win32::System::Threading::{
+    CreateMutexW, OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+};
+use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    FindWindowW, MB_ICONERROR, MB_OK, MessageBoxW, SW_HIDE, SW_RESTORE, SetForegroundWindow,
-    ShowWindowAsync,
+    FindWindowW, MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MessageBoxW, SW_HIDE, SW_RESTORE,
+    SW_SHOWNORMAL, SetForegroundWindow, ShowWindowAsync,
 };
 use windows::core::{HSTRING, w};
 use ws_host::serve::Command;
@@ -57,6 +62,56 @@ pub fn error_box(text: &str) {
             MB_OK | MB_ICONERROR,
         );
     }
+}
+
+pub fn info_box(text: &str) {
+    unsafe {
+        MessageBoxW(
+            None,
+            &HSTRING::from(text),
+            &HSTRING::from(TITLE),
+            MB_OK | MB_ICONINFORMATION,
+        );
+    }
+}
+
+/// Waits up to `timeout` for process `pid` to exit (at once if it is gone).
+pub fn wait_for_exit(pid: u32, timeout: Duration) {
+    let Ok(process) = (unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid) }) else {
+        return;
+    };
+    unsafe {
+        WaitForSingleObject(process, timeout.as_millis().min(u32::MAX as u128) as u32);
+        let _ = CloseHandle(process);
+    }
+}
+
+/// Starts this exe with `args` as administrator (a UAC prompt); returns
+/// once it started, not when it ends.
+pub fn run_elevated(args: &[String]) -> anyhow::Result<()> {
+    let exe = std::env::current_exe()?;
+    let params: Vec<String> = args
+        .iter()
+        .map(|a| ws_host::service::quote_arg(a))
+        .collect();
+    let r = unsafe {
+        ShellExecuteW(
+            None,
+            w!("runas"),
+            &HSTRING::from(exe.as_os_str()),
+            &HSTRING::from(params.join(" ")),
+            None,
+            SW_SHOWNORMAL,
+        )
+    };
+    // Above 32 is success; ERROR_CANCELLED (1223) when the prompt is declined.
+    if r.0 as isize <= 32 {
+        anyhow::bail!(
+            "the administrator prompt was declined or failed ({})",
+            r.0 as isize
+        );
+    }
+    Ok(())
 }
 
 /// Remembers eframe's window so the tray can show and hide it.

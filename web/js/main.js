@@ -25,7 +25,7 @@ const ui = {
   matchHost: $('match-host'), autotune: $('autotune'), mic: $('mic'),
   audioKbps: $('audio-kbps'), audioFrame: $('audio-frame'),
   moreToggle: $('more-toggle'), more: $('more'), kbdToggle: $('kbd-toggle'), keysToggle: $('keys-toggle'), keys: $('keys'),
-  kbdInput: $('kbd-input'), touchFullscreen: $('touch-fullscreen'), view: $('view'), zoomReset: $('zoom-reset'),
+  kbdInput: $('kbd-input'), touchFullscreen: $('touch-fullscreen'), view: $('view'), zoomReset: $('zoom-reset'), zoomPan: $('zoom-pan'),
   filesToggle: $('files-toggle'), files: $('files'), fileList: $('file-list'), fromHost: $('from-host'),
   toHost: $('to-host'), uploadPick: $('upload-pick'), uploadInput: $('upload-input'), uploadList: $('upload-list'),
   diagSave: $('diag-save'),
@@ -41,7 +41,7 @@ if (diag) {
 
 const zoom = new ZoomView({
   el: ui.view, stage: ui.stage,
-  onChange: (on) => { ui.zoomReset.hidden = !on; },
+  onChange: (on) => { ui.zoomReset.hidden = ui.zoomPan.hidden = !on; },
   onView: () => cursor?.schedule(), // the pointer overlay keeps its on-screen size
 });
 // iOS Safari zooms the whole page on a pinch whatever the viewport meta says, and touch-action
@@ -50,6 +50,10 @@ for (const ev of ['gesturestart', 'gesturechange', 'gestureend']) {
   document.addEventListener(ev, (e) => e.preventDefault(), { passive: false });
 }
 ui.zoomReset.addEventListener('click', () => zoom.reset());
+ui.zoomPan.addEventListener('click', () => {
+  zoom.panMode = !zoom.panMode;
+  ui.zoomPan.setAttribute('aria-pressed', String(zoom.panMode));
+});
 
 let session = null;
 let input = null;

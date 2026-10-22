@@ -54,6 +54,13 @@ const KEYFRAME_RETRY: Duration = Duration::from_millis(300);
 /// How long after a host-side drop a frame that skips the gap must go out
 /// before a keyframe is asked for instead.
 const RECOVERY_WAIT: Duration = Duration::from_millis(150);
+/// A new peer connection this soon after the last estimate (a restart after
+/// a network blip, say) starts from that estimate rather than from
+/// [`TransportConfig::initial_bitrate_bps`], so the stream doesn't spend
+/// seconds climbing back.
+pub const ESTIMATE_KEPT_FOR: Duration = Duration::from_secs(60);
+/// It starts a little under it: the path may have changed.
+pub const KEPT_ESTIMATE_SHARE: f64 = 0.8;
 
 #[derive(Debug, Clone)]
 pub struct TransportConfig {
@@ -564,6 +571,7 @@ impl Transport {
                         session: None,
                         shared: thread_shared,
                         steps: Vec::new(),
+                        last_estimate: None,
                     };
                     if ready_tx.send(Ok(())).is_err() {
                         return;
@@ -782,6 +790,8 @@ struct Driver {
     session: Option<Session>,
     shared: Arc<Shared>,
     steps: Vec<Step>,
+    /// The last bandwidth estimate, and when.
+    last_estimate: Option<(u64, Instant)>,
 }
 
 impl Driver {
@@ -933,6 +943,10 @@ impl Driver {
                         );
                         self.shared.emit(TransportEvent::Stats(stats))
                     }
+                    TransportEvent::TargetBitrate(bps) => {
+                        self.last_estimate = Some((bps, Instant::now()));
+                        self.shared.emit(TransportEvent::TargetBitrate(bps))
+                    }
                     TransportEvent::Data { channel, data, .. }
                         if channel == channels::INPUT || channel == channels::INPUT_MOTION =>
                     {
@@ -976,6 +990,16 @@ impl Driver {
         session::candidates(&self.net.udp_addrs, &self.net.tcp_addrs, &public)
     }
 
+    /// Where a new peer connection's bandwidth estimate starts.
+    fn start_estimate(&self, now: Instant) -> u64 {
+        match self.last_estimate {
+            Some((bps, at)) if now.saturating_duration_since(at) < ESTIMATE_KEPT_FOR => {
+                ((bps as f64 * KEPT_ESTIMATE_SHARE) as u64).min(self.config.max_bitrate_bps)
+            }
+            _ => self.config.initial_bitrate_bps,
+        }
+    }
+
     /// Drop the session, reporting Disconnected unless already reported.
     fn end_session(&mut self) {
         if let Some(mut s) = self.session.take() {
@@ -995,14 +1019,17 @@ impl Driver {
             Cmd::Offer(extra, reply) => {
                 self.end_session();
                 let candidates = self.candidates(&extra);
-                let result = Session::offer(&self.config, &candidates, Instant::now()).map(
-                    |(mut s, sdp)| {
-                        let ufrag = s.local_ufrag();
-                        self.filter.lock().expect("filter lock").reset(Some(&ufrag));
-                        self.session = Some(s);
-                        sdp
-                    },
-                );
+                let now = Instant::now();
+                let config = TransportConfig {
+                    initial_bitrate_bps: self.start_estimate(now),
+                    ..self.config.clone()
+                };
+                let result = Session::offer(&config, &candidates, now).map(|(mut s, sdp)| {
+                    let ufrag = s.local_ufrag();
+                    self.filter.lock().expect("filter lock").reset(Some(&ufrag));
+                    self.session = Some(s);
+                    sdp
+                });
                 let _ = reply.send(result);
             }
             Cmd::Answer(sdp, reply) => {

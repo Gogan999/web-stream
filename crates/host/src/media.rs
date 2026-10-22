@@ -69,9 +69,16 @@ const MIN_RESTART_GAP: Duration = Duration::from_secs(1);
 /// Video codecs the browser's answer accepted; `None` until known.
 pub type AcceptedCodecs = watch::Receiver<Option<Vec<VideoCodec>>>;
 
-/// How many peer connections signaling has set up. A count rather than an
-/// event, so a busy loop can't miss one.
-pub type PeerCount = watch::Receiver<u64>;
+/// How many peer connections signaling has set up, and for which paired
+/// device. A count rather than an event, so a busy loop can't miss one.
+pub type PeerCount = watch::Receiver<Peer>;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Peer {
+    pub count: u64,
+    /// The paired device the current one is for.
+    pub device: String,
+}
 
 /// What signaling tells media about the current peer connection.
 pub struct Signaled {
@@ -112,13 +119,16 @@ pub async fn run(
         rebuild_pending: false,
         generation: 0,
         last_bwe: None,
+        previous_bwe: None,
         last_restart: None,
         autoscale: AutoScale::default(),
         codecs,
         refused_codecs: Vec::new(),
         live: None,
+        parked: None,
         transfers: None,
         peer: 0,
+        transfer_device: String::new(),
         peers: peers.clone(),
         transitions: 0,
         sent: Arc::default(),
@@ -164,6 +174,9 @@ pub async fn run(
         }
     }
     media.stop();
+    if let Some(parked) = media.parked.take() {
+        drop_blocking(parked);
+    }
     // A resolution change still running would never be put back: wait for
     // it, so it is recorded. The tray app keeps running after the host
     // stops, so nothing else would restore it.
@@ -203,6 +216,22 @@ enum Later {
     /// The connection has been down for [`TRANSFER_GRACE`]: end `peer`'s
     /// file transfers if it hasn't come back.
     TransfersExpire { peer: u64 },
+    /// The connection has been down for [`PARK_FOR`] since `session` ended:
+    /// stop the parked capture if nobody took it.
+    ParkExpire { session: u64 },
+}
+
+/// How long capture and game audio keep running after a connection drops.
+/// A browser back within this (a restart after a network change, a page
+/// reload) gets a picture at once instead of waiting for a new encoder.
+const PARK_FOR: Duration = Duration::from_secs(15);
+
+/// See [`Media::parked`].
+struct Parked {
+    video: Video,
+    /// The display it captures.
+    display: DisplayId,
+    audio: Option<platform::Loopback>,
 }
 
 /// How long file transfers wait for a dropped connection to come back.
@@ -278,6 +307,9 @@ struct Media {
     generation: u64,
     /// Latest bandwidth estimate of this connection, in bits per second.
     last_bwe: Option<u64>,
+    /// The last connection's final estimate and when it went down: a
+    /// connection back soon after starts from it, as the transport does.
+    previous_bwe: Option<(u64, Instant)>,
     last_restart: Option<Instant>,
     /// Encodes below the configured size while the bitrate is too low.
     autoscale: AutoScale,
@@ -286,6 +318,9 @@ struct Media {
     /// (no AV1 or HEVC on the GPU): never tried again while the host runs.
     refused_codecs: Vec<VideoCodec>,
     live: Option<Live>,
+    /// Capture and game audio of the last connection, kept running for
+    /// [`PARK_FOR`] after it dropped.
+    parked: Option<Parked>,
     /// Frames handed to the transport since the last stats report.
     sent: Arc<Mutex<SentFrames>>,
     /// Keyframe requests passed to the encoder since the last stats
@@ -298,11 +333,15 @@ struct Media {
     last_mode_change: Option<Instant>,
     /// What the host user sees.
     host_events: mpsc::UnboundedSender<Event>,
-    /// From when the `control` channel opens until the peer connection is
-    /// replaced (or stays down for [`TRANSFER_GRACE`]).
+    /// From when the `control` channel opens until another device connects
+    /// (or the connection stays down for [`TRANSFER_GRACE`]). A new peer
+    /// connection from the same device (a restart after a network change)
+    /// keeps the offers, so it doesn't lose the files on offer.
     transfers: Option<Transfers>,
-    /// The peer connection `transfers` belong to.
+    /// The current peer connection.
     peer: u64,
+    /// The device `transfers` belong to.
+    transfer_device: String,
     peers: PeerCount,
     /// Connected and Disconnected events handled, for
     /// [`Transport::set_input_sink`].
@@ -391,18 +430,20 @@ impl Media {
                 tracing::debug!(channel = c, "channel open");
                 if c == channels::CONTROL {
                     self.control_open = true;
-                    self.transfers = Some(Transfers {
-                        files: FileSession::start(
-                            self.transport.clone(),
-                            self.control_tx.clone(),
-                            self.host_events.clone(),
-                        ),
-                        uploads: UploadSession::start(
-                            self.opts.upload_dir.clone(),
-                            self.control_tx.clone(),
-                            self.host_events.clone(),
-                        ),
-                    });
+                    if self.transfers.is_some() {
+                        // The same device on a new peer connection: offer
+                        // its files again.
+                        self.to_files(FileMsg::Reoffer);
+                    } else {
+                        self.transfers = Some(Transfers {
+                            files: FileSession::start(
+                                self.transport.clone(),
+                                self.control_tx.clone(),
+                                self.host_events.clone(),
+                            ),
+                            uploads: self.new_uploads(),
+                        });
+                    }
                     self.reply(HostControl::Uploads {
                         enabled: self.opts.upload_dir.is_some(),
                         max_size: uploads::MAX_SIZE,
@@ -460,7 +501,26 @@ impl Media {
             self.route_input(input);
         }
 
-        let audio = if self.opts.game_audio {
+        let parked = self.parked.take();
+        let (parked_video, parked_audio) = match parked {
+            Some(p) => {
+                let display = self.chosen_display().map(|d| d.id);
+                // Capturing some other display than this browser gets: start
+                // afresh.
+                let video = if display == Some(p.display) {
+                    Some(p.video)
+                } else {
+                    drop_blocking(p.video);
+                    None
+                };
+                (video, p.audio)
+            }
+            None => (None, None),
+        };
+        let audio = if let Some(capture) = parked_audio {
+            platform::set_audio(&capture, self.audio.0 * 1000, self.audio.1);
+            Some(capture)
+        } else if self.opts.game_audio {
             let (tx, rx) = mpsc::channel(AUDIO_QUEUE);
             let config = LoopbackConfig {
                 device: self.opts.audio_device.clone(),
@@ -498,16 +558,67 @@ impl Media {
         if self.mic_enabled {
             self.start_mic();
         }
+        if let Some(video) = parked_video {
+            tracing::info!("picking up the running capture");
+            self.attach_video(&video.pipeline);
+            video.pipeline.request_keyframe();
+            let live = self.live.as_mut().expect("just set");
+            live.bitrate_kbps = video.config.bitrate_kbps;
+            live.video = Some(video);
+            self.apply_bitrate(true);
+            // This browser may want another size or codec.
+            if self.video_outdated() {
+                self.request_rebuild();
+            }
+            return;
+        }
         if let Err(e) = self.start_video() {
             tracing::error!("video: {e}");
             self.error(format!("video is not available: {e}"));
         }
     }
 
+    /// Whether the running pipeline differs from what the current config
+    /// asks for (bitrate aside, which changes in place).
+    fn video_outdated(&self) -> bool {
+        let Some(video) = self.live.as_ref().and_then(|l| l.video.as_ref()) else {
+            return false;
+        };
+        let (width, height) =
+            scale::size(self.config.width, self.config.height, self.autoscale.step());
+        let wanted = VideoConfig {
+            codec: self.streaming_codec().unwrap_or(self.config.codec),
+            width,
+            height,
+            bitrate_kbps: video.config.bitrate_kbps,
+            ..self.config.clone()
+        };
+        wanted != video.config
+    }
+
+    /// Keyframe requests and repairs go from the transport's run loop
+    /// straight to `pipeline`'s capture thread, never waiting behind this
+    /// loop (which may be busy rebuilding a pipeline). Set before its first
+    /// frame reaches the transport.
+    fn attach_video(&self, pipeline: &VideoPipeline) {
+        let control = pipeline.control();
+        let requests = self.keyframe_requests.clone();
+        self.transport
+            .set_video_sink(Box::new(move |signal| match signal {
+                VideoSignal::Keyframe => {
+                    requests.fetch_add(1, Ordering::Relaxed);
+                    control.request_keyframe();
+                }
+                VideoSignal::FramesLost(from) => control.recover_from(from),
+            }));
+    }
+
     fn stop(&mut self) {
         self.control_open = false;
         self.unsent.clear();
-        self.last_bwe = None;
+        if let Some(bps) = self.last_bwe.take() {
+            self.previous_bwe = Some((bps, Instant::now()));
+        }
         self.rebuild_pending = false;
         self.autoscale.reset();
         self.session += 1;
@@ -520,7 +631,27 @@ impl Media {
         self.audio = (self.opts.audio_kbps, self.opts.audio_frame_ms);
         *self.sent.lock().expect("sent stats lock") = SentFrames::default();
         self.transport.clear_input_sink();
-        if let Some(live) = self.live.take() {
+        if let Some(old) = self.parked.take() {
+            drop_blocking(old);
+        }
+        if let Some(mut live) = self.live.take() {
+            // Input, the cursor and the mic stop now; capture and game audio
+            // keep running a while for a browser that comes straight back.
+            match (live.video.take(), self.display) {
+                (Some(video), Some(display)) => {
+                    self.parked = Some(Parked {
+                        video,
+                        display,
+                        audio: live.audio.take(),
+                    });
+                    let (tx, session) = (self.later_tx.clone(), self.session);
+                    tokio::spawn(async move {
+                        tokio::time::sleep(PARK_FOR).await;
+                        let _ = tx.send(Later::ParkExpire { session }).await;
+                    });
+                }
+                (video, _) => drop_blocking(video),
+            }
             drop_blocking(live);
             tracing::info!("browser disconnected; media stopped");
         }
@@ -533,14 +664,34 @@ impl Media {
         }
     }
 
-    /// When signaling has set up a new peer connection, the old one's file
-    /// transfers end.
+    /// When signaling has set up a new peer connection: for another device,
+    /// the file transfers end; for the same one, transfers in progress end
+    /// (they rode the old connection's channels) but the offers stay, and
+    /// are made again once its `control` channel opens.
     fn sync_peer(&mut self) {
-        let peer = *self.peers.borrow();
-        if peer != self.peer {
-            self.peer = peer;
-            self.transfers = None;
+        let Peer { count, device } = self.peers.borrow().clone();
+        if count == self.peer {
+            return;
         }
+        self.peer = count;
+        if device != self.transfer_device {
+            self.transfer_device = device;
+            self.transfers = None;
+        } else if self.transfers.is_some() {
+            self.to_files(FileMsg::Reconnected);
+            let uploads = self.new_uploads();
+            if let Some(t) = &mut self.transfers {
+                t.uploads = uploads;
+            }
+        }
+    }
+
+    fn new_uploads(&self) -> UploadSession {
+        UploadSession::start(
+            self.opts.upload_dir.clone(),
+            self.control_tx.clone(),
+            self.host_events.clone(),
+        )
     }
 
     /// Input goes from the transport straight to `input`, unless this loop
@@ -654,23 +805,13 @@ impl Media {
             }
             Err(e) => return Err(e.into()),
         };
+        if self.live.is_none() {
+            return Ok(());
+        }
+        self.attach_video(&pipeline);
         let Some(live) = &mut self.live else {
             return Ok(());
         };
-        // Keyframe requests and repairs go from the transport's run loop
-        // straight to the capture thread, never waiting behind this loop
-        // (which may be busy rebuilding a pipeline). Set before the first
-        // frame reaches the transport.
-        let control = pipeline.control();
-        let requests = self.keyframe_requests.clone();
-        self.transport
-            .set_video_sink(Box::new(move |signal| match signal {
-                VideoSignal::Keyframe => {
-                    requests.fetch_add(1, Ordering::Relaxed);
-                    control.request_keyframe();
-                }
-                VideoSignal::FramesLost(from) => control.recover_from(from),
-            }));
         self.generation += 1;
         tokio::spawn(forward_video(
             rx,
@@ -715,9 +856,12 @@ impl Media {
     /// Where the encoder starts: under the current estimate (or the
     /// transport's starting estimate), never above the configured rate.
     fn start_kbps(&self) -> u32 {
-        let bwe = self
-            .last_bwe
-            .unwrap_or_else(|| TransportConfig::default().initial_bitrate_bps);
+        let bwe = self.last_bwe.unwrap_or_else(|| match self.previous_bwe {
+            Some((bps, at)) if at.elapsed() < ws_transport::ESTIMATE_KEPT_FOR => {
+                (bps as f64 * ws_transport::KEPT_ESTIMATE_SHARE) as u64
+            }
+            _ => TransportConfig::default().initial_bitrate_bps,
+        });
         target_kbps(bwe, self.config.bitrate_kbps)
     }
 
@@ -1128,6 +1272,14 @@ impl Media {
                 if session == self.session && self.live.is_some() {
                     block_in_place(|| self.refresh_input_rect());
                     self.send_displays();
+                }
+            }
+            Later::ParkExpire { session } => {
+                if session == self.session && self.live.is_none() {
+                    if let Some(parked) = self.parked.take() {
+                        drop_blocking(parked);
+                        tracing::info!("nobody came back; capture stopped");
+                    }
                 }
             }
             Later::TransfersExpire { peer } => {

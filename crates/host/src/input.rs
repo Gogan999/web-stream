@@ -17,7 +17,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use ws_input::{DisplayRect, GamepadKind, InputHandler};
-use ws_proto::{GamepadState, HostControl, InputEvent, MAX_GAMEPADS};
+use ws_proto::{GamepadState, HostControl, InputEvent, MAX_GAMEPADS, seq_newer};
 
 use crate::platform;
 
@@ -42,8 +42,18 @@ enum Msg {
 struct Motion {
     dx: i32,
     dy: i32,
-    abs: Option<(u16, u16)>,
-    pads: [Option<GamepadState>; MAX_GAMEPADS as usize],
+    abs: Option<(u16, u16, Option<u16>)>,
+    pads: [Option<(GamepadState, Option<u16>)>; MAX_GAMEPADS as usize],
+}
+
+/// Whether a motion event numbered `new` should replace one numbered `old`
+/// in a merge: unless both are numbered and `new` is the older one (it was
+/// overtaken on the unordered channel).
+fn replaces(new: Option<u16>, old: Option<u16>) -> bool {
+    match (new, old) {
+        (Some(new), Some(old)) => seq_newer(new, old),
+        _ => true,
+    }
 }
 
 impl Motion {
@@ -54,9 +64,16 @@ impl Motion {
                 self.dx = self.dx.saturating_add(dx.into());
                 self.dy = self.dy.saturating_add(dy.into());
             }
-            InputEvent::MouseAbs { x, y } => self.abs = Some((x, y)),
-            InputEvent::Gamepad { index, state } if index < MAX_GAMEPADS => {
-                self.pads[index as usize] = Some(state);
+            InputEvent::MouseAbs { x, y, seq } => {
+                if replaces(seq, self.abs.and_then(|a| a.2)) {
+                    self.abs = Some((x, y, seq));
+                }
+            }
+            InputEvent::Gamepad { index, state, seq } if index < MAX_GAMEPADS => {
+                let pad = &mut self.pads[index as usize];
+                if replaces(seq, pad.and_then(|p| p.1)) {
+                    *pad = Some((state, seq));
+                }
             }
             other => return Some(other),
         }
@@ -67,8 +84,8 @@ impl Motion {
     fn drain(&mut self) -> Vec<InputEvent> {
         let m = std::mem::take(self);
         let mut out = Vec::new();
-        if let Some((x, y)) = m.abs {
-            out.push(InputEvent::MouseAbs { x, y });
+        if let Some((x, y, seq)) = m.abs {
+            out.push(InputEvent::MouseAbs { x, y, seq });
         }
         let (mut dx, mut dy) = (m.dx, m.dy);
         while dx != 0 || dy != 0 {
@@ -81,11 +98,12 @@ impl Motion {
             dx -= sx;
             dy -= sy;
         }
-        for (index, state) in m.pads.into_iter().enumerate() {
-            if let Some(state) = state {
+        for (index, pad) in m.pads.into_iter().enumerate() {
+            if let Some((state, seq)) = pad {
                 out.push(InputEvent::Gamepad {
                     index: index as u8,
                     state,
+                    seq,
                 });
             }
         }
@@ -302,14 +320,29 @@ mod tests {
             m.merge(InputEvent::MouseMove { dx: 30_000, dy: -5 })
                 .is_none()
         );
-        assert!(m.merge(InputEvent::MouseAbs { x: 1, y: 2 }).is_none());
-        assert!(m.merge(InputEvent::MouseAbs { x: 3, y: 4 }).is_none());
+        assert!(
+            m.merge(InputEvent::MouseAbs {
+                x: 1,
+                y: 2,
+                seq: None
+            })
+            .is_none()
+        );
+        assert!(
+            m.merge(InputEvent::MouseAbs {
+                x: 3,
+                y: 4,
+                seq: None
+            })
+            .is_none()
+        );
         let pad = |buttons| InputEvent::Gamepad {
             index: 1,
             state: GamepadState {
                 buttons,
                 ..Default::default()
             },
+            seq: None,
         };
         assert!(m.merge(pad(1)).is_none());
         assert!(m.merge(pad(2)).is_none());
@@ -322,7 +355,11 @@ mod tests {
         assert_eq!(
             m.drain(),
             vec![
-                InputEvent::MouseAbs { x: 3, y: 4 },
+                InputEvent::MouseAbs {
+                    x: 3,
+                    y: 4,
+                    seq: None
+                },
                 InputEvent::MouseMove {
                     dx: i16::MAX,
                     dy: -10
@@ -381,7 +418,7 @@ mod tests {
     #[test]
     fn motion_stays_on_its_side_of_a_press() {
         use ws_proto::MouseButton;
-        let abs = |x| Msg::Event(InputEvent::MouseAbs { x, y: 0 });
+        let abs = |x| Msg::Event(InputEvent::MouseAbs { x, y: 0, seq: None });
         let button = |down| {
             Msg::Event(InputEvent::MouseButton {
                 button: MouseButton::Left,
@@ -393,5 +430,27 @@ mod tests {
         let out = coalesce(vec![abs(1), button(true), abs(2), abs(3), button(false)]);
         assert_eq!(out, vec![abs(1), button(true), abs(3), button(false)]);
         assert_eq!(coalesce(vec![abs(1), abs(2)]), vec![abs(2)]);
+    }
+
+    #[test]
+    fn merging_keeps_the_newest_numbered_motion() {
+        let mut m = Motion::default();
+        let abs = |x, seq| InputEvent::MouseAbs {
+            x,
+            y: 0,
+            seq: Some(seq),
+        };
+        assert!(m.merge(abs(1, 7)).is_none());
+        // Overtaken: arrived later but older.
+        assert!(m.merge(abs(2, 6)).is_none());
+        assert_eq!(m.drain(), [abs(1, 7)]);
+        // Button changes on the reliable channel are not motion: they pass
+        // through and are never merged away.
+        let edge = InputEvent::GamepadButtons {
+            index: 0,
+            state: GamepadState::default(),
+            seq: 3,
+        };
+        assert_eq!(m.merge(edge.clone()), Some(edge));
     }
 }

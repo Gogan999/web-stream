@@ -28,3 +28,20 @@ test('gamepad is 14 bytes and round-trips', () => {
   assert.equal(buf.byteLength, 14);
   assert.deepEqual(P.decode(buf), { type: 'gamepad', index: 1, ...s });
 });
+
+test('numbered gamepad snapshots and button changes carry a u16 sequence', () => {
+  const s = { buttons: 0x1000, lx: 1, ly: 2, rx: 3, ry: 4, lt: 5, rt: 6 };
+  const motion = P.gamepad(2, s, 0x10001);
+  assert.equal(motion.byteLength, 16);
+  assert.deepEqual(P.decode(motion), { type: 'gamepad', index: 2, ...s, seq: 1 });
+  const edge = P.gamepadButtons(2, s, 7);
+  assert.equal(edge.byteLength, 16);
+  assert.equal(new Uint8Array(edge)[0], 0x09);
+  assert.deepEqual(P.decode(edge), { type: 'gamepad-buttons', index: 2, ...s, seq: 7 });
+});
+
+test('numbered absolute moves are 7 bytes', () => {
+  const buf = P.mouseAbs(0, 1, 300);
+  assert.equal(buf.byteLength, 7);
+  assert.deepEqual(P.decode(buf), { type: 'mouse-abs', x: 0, y: 65535, seq: 300 });
+});

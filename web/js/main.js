@@ -25,7 +25,7 @@ const ui = {
   matchHost: $('match-host'), autotune: $('autotune'), mic: $('mic'),
   audioKbps: $('audio-kbps'), audioFrame: $('audio-frame'),
   moreToggle: $('more-toggle'), more: $('more'), kbdToggle: $('kbd-toggle'), keysToggle: $('keys-toggle'), keys: $('keys'),
-  kbdInput: $('kbd-input'), touchFullscreen: $('touch-fullscreen'), view: $('view'), zoomReset: $('zoom-reset'),
+  kbdInput: $('kbd-input'), touchFullscreen: $('touch-fullscreen'), view: $('view'), zoomReset: $('zoom-reset'), zoomPan: $('zoom-pan'),
   filesToggle: $('files-toggle'), files: $('files'), fileList: $('file-list'), fromHost: $('from-host'),
   toHost: $('to-host'), uploadPick: $('upload-pick'), uploadInput: $('upload-input'), uploadList: $('upload-list'),
   diagSave: $('diag-save'),
@@ -41,7 +41,7 @@ if (diag) {
 
 const zoom = new ZoomView({
   el: ui.view, stage: ui.stage,
-  onChange: (on) => { ui.zoomReset.hidden = !on; },
+  onChange: (on) => { ui.zoomReset.hidden = ui.zoomPan.hidden = !on; },
   onView: () => cursor?.schedule(), // the pointer overlay keeps its on-screen size
 });
 // iOS Safari zooms the whole page on a pinch whatever the viewport meta says, and touch-action
@@ -50,6 +50,10 @@ for (const ev of ['gesturestart', 'gesturechange', 'gestureend']) {
   document.addEventListener(ev, (e) => e.preventDefault(), { passive: false });
 }
 ui.zoomReset.addEventListener('click', () => zoom.reset());
+ui.zoomPan.addEventListener('click', () => {
+  zoom.panMode = !zoom.panMode;
+  ui.zoomPan.setAttribute('aria-pressed', String(zoom.panMode));
+});
 
 let session = null;
 let input = null;
@@ -641,6 +645,18 @@ function setFilesOpen(open) {
   document.body.classList.toggle('files-open', open);
   ui.filesToggle.setAttribute('aria-expanded', String(open));
 }
+// Which settings groups are unfolded is remembered per browser; storage may be unavailable.
+const FOLDS_KEY = 'ws-settings-open';
+try {
+  const open = JSON.parse(localStorage.getItem(FOLDS_KEY) ?? 'null');
+  if (open && typeof open === 'object') {
+    for (const d of ui.more.querySelectorAll('details')) if (typeof open[d.id] === 'boolean') d.open = open[d.id];
+  }
+} catch { /* defaults from the page */ }
+ui.more.addEventListener('toggle', () => {
+  const open = Object.fromEntries([...ui.more.querySelectorAll('details')].map((d) => [d.id, d.open]));
+  try { localStorage.setItem(FOLDS_KEY, JSON.stringify(open)); } catch { /* not remembered */ }
+}, { capture: true });
 ui.moreToggle.addEventListener('click', () => setSettingsOpen(!document.body.classList.contains('more-open')));
 ui.filesToggle.addEventListener('click', () => setFilesOpen(!document.body.classList.contains('files-open')));
 document.addEventListener('pointerdown', (e) => {

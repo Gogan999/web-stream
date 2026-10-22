@@ -90,6 +90,14 @@ test('phone: touch input, on-screen keyboard and small-screen toolbar', { timeou
   assert.ok(got.filter((e) => e.type === 'wheel').every((e) => e.dy > 0));
   assert.ok(!got.some((e) => e.type === 'mouse-button'));
 
+  // The host pointer, drawn over the video in relative mode.
+  const sendHost = (msg) => host.evaluate((m) => window.__control.send(JSON.stringify(m)), msg);
+  const px = Buffer.from(Array(32 * 32).fill([255, 255, 255, 255]).flat()).toString('base64');
+  await sendHost({ type: 'cursorShape', kind: 'custom', id: 1, image: { width: 32, height: 32, hotX: 0, hotY: 0, rgba: px } });
+  await sendHost({ type: 'cursorPosition', x: 100, y: 100 });
+  await client.waitForSelector('#cursor:not([hidden])');
+  const pointer = await client.locator('#cursor').boundingBox();
+
   // Pinch out zooms the view (not the host) and shows Fit; Fit zooms back out.
   await clearLog();
   await touch('touchStart', [{ x: cx - 40, y: cy, id: 1 }, { x: cx + 40, y: cy, id: 2 }]);
@@ -100,6 +108,26 @@ test('phone: touch input, on-screen keyboard and small-screen toolbar', { timeou
   assert.equal(await client.isVisible('#zoom-reset'), true);
   await client.waitForTimeout(200);
   assert.ok(!(await inputs()).some((e) => e.type === 'wheel' || e.type === 'mouse-button'));
+  // The pointer keeps its size on screen.
+  const zp = await client.locator('#cursor').boundingBox();
+  assert.ok(Math.abs(zp.width - pointer.width) < 1, `pointer ${pointer.width} -> ${zp.width}`);
+  // Zoomed in, a two-finger drag still scrolls; with Pan on it moves the view instead.
+  const drag = async () => {
+    await touch('touchStart', [{ x: cx - 50, y: cy, id: 1 }, { x: cx + 50, y: cy, id: 2 }]);
+    for (let i = 1; i <= 5; i++) await touch('touchMove', [{ x: cx - 50, y: cy + i * 10, id: 1 }, { x: cx + 50, y: cy + i * 10, id: 2 }]);
+    await touch('touchEnd', []);
+  };
+  await clearLog();
+  await drag();
+  await host.waitForFunction(() => window.mockLog.some((e) => e.type === 'wheel'));
+  assert.equal((await client.locator('#video').boundingBox()).y, zoomed.y, 'scrolling left the view alone');
+  await client.tap('#zoom-pan');
+  await clearLog();
+  await drag();
+  await client.waitForTimeout(200);
+  assert.ok(!(await inputs()).some((e) => e.type === 'wheel'), 'Pan on: no scroll');
+  assert.ok((await client.locator('#video').boundingBox()).y > zoomed.y + 20, 'Pan on: the view moved');
+  await client.tap('#zoom-pan');
   await client.tap('#zoom-reset');
   assert.equal((await client.locator('#video').boundingBox()).width, box.width);
   assert.equal(await client.isVisible('#zoom-reset'), false);

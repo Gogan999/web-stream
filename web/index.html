@@ -32,47 +32,65 @@
   </div>
   <button id="more-toggle" type="button" aria-expanded="false" aria-controls="more" aria-haspopup="true">Settings ▾</button>
   <div id="more" class="panel" role="group" aria-label="Settings">
-    <section>
-      <h2>Display</h2>
-      <label>Display <select id="display" disabled></select></label>
-      <label>Resolution <select id="resolution"></select></label>
-      <label title="Lets the host lower the stream's resolution while the connection is too slow for it, and raise it again once there is room. Only when something moves on screen: a still desktop never lowers it.">Auto resolution <select id="min-scale"></select></label>
-      <label title="Change the host display's resolution to fit this screen. The host must be started with --allow-resolution-change; undone on disconnect."><input type="checkbox" id="match-host"> Match host resolution</label>
-    </section>
-    <section>
-      <h2>Video</h2>
-      <label title="H.265 and AV1 look better than H.264 at the same bitrate. Only codecs this browser can play are listed; if the host's GPU can't encode one, it streams H.264 and says so.">Codec <select id="codec"></select></label>
-      <label>Bitrate <select id="bitrate"></select></label>
-      <label>FPS <select id="fps"></select></label>
-      <label>Quality <select id="quality"></select></label>
-      <label title="How many ordinary frames' worth of data a keyframe may use. Keyframes restart the picture (on connect, or after a packet is lost for good); bigger ones look sharper straight away but take that many frames to send.">Keyframe size <select id="keyframe-scale"></select></label>
-      <label title="When the host drops a frame (it fell behind sending), have the encoder skip over it instead of sending a keyframe. Turn off if the picture smears or streaks after a hitch."><input type="checkbox" id="recover-drops"> Skip dropped frames</label>
-      <button id="autotune" type="button" title="Steps through bitrates and encoder qualities and keeps the best that streams cleanly. Run it while something moves on screen.">Auto-tune (test)</button>
-    </section>
-    <section>
-      <h2>Input</h2>
-      <label>Mouse
-        <select id="mouse-mode">
-          <option value="relative">Relative (game)</option>
-          <option value="absolute">Absolute (desktop)</option>
-        </select>
-      </label>
-    </section>
-    <section>
-      <h2>Audio</h2>
-      <label title="Game audio bitrate. Higher is closer to the original; 192 kb/s and up is hard to tell apart from it.">Bitrate <select id="audio-kbps"></select></label>
-      <label title="Longer frames sound better at the same bitrate; 10 ms reaches you 10 ms sooner.">Frame <select id="audio-frame"></select></label>
-      <label title="Send this browser's microphone to the host, which plays it into its virtual cable (CABLE Input unless started with --mic-device). Games pick CABLE Output as their mic."><input type="checkbox" id="mic"> Mic</label>
-    </section>
-    <section>
-      <h2>Other</h2>
-      <button id="stats-toggle" type="button" aria-pressed="false">Stats</button>
-      <label title="Essential: warnings (reduced resolution or bitrate, slow or lossy connection, TCP fallback, dropped frames) and the key figures. Detailed: every browser and host figure. Debug: adds totals, the connection route and raw host stats.">Stats level <select id="stats-level"></select></label>
-      <button id="unpair" type="button" hidden>Unpair</button>
-      <button id="update-host" type="button" disabled title="Updates the host to the latest main and restarts it (scripts\update.ps1 on the host). Needs the tray app's &quot;let the browser update and restart this host&quot; setting.">Update host</button>
-      <button id="diag-save" type="button" hidden title="Temporary: the browser side of a WS_DIAG run (page opened with ?diag)">Save diag log</button>
-      <p class="hint">Ctrl+Alt+Shift: 1–9 display · S stats · L stats level · F fullscreen · M mouse mode · Q release mouse · E send Esc</p>
-    </section>
+    <!-- Everyday settings stay open; Advanced, Host and Shortcuts start folded (main.js remembers which are open). -->
+    <details id="set-display" open>
+      <summary>Display</summary>
+      <div class="group">
+        <label>Display <select id="display" disabled></select></label>
+        <label>Resolution <select id="resolution"></select></label>
+        <label title="Lets the host lower the stream's resolution while the connection is too slow for it, and raise it again once there is room. Only when something moves on screen: a still desktop never lowers it.">Auto resolution <select id="min-scale"></select></label>
+        <label title="Change the host display's resolution to fit this screen. The host must be started with --allow-resolution-change; undone on disconnect."><input type="checkbox" id="match-host"> Match host resolution</label>
+      </div>
+    </details>
+    <details id="set-stream" open>
+      <summary>Stream</summary>
+      <div class="group">
+        <label title="H.265 and AV1 look better than H.264 at the same bitrate. Only codecs this browser can play are listed; if the host's GPU can't encode one, it streams H.264 and says so.">Codec <select id="codec"></select></label>
+        <label>Bitrate <select id="bitrate"></select></label>
+        <label>FPS <select id="fps"></select></label>
+        <label>Mouse
+          <select id="mouse-mode">
+            <option value="relative">Relative (game)</option>
+            <option value="absolute">Absolute (desktop)</option>
+          </select>
+        </label>
+        <div class="row">
+          <label title="Send this browser's microphone to the host, which plays it into its virtual cable (CABLE Input unless started with --mic-device). Games pick CABLE Output as their mic."><input type="checkbox" id="mic"> Mic</label>
+          <button id="stats-toggle" type="button" aria-pressed="false">Stats</button>
+        </div>
+      </div>
+    </details>
+    <details id="set-advanced">
+      <summary>Advanced</summary>
+      <div class="group">
+        <h3>Video</h3>
+        <label>Quality <select id="quality"></select></label>
+        <label title="How many ordinary frames' worth of data a keyframe may use. Keyframes restart the picture (on connect, or after a packet is lost for good); bigger ones look sharper straight away but take that many frames to send.">Keyframe size <select id="keyframe-scale"></select></label>
+        <label title="When the host drops a frame (it fell behind sending), have the encoder skip over it instead of sending a keyframe. Turn off if the picture smears or streaks after a hitch."><input type="checkbox" id="recover-drops"> Skip dropped frames</label>
+        <button id="autotune" type="button" title="Steps through bitrates and encoder qualities and keeps the best that streams cleanly. Run it while something moves on screen.">Auto-tune (test)</button>
+        <h3>Audio</h3>
+        <label title="Game audio bitrate. Higher is closer to the original; 192 kb/s and up is hard to tell apart from it.">Bitrate <select id="audio-kbps"></select></label>
+        <label title="Longer frames sound better at the same bitrate; 10 ms reaches you 10 ms sooner.">Frame <select id="audio-frame"></select></label>
+        <h3>Stats</h3>
+        <label title="Essential: warnings (reduced resolution or bitrate, slow or lossy connection, TCP fallback, dropped frames) and the key figures. Detailed: every browser and host figure. Debug: adds totals, the connection route and raw host stats.">Stats level <select id="stats-level"></select></label>
+      </div>
+    </details>
+    <details id="set-host">
+      <summary>Host</summary>
+      <div class="group">
+        <div class="row">
+          <button id="update-host" type="button" disabled title="Updates the host to the latest main and restarts it (scripts\update.ps1 on the host). Needs the tray app's &quot;let the browser update and restart this host&quot; setting.">Update host</button>
+          <button id="unpair" type="button" hidden>Unpair</button>
+          <button id="diag-save" type="button" hidden title="Temporary: the browser side of a WS_DIAG run (page opened with ?diag)">Save diag log</button>
+        </div>
+      </div>
+    </details>
+    <details id="set-shortcuts" class="hint">
+      <summary>Shortcuts</summary>
+      <div class="group">
+        <p>Ctrl+Alt+Shift with: 1–9 display · S stats · L stats level · F fullscreen · M mouse mode · Q release mouse · E send Esc</p>
+      </div>
+    </details>
   </div>
 </header>
 <form id="pair" hidden>
@@ -91,6 +109,7 @@
   </div>
   <pre id="stats" hidden></pre>
   <div id="touchbar">
+    <button id="zoom-pan" type="button" aria-pressed="false" title="On: two-finger drag moves around the zoomed view. Off: it scrolls on the host. Moving a pinch pans either way." hidden>Pan</button>
     <button id="zoom-reset" type="button" title="Zoom back out to the whole screen" hidden>Fit</button>
     <button id="kbd-toggle" type="button" aria-pressed="false" title="On-screen keyboard">Keyboard</button>
     <button id="keys-toggle" type="button" aria-pressed="false" title="Esc, Tab, Ctrl, Alt, Win, arrows">Keys</button>

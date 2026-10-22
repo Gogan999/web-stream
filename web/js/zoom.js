@@ -40,6 +40,7 @@ export class ZoomView {
     this.onChange = onChange; // (zoomed) when it zooms in from fit or back to it
     this.onView = onView; // () on every change of scale or offset
     this.v = { s: 1, x: 0, y: 0 };
+    this.panMode = false; // the Pan button: two-finger drags pan instead of scrolling the host
     // Rotation, a resized window or the phone keyboard opening: keep the zoom, stay covering.
     new ResizeObserver(() => this.set(clampView(this.v, stage.clientWidth, stage.clientHeight))).observe(stage);
   }
@@ -50,6 +51,11 @@ export class ZoomView {
 
   get zoomed() {
     return this.v.s > 1;
+  }
+
+  // Two-finger drags pan only while zoomed in; at fit there is nothing to pan.
+  get pans() {
+    return this.panMode && this.zoomed;
   }
 
   // Client coordinates, as the touch gestures report them.

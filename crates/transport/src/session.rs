@@ -405,7 +405,11 @@ impl Session {
         };
         let rtp_time =
             MediaTime::from_micros(packet.capture_time).rebase(Frequency::FORTY_EIGHT_KHZ);
-        if let Err(e) = writer.write(pt, now, rtp_time, packet.data.to_vec()) {
+        // Wallclock is when the audio was captured, as for video, so the
+        // two streams' sender reports agree on what happened when.
+        let age = Duration::from_micros(ws_proto::mono_now().saturating_sub(packet.capture_time));
+        let wallclock = now.checked_sub(age).unwrap_or(now);
+        if let Err(e) = writer.write(pt, wallclock, rtp_time, packet.data.to_vec()) {
             tracing::debug!("audio write: {e}");
         }
     }

@@ -5,9 +5,14 @@ import { hidUsage } from './keymap.js';
 import { toXInput, sameState } from './gamepad.js';
 import { CHANNELS } from './session.js';
 import { TouchGestures, HOLD_MS, SECOND_FINGER_MS } from './touch.js';
+import { pictureRect } from './picture.js';
+
+export { pictureRect };
 
 const GAMEPAD_KEEPALIVE_MS = 100;
 const MAX_PADS = 4;
+// Once the pointer has rested this long, its last absolute position is re-sent reliably.
+export const ABS_SETTLE_MS = 100;
 // Chrome reads gamepads every 4 ms; polling only once per animation frame would leave a press waiting
 // up to a display frame (16 ms at 60 Hz) before it is even seen.
 export const GAMEPAD_POLL_MS = 4;
@@ -29,15 +34,17 @@ export function pictureScale(rect, videoW, videoH) {
   return Math.max(videoW / rect.width, videoH / rect.height);
 }
 
-// Map a client point to 0..1 over the actual picture inside a letterboxed (object-fit: contain) video.
+// Map a client point to 0..1 over the host display inside a letterboxed (object-fit: contain) video,
+// leaving out both the page's bars and any the host drew into the frame (see pictureRect).
 // With `clamp`, points in the black bars snap to the nearest edge instead of being dropped.
-export function videoPoint(clientX, clientY, rect, videoW, videoH, clamp = false) {
+export function videoPoint(clientX, clientY, rect, videoW, videoH, clamp = false, display = null) {
   if (!videoW || !videoH) return null;
   const scale = Math.min(rect.width / videoW, rect.height / videoH);
-  const w = videoW * scale;
-  const h = videoH * scale;
-  const left = rect.left + (rect.width - w) / 2;
-  const top = rect.top + (rect.height - h) / 2;
+  const pic = pictureRect(videoW, videoH, display);
+  const w = pic.width * scale;
+  const h = pic.height * scale;
+  const left = rect.left + (rect.width - videoW * scale) / 2 + pic.x * scale;
+  const top = rect.top + (rect.height - videoH * scale) / 2 + pic.y * scale;
   const x = (clientX - left) / w;
   const y = (clientY - top) / h;
   if (clamp) return { x: Math.min(1, Math.max(0, x)), y: Math.min(1, Math.max(0, y)) };
@@ -85,6 +92,10 @@ export class InputCapture {
     this.pads = new Array(MAX_PADS).fill(null); // last sent state per slot
     this.motion = { dx: 0, dy: 0, abs: null }; // not yet sent because input-motion was backed up
     this.padSentAt = new Array(MAX_PADS).fill(0);
+    this.padSeq = new Array(MAX_PADS).fill(0); // numbers each pad's snapshots for the host
+    this.absSeq = 0; // numbers absolute positions on input-motion
+    this.absLast = null; // last absolute position sent, re-sent reliably once the pointer rests
+    this.absSettleTimer = 0;
     this.abort = new AbortController();
     this.rafId = 0;
     this.padTimer = 0;
@@ -208,6 +219,7 @@ export class InputCapture {
     cancelAnimationFrame(this.rafId);
     clearInterval(this.padTimer);
     clearTimeout(this.motionTimer);
+    clearTimeout(this.absSettleTimer);
     clearTimeout(this.holdTimer);
     clearTimeout(this.slideTimer);
     if (this.locked) document.exitPointerLock();
@@ -253,7 +265,7 @@ export class InputCapture {
       this.motion.dy += e.movementY;
     } else if (this.mode === 'absolute') {
       const p = videoPoint(e.clientX, e.clientY, this.video.getBoundingClientRect(),
-        this.video.videoWidth, this.video.videoHeight);
+        this.video.videoWidth, this.video.videoHeight, false, this.displaySize?.());
       if (p) this.motion.abs = p;
     }
     const wait = this.motionSentAt + MOTION_GAP_MS - performance.now();
@@ -270,7 +282,14 @@ export class InputCapture {
     const m = this.motion;
     if (!m.abs && !m.dx && !m.dy) return;
     this.motionSentAt = performance.now();
-    if (m.abs && this.session.sendInput(CHANNELS.INPUT_RT, P.mouseAbs(m.abs.x, m.abs.y))) m.abs = null;
+    if (m.abs) {
+      const seq = this.absSeq = (this.absSeq + 1) & 0xffff;
+      if (this.session.sendInput(CHANNELS.INPUT_RT, P.mouseAbs(m.abs.x, m.abs.y, seq))) {
+        this.absLast = m.abs;
+        m.abs = null;
+        this.settleAbs();
+      }
+    }
     while ((m.dx || m.dy) && this.session.canSend(CHANNELS.INPUT_RT)) {
       const dx = Math.max(-32768, Math.min(32767, m.dx));
       const dy = Math.max(-32768, Math.min(32767, m.dy));
@@ -278,6 +297,21 @@ export class InputCapture {
       m.dx -= dx;
       m.dy -= dy;
     }
+  }
+
+  // input-motion may lose the last position before the pointer stops, leaving the host
+  // cursor short of it. Once it has rested a moment, send that position again on the
+  // reliable channel, numbered so nothing older can move it afterwards.
+  settleAbs() {
+    clearTimeout(this.absSettleTimer);
+    this.absSettleTimer = setTimeout(() => {
+      this.absSettleTimer = 0;
+      const p = this.absLast;
+      if (!p || this.motion.abs) return;
+      this.absLast = null;
+      this.absSeq = (this.absSeq + 1) & 0xffff;
+      this.session.sendInput(CHANNELS.INPUT, P.mouseAbs(p.x, p.y, this.absSeq));
+    }, ABS_SETTLE_MS);
   }
 
   onTouchDown(id, x, y, t) {
@@ -318,7 +352,8 @@ export class InputCapture {
     // Relative motion is in host display pixels, so scale CSS px -> video px -> display px.
     const vw = this.video.videoWidth;
     const d = this.displaySize?.();
-    const toDisplay = d?.width && vw ? d.width / vw : 1;
+    const pic = pictureRect(vw, this.video.videoHeight, d);
+    const toDisplay = d?.width && pic.width ? d.width / pic.width : 1;
     const scale = pictureScale(this.video.getBoundingClientRect(), vw, this.video.videoHeight) * toDisplay;
     const r = this.touchRest;
     r.x += dx * scale;
@@ -335,11 +370,18 @@ export class InputCapture {
   // `reliable`: where a click is about to land (touch down, drag start), the position goes on the
   // ordered reliable channel ahead of the button, so a lost or held motion packet can't misplace it.
   touchMoveTo(x, y, reliable) {
-    const p = videoPoint(x, y, this.video.getBoundingClientRect(), this.video.videoWidth, this.video.videoHeight, true);
+    const p = videoPoint(x, y, this.video.getBoundingClientRect(), this.video.videoWidth, this.video.videoHeight,
+      true, this.displaySize?.());
     if (!p) return;
     if (reliable) {
+      // Numbered and newest: no lossy position still in flight, nor a pending re-send of
+      // one, can move the pointer off it afterwards.
       this.motion.abs = null;
-      this.rel(P.mouseAbs(p.x, p.y));
+      this.absLast = null;
+      clearTimeout(this.absSettleTimer);
+      this.absSettleTimer = 0;
+      this.absSeq = (this.absSeq + 1) & 0xffff;
+      this.rel(P.mouseAbs(p.x, p.y, this.absSeq));
       return;
     }
     this.motion.abs = p;
@@ -419,10 +461,19 @@ export class InputCapture {
       any = true;
       const i = pad.index;
       const s = toXInput(pad);
-      if ((!sameState(s, this.pads[i]) || now - this.padSentAt[i] >= GAMEPAD_KEEPALIVE_MS) &&
-          this.session.sendInput(CHANNELS.INPUT_RT, P.gamepad(i, s))) {
-        this.pads[i] = s;
-        this.padSentAt[i] = now;
+      const last = this.pads[i];
+      if (!sameState(s, last) || now - this.padSentAt[i] >= GAMEPAD_KEEPALIVE_MS) {
+        const seq = (this.padSeq[i] + 1) & 0xffff;
+        // Button changes go on the reliable channel so a quick tap is never lost;
+        // stick and trigger moves and keepalives on the unordered one.
+        const sent = !last || s.buttons !== last.buttons
+          ? this.session.sendInput(CHANNELS.INPUT, P.gamepadButtons(i, s, seq))
+          : this.session.sendInput(CHANNELS.INPUT_RT, P.gamepad(i, s, seq));
+        if (sent) {
+          this.pads[i] = s;
+          this.padSentAt[i] = now;
+          this.padSeq[i] = seq;
+        }
       }
     }
     return any;

@@ -13,7 +13,7 @@ Defined by the WebRTC transport thread in `docs/signaling.md`, which is authorit
 | Label | Options | Carries |
 |---|---|---|
 | `input-motion` | unordered, `maxRetransmits: 0` | mouse motion, gamepad state |
-| `input` | ordered, reliable | keys, mouse buttons, wheel, gamepad disconnect, release-all |
+| `input` | ordered, reliable | keys, mouse buttons, wheel, gamepad button changes, gamepad disconnect, release-all |
 | `control` | ordered, reliable, JSON text | `ClientControl` / `HostControl` |
 | `file` | ordered, reliable, binary | bytes of a shared file (see File transfer) |
 
@@ -26,16 +26,20 @@ One binary frame per message, little-endian, first byte is the type. The host in
 | Type | Name | Layout | Size | Channel |
 |---|---|---|---|---|
 | `0x01` | mouse relative | `u8 type, i16 dx, i16 dy` | 5 | input-motion |
-| `0x02` | mouse absolute | `u8 type, u16 x, u16 y` (0..65535 across the active display) | 5 | input-motion (input before a touch click) |
+| `0x02` | mouse absolute | `u8 type, u16 x, u16 y [, u16 seq]` (0..65535 across the active display) | 5 or 7 | input-motion, numbered (input: before a touch click and once the pointer rests, numbered too) |
 | `0x03` | mouse button | `u8 type, u8 button, u8 down` (0 left, 1 middle, 2 right, 3 back, 4 forward; down 1/0) | 3 | input |
 | `0x04` | wheel | `u8 type, i16 dx, i16 dy` (120 = one notch; +dy away from the user, +dx right, as Windows) | 5 | input |
 | `0x05` | key | `u8 type, u16 usage, u8 down` (USB HID usage, Keyboard page 0x07, physical position) | 4 | input |
-| `0x06` | gamepad state | `u8 type, u8 index, u16 buttons, i16 lx, i16 ly, i16 rx, i16 ry, u8 lt, u8 rt` | 14 | input-motion |
+| `0x06` | gamepad state | `u8 type, u8 index, u16 buttons, i16 lx, i16 ly, i16 rx, i16 ry, u8 lt, u8 rt [, u16 seq]` | 14 or 16 | input-motion |
 | `0x07` | gamepad disconnect | `u8 type, u8 index` | 2 | input |
 | `0x08` | release all | `u8 type` | 1 | input |
+| `0x09` | gamepad buttons | same as `0x06`, `seq` required | 16 | input |
 
 - Motion is never queued: when `input-motion` has more than 1 KiB buffered the client holds relative deltas and sends their sum on the next free send; absolute keeps only the latest point.
 - Touch in direct (absolute) mode sends the position where a click or drag starts as a `mouse absolute` on `input`, ahead of the button, so a lost or held motion packet can't move the click. The host decodes both channels the same way.
+- `seq` numbers what rides the unordered channel, so the host can ignore a message overtaken by a newer one: one counter for absolute positions, one per gamepad index (shared by `0x06` and `0x09`), each a `u16` that wraps (compared as `(a - b) as i16 > 0`). Unnumbered messages always apply, as before.
+- Absolute mouse: the last position before the pointer stops can be lost on `input-motion`, so after it rests 100 ms the client sends it again on `input`, numbered, so nothing older moves it afterwards.
+- Gamepad: when the buttons change the client sends the snapshot as `0x09` on `input`, so a press or release is never lost; stick and trigger moves and the keepalive go as `0x06` on `input-motion`. The host always applies a `0x09`'s buttons (they arrive in order), and its sticks and triggers only if its `seq` is newer than the last state applied; an `0x06` older than the last state applied is ignored.
 - Gamepad `buttons` are `XINPUT_GAMEPAD_*` flags (DPAD_UP 0x0001 … Y 0x8000, plus 0x0400 for Guide). Sticks use XInput's sign (+y up). Index 0–3. Full state is sent on change and every 100 ms as a keepalive; the first state for an index plugs in a virtual pad, disconnect unplugs it.
 - `release all` is sent on window blur, tab hide, pointer-lock loss and disconnect; the host releases every key and button it holds for this client.
 - Key repeat: repeated `keydown`s are forwarded as further key-down messages.

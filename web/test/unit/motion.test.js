@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { InputCapture, MOTION_GAP_MS } from '../../js/input.js';
+import { ABS_SETTLE_MS, InputCapture, MOTION_GAP_MS } from '../../js/input.js';
 import { decode } from '../../js/protocol.js';
 
 // Fake session whose input-rt channel can be toggled between backed up and free.
@@ -79,4 +79,24 @@ test('a button waits for no motion: pending motion goes out first', () => {
   ic.onMouseDown({ button: 0, preventDefault() {} });
   assert.deepEqual(session.sent.map((m) => [m.type, m.dx]), [['mouse-rel', 1], ['mouse-rel', 2], ['mouse-button', undefined]]);
   clearTimeout(ic.motionTimer);
+});
+
+const square = { getBoundingClientRect: () => ({ left: 0, top: 0, width: 100, height: 100 }), videoWidth: 100, videoHeight: 100 };
+const rest = () => new Promise((r) => setTimeout(r, ABS_SETTLE_MS + 20));
+
+test('a resting absolute position is sent again on the reliable channel, numbered newest', async () => {
+  const session = fakeSession();
+  const ic = new InputCapture({ session, video: square, stage: {} });
+  ic.touchMoveTo(25, 25, false);
+  await rest();
+  assert.deepEqual(session.sent.map((m) => [m.label, m.x, m.seq]), [['input-motion', 16384, 1], ['input', 16384, 2]]);
+});
+
+test('a reliable touch position cancels the re-send of an older one', async () => {
+  const session = fakeSession();
+  const ic = new InputCapture({ session, video: square, stage: {} });
+  ic.touchMoveTo(25, 25, false); // a drag ends at A on the lossy channel
+  ic.touchMoveTo(75, 75, true); // a tap at B
+  await rest();
+  assert.deepEqual(session.sent.map((m) => [m.label, m.x, m.seq]), [['input-motion', 16384, 1], ['input', 49151, 2]]);
 });

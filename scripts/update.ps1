@@ -22,6 +22,14 @@
     It installs nothing; run install.ps1 again for new build dependencies or
     drivers.
 
+    Signed releases: with an allowed-signers file at
+    .git\web-stream-allowed-signers (SSH keys, in git's allowed signers
+    format), it builds the newest tag named host-* whose SSH signature
+    verifies against those keys, instead of whatever is on main. Then a
+    commit merged to main (by anyone with access to the GitHub repository)
+    only reaches this PC once the owner of one of those keys has signed a
+    tag for it. See docs/host-setup.md.
+
 .PARAMETER Force
     Rebuild and restart even when the build is already the latest main.
 
@@ -225,9 +233,89 @@ if (Invoke-Git status --porcelain --untracked-files=no) {
     throw 'The checkout has local changes. Commit or discard them (git status) and run this again.'
 }
 
-Write-Step 'Fetching main'
-Invoke-Git fetch origin main | Out-Host
-$new = @(Invoke-Git log --oneline HEAD..origin/main)
+# Whether $Tag is a signed release: a tag object named host-* that names
+# itself $Tag (so a tag signed as something else can't be pushed under a
+# release name), signed with SSH by a key in $Signers. OpenPGP and X.509
+# signatures are refused, whatever keys this PC trusts.
+function Test-SignedTag([string]$Signers, [string]$Tag) {
+    if ($Tag -notlike 'host-*') { return $false }
+    # Windows PowerShell turns a native command's redirected stderr into
+    # errors, which 'Stop' would end the script on, and verify-tag reports
+    # even a good signature on stderr. Local to this function.
+    $ErrorActionPreference = 'Continue'
+    $body = @(& git -C $repo cat-file tag $Tag 2>$null)
+    # A lightweight tag has no tag object, and no signature.
+    if ($LASTEXITCODE -ne 0) { return $false }
+    $blank = [array]::IndexOf($body, '')
+    $header = if ($blank -ge 0) { $body[0..($blank - 1)] } else { $body }
+    if ($header -notcontains "tag $Tag") { return $false }
+    if ($body -notcontains '-----BEGIN SSH SIGNATURE-----') { return $false }
+    & git -C $repo -c "gpg.ssh.allowedSignersFile=$Signers" -c gpg.program=false -c gpg.x509.program=false verify-tag $Tag 2>$null | Out-Null
+    $LASTEXITCODE -eq 0
+}
+
+# Whether $Commit is on main's history.
+function Test-OnMain([string]$Commit) {
+    & git -C $repo merge-base --is-ancestor $Commit origin/main
+    $LASTEXITCODE -eq 0
+}
+
+# The newest signed release on main, as a commit id, or $null if there is
+# none.
+function Find-SignedRelease([string]$Signers) {
+    $tags = @(Invoke-Git tag --list 'host-*' --sort=-creatordate)
+    foreach ($tag in $tags) {
+        $tag = $tag.Trim()
+        if (-not $tag) { continue }
+        if (-not (Test-SignedTag $Signers $tag)) {
+            Write-Host "  $tag is not signed by an allowed key; skipped" -ForegroundColor Yellow
+            continue
+        }
+        $commit = (Invoke-Git rev-parse "$tag^{commit}").Trim()
+        if (-not (Test-OnMain $commit)) {
+            Write-Host "  $tag is not on main; skipped" -ForegroundColor Yellow
+            continue
+        }
+        Write-Host "Newest signed release: $tag"
+        return $commit
+    }
+    $null
+}
+
+# Whether a signed release on main points at this checkout's commit.
+function Test-HeadSigned([string]$Signers) {
+    $head = (Invoke-Git rev-parse HEAD).Trim()
+    if (-not (Test-OnMain $head)) { return $false }
+    foreach ($tag in @(Invoke-Git tag --points-at HEAD --list 'host-*')) {
+        if ($tag.Trim() -and (Test-SignedTag $Signers $tag.Trim())) { return $true }
+    }
+    $false
+}
+
+$signers = Join-Path $repo '.git\web-stream-allowed-signers'
+if (Test-Path $signers) {
+    Write-Step 'Fetching signed releases'
+    Invoke-Git fetch origin main --tags --force | Out-Host
+    $target = Find-SignedRelease $signers
+    if (-not $target) {
+        throw "No host-* tag on main is signed by a key in $signers, so there is nothing to build. Sign one (git tag -s host-<date>) and push it."
+    }
+    # Only forward along main. A checkout ahead of the newest release has
+    # commits nobody signed (pulled by hand, or before signing was set up):
+    # build it only if it is itself a signed release.
+    & git -C $repo merge-base --is-ancestor HEAD $target
+    if ($LASTEXITCODE -ne 0) {
+        if (-not (Test-HeadSigned $signers)) {
+            throw "This checkout is at $((Invoke-Git rev-parse --short HEAD).Trim()), which is not a signed release and not behind one. Move it to the newest signed release (git reset --hard $($target.Substring(0, 8))) and run this again."
+        }
+        $target = (Invoke-Git rev-parse HEAD).Trim()
+    }
+} else {
+    Write-Step 'Fetching main'
+    Invoke-Git fetch origin main | Out-Host
+    $target = (Invoke-Git rev-parse origin/main).Trim()
+}
+$new = @(Invoke-Git log --oneline "HEAD..$target")
 $built = if (Test-Path $commitFile) { (Get-Content $commitFile).Trim() } else { $null }
 $head = (Invoke-Git rev-parse HEAD).Trim()
 if (-not $new -and $built -eq $head -and -not $Force) {
@@ -237,7 +325,7 @@ if (-not $new -and $built -eq $head -and -not $Force) {
 if ($new) {
     Write-Host "New on main:"
     $new | ForEach-Object { Write-Host "  $_" }
-    Invoke-Git merge --ff-only origin/main | Out-Host
+    Invoke-Git merge --ff-only $target | Out-Host
     $head = (Invoke-Git rev-parse HEAD).Trim()
 }
 

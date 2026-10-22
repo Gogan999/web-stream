@@ -22,13 +22,10 @@ pub const FRAME_MS: [u32; 2] = [10, 20];
 /// this far ahead (a stall, a reopened device), never back.
 const RESYNC_MICROS: u64 = 80_000;
 
-/// Converts an [`Instant`] to [`MicrosMono`]. The epoch is the first call in
-/// the process.
-// TODO: move to ws-proto once the capture crate needs the same clock.
+/// Converts an [`Instant`] to [`MicrosMono`], on the same clock as video
+/// frames ([`ws_proto::mono_micros`]), so audio and video times compare.
 pub fn micros_mono(at: Instant) -> MicrosMono {
-    static EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
-    let epoch = *EPOCH.get_or_init(|| at);
-    at.saturating_duration_since(epoch).as_micros() as MicrosMono
+    ws_proto::mono_micros(at)
 }
 
 pub struct OpusFrameEncoder {

@@ -130,8 +130,14 @@ pub(crate) struct NvEncoder {
 
 impl NvEncoder {
     /// Opens an encoder on `gpu` that reads from `input` (NV12, the stream
-    /// size).
-    pub(crate) fn new(gpu: &Gpu, input: &ID3D11Texture2D, cfg: &VideoConfig) -> Result<Self> {
+    /// size). [`Self::resize`] can later change the size in place up to
+    /// `max` (width, height); at least the stream size.
+    pub(crate) fn new(
+        gpu: &Gpu,
+        input: &ID3D11Texture2D,
+        cfg: &VideoConfig,
+        max: (u32, u32),
+    ) -> Result<Self> {
         let api = api()?;
         let mut session = nv::NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS {
             version: nv::NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER,
@@ -163,8 +169,8 @@ impl NvEncoder {
             input: ptr::null_mut(),
             bitstream: ptr::null_mut(),
         };
-        this.initialize(cfg)?;
-        this.register_input(input, cfg)?;
+        this.initialize(cfg, max)?;
+        this.register_input(input, cfg.width, cfg.height)?;
 
         let mut bs = nv::NV_ENC_CREATE_BITSTREAM_BUFFER {
             version: nv::NV_ENC_CREATE_BITSTREAM_BUFFER_VER,
@@ -179,7 +185,7 @@ impl NvEncoder {
         Ok(this)
     }
 
-    fn initialize(&mut self, cfg: &VideoConfig) -> Result<()> {
+    fn initialize(&mut self, cfg: &VideoConfig, max: (u32, u32)) -> Result<()> {
         let codec_guid = match cfg.codec {
             VideoCodec::H264 => nv::NV_ENC_CODEC_H264_GUID,
             VideoCodec::H265 => nv::NV_ENC_CODEC_HEVC_GUID,
@@ -320,8 +326,8 @@ impl NvEncoder {
             enableEncodeAsync: 0,
             enablePTD: 1,
             encodeConfig: &mut *self.config,
-            maxEncodeWidth: cfg.width,
-            maxEncodeHeight: cfg.height,
+            maxEncodeWidth: max.0.max(cfg.width),
+            maxEncodeHeight: max.1.max(cfg.height),
             tuningInfo: tuning,
             ..Default::default()
         };
@@ -354,12 +360,70 @@ impl NvEncoder {
         Ok(())
     }
 
-    fn register_input(&mut self, input: &ID3D11Texture2D, cfg: &VideoConfig) -> Result<()> {
+    /// Changes the encoded size in place, reading from `input` (NV12, the
+    /// new size) from now on; the next frame is an IDR. Cheaper than a new
+    /// session: no new device or encoder, so no stall. Fails if the size is
+    /// over the maximum the encoder was opened for, or the driver refuses;
+    /// the encoder then has no input and must be replaced.
+    pub(crate) fn resize(
+        &mut self,
+        input: &ID3D11Texture2D,
+        width: u32,
+        height: u32,
+    ) -> Result<()> {
+        if width > self.init.maxEncodeWidth || height > self.init.maxEncodeHeight {
+            return Err(CaptureError::InvalidConfig(format!(
+                "{width}x{height} is larger than the encoder was opened for ({}x{})",
+                self.init.maxEncodeWidth, self.init.maxEncodeHeight
+            )));
+        }
+        self.unregister_input();
+        let previous = (
+            self.init.encodeWidth,
+            self.init.encodeHeight,
+            self.init.darWidth,
+            self.init.darHeight,
+        );
+        self.init.encodeWidth = width;
+        self.init.encodeHeight = height;
+        self.init.darWidth = width;
+        self.init.darHeight = height;
+        let mut params = nv::NV_ENC_RECONFIGURE_PARAMS {
+            version: nv::NV_ENC_RECONFIGURE_PARAMS_VER,
+            reInitEncodeParams: *self.init,
+            ..Default::default()
+        };
+        params.set_resetEncoder(1);
+        params.set_forceIDR(1);
+        let status = unsafe { call!(self.api, nvEncReconfigureEncoder(self.encoder, &mut params)) };
+        if let Err(e) = self.check(status, "nvEncReconfigureEncoder (resize)") {
+            // Keep our copy in sync with what the encoder is still running.
+            (
+                self.init.encodeWidth,
+                self.init.encodeHeight,
+                self.init.darWidth,
+                self.init.darHeight,
+            ) = previous;
+            return Err(e);
+        }
+        self.register_input(input, width, height)
+    }
+
+    fn unregister_input(&mut self) {
+        if !self.input.is_null() {
+            if let Some(f) = self.api.nvEncUnregisterResource {
+                unsafe { f(self.encoder, self.input) };
+            }
+            self.input = ptr::null_mut();
+        }
+    }
+
+    fn register_input(&mut self, input: &ID3D11Texture2D, width: u32, height: u32) -> Result<()> {
         let mut reg = nv::NV_ENC_REGISTER_RESOURCE {
             version: nv::NV_ENC_REGISTER_RESOURCE_VER,
             resourceType: nv::NV_ENC_INPUT_RESOURCE_TYPE::NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX,
-            width: cfg.width,
-            height: cfg.height,
+            width,
+            height,
             pitch: 0,
             resourceToRegister: input.as_raw(),
             bufferFormat: nv::NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_NV12,
@@ -376,11 +440,16 @@ impl NvEncoder {
     /// `timestamp` names the frame for [`Self::invalidate`]. `intra` says
     /// the frame will be coded from scratch without being an IDR (every
     /// reference was invalidated), so it gets a keyframe's budget too.
+    ///
+    /// `kbps` is a new bitrate to use from this frame on (after it, for a
+    /// keyframe, so the change shares the reconfigure that restores the
+    /// ordinary frame budget). [`Self::bitrate_kbps`] says what took.
     pub(crate) fn encode(
         &mut self,
         timestamp: u64,
         force_idr: bool,
         intra: bool,
+        kbps: Option<u32>,
     ) -> Result<EncodedBits> {
         // Let the keyframe take a few frames' worth of bits, then go back.
         // A failed change only costs keyframe sharpness.
@@ -390,10 +459,15 @@ impl NvEncoder {
             if let Err(e) = self.reconfigure_rate(self.kbps(), vbv, self.keyframe_scale) {
                 tracing::debug!("larger keyframe budget refused: {e}");
             }
+        } else if let Some(kbps) = kbps {
+            if let Err(e) = self.reconfigure_rate(kbps, self.vbv_frames, 1) {
+                tracing::debug!("bitrate change to {kbps} kbps refused: {e}");
+            }
         }
         let bits = self.encode_input(timestamp, force_idr);
         if big_keyframe {
-            if let Err(e) = self.reconfigure_rate(self.kbps(), self.vbv_frames, 1) {
+            let kbps = kbps.unwrap_or(self.kbps());
+            if let Err(e) = self.reconfigure_rate(kbps, self.vbv_frames, 1) {
                 tracing::warn!("restoring the frame budget after a keyframe failed: {e}");
             }
         }
@@ -492,9 +566,9 @@ impl NvEncoder {
         self.can_invalidate
     }
 
-    /// Changes the bitrate in place; takes effect on the next frame.
-    pub(crate) fn set_bitrate(&mut self, kbps: u32) -> Result<()> {
-        self.reconfigure_rate(kbps, self.vbv_frames, 1)
+    /// The bitrate the encoder is running at.
+    pub(crate) fn bitrate_kbps(&self) -> u32 {
+        self.kbps()
     }
 
     fn kbps(&self) -> u32 {
@@ -571,11 +645,9 @@ impl Drop for NvEncoder {
                     f(self.encoder, self.bitstream);
                 }
             }
-            if !self.input.is_null() {
-                if let Some(f) = api.nvEncUnregisterResource {
-                    f(self.encoder, self.input);
-                }
-            }
+        }
+        self.unregister_input();
+        unsafe {
             if let Some(f) = api.nvEncDestroyEncoder {
                 f(self.encoder);
             }

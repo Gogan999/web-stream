@@ -2,6 +2,7 @@
 //! at a time, newest image wins.
 
 use std::sync::mpsc as std_mpsc;
+use std::sync::{Arc, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -18,11 +19,12 @@ use super::display::{self, Output};
 use super::duplication::{Acquired, Duplicator};
 use super::nvenc::{DPB_FRAMES, NvEncoder};
 use super::{Gpu, init_process};
-use crate::pacing::{Backpressure, EncodeJob, Scheduler};
+use crate::pacing::{Backpressure, BitrateGate, EncodeJob, Scheduler};
 use crate::{CaptureError, Result};
 
 enum Command {
     Select(DisplayId, std_mpsc::Sender<Result<()>>),
+    Resize(u32, u32, std_mpsc::Sender<Result<()>>),
     Keyframe,
     Recover(u64),
     Bitrate(u32),
@@ -37,7 +39,9 @@ const MAX_INVALIDATE: u64 = 16;
 const HOLD_POLL_MS: u32 = 2;
 
 pub(crate) struct PipelineHandle {
-    commands: Option<std_mpsc::Sender<Command>>,
+    /// The only strong reference: dropping it closes the channel, which
+    /// tells the thread to exit, however many [`Control`]s are around.
+    commands: Option<Arc<std_mpsc::Sender<Command>>>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -45,6 +49,7 @@ impl PipelineHandle {
     pub(crate) fn start(
         display: DisplayId,
         config: VideoConfig,
+        max: (u32, u32),
         frames: mpsc::Sender<EncodedFrame>,
         backlog: SendBacklog,
     ) -> Result<Self> {
@@ -59,7 +64,7 @@ impl PipelineHandle {
                 let _ = unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST) };
                 // The session may start on the lock screen.
                 ws_desktop::follow_input_desktop();
-                let mut session = match Session::open(display, config, frames, backlog) {
+                let mut session = match Session::open(display, config, max, frames, backlog) {
                     Ok(s) => {
                         let _ = ready_tx.send(Ok(()));
                         s
@@ -75,7 +80,7 @@ impl PipelineHandle {
             })
             .map_err(|e| CaptureError::Platform(format!("spawn capture thread: {e}")))?;
         let handle = Self {
-            commands: Some(cmd_tx),
+            commands: Some(Arc::new(cmd_tx)),
             thread: Some(thread),
         };
         ready_rx.recv().map_err(|_| CaptureError::Stopped)??;
@@ -94,6 +99,21 @@ impl PipelineHandle {
         rx.recv().map_err(|_| CaptureError::Stopped)?
     }
 
+    pub(crate) fn resize(&self, width: u32, height: u32) -> Result<()> {
+        let (tx, rx) = std_mpsc::channel();
+        self.send(Command::Resize(width, height, tx));
+        rx.recv().map_err(|_| CaptureError::Stopped)?
+    }
+
+    pub(crate) fn control(&self) -> Control {
+        Control(
+            self.commands
+                .as_ref()
+                .map(Arc::downgrade)
+                .unwrap_or_default(),
+        )
+    }
+
     pub(crate) fn request_keyframe(&self) {
         self.send(Command::Keyframe);
     }
@@ -104,6 +124,27 @@ impl PipelineHandle {
 
     pub(crate) fn set_bitrate(&self, kbps: u32) {
         self.send(Command::Bitrate(kbps));
+    }
+}
+
+/// Keyframe and repair requests for the capture thread, from any thread.
+/// Holding one doesn't keep the pipeline running.
+#[derive(Clone)]
+pub(crate) struct Control(Weak<std_mpsc::Sender<Command>>);
+
+impl Control {
+    fn send(&self, cmd: Command) {
+        if let Some(tx) = self.0.upgrade() {
+            let _ = tx.send(cmd);
+        }
+    }
+
+    pub(crate) fn request_keyframe(&self) {
+        self.send(Command::Keyframe);
+    }
+
+    pub(crate) fn recover_from(&self, index: u64) {
+        self.send(Command::Recover(index));
     }
 }
 
@@ -127,10 +168,10 @@ struct Encode {
 }
 
 impl Encode {
-    fn open(output: &Output, config: &VideoConfig) -> Result<Self> {
+    fn open(output: &Output, config: &VideoConfig, max: (u32, u32)) -> Result<Self> {
         let gpu = Gpu::new(&output.adapter)?;
         let converter = Converter::new(&gpu, config.width, config.height, config.fps)?;
-        let encoder = NvEncoder::new(&gpu, converter.output(), config).map_err(|e| match e {
+        let encoder = NvEncoder::new(&gpu, converter.output(), config, max).map_err(|e| match e {
             CaptureError::NoEncoder(msg) if output.adapter_vendor != 0x10de => CaptureError::NoEncoder(format!(
                 "{msg}; display {:?} is driven by a non-NVIDIA adapter (AMF/QSV not supported yet)",
                 output.info.id
@@ -160,8 +201,12 @@ struct Session {
     enc: Encode,
     display: DisplayId,
     config: VideoConfig,
+    /// The largest size the encoder can be resized to in place.
+    max: (u32, u32),
     frames: mpsc::Sender<EncodedFrame>,
     sched: Scheduler,
+    /// Bitrate changes waiting to reach the encoder.
+    bitrate: BitrateGate,
     backlog: SendBacklog,
     backpressure: Backpressure,
     frame_index: u64,
@@ -184,11 +229,13 @@ impl Session {
     fn open(
         id: DisplayId,
         config: VideoConfig,
+        max: (u32, u32),
         frames: mpsc::Sender<EncodedFrame>,
         backlog: SendBacklog,
     ) -> Result<Self> {
         let output = display::find(id)?;
-        let enc = Encode::open(&output, &config)?;
+        let max = (max.0.max(config.width), max.1.max(config.height));
+        let enc = Encode::open(&output, &config, max)?;
         let dup = Duplicator::new(&output.output, &enc.gpu)?;
         tracing::info!(display = id.0, name = %output.info.name, "capturing");
         Ok(Self {
@@ -196,7 +243,9 @@ impl Session {
             enc,
             display: id,
             sched: Scheduler::new(config.fps),
+            bitrate: BitrateGate::new(config.bitrate_kbps),
             config,
+            max,
             frames,
             backlog,
             backpressure: Backpressure::default(),
@@ -324,20 +373,14 @@ impl Session {
                 self.sched.request_keyframe()
             }
             Command::Recover(from) => self.recover_from(from),
-            Command::Bitrate(kbps) => {
-                let started = Instant::now();
-                let result = self.enc.encoder.set_bitrate(kbps);
-                diag!(
-                    "cap_cmd",
-                    "bitrate kbps={kbps} ok={} ms={:.2}",
-                    result.is_ok(),
-                    started.elapsed().as_secs_f64() * 1000.0
-                );
-                if let Err(e) = result {
-                    tracing::warn!("bitrate change to {kbps} kbps failed: {e}");
-                } else {
-                    self.config.bitrate_kbps = kbps;
+            // Applied with the next frame, at most so often (see BitrateGate).
+            Command::Bitrate(kbps) => self.bitrate.request(kbps),
+            Command::Resize(width, height, reply) => {
+                let result = self.resize(width, height);
+                if let Err(e) = &result {
+                    tracing::warn!(width, height, "resize failed: {e}");
                 }
+                let _ = reply.send(result);
             }
             Command::Select(id, reply) => {
                 let result = if id == self.display && self.dup.is_some() {
@@ -380,6 +423,43 @@ impl Session {
         }
     }
 
+    /// Changes the stream size. In place where the encoder allows it: a new
+    /// converter output on the same device and the encoder reset to the new
+    /// size, so there is no stall for a new device and session. Otherwise
+    /// (larger than the encoder was opened for, or the driver refuses) the
+    /// encoder is rebuilt. Either way the next frame is an IDR, from a fresh
+    /// desktop image.
+    fn resize(&mut self, width: u32, height: u32) -> Result<()> {
+        if (width, height) == (self.config.width, self.config.height) {
+            return Ok(());
+        }
+        let started = Instant::now();
+        let converter = Converter::new(&self.enc.gpu, width, height, self.config.fps)?;
+        self.config.width = width;
+        self.config.height = height;
+        let in_place = self.enc.encoder.resize(converter.output(), width, height);
+        diag!(
+            "capture_resize",
+            "size={width}x{height} in_place={} ms={:.2}",
+            in_place.is_ok(),
+            started.elapsed().as_secs_f64() * 1000.0
+        );
+        match in_place {
+            Ok(()) => {
+                // The encoder no longer reads the old output: safe to drop.
+                self.enc.converter = converter;
+                // A new duplication hands over the whole desktop at once,
+                // which a still desktop otherwise wouldn't.
+                self.switch_to(self.display, false)
+            }
+            Err(e) => {
+                tracing::debug!("resizing in place failed ({e}); opening a new encoder");
+                self.max = (self.max.0.max(width), self.max.1.max(height));
+                self.switch_to(self.display, true)
+            }
+        }
+    }
+
     /// Points capture at `id`. The encoder is rebuilt when the display is on
     /// another adapter or `rebuild` is set; otherwise only the duplication is
     /// replaced (the old one is released first, since DXGI may refuse a
@@ -387,7 +467,7 @@ impl Session {
     fn switch_to(&mut self, id: DisplayId, rebuild: bool) -> Result<()> {
         let output = display::find(id)?;
         if rebuild || !same_luid(output.adapter_luid, self.enc.luid) {
-            let enc = Encode::open(&output, &self.config)?;
+            let enc = Encode::open(&output, &self.config, self.max)?;
             let dup = Duplicator::new(&output.output, &enc.gpu)?;
             self.dup = None;
             self.enc = enc;
@@ -457,8 +537,27 @@ impl Session {
         let repair = self.sched.repair_requested();
         let start = Instant::now();
         let intra = std::mem::take(&mut self.intra_next);
-        let bits = self.enc.encoder.encode(self.frame_index, job.idr, intra)?;
+        // A keyframe already reconfigures the encoder (for its larger
+        // budget): a waiting bitrate change rides along with that.
+        let kbps = if job.idr || intra {
+            self.bitrate.take_now()
+        } else {
+            self.bitrate.take_due(now)
+        };
+        let bits = self
+            .enc
+            .encoder
+            .encode(self.frame_index, job.idr, intra, kbps)?;
         let done = Instant::now();
+        if let Some(kbps) = kbps {
+            let actual = self.enc.encoder.bitrate_kbps();
+            if actual != kbps {
+                tracing::warn!("bitrate change to {kbps} kbps failed");
+            }
+            diag!("cap_cmd", "bitrate kbps={kbps} applied={actual}");
+            self.config.bitrate_kbps = actual;
+            self.bitrate.applied(now, actual);
+        }
 
         // Only the first frame after an invalidation needs the tag; later
         // ones build on it. A keyframe needs none.

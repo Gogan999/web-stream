@@ -104,6 +104,12 @@ pub enum FileMsg {
     /// Bandwidth estimate, bits per second, while video streams; `None`
     /// without video, when there is nothing to leave room for.
     Bitrate(Option<u64>),
+    /// The same browser is on a new peer connection: what was being sent
+    /// went with the old one's channel. The offers stay.
+    Reconnected,
+    /// The new connection's `control` channel is open: offer everything
+    /// again (the browser starts with an empty list).
+    Reoffer,
 }
 
 /// The file sender of one browser session; dropping it ends every offer.
@@ -270,6 +276,27 @@ impl<O: ChunkOut> Sender<O> {
                 }
             }
             FileMsg::Bitrate(bps) => self.pacer.set_estimate(bps),
+            FileMsg::Reconnected => self.reconnected(),
+            FileMsg::Reoffer => self.reoffer(),
+        }
+    }
+
+    fn reconnected(&mut self) {
+        self.queue.clear();
+        if let Some(cur) = self.current.take() {
+            let name = self.name(cur.id);
+            tracing::info!(id = cur.id.0, "connection restarted; file transfer stopped");
+            self.event(FileEvent::Cancelled { id: cur.id, name });
+        }
+    }
+
+    fn reoffer(&mut self) {
+        for (&id, offer) in &self.offers {
+            self.reply(HostControl::FileOffer {
+                id,
+                name: offer.name.clone(),
+                size: offer.size,
+            });
         }
     }
 
@@ -912,5 +939,29 @@ mod tests {
         assert_eq!(display_name(Path::new("/")), "file");
         assert_eq!(display_name(Path::new("/a/x\u{202E}txt.exe")), "xtxt.exe");
         assert_eq!(display_name(Path::new(&"x".repeat(300))).len(), NAME_MAX);
+    }
+
+    #[tokio::test]
+    async fn a_restarted_connection_keeps_the_offers() {
+        let mut h = Harness::new("restart");
+        let data = pattern(3 * FILE_WINDOW as usize);
+        let id = h.share("big.bin", &data).await;
+        h.msg(FileMsg::Request(id)).await;
+        h.file_events();
+
+        h.msg(FileMsg::Reconnected).await;
+        assert!(h.sender.current.is_none());
+        assert!(matches!(
+            h.file_events().as_slice(),
+            [FileEvent::Cancelled { id: i, .. }] if *i == id
+        ));
+        h.msg(FileMsg::Reoffer).await;
+        assert!(matches!(
+            h.control.try_recv().unwrap(),
+            HostControl::FileOffer { id: i, .. } if i == id
+        ));
+        // And it can be asked for again.
+        h.msg(FileMsg::Request(id)).await;
+        assert!(h.sender.current.is_some());
     }
 }

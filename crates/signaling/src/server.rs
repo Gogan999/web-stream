@@ -73,6 +73,9 @@ pub enum Notice {
 /// socket.
 pub struct SignalingSession {
     pub device_name: String,
+    /// Which paired device this is: its token's hash. Unlike the name,
+    /// which the browser chooses, it tells two devices apart.
+    pub device_id: String,
     /// The host name or address the browser used to reach us (its URL's
     /// host, from the `Host` header, without the port). From outside the
     /// LAN this is the WAN address or DDNS name, which the media
@@ -606,6 +609,7 @@ async fn run_socket(
     host: Option<String>,
 ) {
     let id = shared.next_id.fetch_add(1, Ordering::Relaxed);
+    let device_id = crate::store::hash(&token);
     let (kick_tx, mut kick_rx) = oneshot::channel();
     {
         // Re-check the token while holding `current`: a revoke that landed
@@ -650,6 +654,7 @@ async fn run_socket(
     }
     let session = SignalingSession {
         device_name: device_name.clone(),
+        device_id,
         host,
         incoming: in_rx,
         outgoing: out_tx,

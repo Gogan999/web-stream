@@ -156,9 +156,12 @@ impl VideoPipeline {
     /// aspect ratio are letterboxed.
     /// `backlog` is the transport's send queue age: while it is behind,
     /// frames are skipped before they are encoded (see `pacing`).
+    /// `max` (width, height) is the largest size [`Self::resize`] may later
+    /// ask for without a new encoder.
     pub fn start(
         display: DisplayId,
         config: VideoConfig,
+        max: (u32, u32),
         frames: mpsc::Sender<EncodedFrame>,
         backlog: SendBacklog,
     ) -> Result<Self> {
@@ -166,13 +169,43 @@ impl VideoPipeline {
         #[cfg(windows)]
         {
             Ok(Self {
-                inner: win::PipelineHandle::start(display, config, frames, backlog)?,
+                inner: win::PipelineHandle::start(display, config, max, frames, backlog)?,
             })
         }
         #[cfg(not(windows))]
         {
-            let _ = (display, frames, backlog);
+            let _ = (display, max, frames, backlog);
             Err(CaptureError::Unsupported)
+        }
+    }
+
+    /// Changes the stream size, in place where the encoder can (no new
+    /// device or session, so no stall), else by opening a new encoder on
+    /// the pipeline's thread. The next frame is a keyframe; frame numbers
+    /// carry on. Blocks until done.
+    pub fn resize(&self, width: u32, height: u32) -> Result<()> {
+        validate(&VideoConfig {
+            width,
+            height,
+            ..Default::default()
+        })?;
+        #[cfg(windows)]
+        {
+            self.inner.resize(width, height)
+        }
+        #[cfg(not(windows))]
+        {
+            Err(CaptureError::Unsupported)
+        }
+    }
+
+    /// A handle for keyframe and repair requests that any thread can hold
+    /// (the transport's run loop, say). It doesn't keep the pipeline alive:
+    /// once the pipeline is dropped, requests are ignored.
+    pub fn control(&self) -> VideoControl {
+        VideoControl {
+            #[cfg(windows)]
+            inner: self.inner.control(),
         }
     }
 
@@ -214,6 +247,29 @@ impl VideoPipeline {
         self.inner.set_bitrate(kbps.clamp(100, 500_000));
         #[cfg(not(windows))]
         let _ = kbps;
+    }
+}
+
+/// See [`VideoPipeline::control`].
+#[derive(Clone)]
+pub struct VideoControl {
+    #[cfg(windows)]
+    inner: win::Control,
+}
+
+impl VideoControl {
+    /// Forces the next frame to be an IDR.
+    pub fn request_keyframe(&self) {
+        #[cfg(windows)]
+        self.inner.request_keyframe();
+    }
+
+    /// See [`VideoPipeline::recover_from`].
+    pub fn recover_from(&self, index: u64) {
+        #[cfg(windows)]
+        self.inner.recover_from(index);
+        #[cfg(not(windows))]
+        let _ = index;
     }
 }
 

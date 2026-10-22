@@ -10,6 +10,7 @@ export const MSG = Object.freeze({
   GAMEPAD: 0x06,
   GAMEPAD_DISCONNECT: 0x07,
   RELEASE_ALL: 0x08,
+  GAMEPAD_BUTTONS: 0x09,
 });
 
 const clampI16 = (v) => Math.max(-32768, Math.min(32767, Math.round(v)));
@@ -25,13 +26,15 @@ export function mouseRel(dx, dy) {
   return b;
 }
 
-// x, y in 0..1 over the active display.
-export function mouseAbs(x, y) {
-  const b = new ArrayBuffer(5);
+// x, y in 0..1 over the active display. `seq` (optional, u16) numbers positions sent on the
+// unordered channel so the host can ignore one overtaken by a newer one.
+export function mouseAbs(x, y, seq) {
+  const b = new ArrayBuffer(seq === undefined ? 5 : 7);
   const v = new DataView(b);
   v.setUint8(0, MSG.MOUSE_ABS);
   v.setUint16(1, clampU16(x * 65535), true);
   v.setUint16(3, clampU16(y * 65535), true);
+  if (seq !== undefined) v.setUint16(5, seq & 0xffff, true);
   return b;
 }
 
@@ -60,10 +63,21 @@ export function key(hidUsage, down) {
 }
 
 // state: { buttons (XInput bit flags), lx, ly, rx, ry (i16, +y up), lt, rt (u8) }
-export function gamepad(index, s) {
-  const b = new ArrayBuffer(14);
+// `seq` (u16, per pad, shared with gamepadButtons) lets the host drop an overtaken snapshot.
+export function gamepad(index, s, seq) {
+  return padState(MSG.GAMEPAD, index, s, seq);
+}
+
+// The same snapshot for the reliable channel, sent when the buttons change: its buttons
+// always apply on the host, so a press or release is never lost.
+export function gamepadButtons(index, s, seq) {
+  return padState(MSG.GAMEPAD_BUTTONS, index, s, seq);
+}
+
+function padState(type, index, s, seq) {
+  const b = new ArrayBuffer(seq === undefined ? 14 : 16);
   const v = new DataView(b);
-  v.setUint8(0, MSG.GAMEPAD);
+  v.setUint8(0, type);
   v.setUint8(1, index);
   v.setUint16(2, s.buttons & 0xffff, true);
   v.setInt16(4, clampI16(s.lx), true);
@@ -72,6 +86,7 @@ export function gamepad(index, s) {
   v.setInt16(10, clampI16(s.ry), true);
   v.setUint8(12, clampU8(s.lt));
   v.setUint8(13, clampU8(s.rt));
+  if (seq !== undefined) v.setUint16(14, seq & 0xffff, true);
   return b;
 }
 
@@ -91,7 +106,10 @@ export function decode(buf) {
     case MSG.MOUSE_REL:
       return { type: 'mouse-rel', dx: v.getInt16(1, true), dy: v.getInt16(3, true) };
     case MSG.MOUSE_ABS:
-      return { type: 'mouse-abs', x: v.getUint16(1, true), y: v.getUint16(3, true) };
+      return {
+        type: 'mouse-abs', x: v.getUint16(1, true), y: v.getUint16(3, true),
+        ...(v.byteLength >= 7 ? { seq: v.getUint16(5, true) } : {}),
+      };
     case MSG.MOUSE_BUTTON:
       return { type: 'mouse-button', button: v.getUint8(1), down: v.getUint8(2) === 1 };
     case MSG.WHEEL:
@@ -99,11 +117,14 @@ export function decode(buf) {
     case MSG.KEY:
       return { type: 'key', usage: v.getUint16(1, true), down: v.getUint8(3) === 1 };
     case MSG.GAMEPAD:
+    case MSG.GAMEPAD_BUTTONS:
       return {
-        type: 'gamepad', index: v.getUint8(1), buttons: v.getUint16(2, true),
+        type: t === MSG.GAMEPAD ? 'gamepad' : 'gamepad-buttons',
+        index: v.getUint8(1), buttons: v.getUint16(2, true),
         lx: v.getInt16(4, true), ly: v.getInt16(6, true),
         rx: v.getInt16(8, true), ry: v.getInt16(10, true),
         lt: v.getUint8(12), rt: v.getUint8(13),
+        ...(v.byteLength >= 16 ? { seq: v.getUint16(14, true) } : {}),
       };
     case MSG.GAMEPAD_DISCONNECT:
       return { type: 'gamepad-disconnect', index: v.getUint8(1) };

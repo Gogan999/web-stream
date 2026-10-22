@@ -7,6 +7,7 @@
 //! done in place (`block_in_place`), as are the thread joins when a pipeline
 //! stops; events queue in the transport meanwhile.
 
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -19,7 +20,9 @@ use ws_proto::{
     ClientControl, DisplayId, DisplayInfo, EncodedFrame, HostControl, UpdateState, VideoCodec,
     VideoConfig, VideoStats, channels,
 };
-use ws_transport::{Transport, TransportConfig, TransportEvent, TransportStats};
+use ws_transport::{
+    Events, Transport, TransportConfig, TransportEvent, TransportStats, VideoSignal,
+};
 
 use crate::cursor::{CursorSession, CursorTarget};
 use crate::files::{FileCommand, FileMsg, FileSession};
@@ -31,9 +34,9 @@ use crate::serve::Event;
 use crate::update;
 use crate::uploads::{self, UploadMsg, UploadSession};
 
-/// Encoded frames waiting for the transport. The transport keeps only the
-/// newest frame anyway; a full channel makes the encoder drop and send a
-/// keyframe next.
+/// Encoded frames waiting for the hop to the transport (which queues a few
+/// more). A full channel makes the encoder drop the frame and skip over it
+/// next, or send a keyframe.
 const FRAME_QUEUE: usize = 1;
 /// About 40 ms of 10 ms Opus packets.
 const AUDIO_QUEUE: usize = 4;
@@ -66,9 +69,16 @@ const MIN_RESTART_GAP: Duration = Duration::from_secs(1);
 /// Video codecs the browser's answer accepted; `None` until known.
 pub type AcceptedCodecs = watch::Receiver<Option<Vec<VideoCodec>>>;
 
-/// How many peer connections signaling has set up. A count rather than an
-/// event, so a busy loop can't miss one.
-pub type PeerCount = watch::Receiver<u64>;
+/// How many peer connections signaling has set up, and for which paired
+/// device. A count rather than an event, so a busy loop can't miss one.
+pub type PeerCount = watch::Receiver<Peer>;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Peer {
+    pub count: u64,
+    /// The paired device the current one is for (its id, not its name).
+    pub device: String,
+}
 
 /// What signaling tells media about the current peer connection.
 pub struct Signaled {
@@ -78,7 +88,7 @@ pub struct Signaled {
 
 pub async fn run(
     transport: Transport,
-    mut events: mpsc::Receiver<TransportEvent>,
+    mut events: Events,
     opts: MediaOptions,
     signaled: Signaled,
     mut file_commands: mpsc::Receiver<FileCommand>,
@@ -109,17 +119,20 @@ pub async fn run(
         rebuild_pending: false,
         generation: 0,
         last_bwe: None,
+        previous_bwe: None,
         last_restart: None,
         autoscale: AutoScale::default(),
         codecs,
         refused_codecs: Vec::new(),
         live: None,
+        parked: None,
         transfers: None,
         peer: 0,
+        transfer_device: String::new(),
         peers: peers.clone(),
         transitions: 0,
         sent: Arc::default(),
-        keyframe_requests: 0,
+        keyframe_requests: Arc::default(),
         changed_modes: ChangedModes::default(),
         mode_busy: false,
         last_mode_change: None,
@@ -161,6 +174,9 @@ pub async fn run(
         }
     }
     media.stop();
+    if let Some(parked) = media.parked.take() {
+        drop_blocking(parked);
+    }
     // A resolution change still running would never be put back: wait for
     // it, so it is recorded. The tray app keeps running after the host
     // stops, so nothing else would restore it.
@@ -200,6 +216,24 @@ enum Later {
     /// The connection has been down for [`TRANSFER_GRACE`]: end `peer`'s
     /// file transfers if it hasn't come back.
     TransfersExpire { peer: u64 },
+    /// The connection has been down for [`PARK_FOR`] since `session` ended:
+    /// stop the parked capture if nobody took it.
+    ParkExpire { session: u64 },
+}
+
+/// How long capture and game audio keep running after a connection drops.
+/// A browser back within this (a restart after a network change, a page
+/// reload) gets a picture at once instead of waiting for a new encoder.
+const PARK_FOR: Duration = Duration::from_secs(15);
+
+/// See [`Media::parked`].
+struct Parked {
+    video: Video,
+    /// The display it captures.
+    display: DisplayId,
+    /// The rate its encoder runs at (changed in place since it started).
+    bitrate_kbps: u32,
+    audio: Option<platform::Loopback>,
 }
 
 /// How long file transfers wait for a dropped connection to come back.
@@ -275,6 +309,9 @@ struct Media {
     generation: u64,
     /// Latest bandwidth estimate of this connection, in bits per second.
     last_bwe: Option<u64>,
+    /// The last connection's final estimate and when it went down: a
+    /// connection back soon after starts from it, as the transport does.
+    previous_bwe: Option<(u64, Instant)>,
     last_restart: Option<Instant>,
     /// Encodes below the configured size while the bitrate is too low.
     autoscale: AutoScale,
@@ -283,9 +320,14 @@ struct Media {
     /// (no AV1 or HEVC on the GPU): never tried again while the host runs.
     refused_codecs: Vec<VideoCodec>,
     live: Option<Live>,
+    /// Capture and game audio of the last connection, kept running for
+    /// [`PARK_FOR`] after it dropped.
+    parked: Option<Parked>,
     /// Frames handed to the transport since the last stats report.
     sent: Arc<Mutex<SentFrames>>,
-    keyframe_requests: u32,
+    /// Keyframe requests passed to the encoder since the last stats
+    /// report; counted by the transport's video sink too.
+    keyframe_requests: Arc<AtomicU32>,
     /// Displays whose resolution this session changed, to put back.
     changed_modes: ChangedModes,
     /// A resolution change or restore is running.
@@ -293,11 +335,15 @@ struct Media {
     last_mode_change: Option<Instant>,
     /// What the host user sees.
     host_events: mpsc::UnboundedSender<Event>,
-    /// From when the `control` channel opens until the peer connection is
-    /// replaced (or stays down for [`TRANSFER_GRACE`]).
+    /// From when the `control` channel opens until another device connects
+    /// (or the connection stays down for [`TRANSFER_GRACE`]). A new peer
+    /// connection from the same device (a restart after a network change)
+    /// keeps the offers, so it doesn't lose the files on offer.
     transfers: Option<Transfers>,
-    /// The peer connection `transfers` belong to.
+    /// The current peer connection.
     peer: u64,
+    /// The device `transfers` and `previous_bwe` belong to.
+    transfer_device: String,
     peers: PeerCount,
     /// Connected and Disconnected events handled, for
     /// [`Transport::set_input_sink`].
@@ -327,6 +373,8 @@ struct Live {
 struct Video {
     pipeline: VideoPipeline,
     generation: u64,
+    /// What it was started with (its size changes with [`Media::rebuild`]).
+    config: VideoConfig,
 }
 
 impl Media {
@@ -343,7 +391,7 @@ impl Media {
             TransportEvent::KeyframeNeeded => {
                 ws_diag::diag!("media_event", "keyframe_needed");
                 if let Some(v) = self.live.as_ref().and_then(|l| l.video.as_ref()) {
-                    self.keyframe_requests += 1;
+                    self.keyframe_requests.fetch_add(1, Ordering::Relaxed);
                     v.pipeline.request_keyframe();
                 }
             }
@@ -384,18 +432,20 @@ impl Media {
                 tracing::debug!(channel = c, "channel open");
                 if c == channels::CONTROL {
                     self.control_open = true;
-                    self.transfers = Some(Transfers {
-                        files: FileSession::start(
-                            self.transport.clone(),
-                            self.control_tx.clone(),
-                            self.host_events.clone(),
-                        ),
-                        uploads: UploadSession::start(
-                            self.opts.upload_dir.clone(),
-                            self.control_tx.clone(),
-                            self.host_events.clone(),
-                        ),
-                    });
+                    if self.transfers.is_some() {
+                        // The same device on a new peer connection: offer
+                        // its files again.
+                        self.to_files(FileMsg::Reoffer);
+                    } else {
+                        self.transfers = Some(Transfers {
+                            files: FileSession::start(
+                                self.transport.clone(),
+                                self.control_tx.clone(),
+                                self.host_events.clone(),
+                            ),
+                            uploads: self.new_uploads(),
+                        });
+                    }
                     self.reply(HostControl::Uploads {
                         enabled: self.opts.upload_dir.is_some(),
                         max_size: uploads::MAX_SIZE,
@@ -453,7 +503,26 @@ impl Media {
             self.route_input(input);
         }
 
-        let audio = if self.opts.game_audio {
+        let parked = self.parked.take();
+        let (parked_video, parked_audio) = match parked {
+            Some(p) => {
+                let display = self.chosen_display().map(|d| d.id);
+                // Capturing some other display than this browser gets: start
+                // afresh.
+                let video = if display == Some(p.display) {
+                    Some((p.video, p.bitrate_kbps))
+                } else {
+                    drop_blocking(p.video);
+                    None
+                };
+                (video, p.audio)
+            }
+            None => (None, None),
+        };
+        let audio = if let Some(capture) = parked_audio {
+            platform::set_audio(&capture, self.audio.0 * 1000, self.audio.1);
+            Some(capture)
+        } else if self.opts.game_audio {
             let (tx, rx) = mpsc::channel(AUDIO_QUEUE);
             let config = LoopbackConfig {
                 device: self.opts.audio_device.clone(),
@@ -491,20 +560,72 @@ impl Media {
         if self.mic_enabled {
             self.start_mic();
         }
+        if let Some((video, bitrate_kbps)) = parked_video {
+            tracing::info!("picking up the running capture");
+            self.attach_video(&video.pipeline);
+            video.pipeline.request_keyframe();
+            let live = self.live.as_mut().expect("just set");
+            live.bitrate_kbps = bitrate_kbps;
+            live.video = Some(video);
+            self.apply_bitrate(true);
+            // This browser may want another size or codec.
+            if self.video_outdated() {
+                self.request_rebuild();
+            }
+            return;
+        }
         if let Err(e) = self.start_video() {
             tracing::error!("video: {e}");
             self.error(format!("video is not available: {e}"));
         }
     }
 
+    /// Whether the running pipeline differs from what the current config
+    /// asks for (bitrate aside, which changes in place).
+    fn video_outdated(&self) -> bool {
+        let Some(video) = self.live.as_ref().and_then(|l| l.video.as_ref()) else {
+            return false;
+        };
+        let (width, height) =
+            scale::size(self.config.width, self.config.height, self.autoscale.step());
+        let wanted = VideoConfig {
+            codec: self.streaming_codec().unwrap_or(self.config.codec),
+            width,
+            height,
+            bitrate_kbps: video.config.bitrate_kbps,
+            ..self.config.clone()
+        };
+        wanted != video.config
+    }
+
+    /// Keyframe requests and repairs go from the transport's run loop
+    /// straight to `pipeline`'s capture thread, never waiting behind this
+    /// loop (which may be busy rebuilding a pipeline). Set before its first
+    /// frame reaches the transport.
+    fn attach_video(&self, pipeline: &VideoPipeline) {
+        let control = pipeline.control();
+        let requests = self.keyframe_requests.clone();
+        self.transport
+            .set_video_sink(Box::new(move |signal| match signal {
+                VideoSignal::Keyframe => {
+                    requests.fetch_add(1, Ordering::Relaxed);
+                    control.request_keyframe();
+                }
+                VideoSignal::FramesLost(from) => control.recover_from(from),
+            }));
+    }
+
     fn stop(&mut self) {
         self.control_open = false;
         self.unsent.clear();
-        self.last_bwe = None;
+        if let Some(bps) = self.last_bwe.take() {
+            self.previous_bwe = Some((bps, Instant::now()));
+        }
         self.rebuild_pending = false;
         self.autoscale.reset();
         self.session += 1;
-        self.keyframe_requests = 0;
+        self.keyframe_requests.store(0, Ordering::Relaxed);
+        self.transport.clear_video_sink();
         self.cursor_target.send_replace(CursorTarget::default());
         // The next browser turns the mic on if it wants it, and sets its
         // own audio quality.
@@ -512,7 +633,28 @@ impl Media {
         self.audio = (self.opts.audio_kbps, self.opts.audio_frame_ms);
         *self.sent.lock().expect("sent stats lock") = SentFrames::default();
         self.transport.clear_input_sink();
-        if let Some(live) = self.live.take() {
+        if let Some(old) = self.parked.take() {
+            drop_blocking(old);
+        }
+        if let Some(mut live) = self.live.take() {
+            // Input, the cursor and the mic stop now; capture and game audio
+            // keep running a while for a browser that comes straight back.
+            match (live.video.take(), self.display) {
+                (Some(video), Some(display)) => {
+                    self.parked = Some(Parked {
+                        video,
+                        display,
+                        bitrate_kbps: live.bitrate_kbps,
+                        audio: live.audio.take(),
+                    });
+                    let (tx, session) = (self.later_tx.clone(), self.session);
+                    tokio::spawn(async move {
+                        tokio::time::sleep(PARK_FOR).await;
+                        let _ = tx.send(Later::ParkExpire { session }).await;
+                    });
+                }
+                (video, _) => drop_blocking(video),
+            }
             drop_blocking(live);
             tracing::info!("browser disconnected; media stopped");
         }
@@ -525,14 +667,36 @@ impl Media {
         }
     }
 
-    /// When signaling has set up a new peer connection, the old one's file
-    /// transfers end.
+    /// When signaling has set up a new peer connection: for another device,
+    /// the file transfers end; for the same one, transfers in progress end
+    /// (they rode the old connection's channels) but the offers stay, and
+    /// are made again once its `control` channel opens.
     fn sync_peer(&mut self) {
-        let peer = *self.peers.borrow();
-        if peer != self.peer {
-            self.peer = peer;
-            self.transfers = None;
+        let Peer { count, device } = self.peers.borrow().clone();
+        if count == self.peer {
+            return;
         }
+        self.peer = count;
+        if device != self.transfer_device {
+            self.transfer_device = device;
+            self.transfers = None;
+            // Nor does another device start from this one's bandwidth.
+            self.previous_bwe = None;
+        } else if self.transfers.is_some() {
+            self.to_files(FileMsg::Reconnected);
+            let uploads = self.new_uploads();
+            if let Some(t) = &mut self.transfers {
+                t.uploads = uploads;
+            }
+        }
+    }
+
+    fn new_uploads(&self) -> UploadSession {
+        UploadSession::start(
+            self.opts.upload_dir.clone(),
+            self.control_tx.clone(),
+            self.host_events.clone(),
+        )
     }
 
     /// Input goes from the transport straight to `input`, unless this loop
@@ -585,6 +749,7 @@ impl Media {
             return Ok(());
         };
         if let Some(video) = live.video.take() {
+            self.transport.clear_video_sink();
             drop_blocking(video);
         }
         let displays = ws_capture::list_displays()?;
@@ -614,8 +779,10 @@ impl Media {
         };
         let (tx, rx) = mpsc::channel(FRAME_QUEUE);
         let backlog = self.transport.send_backlog();
+        // Room to grow back to the browser's size without a new encoder.
+        let max = (self.config.width, self.config.height);
         let pipeline = match block_in_place(|| {
-            VideoPipeline::start(info.id, config.clone(), tx.clone(), backlog.clone())
+            VideoPipeline::start(info.id, config.clone(), max, tx.clone(), backlog.clone())
         }) {
             Ok(p) => p,
             // The GPU may not encode AV1 or HEVC: stream H.264 rather than
@@ -632,9 +799,10 @@ impl Media {
                 let msg = format!("this PC can't encode {refused:?} ({e}); streaming H264");
                 config.codec = VideoCodec::H264;
                 // H.264 failing too means the trouble isn't the codec.
-                let pipeline =
-                    block_in_place(|| VideoPipeline::start(info.id, config.clone(), tx, backlog))
-                        .map_err(|_| e)?;
+                let pipeline = block_in_place(|| {
+                    VideoPipeline::start(info.id, config.clone(), max, tx, backlog)
+                })
+                .map_err(|_| e)?;
                 tracing::warn!("{msg}");
                 self.error(msg);
                 self.refused_codecs.push(refused);
@@ -642,6 +810,10 @@ impl Media {
             }
             Err(e) => return Err(e.into()),
         };
+        if self.live.is_none() {
+            return Ok(());
+        }
+        self.attach_video(&pipeline);
         let Some(live) = &mut self.live else {
             return Ok(());
         };
@@ -656,6 +828,7 @@ impl Media {
         live.video = Some(Video {
             pipeline,
             generation: self.generation,
+            config: config.clone(),
         });
         live.bitrate_kbps = start_kbps;
         self.last_restart = Some(Instant::now());
@@ -688,9 +861,12 @@ impl Media {
     /// Where the encoder starts: under the current estimate (or the
     /// transport's starting estimate), never above the configured rate.
     fn start_kbps(&self) -> u32 {
-        let bwe = self
-            .last_bwe
-            .unwrap_or_else(|| TransportConfig::default().initial_bitrate_bps);
+        let bwe = self.last_bwe.unwrap_or_else(|| match self.previous_bwe {
+            Some((bps, at)) if at.elapsed() < ws_transport::ESTIMATE_KEPT_FOR => {
+                (bps as f64 * ws_transport::KEPT_ESTIMATE_SHARE) as u64
+            }
+            _ => TransportConfig::default().initial_bitrate_bps,
+        });
         target_kbps(bwe, self.config.bitrate_kbps)
     }
 
@@ -707,7 +883,7 @@ impl Media {
         if live.video.is_none() || !self.control_open {
             return;
         }
-        let keyframe_requests = std::mem::take(&mut self.keyframe_requests);
+        let keyframe_requests = self.keyframe_requests.swap(0, Ordering::Relaxed);
         // Transport stats arrive once a second.
         self.reply(HostControl::VideoStats(VideoStats {
             encoder_kbps: live.bitrate_kbps,
@@ -825,7 +1001,7 @@ impl Media {
             ClientControl::RequestKeyframe => {
                 ws_diag::diag!("media_event", "browser_control_keyframe_request");
                 if let Some(v) = self.live.as_ref().and_then(|l| l.video.as_ref()) {
-                    self.keyframe_requests += 1;
+                    self.keyframe_requests.fetch_add(1, Ordering::Relaxed);
                     v.pipeline.request_keyframe();
                 }
             }
@@ -1103,6 +1279,14 @@ impl Media {
                     self.send_displays();
                 }
             }
+            Later::ParkExpire { session } => {
+                if session == self.session && self.live.is_none() {
+                    if let Some(parked) = self.parked.take() {
+                        drop_blocking(parked);
+                        tracing::info!("nobody came back; capture stopped");
+                    }
+                }
+            }
             Later::TransfersExpire { peer } => {
                 if peer == self.peer && self.live.is_none() && self.transfers.take().is_some() {
                     tracing::info!("connection still down; file transfers ended");
@@ -1174,12 +1358,56 @@ impl Media {
 
     /// Restarts the pipeline with the current config.
     fn rebuild(&mut self) {
+        if self.resize_in_place() {
+            self.display_changed();
+            return;
+        }
         if let Err(e) = self.start_video() {
             tracing::error!("video: {e}");
             self.error(format!("could not apply video settings: {e}"));
             return;
         }
         self.display_changed();
+    }
+
+    /// Applies a change of stream size alone (a new size from the browser,
+    /// or an autoscale step) to the running pipeline without restarting it:
+    /// no new capture thread, device or encoder session, so no stall, and
+    /// this loop isn't held up. False if anything else changed too, or the
+    /// pipeline couldn't resize; the caller restarts it.
+    fn resize_in_place(&mut self) -> bool {
+        let codec = self.streaming_codec();
+        let (width, height) =
+            scale::size(self.config.width, self.config.height, self.autoscale.step());
+        let Some(live) = &mut self.live else {
+            return false;
+        };
+        let Some(video) = &mut live.video else {
+            return false;
+        };
+        let ignoring_size = |c: &VideoConfig| VideoConfig {
+            width: 0,
+            height: 0,
+            bitrate_kbps: 0,
+            ..c.clone()
+        };
+        let wanted = VideoConfig {
+            codec: codec.unwrap_or(self.config.codec),
+            ..self.config.clone()
+        };
+        if codec.is_none() || ignoring_size(&wanted) != ignoring_size(&video.config) {
+            return false;
+        }
+        if let Err(e) = block_in_place(|| video.pipeline.resize(width, height)) {
+            tracing::warn!("resize to {width}x{height} failed: {e}; restarting video");
+            return false;
+        }
+        video.config.width = width;
+        video.config.height = height;
+        self.last_restart = Some(Instant::now());
+        tracing::info!(width, height, "stream resized");
+        ws_diag::diag!("streaming", "resized={width}x{height}");
+        true
     }
 
     fn select_display(&mut self, id: DisplayId) {

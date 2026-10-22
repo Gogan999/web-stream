@@ -82,8 +82,14 @@ fn capture_test(args: &[String]) -> anyhow::Result<()> {
     let mut file = std::io::BufWriter::new(std::fs::File::create(&out)?);
 
     let (tx, mut rx) = mpsc::channel(4);
-    let _pipeline =
-        ws_capture::VideoPipeline::start(display, config, tx, ws_proto::SendBacklog::default())?;
+    let max = (config.width, config.height);
+    let _pipeline = ws_capture::VideoPipeline::start(
+        display,
+        config,
+        max,
+        tx,
+        ws_proto::SendBacklog::default(),
+    )?;
     println!("capturing display {} to {out} for {seconds}s", display.0);
 
     let end = Instant::now() + Duration::from_secs(seconds);

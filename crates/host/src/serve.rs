@@ -106,7 +106,7 @@ pub async fn serve(
     let mut server_task = tokio::spawn(server.serve());
     let (media_stop, media_stop_rx) = oneshot::channel();
     let (codecs_tx, codecs) = watch::channel(None);
-    let (peers_tx, peers) = watch::channel(0);
+    let (peers_tx, peers) = watch::channel(media::Peer::default());
     let (files, files_rx) = mpsc::channel(8);
     let media_task = tokio::spawn(media::run(
         transport.clone(),
@@ -182,6 +182,14 @@ pub async fn serve(
     transport.close();
     let _ = media_stop.send(());
     let _ = media_task.await;
+    // The sockets close on the transport's own thread: wait for it, so a
+    // host started right after can bind the same ports.
+    if tokio::time::timeout(Duration::from_secs(2), transport.shutdown())
+        .await
+        .is_err()
+    {
+        tracing::warn!("transport did not stop in time");
+    }
     result
 }
 
@@ -236,7 +244,7 @@ async fn run_signaling(
     mut sessions: mpsc::Receiver<SignalingSession>,
     transport: Transport,
     codecs: watch::Sender<Option<Vec<VideoCodec>>>,
-    peers: watch::Sender<u64>,
+    peers: watch::Sender<media::Peer>,
     mut stop: oneshot::Receiver<()>,
 ) {
     let mut current: Option<SignalingSession> = None;
@@ -258,11 +266,20 @@ async fn run_signaling(
                 if current.is_some() && handed_off {
                     say_bye(&transport, ByeReason::Replaced).await;
                 }
+                let device = s.device_id.clone();
+                if peers.borrow().device != device {
+                    // The last connection's bandwidth says nothing about
+                    // this device's path.
+                    transport.forget_estimate();
+                }
                 current = Some(s);
                 handed_off = false;
                 // Until this browser answers, its codecs are unknown.
                 codecs.send_replace(None);
-                peers.send_modify(|n| *n += 1);
+                peers.send_modify(|p| {
+                    p.count += 1;
+                    p.device = device;
+                });
                 if !send_offer(&transport, current.as_ref()).await {
                     current = None;
                 }
@@ -304,7 +321,7 @@ async fn run_signaling(
             }
             Some(SessionEvent::Signal(ClientSignal::Restart)) => {
                 codecs.send_replace(None);
-                peers.send_modify(|n| *n += 1);
+                peers.send_modify(|p| p.count += 1);
                 if !send_offer(&transport, current.as_ref()).await {
                     current = None;
                     transport.close();

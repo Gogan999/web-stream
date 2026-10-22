@@ -28,7 +28,7 @@ pub use net::lan_ips;
 
 use std::collections::{HashSet, VecDeque};
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -43,9 +43,10 @@ use crate::session::{Session, Step, VideoWrite};
 /// Frames the encoder may get ahead of the send loop (about 50 ms at 60 fps)
 /// before the oldest is dropped. The late-frame drop still bounds latency.
 const VIDEO_QUEUE: usize = 3;
-/// Events waiting for the host app. If it falls this far behind, events are
-/// dropped rather than stalling media.
-const EVENT_QUEUE: usize = 1024;
+/// Data channel messages and mic packets waiting for the host app. If it
+/// falls this far behind, more are dropped rather than queued without
+/// bound. Connection, channel and bitrate events are never dropped.
+const DATA_QUEUE: usize = 1024;
 const CMD_QUEUE: usize = 64;
 /// A keyframe request is repeated only if no keyframe went out this long
 /// after the last one.
@@ -53,6 +54,15 @@ const KEYFRAME_RETRY: Duration = Duration::from_millis(300);
 /// How long after a host-side drop a frame that skips the gap must go out
 /// before a keyframe is asked for instead.
 const RECOVERY_WAIT: Duration = Duration::from_millis(150);
+/// A new peer connection this soon after the last estimate (a restart after
+/// a network blip, say) starts from that estimate rather than from
+/// [`TransportConfig::initial_bitrate_bps`], so the stream doesn't spend
+/// seconds climbing back. Unless [`Transport::forget_estimate`] said the
+/// next one is for another device, whose path the estimate says nothing
+/// about.
+pub const ESTIMATE_KEPT_FOR: Duration = Duration::from_secs(60);
+/// It starts a little under it: the path may have changed.
+pub const KEPT_ESTIMATE_SHARE: f64 = 0.8;
 
 #[derive(Debug, Clone)]
 pub struct TransportConfig {
@@ -104,14 +114,16 @@ pub enum TransportEvent {
     Disconnected,
     /// The browser lost a frame (PLI/FIR) or the transport dropped one:
     /// send an IDR or intra refresh now. Not repeated until a keyframe has
-    /// been sent (or a short retry interval passes).
+    /// been sent (or a short retry interval passes). Goes to the
+    /// [`VideoSink`] instead while one is set.
     KeyframeNeeded,
     /// The transport dropped frames from this `frame_index` on (sent too
     /// late, or built on a dropped frame); the browser never saw them. The
     /// next frame must build only on earlier ones
     /// ([`ws_proto::EncodedFrame::recovers_from`]), or be a keyframe.
     /// Raised again if that frame is dropped too; if none has gone out a
-    /// short while later, [`TransportEvent::KeyframeNeeded`] follows.
+    /// short while later, [`TransportEvent::KeyframeNeeded`] follows. Goes
+    /// to the [`VideoSink`] instead while one is set.
     FramesLost(u64),
     /// Bandwidth estimate, in bits per second; drive the encoder bitrate.
     TargetBitrate(u64),
@@ -163,6 +175,69 @@ pub struct Trouble {
 /// straight from the transport's run loop (see [`Transport::set_input_sink`]).
 /// Must return at once: it holds up all media while it runs.
 pub type InputSink = Box<dyn Fn(&[u8]) + Send + Sync>;
+
+/// What the encoder must do so the browser can keep decoding: the
+/// [`TransportEvent::KeyframeNeeded`] and [`TransportEvent::FramesLost`]
+/// events, delivered straight from the run loop (see
+/// [`Transport::set_video_sink`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VideoSignal {
+    Keyframe,
+    FramesLost(u64),
+}
+
+/// Takes [`VideoSignal`]s, called straight from the transport's run loop.
+/// Must return at once (hand the signal to the encoder's thread).
+pub type VideoSink = Box<dyn Fn(VideoSignal) + Send + Sync>;
+
+/// The transport's events for the host app, in order. Connection, channel
+/// and bitrate events are never dropped; data channel messages and mic
+/// packets are once [`DATA_QUEUE`] of them are waiting.
+pub struct Events {
+    rx: mpsc::UnboundedReceiver<TransportEvent>,
+    queued_data: Arc<AtomicUsize>,
+}
+
+impl Events {
+    pub async fn recv(&mut self) -> Option<TransportEvent> {
+        let ev = self.rx.recv().await?;
+        self.took(&ev);
+        Some(ev)
+    }
+
+    pub fn try_recv(&mut self) -> Result<TransportEvent, mpsc::error::TryRecvError> {
+        let ev = self.rx.try_recv()?;
+        self.took(&ev);
+        Ok(ev)
+    }
+
+    fn took(&self, ev: &TransportEvent) {
+        if is_data(ev) {
+            self.queued_data.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Events that are many and bulky (uploads, mic audio): bounded, dropped
+/// when the app is behind. Messages on `control` are few, and losing one
+/// (a keyframe request, a size change) would go unnoticed, so they are
+/// never dropped.
+fn is_data(ev: &TransportEvent) -> bool {
+    match ev {
+        TransportEvent::Data { channel, .. } => *channel != channels::CONTROL,
+        TransportEvent::MicAudio(_) => true,
+        _ => false,
+    }
+}
+
+/// A short name for an event, for logs (data events carry bulk payloads).
+fn event_kind(ev: &TransportEvent) -> &'static str {
+    match ev {
+        TransportEvent::Data { channel, .. } => channel,
+        TransportEvent::MicAudio(_) => "mic_audio",
+        _ => "other",
+    }
+}
 
 /// Input messages kept while no sink is set (the app is still starting its
 /// input side). Past this the oldest go, and the sink is first told to
@@ -254,6 +329,8 @@ enum Cmd {
     Answer(String, oneshot::Sender<Result<(), Error>>),
     Candidate(String),
     Close,
+    /// End the run loop and the thread, whatever handles remain.
+    Shutdown,
     MaxBitrate(u64),
     Data {
         channel: String,
@@ -277,10 +354,19 @@ struct Shared {
     /// out.
     recovering: Mutex<Option<(u64, Instant)>>,
     trouble: TroubleCounts,
-    events: mpsc::Sender<TransportEvent>,
+    events: mpsc::UnboundedSender<TransportEvent>,
+    /// Data events sent and not yet taken by [`Events`].
+    queued_data: Arc<AtomicUsize>,
     input: Mutex<InputRoute>,
+    /// Where keyframe requests and repairs go, if not to `events`.
+    video: Mutex<Option<VideoSink>>,
     /// Age of the oldest unsent video packet, for the encoder.
     backlog: SendBacklog,
+    /// The next offer starts from the configured estimate.
+    forget_estimate: AtomicBool,
+    /// Fires once the transport thread has dropped its runtime, and with it
+    /// every socket.
+    exited: Mutex<Option<oneshot::Receiver<()>>>,
 }
 
 impl Shared {
@@ -289,18 +375,40 @@ impl Shared {
         // Held across the send, so a sink set meanwhile is checked against
         // the count this event makes.
         let mut route = transition.then(|| self.input_route());
-        match self.events.try_send(ev) {
+        let data = is_data(&ev);
+        if data && self.queued_data.fetch_add(1, Ordering::Relaxed) >= DATA_QUEUE {
+            self.queued_data.fetch_sub(1, Ordering::Relaxed);
+            diag!("event_queue_full", "dropped={}", event_kind(&ev));
+            tracing::warn!("transport event queue full; dropping a data channel message");
+            return;
+        }
+        match self.events.send(ev) {
             Ok(()) => {
                 if let Some(route) = &mut route {
                     route.transitions += 1;
                     route.reset();
                 }
             }
-            Err(mpsc::error::TrySendError::Full(ev)) => {
-                diag!("event_queue_full", "dropped={ev:?}");
-                tracing::warn!(?ev, "transport event queue full; dropping event");
+            Err(_) if data => {
+                self.queued_data.fetch_sub(1, Ordering::Relaxed);
             }
-            Err(mpsc::error::TrySendError::Closed(_)) => {}
+            Err(_) => {}
+        }
+    }
+
+    /// Hands a keyframe request or repair to the encoder: straight to the
+    /// video sink if one is set, else as an event.
+    fn signal_video(&self, signal: VideoSignal) {
+        let video = self.video.lock().unwrap_or_else(|e| e.into_inner());
+        match &*video {
+            Some(sink) => sink(signal),
+            None => {
+                drop(video);
+                self.emit(match signal {
+                    VideoSignal::Keyframe => TransportEvent::KeyframeNeeded,
+                    VideoSignal::FramesLost(from) => TransportEvent::FramesLost(from),
+                });
+            }
         }
     }
 
@@ -319,7 +427,7 @@ impl Shared {
         *asked = Some(now);
         drop(asked);
         diag!("keyframe_needed", "cause={cause} suppressed=false");
-        self.emit(TransportEvent::KeyframeNeeded);
+        self.signal_video(VideoSignal::Keyframe);
     }
 
     fn keyframe_sent(&self) {
@@ -345,7 +453,7 @@ impl Shared {
                     // The repair itself was dropped: skip it too.
                     drop(recovering);
                     diag!("frames_lost", "from={from} why=repair_dropped");
-                    self.emit(TransportEvent::FramesLost(from));
+                    self.signal_video(VideoSignal::FramesLost(from));
                 }
             }
             _ => {
@@ -356,7 +464,7 @@ impl Shared {
                     "from={from} why=first_drop idx={}",
                     dropped.frame_index
                 );
-                self.emit(TransportEvent::FramesLost(from));
+                self.signal_video(VideoSignal::FramesLost(from));
             }
         }
     }
@@ -367,7 +475,7 @@ impl Shared {
         let recovering = *self.recovering.lock().expect("recovery lock");
         if let Some((from, _)) = recovering {
             diag!("frames_lost", "from={from} why=repair_lost_in_queue");
-            self.emit(TransportEvent::FramesLost(from));
+            self.signal_video(VideoSignal::FramesLost(from));
         }
     }
 
@@ -394,11 +502,15 @@ pub struct Transport {
 }
 
 impl Transport {
-    /// Bind the sockets and start the transport task. Events arrive on the
-    /// returned receiver.
-    pub async fn start(
-        config: TransportConfig,
-    ) -> Result<(Transport, mpsc::Receiver<TransportEvent>), Error> {
+    /// Bind the sockets and start the transport on its own thread. Events
+    /// arrive on the returned receiver.
+    ///
+    /// The run loop paces every video packet out, so it gets an OS thread
+    /// and a runtime of its own (with the MMCSS "Games" class on Windows)
+    /// rather than sharing the host's tokio workers with HTTPS, file
+    /// transfer and disk writes, any of which could make a pacer wakeup
+    /// late. The sockets' reader tasks run there too.
+    pub async fn start(config: TransportConfig) -> Result<(Transport, Events), Error> {
         let ips = if config.ips.is_empty() {
             net::lan_ips()
         } else {
@@ -409,22 +521,12 @@ impl Transport {
                 "no local IPv4 address to listen on",
             )));
         }
-        let (pkt_tx, pkt_rx) = mpsc::channel(1024);
-        let filter = SharedFilter::default();
-        let net = Net::bind(
-            &ips,
-            config.udp_port,
-            config.tcp_port,
-            filter.clone(),
-            pkt_tx,
-        )
-        .await?;
-        tracing::info!(udp = ?net.udp_addrs, tcp = ?net.tcp_addrs, "transport listening");
-
         let (cmds, cmd_rx) = mpsc::channel(CMD_QUEUE);
-        let (events_tx, events) = mpsc::channel(EVENT_QUEUE);
+        let (events_tx, events) = mpsc::unbounded_channel();
+        let queued_data = Arc::new(AtomicUsize::new(0));
         // About 80 ms of 10 ms Opus packets; beyond that, old audio is useless.
         let (audio, audio_rx) = mpsc::channel(8);
+        let (exit_tx, exit_rx) = oneshot::channel();
         let shared = Arc::new(Shared {
             frames: Mutex::new(VecDeque::new()),
             notify: Notify::new(),
@@ -433,26 +535,81 @@ impl Transport {
             recovering: Mutex::new(None),
             trouble: TroubleCounts::default(),
             events: events_tx,
+            queued_data: queued_data.clone(),
             input: Mutex::default(),
+            video: Mutex::default(),
             backlog: SendBacklog::default(),
+            forget_estimate: AtomicBool::new(false),
+            exited: Mutex::new(Some(exit_rx)),
         });
-        let driver = Driver {
-            config,
-            net,
-            filter,
-            confirmed: HashSet::new(),
-            session: None,
-            shared: shared.clone(),
-            steps: Vec::new(),
-        };
-        tokio::spawn(driver.run(cmd_rx, pkt_rx, audio_rx));
+
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let thread_shared = shared.clone();
+        std::thread::Builder::new()
+            .name("ws-transport".into())
+            .spawn(move || {
+                let runtime = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        let _ = ready_tx.send(Err(Error::Io(e)));
+                        return;
+                    }
+                };
+                let _mmcss = timer::Mmcss::enter();
+                runtime.block_on(async move {
+                    let (pkt_tx, pkt_rx) = mpsc::channel(1024);
+                    let filter = SharedFilter::default();
+                    let net = match Net::bind(
+                        &ips,
+                        config.udp_port,
+                        config.tcp_port,
+                        filter.clone(),
+                        pkt_tx,
+                    )
+                    .await
+                    {
+                        Ok(net) => net,
+                        Err(e) => {
+                            let _ = ready_tx.send(Err(e.into()));
+                            return;
+                        }
+                    };
+                    tracing::info!(udp = ?net.udp_addrs, tcp = ?net.tcp_addrs, "transport listening");
+                    let driver = Driver {
+                        config,
+                        net,
+                        filter,
+                        confirmed: HashSet::new(),
+                        session: None,
+                        shared: thread_shared,
+                        steps: Vec::new(),
+                        last_estimate: None,
+                    };
+                    if ready_tx.send(Ok(())).is_err() {
+                        return;
+                    }
+                    // Ends on Transport::shutdown, or once every Transport
+                    // handle is gone; dropping the runtime then stops the
+                    // socket tasks.
+                    driver.run(cmd_rx, pkt_rx, audio_rx).await;
+                });
+                drop(runtime);
+                let _ = exit_tx.send(());
+            })?;
+        ready_rx.await.map_err(|_| Error::Stopped)??;
         Ok((
             Transport {
                 cmds,
                 shared,
                 audio,
             },
-            events,
+            Events {
+                rx: events,
+                queued_data,
+            },
         ))
     }
 
@@ -498,6 +655,22 @@ impl Transport {
     }
 
     /// End the current peer connection.
+    /// Stops the transport for good, and returns once its thread has closed
+    /// every socket, so another transport can bind the same ports. Every
+    /// handle fails with [`Error::Stopped`] from then on.
+    pub async fn shutdown(&self) {
+        let _ = self.cmds.send(Cmd::Shutdown).await;
+        let exited = self
+            .shared
+            .exited
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some(exited) = exited {
+            let _ = exited.await;
+        }
+    }
+
     pub fn close(&self) {
         if let Err(mpsc::error::TrySendError::Full(cmd)) = self.cmds.try_send(Cmd::Close) {
             let cmds = self.cmds.clone();
@@ -570,6 +743,38 @@ impl Transport {
         true
     }
 
+    /// Send keyframe requests and repairs straight to `sink` (the encoder)
+    /// from the run loop, instead of as events. A repair then never waits
+    /// behind the app's other work (a pipeline being rebuilt, say).
+    ///
+    /// Call it with each new encoder, before its first frame: frames still
+    /// queued from the last one are discarded, and any repair in progress
+    /// is forgotten, since the new encoder starts with a keyframe and its
+    /// frame numbers start again.
+    pub fn set_video_sink(&self, sink: VideoSink) {
+        let mut video = self.shared.video.lock().unwrap_or_else(|e| e.into_inner());
+        self.shared.frames.lock().expect("video queue lock").clear();
+        self.shared.recovering.lock().expect("recovery lock").take();
+        *video = Some(sink);
+    }
+
+    /// The next offer is for another device: its estimate starts from
+    /// [`TransportConfig::initial_bitrate_bps`], not from the last
+    /// connection's (see [`ESTIMATE_KEPT_FOR`]). Call before
+    /// [`Transport::offer`].
+    pub fn forget_estimate(&self) {
+        self.shared.forget_estimate.store(true, Ordering::Relaxed);
+    }
+
+    /// Keyframe requests and repairs go back to being events.
+    pub fn clear_video_sink(&self) {
+        self.shared
+            .video
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+    }
+
     /// Stop handing input to the sink; it waits for the next one.
     pub fn clear_input_sink(&self) {
         self.shared.input_route().sink = None;
@@ -627,6 +832,8 @@ struct Driver {
     session: Option<Session>,
     shared: Arc<Shared>,
     steps: Vec<Step>,
+    /// The last bandwidth estimate, and when.
+    last_estimate: Option<(u64, Instant)>,
 }
 
 impl Driver {
@@ -644,6 +851,10 @@ impl Driver {
             // the others.
             tokio::select! {
                 cmd = cmds.recv() => match cmd {
+                    Some(Cmd::Shutdown) => {
+                        self.end_session();
+                        return;
+                    }
                     Some(cmd) => self.command(cmd),
                     None => return,
                 },
@@ -778,6 +989,10 @@ impl Driver {
                         );
                         self.shared.emit(TransportEvent::Stats(stats))
                     }
+                    TransportEvent::TargetBitrate(bps) => {
+                        self.last_estimate = Some((bps, Instant::now()));
+                        self.shared.emit(TransportEvent::TargetBitrate(bps))
+                    }
                     TransportEvent::Data { channel, data, .. }
                         if channel == channels::INPUT || channel == channels::INPUT_MOTION =>
                     {
@@ -821,6 +1036,16 @@ impl Driver {
         session::candidates(&self.net.udp_addrs, &self.net.tcp_addrs, &public)
     }
 
+    /// Where a new peer connection's bandwidth estimate starts.
+    fn start_estimate(&self, now: Instant) -> u64 {
+        match self.last_estimate {
+            Some((bps, at)) if now.saturating_duration_since(at) < ESTIMATE_KEPT_FOR => {
+                ((bps as f64 * KEPT_ESTIMATE_SHARE) as u64).min(self.config.max_bitrate_bps)
+            }
+            _ => self.config.initial_bitrate_bps,
+        }
+    }
+
     /// Drop the session, reporting Disconnected unless already reported.
     fn end_session(&mut self) {
         if let Some(mut s) = self.session.take() {
@@ -839,15 +1064,21 @@ impl Driver {
         match cmd {
             Cmd::Offer(extra, reply) => {
                 self.end_session();
+                if self.shared.forget_estimate.swap(false, Ordering::Relaxed) {
+                    self.last_estimate = None;
+                }
                 let candidates = self.candidates(&extra);
-                let result = Session::offer(&self.config, &candidates, Instant::now()).map(
-                    |(mut s, sdp)| {
-                        let ufrag = s.local_ufrag();
-                        self.filter.lock().expect("filter lock").reset(Some(&ufrag));
-                        self.session = Some(s);
-                        sdp
-                    },
-                );
+                let now = Instant::now();
+                let config = TransportConfig {
+                    initial_bitrate_bps: self.start_estimate(now),
+                    ..self.config.clone()
+                };
+                let result = Session::offer(&config, &candidates, now).map(|(mut s, sdp)| {
+                    let ufrag = s.local_ufrag();
+                    self.filter.lock().expect("filter lock").reset(Some(&ufrag));
+                    self.session = Some(s);
+                    sdp
+                });
                 let _ = reply.send(result);
             }
             Cmd::Answer(sdp, reply) => {
@@ -863,6 +1094,7 @@ impl Driver {
                 }
             }
             Cmd::Close => self.end_session(),
+            Cmd::Shutdown => unreachable!("handled by the run loop"),
             Cmd::MaxBitrate(bps) => {
                 self.config.max_bitrate_bps = bps;
                 if let Some(s) = &mut self.session {
@@ -941,5 +1173,91 @@ mod tests {
         assert_eq!(got[0], ws_proto::InputEvent::ReleaseAll.encode()[0]);
         assert_eq!(got[1..3], [5, 6]);
         assert_eq!(got.len(), INPUT_PENDING + 1);
+    }
+
+    #[tokio::test]
+    async fn data_events_are_bounded_but_connection_events_never_drop() {
+        let (transport, mut events) = Transport::start(TransportConfig {
+            ips: vec![[127, 0, 0, 1].into()],
+            udp_port: 0,
+            tcp_port: None,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let shared = &transport.shared;
+        let data = || TransportEvent::Data {
+            channel: channels::FILE,
+            binary: true,
+            data: vec![0],
+        };
+        for _ in 0..DATA_QUEUE + 10 {
+            shared.emit(data());
+        }
+        let control = TransportEvent::Data {
+            channel: channels::CONTROL,
+            binary: false,
+            data: b"{}".to_vec(),
+        };
+        shared.emit(control.clone());
+        shared.emit(TransportEvent::Connected);
+        let mut got = Vec::new();
+        while let Ok(ev) = events.try_recv() {
+            got.push(ev);
+        }
+        assert_eq!(got.len(), DATA_QUEUE + 2);
+        assert_eq!(got[DATA_QUEUE], control);
+        assert_eq!(got.last(), Some(&TransportEvent::Connected));
+        // Taking them makes room again.
+        shared.emit(data());
+        assert_eq!(events.try_recv().ok(), Some(data()));
+    }
+
+    #[tokio::test]
+    async fn shutdown_frees_the_port() {
+        let port = std::net::UdpSocket::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let (transport, _events) = Transport::start(TransportConfig {
+            ips: vec![[127, 0, 0, 1].into()],
+            udp_port: port,
+            tcp_port: None,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let other = transport.clone();
+        transport.shutdown().await;
+        // Even with a handle left, the sockets are gone.
+        std::net::UdpSocket::bind(("127.0.0.1", port)).unwrap();
+        assert!(matches!(other.offer().await, Err(Error::Stopped)));
+    }
+
+    #[tokio::test]
+    async fn video_signals_go_to_the_sink_while_one_is_set() {
+        let (transport, mut events) = Transport::start(TransportConfig {
+            ips: vec![[127, 0, 0, 1].into()],
+            udp_port: 0,
+            tcp_port: None,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let got = Arc::new(Mutex::new(Vec::new()));
+        let sink_got = got.clone();
+        transport.set_video_sink(Box::new(move |s| sink_got.lock().unwrap().push(s)));
+        transport.shared.keyframe_needed("test");
+        transport.shared.signal_video(VideoSignal::FramesLost(7));
+        assert_eq!(
+            *got.lock().unwrap(),
+            [VideoSignal::Keyframe, VideoSignal::FramesLost(7)]
+        );
+        assert!(events.try_recv().is_err());
+
+        transport.clear_video_sink();
+        transport.shared.signal_video(VideoSignal::FramesLost(9));
+        assert_eq!(events.try_recv().ok(), Some(TransportEvent::FramesLost(9)));
     }
 }

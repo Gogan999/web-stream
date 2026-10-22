@@ -155,7 +155,7 @@ pub(crate) fn random_token() -> Result<String, Error> {
     Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
 
-fn hash(token: &str) -> String {
+pub(crate) fn hash(token: &str) -> String {
     Sha256::digest(token.as_bytes())
         .iter()
         .map(|b| format!("{b:02x}"))

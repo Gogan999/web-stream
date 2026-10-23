@@ -18,7 +18,10 @@ export class Cancelled extends Error {
 // Why a measurement window is not good enough, or null if it is.
 // m: { freezes, keyframeRequests, loss, bweKbps, hostFps, decodeMs, encodeMs } over the window
 // (any may be null).
-export function problem(m, config) {
+// `encode` says whether encode time counts: not while stepping bitrate, since it doesn't depend on
+// bitrate (a host whose encoder is slow at any bitrate would otherwise fail every step and end on the
+// floor), only while picking the encoder quality.
+export function problem(m, config, { encode = true } = {}) {
   const frameMs = 1000 / config.fps;
   if (m.freezes > 0) return 'the picture froze';
   if (m.keyframeRequests > 1) return 'frames were dropped on the way';
@@ -28,7 +31,9 @@ export function problem(m, config) {
   if (moving(m, config) && m.bweKbps != null && m.bweKbps < config.bitrateKbps * 0.85) {
     return `the network only carries about ${(m.bweKbps / 1000).toFixed(0)} Mb/s`;
   }
-  if (m.encodeMs != null && m.encodeMs > frameMs * 0.6) return `host encode too slow (${m.encodeMs.toFixed(1)} ms)`;
+  // Capture to encoded: besides the encode itself, a frame can wait up to about a frame time for its
+  // slot at the target rate, so only more than a frame time means the encoder can't keep up.
+  if (encode && m.encodeMs != null && m.encodeMs > frameMs) return `host encode too slow (${m.encodeMs.toFixed(1)} ms)`;
   if (m.decodeMs != null && m.decodeMs > frameMs * 0.6) return `browser decode too slow (${m.decodeMs.toFixed(1)} ms)`;
   return null;
 }
@@ -54,14 +59,14 @@ export class AutoTune {
 
   cancel() { this.cancelled = true; }
 
-  async trial(config, label) {
+  async trial(config, label, opts) {
     this.onProgress(`Auto-tune: trying ${label}…`);
     this.apply(config);
     await this.wait(SETTLE_MS);
     if (this.cancelled) throw new Cancelled();
     const m = await this.measure(MEASURE_MS);
     if (this.cancelled) throw new Cancelled();
-    const why = problem(m, config);
+    const why = problem(m, config, opts);
     this.log.push({ label, ok: !why, why, metrics: m, moving: moving(m, config) });
     return !why;
   }
@@ -71,7 +76,7 @@ export class AutoTune {
     // Bitrate first, at the fastest encoder setting so encode time doesn't cloud the network test.
     let best = null;
     for (const kbps of LADDER_KBPS) {
-      if (!(await this.trial({ ...this.base, bitrateKbps: kbps, quality: 'speed' }, mbps(kbps)))) break;
+      if (!(await this.trial({ ...this.base, bitrateKbps: kbps, quality: 'speed' }, mbps(kbps), { encode: false }))) break;
       best = kbps;
     }
     const bitrateKbps = best == null

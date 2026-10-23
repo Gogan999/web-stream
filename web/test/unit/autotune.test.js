@@ -14,7 +14,9 @@ test('problems in a measurement window', () => {
   assert.equal(problem({ ...clean, bweKbps: 19000 }, base), null);
   // A still screen sends little, and the estimate stays low: not a network problem.
   assert.equal(problem({ ...clean, bweKbps: 3000, hostFps: 10 }, base), null);
-  assert.match(problem({ ...clean, encodeMs: 12 }, base), /encode too slow/);
+  assert.equal(problem({ ...clean, encodeMs: 12 }, base), null);
+  assert.match(problem({ ...clean, encodeMs: 20 }, base), /encode too slow/);
+  assert.equal(problem({ ...clean, encodeMs: 20 }, base, { encode: false }), null);
   assert.match(problem({ ...clean, decodeMs: 12 }, base), /decode too slow/);
 });
 
@@ -30,7 +32,7 @@ function run(capKbps, slowClarity = false, still = false) {
       ...clean,
       bweKbps: still ? 2000 : Math.min(current.bitrateKbps, capKbps),
       hostFps: still ? 10 : 60,
-      encodeMs: slowClarity && current.quality === 'clarity' ? 14 : 3,
+      encodeMs: slowClarity && current.quality === 'clarity' ? 24 : 3,
     }),
   });
   return tune.run().then((r) => ({ ...r, applied, tune }));
@@ -56,6 +58,20 @@ test('says so when the picture was still', async () => {
   assert.equal(r.config.bitrateKbps, 127500);
   assert.match(r.summary, /mostly still/);
   assert.doesNotMatch((await run(55000)).summary, /mostly still/);
+});
+
+test('a slow encoder does not fail the bitrate steps', async () => {
+  const applied = [];
+  let current = base;
+  const tune = new AutoTune({
+    base,
+    apply: (c) => { current = c; applied.push(c); },
+    wait: async () => {},
+    measure: async () => ({ ...clean, bweKbps: Math.min(current.bitrateKbps, 55000), encodeMs: 30 }),
+  });
+  const r = await tune.run();
+  assert.equal(r.config.bitrateKbps, 42500);
+  assert.equal(r.config.quality, 'speed');
 });
 
 test('falls back to the floor when nothing passes', async () => {

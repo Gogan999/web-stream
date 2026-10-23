@@ -702,7 +702,16 @@ impl<M: Send + 'static> NvEncoder<M> {
         intra: bool,
         kbps: Option<u32>,
     ) -> Result<()> {
-        unsafe { context.CopyResource(&self.slots[index].texture, src) };
+        unsafe {
+            context.CopyResource(&self.slots[index].texture, src);
+            // Submit the copy now. NVENC waits for it on the GPU, but D3D11
+            // only hands queued work to the GPU when its buffer is flushed,
+            // which otherwise happens at the next desktop image: each frame
+            // then sat in the encoder for about one frame time (capture to
+            // encoded went from about 12 to 30 ms with async encoding, and
+            // the frame rate fell to about 1 / that).
+            context.Flush();
+        }
         let mut map = nv::NV_ENC_MAP_INPUT_RESOURCE {
             version: nv::NV_ENC_MAP_INPUT_RESOURCE_VER,
             registeredResource: self.slots[index].registered,

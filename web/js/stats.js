@@ -147,7 +147,11 @@ export function assess(s, host, config) {
   if (s.width && s.height && config?.width && config?.height && s.width * s.height < 0.9 * config.width * config.height) {
     add('resolution', 'warn', `Reduced resolution ${s.width}x${s.height} (asked ${config.width}x${config.height}): host scaled down for the network`);
   }
-  if (host?.encoderKbps != null && host.maxKbps > 0 && host.encoderKbps < 0.6 * host.maxKbps) {
+  // The target follows the bandwidth estimate, which sinks whenever little is sent (a still or simple
+  // picture) and saws on Wi-Fi without any loss. It only costs picture quality while the encoder uses
+  // what it is given, so a lower target with the encoder well under it is not worth a warning.
+  const bitrateLimits = host?.sentKbps == null || host.sentKbps >= 0.8 * host.encoderKbps;
+  if (host?.encoderKbps != null && host.maxKbps > 0 && host.encoderKbps < 0.6 * host.maxKbps && bitrateLimits) {
     const bwe = host.bweKbps != null ? `, network carries ~${mb(host.bweKbps)}` : '';
     add('bitrate', host.encoderKbps < 0.25 * host.maxKbps ? 'bad' : 'warn',
       `Reduced bitrate ${mb(host.encoderKbps)} of ${mb(host.maxKbps)} Mb/s${bwe}`);
@@ -169,7 +173,7 @@ export function assess(s, host, config) {
   }
   const budget = config?.fps > 0 ? 1000 / config.fps : null;
   if (budget && s.decodeMs != null && s.decodeMs > budget) add('decode', 'warn', `Slow decode: ${s.decodeMs.toFixed(1)} ms per frame (budget ${budget.toFixed(1)})`);
-  if (budget && host?.encodeMs > budget) add('encode', 'warn', `Slow host encode: ${host.encodeMs.toFixed(1)} ms per frame (budget ${budget.toFixed(1)})`);
+  if (budget && host?.encodeMs > budget) add('encode', 'warn', `Slow host encode: ${host.encodeMs.toFixed(1)} ms from capture to encoded (budget ${budget.toFixed(1)})`);
   return out.sort((a, b) => (a.sev === b.sev ? 0 : a.sev === 'bad' ? -1 : 1));
 }
 

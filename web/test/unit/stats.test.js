@@ -51,7 +51,7 @@ test('first sample has no rates', () => {
 
 const healthy = { width: 1920, height: 1080, fps: 60, bitrateMbps: 18, rttMs: 4, relayed: false, tcp: false, lossPct: 0, droppedDelta: 0, freezesDelta: 0, pliDelta: 0, decodeMs: 2, totals: { packets: 0, frames: 0, keyframes: 0, nacks: 0, plis: 0, freezeSec: 0 } };
 const config = { codec: 'h264', width: 1920, height: 1080, fps: 60, bitrateKbps: 20000, quality: 'balanced' };
-const hostOk = { encoderKbps: 20000, maxKbps: 20000, bweKbps: 40000, fps: 60, encodeMs: 3, keyframeRequests: 0, loss: 0, lateFrames: 0, lostFrames: 0, sendDrops: 0 };
+const hostOk = { encoderKbps: 20000, maxKbps: 20000, bweKbps: 40000, fps: 60, sentKbps: 19000, encodeMs: 3, keyframeRequests: 0, loss: 0, lateFrames: 0, lostFrames: 0, sendDrops: 0 };
 
 test('a healthy stream has no warnings and essential says OK', () => {
   assert.deepEqual(assess(healthy, hostOk, config), []);
@@ -61,9 +61,15 @@ test('a healthy stream has no warnings and essential says OK', () => {
   assert.ok(!lines.some((l) => /host enc/.test(l.text)), 'essential leaves out host detail');
 });
 
+test('a lower bitrate target is no warning while the encoder sends well under it', () => {
+  const quiet = { ...hostOk, encoderKbps: 2000, bweKbps: 2600, sentKbps: 900 };
+  assert.ok(!assess(healthy, quiet, config).some((a) => a.key === 'bitrate'));
+  assert.ok(assess(healthy, { ...quiet, sentKbps: 1900 }, config).some((a) => a.key === 'bitrate'));
+});
+
 test('essential warnings name reduced resolution, bitrate, slow and lossy links, TCP and drops', () => {
   const s = { ...healthy, width: 1280, height: 720, rttMs: 170, lossPct: 2.5, tcp: true, droppedDelta: 3 };
-  const h = { ...hostOk, encoderKbps: 4000, bweKbps: 4500, lateFrames: 2 };
+  const h = { ...hostOk, encoderKbps: 4000, bweKbps: 4500, sentKbps: 3900, lateFrames: 2 };
   const got = assess(s, h, config);
   const text = got.map((a) => a.text).join('\n');
   assert.match(text, /Reduced resolution 1280x720 \(asked 1920x1080\)/);

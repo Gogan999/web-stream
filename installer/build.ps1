@@ -24,10 +24,11 @@ if (-not (Test-Path $iscc)) {
     choco install innosetup --version=6.7.1 --no-progress -y | Out-Host
     if (-not (Test-Path $iscc)) { throw "Inno Setup is not at $iscc" }
 }
-# The version the script is written and tested for.
-$innoVersion = [string](Get-Item $iscc).VersionInfo.ProductVersion
-if (-not $innoVersion.StartsWith('6.')) { throw "Inno Setup 6 needed, found $innoVersion" }
-Write-Host "Inno Setup $innoVersion"
+# The version the script is written and tested for. ISCC.exe's version
+# resource reads 0.0.0.0, so ask the compiler: its banner names it.
+$banner = try { & $iscc '/?' 2>&1 | Out-String } catch { "$_" }
+if ($banner -notmatch 'Inno Setup 6') { throw "Inno Setup 6 needed, $iscc says: $banner" }
+Write-Host ($banner -split "`n" | Where-Object { $_.Trim() } | Select-Object -First 1)
 
 & $iscc "/DAppVersion=$Version" "/DAppNumericVersion=$numeric" (Join-Path $PSScriptRoot 'web-stream.iss')
 if ($LASTEXITCODE -ne 0) { throw "ISCC failed ($LASTEXITCODE)" }

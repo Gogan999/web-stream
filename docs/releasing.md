@@ -37,16 +37,27 @@ tags**, choose **Selected branches and tags** and add the tag rule `v*`.
 
 ## Making a release
 
-```
-# Cargo.toml: version = "0.2.0", merged to main
-git checkout main && git pull
-git tag -a v0.2.0 -m "What changed, in a few lines: this text is shown in the tray before updating"
-git push origin v0.2.0
-```
+Set `version` in `Cargo.toml` to the new version and merge that to `main`.
+Then either:
+
+- **From the Actions tab** (no git needed): Actions > release > **Run
+  workflow**, branch `main`, the version (`0.2.0`, or `0.2.0-rc.1` for a
+  pre-release) and the release notes (what changed, in a few lines: this
+  text is shown in the tray before updating). The tag `v0.2.0` is made at
+  the built commit only after the build has passed, so a failed run leaves
+  nothing behind; run it again once fixed.
+- **With git**:
+
+  ```
+  git checkout main && git pull
+  git tag -a v0.2.0 -m "What changed, in a few lines: this text is shown in the tray before updating"
+  git push origin v0.2.0
+  ```
+
+  A failed run publishes nothing. Delete the tag, fix, and tag again.
 
 If you set up approval: Actions > release > the run > **Review
-deployments** > Approve, once build is green. A test of the pipeline: tag `v0.1.0-rc.1` with the current
-version; it lands as a pre-release, which the updater will ignore, and can
-be deleted afterwards.
-
-A failed run publishes nothing. Delete the tag, fix, and tag again.
+deployments** > Approve, once build is green. A test of the pipeline:
+release `0.1.0-rc.1` with the current version; it lands as a pre-release,
+which the updater will ignore, and can be deleted afterwards (the release
+and its tag).

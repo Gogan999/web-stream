@@ -1,17 +1,28 @@
 name: release
 
-# Push a tag vX.Y.Z (or vX.Y.Z-rc.1 for a pre-release) on a commit on main.
-# The build runs on its own; publishing waits for approval in the `release`
+# Push a tag vX.Y.Z (or vX.Y.Z-rc.1 for a pre-release) on a commit on main,
+# or run it from the Actions tab on main with the version and notes; then the
+# tag is made only once the build has passed. The build runs on its own; publishing waits for approval in the `release`
 # environment if it has a required reviewer. See docs/releasing.md.
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to release, e.g. 0.1.0 or 0.1.0-rc.1 (must match Cargo.toml)
+        required: true
+        type: string
+      notes:
+        description: Release notes, shown in the tray before updating
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref_name }}
+  group: release-${{ inputs.version || github.ref_name }}
   cancel-in-progress: false
 
 env:
@@ -24,6 +35,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       prerelease: ${{ steps.version.outputs.prerelease }}
+      tag: ${{ steps.version.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -31,9 +43,21 @@ jobs:
       - id: version
         name: tag matches Cargo.toml, commit is on main
         env:
-          TAG: ${{ github.ref_name }}
+          PUSHED_TAG: ${{ github.ref_name }}
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            TAG="v${INPUT_VERSION#v}"
+            if [ "$GITHUB_REF" != refs/heads/main ]; then
+              echo "::error::run the release from main, not $GITHUB_REF"; exit 1
+            fi
+            if [ -n "$(git ls-remote --tags origin "refs/tags/$TAG")" ]; then
+              echo "::error::$TAG already exists: pick a new version"; exit 1
+            fi
+          else
+            TAG="$PUSHED_TAG"
+          fi
           if ! [[ "$TAG" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)(-[0-9A-Za-z.-]+)?$ ]]; then
             echo "::error::tag $TAG is not vX.Y.Z or vX.Y.Z-pre"; exit 1
           fi
@@ -47,6 +71,7 @@ jobs:
           if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
             echo "::error::$TAG is not on main: only main is released"; exit 1
           fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
           echo "prerelease=$([ -n "$pre" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
 
@@ -105,7 +130,7 @@ jobs:
       contents: write
     env:
       VERSION: ${{ needs.check.outputs.version }}
-      TAG: ${{ github.ref_name }}
+      TAG: ${{ needs.check.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -114,6 +139,20 @@ jobs:
         with:
           name: release-files
           path: dist
+      # Run from the Actions tab: the tag is made here, after the build has
+      # passed, at the commit that was built. (A tag pushed with the job's
+      # token doesn't start this workflow again.)
+      - name: tag
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          NOTES: ${{ inputs.notes }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          printf '%s\n' "$NOTES" > "$RUNNER_TEMP/notes.txt"
+          git tag -a "$TAG" "$GITHUB_SHA" -F "$RUNNER_TEMP/notes.txt"
+          git push origin "refs/tags/$TAG"
       - name: manifest
         run: |
           set -euo pipefail

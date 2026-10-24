@@ -33,8 +33,10 @@ function Check([bool]$ok, [string]$what) {
     if ($ok) { Write-Host "ok   $what" } else { Write-Host "FAIL $what" -ForegroundColor Red; $script:Failures += $what }
 }
 
+# The Run value, or $null when there is none (StrictMode won't read a
+# missing property off the key).
 function Get-RunValue {
-    (Get-ItemProperty -Path $RunKey -Name 'web-stream host' -ErrorAction SilentlyContinue).'web-stream host'
+    try { Get-ItemPropertyValue -Path $RunKey -Name 'web-stream host' -ErrorAction Stop } catch { $null }
 }
 
 # Software OpenGL for a runner without a GPU, next to the installed app.

@@ -1,0 +1,169 @@
+name: release
+
+# Push a tag vX.Y.Z (or vX.Y.Z-rc.1 for a pre-release) on a commit on main.
+# The build runs on its own; publishing waits for approval in the `release`
+# environment, which holds the signing key. See docs/releasing.md.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: version
+        name: tag matches Cargo.toml, commit is on main
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$TAG" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::tag $TAG is not vX.Y.Z or vX.Y.Z-pre"; exit 1
+          fi
+          base="${BASH_REMATCH[1]}"
+          pre="${BASH_REMATCH[2]}"
+          cargo_version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
+          if [ "$cargo_version" != "$base" ]; then
+            echo "::error::tag $TAG doesn't match workspace version $cargo_version in Cargo.toml"; exit 1
+          fi
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$TAG is not on main: only main is released"; exit 1
+          fi
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$([ -n "$pre" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: check
+    runs-on: windows-latest
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+      RUST_VERSION: 1.97.0
+    steps:
+      - uses: actions/checkout@v4
+      # No build cache and no third-party action: a release is built from
+      # scratch from Cargo.lock, with a pinned compiler (rustup comes with
+      # the runner). Move RUST_VERSION forward deliberately.
+      - name: toolchain
+        run: |
+          rustup toolchain install $env:RUST_VERSION --profile minimal --component rustfmt,clippy
+          rustup override set $env:RUST_VERSION
+          rustc --version
+      - name: fmt
+        run: cargo fmt --all --check
+      - name: clippy
+        run: cargo clippy --workspace --all-targets --locked
+      - name: test
+        run: cargo test --workspace --locked
+      - name: build
+        run: cargo build --release --locked -p ws-host-gui
+      - name: zip
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Compress-Archive -Path target/release/ws-host-gui.exe, installer/third-party `
+            -DestinationPath "dist/web-stream-host-$env:VERSION-windows-x64.zip"
+      - name: installer
+        shell: pwsh
+        run: |
+          ./installer/fetch-redist.ps1
+          ./installer/build.ps1 -Version $env:VERSION
+          Copy-Item "target/installer/web-stream-setup-$env:VERSION.exe" dist/
+      - name: installer works
+        shell: pwsh
+        run: ./installer/test-install.ps1 -Setup "dist/web-stream-setup-$env:VERSION.exe"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-files
+          path: dist/
+          if-no-files-found: error
+
+  # Signs and publishes. Pauses until Logan approves the run in the
+  # `release` environment; only this job can read the signing key.
+  publish:
+    needs: [check, build]
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-files
+          path: dist
+      - name: install minisign
+        run: sudo apt-get update -q && sudo apt-get install -y -q minisign
+      - name: manifest
+        run: |
+          set -euo pipefail
+          cd dist
+          # The tag's message is the release notes the host shows; it is
+          # signed with the rest of the manifest. An annotated tag only, and
+          # without its own signature block, if it has one.
+          if [ "$(git cat-file -t "refs/tags/$TAG")" != tag ]; then
+            echo "::error::$TAG is a lightweight tag: tag with git tag -a and the release notes as its message"; exit 1
+          fi
+          notes=$(git tag -l --format='%(contents:subject)%0a%0a%(contents:body)' "$TAG")
+          files=$(for f in *.zip *.exe; do
+            jq -n --arg name "$f" --argjson size "$(stat -c %s "$f")" \
+              --arg sha256 "$(sha256sum "$f" | cut -d' ' -f1)" '{name: $name, size: $size, sha256: $sha256}'
+          done | jq -s .)
+          jq -n --arg version "$VERSION" --arg released "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg notes "$notes" --argjson files "$files" \
+            '{product: "web-stream-host", version: $version, released: $released, files: $files, notes: $notes}' \
+            > manifest.json
+          sha256sum *.zip *.exe manifest.json > SHA256SUMS.txt
+          cat manifest.json
+      - name: sign
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "$MINISIGN_SECRET_KEY" ]; then
+            echo "::error::MINISIGN_SECRET_KEY is not set in the release environment (docs/releasing.md)"; exit 1
+          fi
+          if ! [ -s release/minisign.pub ]; then
+            echo "::error::release/minisign.pub is missing: commit the public key first (docs/releasing.md)"; exit 1
+          fi
+          key="$RUNNER_TEMP/minisign.key"
+          (umask 077; printf '%s\n' "$MINISIGN_SECRET_KEY" > "$key")
+          trap 'shred -u "$key"' EXIT
+          cd dist
+          minisign -S -s "$key" -t "web-stream-host $VERSION" -m manifest.json *.zip *.exe < /dev/null
+          # The key in the environment must be the one hosts will trust.
+          for f in manifest.json *.zip *.exe; do
+            minisign -V -p ../release/minisign.pub -m "$f"
+          done
+      - name: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ needs.check.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          flags=()
+          if [ "$PRERELEASE" = true ]; then flags+=(--prerelease); fi
+          gh release create "$TAG" dist/* --verify-tag --generate-notes \
+            --title "web-stream host $VERSION" "${flags[@]}"

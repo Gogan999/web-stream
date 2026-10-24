@@ -25,6 +25,13 @@ Data flow on the host: `capture` emits `EncodedFrame`s and `audio` emits
 hands `InputEvent`s to `input` and `ClientControl` messages to `host`.
 Late frames are dropped, never queued.
 
+## Install
+
+Friends hosting on their own PC: download `web-stream-setup-X.Y.Z.exe` from
+[Releases](https://github.com/Gogan999/web-stream/releases) and follow
+[the friend guide](docs/friend-guide.md). Releases are built and signed by
+CI (`docs/releasing.md`); the installer source is in `installer/`.
+
 ## Build
 
 ```

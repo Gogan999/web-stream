@@ -30,6 +30,26 @@ export async function confirmPairing(pairingId, code) {
   throw new Error(pairingError(status, data));
 }
 
+// The secret from a pairing link (the host's QR code): pairs at once while pairing is open.
+export async function pairWithLink(link, deviceName) {
+  const { status, data } = await call('POST', '/api/pair/link', { link, device_name: deviceName });
+  if (status === 200) return true;
+  if (status === 403 && data.error === 'pairing_closed') {
+    throw new Error('This pairing QR code has expired or was used. Press "Pair a browser" on the host for a new one.');
+  }
+  throw new Error(pairingError(status, data));
+}
+
+// Takes `#pair=<secret>` off the address, so it doesn't stay in history or a bookmark. null when
+// there is none, '' when it is damaged (cut short by a QR reader, say).
+export function takePairingLink(loc = location, hist = history) {
+  if (!loc.hash.startsWith('#pair=')) return null;
+  // Read before replaceState, which empties location.hash.
+  const m = /^#pair=([A-Za-z0-9_-]{16,64})$/.exec(loc.hash);
+  hist.replaceState(null, '', loc.pathname + loc.search);
+  return m ? m[1] : '';
+}
+
 export function pairingError(status, data = {}) {
   if (status === 403 && data.error === 'pairing_closed') return 'Pairing is closed. Open pairing on the host first, then request a code.';
   if (status === 409) return 'Another pairing is in progress. Try again in a couple of minutes, or reopen pairing on the host.';

@@ -9,8 +9,10 @@ use eframe::egui::{self, Color32, RichText};
 use ws_host::serve::Notice;
 use ws_host::serve::{Command, Event};
 
+use crate::firstrun::{self, FirstRun};
 use crate::host::{FileStatus, Host, Status};
 use crate::settings::{CODECS, GAMEPADS, QUALITIES, Settings};
+use crate::{portcheck, qr, upnp};
 
 pub struct App {
     host: Host,
@@ -32,6 +34,10 @@ pub struct App {
     /// that was last asked.
     #[cfg(windows)]
     service: (Option<bool>, Option<Instant>),
+    first_run: FirstRun,
+    /// Shows the first-run setup at the top of the window.
+    show_setup: bool,
+    upnp: &'static upnp::Mapper,
     /// Frames until the window hides itself, for `--hidden`. eframe shows
     /// the window after the first frame whatever it was built with.
     #[cfg_attr(not(windows), allow(dead_code))]
@@ -87,7 +93,16 @@ impl App {
             Vec::new()
         });
 
+        let repaint = cc.egui_ctx.clone();
+        let upnp = upnp::mapper(move || repaint.request_repaint());
+        if settings.upnp {
+            upnp.want(Some(settings.forwarded_ports()));
+        }
+
         let mut app = Self {
+            first_run: FirstRun::new(),
+            show_setup: !settings.setup_done,
+            upnp,
             host,
             draft: settings.clone(),
             settings,
@@ -152,7 +167,161 @@ impl App {
         self.draft.duckdns_token.clear();
         self.settings_error = None;
         self.settings = self.draft.clone();
+        // The ports may have changed.
+        self.upnp
+            .want(self.settings.upnp.then(|| self.settings.forwarded_ports()));
         true
+    }
+
+    /// Changes one setting the setup page shows (not part of the form) and
+    /// saves it, leaving unsaved edits in the form as they are.
+    fn save_one(&mut self, change: impl Fn(&mut Settings)) {
+        change(&mut self.settings);
+        change(&mut self.draft);
+        if let Err(e) = self.settings.save(&self.data_dir) {
+            self.host.log(format!("could not save the settings: {e:#}"));
+        }
+    }
+
+    /// The first-run setup: reaching the host from outside, then pairing a
+    /// phone.
+    fn setup_ui(&mut self, ui: &mut egui::Ui) {
+        ui.label(RichText::new("Set up this PC").strong().size(16.0));
+        ui.add_space(4.0);
+        ui.label(RichText::new("1. Use it away from home (optional)").strong());
+        ui.label(
+            "At home on the same Wi-Fi nothing is needed. From elsewhere, the router has to \
+             forward these ports to this PC:",
+        );
+        ui.monospace(forward_ports(&self.settings));
+        let mut on = self.settings.upnp;
+        if ui
+            .checkbox(&mut on, "Let the router forward them (UPnP)")
+            .on_hover_text(
+                "Asks the router to forward only these ports to this PC, renewed every 20 \
+                 minutes while the app runs. Quitting and uninstalling remove them. Leave it off \
+                 to forward them yourself on the router's settings page",
+            )
+            .changed()
+        {
+            self.save_one(|s| s.upnp = on);
+            self.upnp.want(on.then(|| self.settings.forwarded_ports()));
+        }
+        firstrun::upnp_status_ui(ui, &self.upnp.status());
+
+        let (testing, report) = self.first_run.report();
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(!testing, egui::Button::new("Test the ports"))
+                .on_hover_text(
+                    "Connects to this PC's public address the way a phone away from home would",
+                )
+                .clicked()
+            {
+                let fingerprint = match &self.host.state().status {
+                    Status::Running { fingerprint, .. } => Some(fingerprint.clone()),
+                    _ => None,
+                };
+                let input = portcheck::Input {
+                    port: self.settings.port,
+                    ice_tcp_port: self.settings.ice_tcp.then(|| {
+                        self.settings
+                            .ice_tcp_port
+                            .unwrap_or(self.settings.port.saturating_add(1))
+                    }),
+                    fingerprint,
+                    duckdns: self.settings.duckdns.clone(),
+                    public_ips: self
+                        .settings
+                        .public_ips
+                        .split([' ', ',', ';'])
+                        .filter_map(|s| s.trim().parse().ok())
+                        .collect(),
+                };
+                self.first_run.start_check(input, ui.ctx().clone());
+            }
+            if testing {
+                ui.spinner();
+                ui.weak("testing...");
+            }
+        });
+        if let Some(report) = &report {
+            firstrun::report_ui(ui, report);
+        }
+        ui.weak(
+            "For a name that works from anywhere, with no certificate warning in the browser, \
+             fill in DuckDNS under Settings below.",
+        );
+
+        ui.add_space(6.0);
+        ui.label(RichText::new("2. Pair your phone").strong());
+        let running = matches!(self.host.state().status, Status::Running { .. });
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add_enabled(running, egui::Button::new("Pair a phone"))
+                .clicked()
+            {
+                self.host.command(Command::OpenPairing);
+            }
+            ui.label("then scan the QR code that appears below with the phone's camera.");
+        });
+        ui.add_space(6.0);
+        if ui
+            .button("Done")
+            .on_hover_text("\"Setup\" at the bottom brings this back")
+            .clicked()
+        {
+            self.show_setup = false;
+            self.save_one(|s| s.setup_done = true);
+        }
+    }
+
+    /// The public address the port test found this host at, for the QR
+    /// code. Not the one the router reports: any device on the network can
+    /// answer UPnP, and the QR code carries the pairing secret.
+    fn public_ips(&self) -> Vec<std::net::IpAddr> {
+        match self.first_run.report() {
+            (_, Some(r)) => r.verified_ip.into_iter().collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The pairing link as a QR code, with a choice of the address in it.
+    fn pairing_qr_ui(&mut self, ui: &mut egui::Ui, link: &str) {
+        let (port, lan) = match &self.host.state().status {
+            Status::Running { port, ips, .. } => (*port, ips.clone()),
+            _ => return,
+        };
+        let choices = firstrun::addresses(&self.settings, &lan, &self.public_ips());
+        let Some(first) = choices.first().cloned() else {
+            return;
+        };
+        let host = match &self.first_run.qr_host {
+            Some(h) if choices.contains(h) => h.clone(),
+            _ => first,
+        };
+        ui.horizontal(|ui| {
+            ui.label("Or scan with the phone's camera. Address:");
+            let mut selected = host.clone();
+            egui::ComboBox::from_id_salt("qr-host")
+                .selected_text(&selected)
+                .show_ui(ui, |ui| {
+                    for c in &choices {
+                        ui.selectable_value(&mut selected, c.clone(), c);
+                    }
+                })
+                .response
+                .on_hover_text(
+                    "A home address works on the same Wi-Fi. A DuckDNS name or the public address \
+                     also works away from home, once the ports are forwarded",
+                );
+            if selected != host {
+                self.first_run.qr_host = Some(selected);
+            }
+        });
+        let url = firstrun::pairing_url(&host, port, link);
+        qr::show(ui, &url, 200.0).on_hover_text("Pairs one browser, once, while pairing is open");
+        ui.weak("Pairs once, while pairing is open. Anyone who can see this code can pair.");
     }
 
     fn quit(&mut self, ctx: &egui::Context) {
@@ -307,10 +476,11 @@ impl App {
                     left / 60,
                     left % 60
                 ));
-            } else if locked {
+            }
+            if locked {
                 ui.colored_label(
                     Color32::RED,
-                    "Locked after wrong codes; pair again to unlock",
+                    "Codes locked after wrong guesses; pair again to unlock",
                 );
             }
         });
@@ -320,6 +490,12 @@ impl App {
             ui.label(RichText::new(&code.code).monospace().size(36.0).strong());
             let left = code.expires.saturating_duration_since(now).as_secs();
             ui.weak(format!("expires in {left}s"));
+        }
+        let link = self.host.state().pairing_link.clone();
+        // Whatever a browser does with codes: anyone who can reach the port
+        // can ask for one.
+        if let Some(link) = &link {
+            self.pairing_qr_ui(ui, link);
         }
         if pairing_until.is_some() || code.is_some() {
             ui.ctx().request_repaint_after(Duration::from_millis(500));
@@ -924,6 +1100,9 @@ impl eframe::App for App {
                 if ui.button("Open data folder").clicked() {
                     open_folder(&self.data_dir);
                 }
+                if !self.show_setup && ui.button("Setup").clicked() {
+                    self.show_setup = true;
+                }
                 ui.weak("certificate, paired browsers, settings and log");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("Quit").clicked() {
@@ -934,6 +1113,10 @@ impl eframe::App for App {
         });
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
+                if self.show_setup {
+                    egui::Frame::group(ui.style()).show(ui, |ui| self.setup_ui(ui));
+                    ui.add_space(4.0);
+                }
                 self.status_ui(ui);
                 ui.separator();
                 self.session_ui(ui);
@@ -953,6 +1136,7 @@ impl eframe::App for App {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.host.stop_and_wait(Duration::from_secs(15));
+        upnp::shutdown();
     }
 }
 

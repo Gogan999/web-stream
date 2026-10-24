@@ -1,4 +1,5 @@
-//! One-time pairing codes shown on the host and typed into the browser.
+//! One-time pairing codes shown on the host and typed into the browser, or
+//! a pairing link the host shows as a QR code.
 //!
 //! Pairing is closed unless the host user opens it (tray or console action)
 //! for a short window, so nobody on the internet can start one or guess at
@@ -74,6 +75,8 @@ pub struct Pairing {
     path: PathBuf,
     state: Persisted,
     open_until: Option<Instant>,
+    /// The secret in the pairing link (QR code) while pairing is open.
+    link: Option<String>,
     pending: Option<Pending>,
     starts: VecDeque<Instant>,
 }
@@ -91,6 +94,7 @@ impl Pairing {
             path,
             state,
             open_until: None,
+            link: None,
             pending: None,
             starts: VecDeque::new(),
         })
@@ -98,19 +102,47 @@ impl Pairing {
 
     /// Host-side action: accept pairing requests for `window`. Also clears a
     /// lockout, since the host user is evidently present.
-    pub fn open(&mut self, now: Instant, window: Duration) -> Result<(), Error> {
+    ///
+    /// Returns the secret of a pairing link that works once, instead of a
+    /// code, until the window closes. Only the host UI shows it (as a QR
+    /// code); it is long and random, so a wrong one doesn't count towards
+    /// the lockout.
+    pub fn open(&mut self, now: Instant, window: Duration) -> Result<String, Error> {
+        let link = crate::store::random_token()?;
         self.open_until = Some(now + window);
+        self.link = Some(link.clone());
         self.pending = None;
         if self.state.failures != 0 || self.state.locked {
             self.state = Persisted::default();
             self.save()?;
         }
-        Ok(())
+        Ok(link)
     }
 
     pub fn close(&mut self) {
         self.open_until = None;
+        self.link = None;
         self.pending = None;
+    }
+
+    /// Pairs with the link the host showed; on success returns the device
+    /// name and closes pairing, like a right code. `None` if pairing is
+    /// closed or this is not its link (the browser can't tell which).
+    ///
+    /// A code lockout doesn't stop the link: wrong codes from a stranger
+    /// would otherwise also take away the QR code the host user is
+    /// showing, and the link can't be guessed.
+    pub fn redeem_link(&mut self, link: &str, device_name: &str, now: Instant) -> Option<String> {
+        let open = self.open_until.is_some_and(|t| now < t);
+        let matches = self
+            .link
+            .as_ref()
+            .is_some_and(|l| bool::from(l.as_bytes().ct_eq(link.trim().as_bytes())));
+        if !(open && matches) {
+            return None;
+        }
+        self.close();
+        Some(clean_name(device_name))
     }
 
     pub fn is_locked(&self) -> bool {
@@ -195,8 +227,9 @@ impl Pairing {
         self.state.failures += 1;
         let locked = self.state.failures >= MAX_FAILURES;
         if locked {
+            // Codes stop; the link stays until pairing closes.
             self.state.locked = true;
-            self.close();
+            self.pending = None;
         }
         self.save()?;
         Ok(Err(if locked {
@@ -377,6 +410,64 @@ mod tests {
         p.open(now, 2 * CODE_TTL).unwrap();
         p.start("x", now).unwrap().unwrap();
         assert!(p.start("y", now + CODE_TTL).unwrap().is_ok());
+    }
+
+    #[test]
+    fn link_pairs_once_while_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = Instant::now();
+        let mut p = Pairing::load(dir.path()).unwrap();
+        let link = p.open(now, DEFAULT_WINDOW).unwrap();
+        assert!(link.len() >= 32);
+        assert_eq!(p.redeem_link("nope", "x", now), None);
+        assert_eq!(
+            p.redeem_link(&link, "iPhone\u{200B}", now),
+            Some("iPhone".into())
+        );
+        // Used up, and pairing is closed again.
+        assert_eq!(p.redeem_link(&link, "x", now), None);
+        assert_eq!(p.start("x", now).unwrap(), Err(StartError::Closed));
+
+        // A new window makes a new link; the old one never works again.
+        let second = p.open(now, DEFAULT_WINDOW).unwrap();
+        assert_ne!(second, link);
+        assert_eq!(p.redeem_link(&link, "x", now), None);
+        assert_eq!(p.redeem_link(&second, "x", now + DEFAULT_WINDOW), None);
+    }
+
+    #[test]
+    fn wrong_links_do_not_lock_and_wrong_codes_do_not_stop_the_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = Instant::now();
+        let mut p = Pairing::load(dir.path()).unwrap();
+        let link = p.open(now, DEFAULT_WINDOW).unwrap();
+        for _ in 0..MAX_FAILURES * 2 {
+            assert_eq!(p.redeem_link("guess", "x", now), None);
+        }
+        assert!(!p.is_locked());
+        // A stranger burns the codes until pairing locks...
+        for _ in 0..MAX_FAILURES {
+            let s = p.start("x", now).unwrap().unwrap();
+            p.confirm(&s.pairing_id, wrong(&s.code), now).unwrap().ok();
+            p.starts.clear();
+            p.pending = None;
+        }
+        assert!(p.is_locked());
+        assert_eq!(p.start("x", now).unwrap(), Err(StartError::Locked));
+        // ...and the QR code still pairs, once.
+        assert_eq!(p.redeem_link(&link, "phone", now), Some("phone".into()));
+        assert_eq!(p.redeem_link(&link, "phone", now), None);
+    }
+
+    #[test]
+    fn a_right_code_also_ends_the_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = Instant::now();
+        let mut p = Pairing::load(dir.path()).unwrap();
+        let link = p.open(now, DEFAULT_WINDOW).unwrap();
+        let s = p.start("x", now).unwrap().unwrap();
+        p.confirm(&s.pairing_id, &s.code, now).unwrap().unwrap();
+        assert_eq!(p.redeem_link(&link, "x", now), None);
     }
 
     #[test]

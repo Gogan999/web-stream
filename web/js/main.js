@@ -14,6 +14,10 @@ import { DiagLog, diagEnabled } from './diag.js';
 import { ZoomView } from './zoom.js';
 
 const $ = (id) => document.getElementById(id);
+// First thing: the pairing link's secret leaves the address bar (and history) before anything else
+// runs. null: none; '': a damaged one.
+const pairingLink = pairing.takePairingLink();
+
 const ui = {
   connect: $('connect'), status: $('status'), display: $('display'), mouseMode: $('mouse-mode'),
   fullscreen: $('fullscreen'), statsToggle: $('stats-toggle'), statsLevel: $('stats-level'), stage: $('stage'), video: $('video'), stats: $('stats'),
@@ -883,4 +887,23 @@ ui.unpair.addEventListener('click', async () => {
   showPairing(false);
 });
 
-checkPairing().then((paired) => { if (paired && params.has('autoconnect')) connect(); });
+// A pairing link (the host's QR code) pairs this browser without a code.
+async function pairFromLink(link) {
+  try {
+    await pairing.pairWithLink(link, ui.deviceName.value.trim() || pairing.defaultDeviceName());
+    showPairing(true);
+    return true;
+  } catch (err) {
+    // fetch's own TypeError means the host didn't answer at all; checkPairing has said so.
+    if (!(err instanceof TypeError)) ui.pairMsg.textContent = err.message;
+    return false;
+  }
+}
+
+checkPairing().then(async (paired) => {
+  if (!paired && pairingLink === '') {
+    ui.pairMsg.textContent = 'That pairing link was damaged. Scan the QR code on the host again.';
+  }
+  if (!paired && pairingLink) paired = await pairFromLink(pairingLink);
+  if (paired && (pairingLink || params.has('autoconnect'))) connect();
+});

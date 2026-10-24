@@ -46,7 +46,18 @@ sibling subdomain can set it.
 | `GET /api/session` | | `200 {"paired":true,"device":"<name>"}` or `401 {"paired":false}` |
 | `POST /api/pair/start` | `{"device_name":"Chrome on laptop"}` | `200 {"pairing_id":"…","expires_in":120}`; host shows a 6-digit code. `403 {"error":"pairing_closed"}` until the host user opens pairing. `423 {"error":"locked"}`. `409 {"error":"busy"}` while another browser's code is pending (the first request keeps it until it is confirmed, burned or expires). `429 {"error":"rate_limited"}` |
 | `POST /api/pair/confirm` | `{"pairing_id":"…","code":"123456"}` | `200 {"paired":true}` + cookie. `403 {"error":"bad_code","attempts_left":2}`. `410 {"error":"expired"}`. `423 {"error":"locked"}` |
+| `POST /api/pair/link` | `{"link":"…","device_name":"iPhone"}` | `200 {"paired":true}` + cookie. `403 {"error":"pairing_closed"}` if pairing is closed or the link is wrong or used |
 | `POST /api/unpair` | `{}` | `200`, revokes this device and clears the cookie |
+
+Opening pairing also makes a pairing link: 32 random bytes the host UI
+shows as a QR code of `https://<host>:<port>/#pair=<link>`. The fragment
+never reaches a server; the web client takes it off the address, posts it
+to `/api/pair/link` and connects. It pairs one browser, once, while pairing
+is open; a used link, a confirmed code or the window closing ends it. A
+wrong link doesn't count towards the lockout (it can't be guessed), and a
+lockout from wrong codes stops codes but not the link, so a stranger
+guessing codes can't take the QR code away from the host user. The link is
+never logged.
 
 A code is valid for 120 seconds and 3 attempts. After 5 wrong codes in
 total, pairing locks (also across restarts) until the host user opens it

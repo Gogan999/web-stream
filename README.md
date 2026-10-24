@@ -29,8 +29,8 @@ Late frames are dropped, never queued.
 
 Friends hosting on their own PC: download `web-stream-setup-X.Y.Z.exe` from
 [Releases](https://github.com/Gogan999/web-stream/releases) and follow
-[the friend guide](docs/friend-guide.md). Releases are built and signed by
-CI (`docs/releasing.md`); the installer source is in `installer/`.
+[the friend guide](docs/friend-guide.md). Releases are built and published
+by CI (`docs/releasing.md`); the installer source is in `installer/`.
 
 ## Build
 

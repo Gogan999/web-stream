@@ -2,7 +2,7 @@ name: release
 
 # Push a tag vX.Y.Z (or vX.Y.Z-rc.1 for a pre-release) on a commit on main.
 # The build runs on its own; publishing waits for approval in the `release`
-# environment, which holds the signing key. See docs/releasing.md.
+# environment if it has a required reviewer. See docs/releasing.md.
 on:
   push:
     tags: ['v*']
@@ -95,8 +95,8 @@ jobs:
           path: dist/
           if-no-files-found: error
 
-  # Signs and publishes. Pauses until Logan approves the run in the
-  # `release` environment; only this job can read the signing key.
+  # Publishes. Pauses until Logan approves the run when the `release`
+  # environment has a required reviewer; it needs no secrets.
   publish:
     needs: [check, build]
     runs-on: ubuntu-latest
@@ -114,15 +114,13 @@ jobs:
         with:
           name: release-files
           path: dist
-      - name: install minisign
-        run: sudo apt-get update -q && sudo apt-get install -y -q minisign
       - name: manifest
         run: |
           set -euo pipefail
           cd dist
-          # The tag's message is the release notes the host shows; it is
-          # signed with the rest of the manifest. An annotated tag only, and
-          # without its own signature block, if it has one.
+          # The tag's message is the release notes the host shows. An
+          # annotated tag only, and without its own signature block, if it
+          # has one.
           if [ "$(git cat-file -t "refs/tags/$TAG")" != tag ]; then
             echo "::error::$TAG is a lightweight tag: tag with git tag -a and the release notes as its message"; exit 1
           fi
@@ -137,26 +135,6 @@ jobs:
             > manifest.json
           sha256sum *.zip *.exe manifest.json > SHA256SUMS.txt
           cat manifest.json
-      - name: sign
-        env:
-          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
-        run: |
-          set -euo pipefail
-          if [ -z "$MINISIGN_SECRET_KEY" ]; then
-            echo "::error::MINISIGN_SECRET_KEY is not set in the release environment (docs/releasing.md)"; exit 1
-          fi
-          if ! [ -s release/minisign.pub ]; then
-            echo "::error::release/minisign.pub is missing: commit the public key first (docs/releasing.md)"; exit 1
-          fi
-          key="$RUNNER_TEMP/minisign.key"
-          (umask 077; printf '%s\n' "$MINISIGN_SECRET_KEY" > "$key")
-          trap 'shred -u "$key"' EXIT
-          cd dist
-          minisign -S -s "$key" -t "web-stream-host $VERSION" -m manifest.json *.zip *.exe < /dev/null
-          # The key in the environment must be the one hosts will trust.
-          for f in manifest.json *.zip *.exe; do
-            minisign -V -p ../release/minisign.pub -m "$f"
-          done
       - name: publish
         env:
           GH_TOKEN: ${{ github.token }}

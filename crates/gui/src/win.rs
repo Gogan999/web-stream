@@ -8,21 +8,27 @@ use std::time::Duration;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{MouseButton, TrayIcon, TrayIconBuilder, TrayIconEvent};
+use windows::Win32::Devices::DeviceAndDriverInstallation::{
+    DIINSTALLDRIVER_FLAGS, DiInstallDriverW,
+};
 use windows::Win32::Foundation::{
     CloseHandle, ERROR_ALREADY_EXISTS, ERROR_SUCCESS, GetLastError, HWND,
 };
+use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::Registry::{
     HKEY_CURRENT_USER, REG_SZ, RRF_RT_REG_SZ, RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW,
 };
 use windows::Win32::System::Threading::{
     CreateMutexW, OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
 };
-use windows::Win32::UI::Shell::ShellExecuteW;
+use windows::Win32::UI::Shell::{
+    FOLDERID_ProgramFilesCommonX86, KF_FLAG_DEFAULT, SHGetKnownFolderPath, ShellExecuteW,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     FindWindowW, MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MessageBoxW, SW_HIDE, SW_RESTORE,
     SW_SHOWNORMAL, SetForegroundWindow, ShowWindowAsync,
 };
-use windows::core::{HSTRING, w};
+use windows::core::{BOOL, GUID, HSTRING, w};
 use ws_host::serve::Command;
 
 use crate::host::Host;
@@ -223,6 +229,7 @@ pub fn create_tray(host: Host, ctx: eframe::egui::Context) -> anyhow::Result<()>
 pub fn quit(host: &Host) -> ! {
     hide_window();
     host.stop_and_wait(Duration::from_secs(15));
+    crate::upnp::shutdown();
     TRAY.with(|t| t.borrow_mut().take());
     std::process::exit(0)
 }
@@ -267,4 +274,36 @@ pub fn set_autostart(enabled: bool) -> anyhow::Result<()> {
         unsafe { RegDeleteKeyValueW(HKEY_CURRENT_USER, &key, &name) }.ok()?;
     }
     Ok(())
+}
+
+fn known_folder(id: &GUID) -> anyhow::Result<std::path::PathBuf> {
+    // SAFETY: the returned string is freed below.
+    let p = unsafe { SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, None) }?;
+    // SAFETY: a valid NUL-terminated string from the shell.
+    let path = unsafe { p.to_string() }.map(std::path::PathBuf::from);
+    // SAFETY: allocated by the shell with CoTaskMemAlloc.
+    unsafe { CoTaskMemFree(Some(p.0.cast())) };
+    Ok(path?)
+}
+
+/// Steam's signed virtual microphone driver, in Steam's own folder (under
+/// Program Files, so only administrators can change it).
+pub fn steam_mic_inf() -> anyhow::Result<std::path::PathBuf> {
+    Ok(known_folder(&FOLDERID_ProgramFilesCommonX86)?
+        .join(r"Steam\drivers\Windows10\x64\SteamStreamingMicrophone.inf"))
+}
+
+/// Installs the driver package `inf`, as Sunshine installs Steam's virtual
+/// speakers; true if Windows needs a restart. Needs administrator rights.
+pub fn install_driver(inf: &std::path::Path) -> anyhow::Result<bool> {
+    let mut reboot = BOOL(0);
+    unsafe {
+        DiInstallDriverW(
+            None,
+            &HSTRING::from(inf.as_os_str()),
+            DIINSTALLDRIVER_FLAGS(0),
+            Some(&mut reboot),
+        )
+    }?;
+    Ok(reboot.as_bool())
 }

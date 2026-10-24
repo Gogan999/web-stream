@@ -72,6 +72,11 @@ pub struct Settings {
     pub extra_args: String,
     /// Start hosting as soon as the app opens.
     pub start_hosting: bool,
+    /// Ask the router to forward the ports (UPnP). Off unless the user
+    /// turns it on.
+    pub upnp: bool,
+    /// The first-run setup was finished or dismissed.
+    pub setup_done: bool,
 }
 
 impl Default for Settings {
@@ -107,6 +112,8 @@ impl Default for Settings {
             allow_remote_update: false,
             extra_args: String::new(),
             start_hosting: true,
+            upnp: false,
+            setup_done: false,
         }
     }
 }
@@ -210,6 +217,14 @@ impl Settings {
         }
         args.extend(split_args(&self.extra_args)?);
         Ok(args)
+    }
+
+    /// The ports a router forwards to this PC, for UPnP.
+    pub fn forwarded_ports(&self) -> Vec<crate::upnp::Port> {
+        let ice_tcp = self
+            .ice_tcp
+            .then(|| self.ice_tcp_port.unwrap_or(self.port.saturating_add(1)));
+        crate::upnp::ports(self.port, ice_tcp)
     }
 
     pub fn serve_options(&self) -> anyhow::Result<ServeOptions> {

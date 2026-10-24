@@ -12,6 +12,8 @@
 //!     the service's host: pairing, the connected browser, files (elevated)
 //! ws-host-gui service run|session-host ...
 //!     the service and the host it starts (see ws_host::service)
+//! ws-host-gui setup autostart on|off | mic-driver | upnp-remove
+//!     steps the installer and uninstaller run (see setup.rs)
 //! ```
 //!
 //! Closing the window keeps the host running in the tray; Quit stops it.
@@ -22,10 +24,15 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod app;
+mod firstrun;
 mod host;
+mod portcheck;
+mod qr;
 #[cfg(windows)]
 mod service_console;
 mod settings;
+mod setup;
+mod upnp;
 #[cfg(windows)]
 mod win;
 
@@ -37,11 +44,18 @@ use eframe::egui;
 
 pub const TITLE: &str = "web-stream host";
 const LOG_FILE: &str = "ws-host-gui.log";
+const SETUP_LOG_FILE: &str = "setup.log";
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().is_some_and(|a| a == "service") {
         std::process::exit(service(&args[1..]));
+    }
+    if args.first().is_some_and(|a| a == "setup") {
+        let data_dir = ws_host::options::default_data_dir();
+        let _ = std::fs::create_dir_all(&data_dir);
+        init_logging(&data_dir, SETUP_LOG_FILE);
+        std::process::exit(setup::main(&args[1..]));
     }
     if let Err(e) = run(&args) {
         tracing::error!("{e:#}");
@@ -117,7 +131,7 @@ fn run(args: &[String]) -> anyhow::Result<()> {
     let data_dir = ws_host::options::default_data_dir();
     std::fs::create_dir_all(&data_dir)
         .with_context(|| format!("could not create {}", data_dir.display()))?;
-    init_logging(&data_dir);
+    init_logging(&data_dir, LOG_FILE);
 
     // Restarted by an update: the old build still holds the ports and the
     // single-instance lock until it has stopped.
@@ -163,11 +177,11 @@ fn run(args: &[String]) -> anyhow::Result<()> {
 
 /// Logs to a file in the data dir (there is no console), started afresh on
 /// each launch; `RUST_LOG` filters it.
-fn init_logging(data_dir: &std::path::Path) {
+fn init_logging(data_dir: &std::path::Path, file: &str) {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| "info,str0m=warn".into());
     let builder = tracing_subscriber::fmt().with_env_filter(filter);
-    match std::fs::File::create(data_dir.join(LOG_FILE)) {
+    match std::fs::File::create(data_dir.join(file)) {
         Ok(file) => builder
             .with_ansi(false)
             .with_writer(Mutex::new(file))

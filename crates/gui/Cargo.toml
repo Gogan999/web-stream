@@ -15,6 +15,9 @@ serde_json.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
+ws-signaling = { path = "../signaling" }
+igd-next = "0.16"
+qrcode = { version = "0.14", default-features = false }
 eframe = { version = "0.32", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }
 
 [dev-dependencies]
@@ -26,8 +29,10 @@ tray-icon = "0.21"
 rfd = { version = "0.15", default-features = false }
 raw-window-handle = "0.6"
 windows = { workspace = true, features = [
+    "Win32_Devices_DeviceAndDriverInstallation",
     "Win32_Foundation",
     "Win32_Security",
+    "Win32_System_Com",
     "Win32_System_Registry",
     "Win32_System_Threading",
     "Win32_UI_Shell",

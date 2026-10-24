@@ -62,6 +62,8 @@ pub struct State {
     /// When pairing closes again, while it is open.
     pub pairing_until: Option<Instant>,
     pub code: Option<PairingCode>,
+    /// The pairing link's secret while pairing is open, for the QR code.
+    pub pairing_link: Option<String>,
     pub pairing_locked: bool,
     /// The browser streaming right now.
     pub connected: Option<String>,
@@ -102,8 +104,9 @@ impl State {
                     web_root,
                 };
             }
-            Event::PairingOpened => {
+            Event::PairingOpened { link } => {
                 self.pairing_until = Some(Instant::now() + PAIRING_OPEN);
+                self.pairing_link = Some(link);
                 self.pairing_locked = false;
                 self.log("pairing is open for two minutes: request a code in the browser");
             }
@@ -126,6 +129,7 @@ impl State {
                 Notice::Paired { device_name } => {
                     self.code = None;
                     self.pairing_until = None;
+                    self.pairing_link = None;
                     self.log(format!("paired {device_name:?}"));
                 }
                 Notice::PairingFailed { attempts_left } => {
@@ -134,6 +138,7 @@ impl State {
                 Notice::PairingLocked => {
                     self.code = None;
                     self.pairing_until = None;
+                    self.pairing_link = None;
                     self.pairing_locked = true;
                     self.log("too many wrong codes: pairing is locked until you open it again");
                 }
@@ -213,6 +218,7 @@ impl State {
     pub fn expire(&mut self, now: Instant) {
         if self.pairing_until.is_some_and(|t| t <= now) {
             self.pairing_until = None;
+            self.pairing_link = None;
         }
         if self.code.as_ref().is_some_and(|c| c.expires <= now) {
             self.code = None;
@@ -221,6 +227,7 @@ impl State {
 
     fn stopped(&mut self, result: anyhow::Result<()>) {
         self.pairing_until = None;
+        self.pairing_link = None;
         self.code = None;
         self.connected = None;
         self.shared.clear();
@@ -264,6 +271,7 @@ impl Host {
                     status: Status::Stopped,
                     pairing_until: None,
                     code: None,
+                    pairing_link: None,
                     pairing_locked: false,
                     connected: None,
                     shared: Vec::new(),
@@ -426,6 +434,12 @@ mod tests {
                 assert!(Instant::now() < end, "pairing never opened");
                 std::thread::sleep(Duration::from_millis(20));
             }
+            assert!(
+                host.state()
+                    .pairing_link
+                    .as_ref()
+                    .is_some_and(|l| l.len() >= 32)
+            );
             host.stop_and_wait(Duration::from_secs(10));
             assert!(!host.is_active());
             assert_eq!(host.state().status, Status::Stopped);

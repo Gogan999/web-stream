@@ -1,5 +1,60 @@
 # Host setup (Windows)
 
+## Installing
+
+Download `web-stream-setup-X.Y.Z.exe` from the
+[latest release](https://github.com/Gogan999/web-stream/releases/latest)
+and run it. It needs no developer tools. One screen of checkboxes:
+
+| Checkbox | Default | What it does |
+|---|---|---|
+| Gamepad driver (ViGEmBus) | on | installs the bundled, signed ViGEmBus 1.22 driver, unless it is already there |
+| Microphone driver | on | only shown when Steam is installed: installs Steam's signed Streaming Microphone from Steam's folder |
+| Allow use at the login screen | off | installs the Windows service (see the end of this page) |
+| Start with Windows | on | starts the tray app in the tray when you sign in |
+
+It installs into `C:\Program Files\web-stream`, adds **web-stream host**
+to the Start menu, and adds Windows Firewall rules that let the tray app
+(and the service's copy, `ws-host.exe`) accept connections on any network
+profile, so Windows doesn't ask. Settings, paired browsers and logs stay in
+`%LOCALAPPDATA%\web-stream`. Running a newer installer over an old one
+keeps them and updates the service in place.
+
+Windows SmartScreen warns about the unsigned download; see
+[the friend guide](friend-guide.md) for the clicks.
+
+Uninstalling (Settings > Apps) removes the service, the firewall rules, the
+router forwards UPnP made and the autostart entry, and asks whether to
+delete the settings and paired browsers too. The gamepad and microphone
+drivers stay, since other programs use them; remove them from Apps if
+wanted. Silent installs take the usual Inno Setup options, e.g.
+`/VERYSILENT /TASKS="gamepad,autostart"`; a silent uninstall keeps the
+settings unless given `/PURGE`.
+
+### First-run setup
+
+The app opens on a setup section:
+
+1. **Use it away from home**: lists the ports the router has to forward,
+   offers to have the router forward them itself (UPnP, off unless ticked;
+   leased for an hour and renewed while the app runs, removed on quit and
+   uninstall), and **Test the ports**. The test learns the public address
+   from the router, the DuckDNS name or the address in Settings, connects
+   to it from this PC and checks that the certificate answering is this
+   host's (not, say, the router's admin page). It warns when the router's
+   own address is a shared one (CGNAT), where forwarding can't work. Many
+   routers can't loop back to themselves; then the test says so, and the
+   phone on mobile data is the real test. UDP can't be tested from inside.
+2. **Pair your phone**: opens pairing and shows a QR code. Scanning it
+   opens the client with a one-time pairing link (`#pair=...`), which pairs
+   that browser without typing a code. The address in the code can be
+   switched between the home address, the DuckDNS name and the public
+   address. The link works once, only while pairing is open (two minutes).
+
+**Done** hides it; **Setup** at the bottom of the window brings it back.
+
+### From source (developers)
+
 `scripts\install.ps1` installs the build dependencies (Visual Studio Build
 Tools with the C++ tools and Windows SDK, CMake, Rust) through winget and
 builds the host; add `-GamepadDriver` for ViGEmBus and `-MicDriver` for the
@@ -17,9 +72,8 @@ On a PC without the repository it clones it into `%USERPROFILE%\web-stream`:
 
 ## Running the host
 
-The install script updates the checkout (when it is a clean `main`), builds
-the host with the web client built into it and adds **web-stream host** to
-the Start menu. Start it from there. It is a tray app:
+The installer (or, from source, the install script) adds **web-stream
+host** to the Start menu. Start it from there. It is a tray app:
 the window shows what the host is doing, and closing it leaves the host
 running in the tray (click the icon to bring the window back; Quit in its
 menu, or the Quit button, stops the host).
@@ -36,7 +90,8 @@ The window shows:
   browser disconnects. With "let the browser send files to this PC" on in
   Settings, the browser can send files the other way; they land in
   `Downloads\web-stream` (or the folder set there), linked from here;
-- **Pair a browser**, which opens pairing for two minutes. The code to type
+- **Pair a browser**, which opens pairing for two minutes. A QR code with a
+  one-time pairing link appears, for a phone's camera; or the code to type
   in the browser appears here in large digits, and the window comes forward
   by itself when a browser asks for one. **Forget paired browsers** removes
   every paired browser;

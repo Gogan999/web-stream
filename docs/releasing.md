@@ -13,43 +13,27 @@ pre-release) on a commit on `main`, with `version` in `Cargo.toml`'s
    `web-stream-host-X.Y.Z-windows-x64.zip`, the installer
    `web-stream-setup-X.Y.Z.exe` (Inno Setup, `installer/`), and the same
    silent install, start and uninstall test CI runs.
-3. **publish** waits for approval in the `release` environment. It writes
-   `manifest.json` (version, time, each file's size and SHA-256, and the
-   tag's message as release notes), signs the manifest, the zip and the
-   installer with minisign (Ed25519), checks the signatures against
-   `release/minisign.pub`, and creates the GitHub release with the files,
-   their `.minisig` signatures and `SHA256SUMS.txt`.
+3. **publish** waits for approval if the `release` environment has a
+   required reviewer. It writes `manifest.json` (version, time, each file's
+   size and SHA-256, and the tag's message as release notes) and
+   `SHA256SUMS.txt`, and creates the GitHub release with them and the files.
 
-The signatures are what the host's updater (Phase 2) will check, against a
-public key compiled into the host. They are separate from Windows code
-signing, which the project doesn't use: friends click past SmartScreen
-(see `friend-guide.md`).
+Release files are not signed, and nothing needs a key or a secret. The
+hashes in `manifest.json` let the host's updater (Phase 2) check that a
+download is complete and is the file the release lists; trust in the
+release itself comes from GitHub (only the repository's maintainers can
+publish one, over HTTPS). Windows code signing isn't used either: friends
+click past SmartScreen (see `friend-guide.md`).
 
-## One-time setup (Logan)
+## Optional: approve each release
 
-1. **Make the signing key**, on your own PC, without a password (the key
-   is protected by the environment instead, and CI can't type one):
-
-   ```
-   minisign -G -W -p minisign.pub -s minisign.key
-   ```
-
-   minisign is on winget (`winget install jedisct1.minisign`). Keep a copy
-   of `minisign.key` offline (a USB stick) in case the environment's copy
-   is lost; anyone with it can sign releases.
-
-2. **Commit the public key** as `release/minisign.pub` (a PR, as usual).
-
-3. **Make the environment**: repository Settings > Environments > New
-   environment `release`. Under **Deployment protection rules** tick
-   **Required reviewers** and add yourself, and leave **Prevent
-   self-review** unticked (you push the tags yourself). Under **Deployment branches and tags**, choose
-   **Selected branches and tags** and add the tag rule `v*`. Then
-   **Add environment secret** `MINISIGN_SECRET_KEY` with the whole contents
-   of `minisign.key`.
-
-   Only the publish job names this environment, so only it can read the
-   key, and only after you approve that run.
+With nothing set up, the publish job runs as soon as the build is green
+(GitHub makes the `release` environment on the first run). To approve each
+release by hand instead: repository Settings > Environments > `release`
+(or New environment `release`). Under **Deployment protection rules** tick
+**Required reviewers** and add yourself, and leave **Prevent self-review**
+unticked (you push the tags yourself). Under **Deployment branches and
+tags**, choose **Selected branches and tags** and add the tag rule `v*`.
 
 ## Making a release
 
@@ -60,8 +44,8 @@ git tag -a v0.2.0 -m "What changed, in a few lines: this text is shown in the tr
 git push origin v0.2.0
 ```
 
-Then Actions > release > the run > **Review deployments** > Approve, once
-build is green. A test of the pipeline: tag `v0.1.0-rc.1` with the current
+If you set up approval: Actions > release > the run > **Review
+deployments** > Approve, once build is green. A test of the pipeline: tag `v0.1.0-rc.1` with the current
 version; it lands as a pre-release, which the updater will ignore, and can
 be deleted afterwards.
 

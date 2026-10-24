@@ -17,7 +17,7 @@ use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::timeout::TimeoutLayer;
 
 use crate::config::{SignalingConfig, TlsSource};
-use crate::pairing::{CODE_TTL, ConfirmError, DEFAULT_WINDOW, LinkError, Pairing, StartError};
+use crate::pairing::{CODE_TTL, ConfirmError, DEFAULT_WINDOW, Pairing, StartError};
 use crate::store::DeviceStore;
 use crate::{Error, tls};
 use ws_proto::{ByeReason, ClientSignal, HostSignal, PairConfirm, PairLink, PairStart};
@@ -553,19 +553,21 @@ async fn pair_link(
     let Ok(req) = serde_json::from_str::<PairLink>(&body) else {
         return err(StatusCode::BAD_REQUEST, json!({"error": "bad_request"}));
     };
-    let result =
+    // The link is used up here, before the device is saved: if saving
+    // fails, the host user opens pairing again for a new one.
+    let redeemed =
         shared
             .pairing
             .lock()
             .await
             .redeem_link(&req.link, &req.device_name, Instant::now());
-    match result {
-        Ok(device_name) => paired(&shared, device_name).await,
-        Err(LinkError::Invalid) => {
-            tracing::warn!("pairing link refused (closed, used or wrong)");
+    match redeemed {
+        Some(device_name) => paired(&shared, device_name).await,
+        None => {
+            // Debug only: anyone can send these, and they mean nothing.
+            tracing::debug!("pairing link refused (closed, used or wrong)");
             err(StatusCode::FORBIDDEN, json!({"error": "pairing_closed"}))
         }
-        Err(LinkError::Locked) => err(StatusCode::LOCKED, json!({"error": "locked"})),
     }
 }
 

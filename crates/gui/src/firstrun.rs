@@ -87,21 +87,15 @@ pub fn upnp_status_ui(ui: &mut egui::Ui, status: &upnp::Status) {
         upnp::Status::Mapped {
             external_ip,
             lan_ip,
-            permanent,
         } => {
             let public = external_ip.map_or("unknown".to_string(), |ip| ip.to_string());
             ui.colored_label(
                 Color32::GREEN,
                 format!(
-                    "The router forwards the ports to {lan_ip}; its internet address is {public}."
+                    "The router forwards the ports to {lan_ip}; it says its internet address \
+                     is {public}."
                 ),
             );
-            if *permanent {
-                ui.weak(
-                    "This router only keeps forwards until they are removed: quitting the app \
-                     or uninstalling removes them.",
-                );
-            }
         }
         upnp::Status::NoRouter => {
             ui.colored_label(

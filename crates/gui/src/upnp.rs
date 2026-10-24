@@ -2,8 +2,10 @@
 //! to this PC, so a friend doesn't have to find the router's forwarding
 //! page. Off unless the user turns it on in the first-run setup. Mappings
 //! are leased for an hour and renewed while the tray app runs, so a PC
-//! that is switched off stops being forwarded to; quitting and
-//! uninstalling remove them.
+//! that is switched off, or gets another address, stops being forwarded
+//! to within the hour; quitting and uninstalling also remove them. A
+//! router that only takes permanent forwards is refused: one left behind
+//! would forward to whatever device gets this address next.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -18,8 +20,11 @@ pub const DESCRIPTION: &str = "web-stream host";
 const LEASE_SECS: u32 = 3600;
 const RENEW: Duration = Duration::from_secs(20 * 60);
 const SEARCH: Duration = Duration::from_secs(3);
-/// Mapping entries looked through for ours; routers keep far fewer.
-const MAX_ENTRIES: u32 = 256;
+/// Mapping entries looked through for ours; home routers keep few.
+const MAX_ENTRIES: u32 = 64;
+/// How long removing them may take at most (each UPnP call can wait on a
+/// slow router for half a minute).
+pub const REMOVE_DEADLINE: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Proto {
@@ -52,10 +57,10 @@ pub enum Status {
     Off,
     Working,
     Mapped {
+        /// As the router reports it (unverified: any device on the network
+        /// can answer UPnP).
         external_ip: Option<IpAddr>,
         lan_ip: Ipv4Addr,
-        /// The router refused a lease, so the mapping stays until removed.
-        permanent: bool,
     },
     NoRouter,
     Failed(String),
@@ -106,23 +111,18 @@ impl Router {
         self.gateway.get_external_ip().ok()
     }
 
-    /// Maps each port to the same port on this PC. True if the router only
-    /// takes permanent mappings.
-    pub fn map(&self, ports: &[Port]) -> anyhow::Result<bool> {
-        let mut permanent = false;
+    /// Maps each port to the same port on this PC, leased.
+    pub fn map(&self, ports: &[Port]) -> anyhow::Result<()> {
         for &(proto, port) in ports {
             let local = SocketAddr::new(IpAddr::V4(self.lan_ip), port);
-            let lease = if permanent { 0 } else { LEASE_SECS };
-            let mut r = self
+            let r = self
                 .gateway
-                .add_port(proto.igd(), port, local, lease, DESCRIPTION);
-            if matches!(r, Err(AddPortError::OnlyPermanentLeasesSupported)) {
-                permanent = true;
-                r = self
-                    .gateway
-                    .add_port(proto.igd(), port, local, 0, DESCRIPTION);
-            }
+                .add_port(proto.igd(), port, local, LEASE_SECS, DESCRIPTION);
             r.map_err(|e| match e {
+                AddPortError::OnlyPermanentLeasesSupported => anyhow::anyhow!(
+                    "this router only takes permanent forwards, which would outlive this PC's \
+                     address; forward the ports on the router's settings page instead"
+                ),
                 AddPortError::PortInUse => anyhow::anyhow!(
                     "the router already forwards {proto:?} {port} to another device"
                 ),
@@ -134,20 +134,29 @@ impl Router {
                 e => anyhow::anyhow!("forwarding {proto:?} {port}: {e}"),
             })?;
         }
-        Ok(permanent)
+        Ok(())
     }
 
-    /// Removes every mapping marked as ours that points at this PC; how
-    /// many went.
+    /// Removes every mapping marked as ours that points at this PC's
+    /// address; how many went.
     pub fn unmap_ours(&self) -> usize {
+        self.unmap_where(|client| client == Some(self.lan_ip))
+    }
+
+    /// Removes every mapping marked as ours, whatever address it points at
+    /// (an old one of this PC's, say). For uninstalling; another web-stream
+    /// host on the network renews its own within 20 minutes.
+    pub fn unmap_all_ours(&self) -> usize {
+        self.unmap_where(|_| true)
+    }
+
+    fn unmap_where(&self, client: impl Fn(Option<Ipv4Addr>) -> bool) -> usize {
         let mut ours = Vec::new();
         for i in 0..MAX_ENTRIES {
             let Ok(e) = self.gateway.get_generic_port_mapping_entry(i) else {
                 break;
             };
-            if e.port_mapping_description == DESCRIPTION
-                && e.internal_client.parse::<Ipv4Addr>().ok() == Some(self.lan_ip)
-            {
+            if e.port_mapping_description == DESCRIPTION && client(e.internal_client.parse().ok()) {
                 ours.push((e.protocol, e.external_port));
             }
         }
@@ -259,20 +268,19 @@ fn run(rx: mpsc::Receiver<Msg>, status: Arc<Mutex<Status>>, changed: impl Fn()) 
                 continue;
             }
         };
-        // Different ports, or a different PC address: drop the old ones.
-        if mapped
-            .as_ref()
-            .is_some_and(|(r, p)| p != ports || r.lan_ip != router.lan_ip)
-        {
-            router.unmap_ours();
+        // Different ports, or a different PC address: drop the old ones,
+        // through what they were mapped with (the old address).
+        if let Some((old, old_ports)) = &mapped {
+            if old_ports != ports || old.lan_ip != router.lan_ip {
+                old.unmap_ours();
+            }
         }
         match router.map(ports) {
-            Ok(permanent) => {
-                tracing::info!(?ports, lan = %router.lan_ip, permanent, "UPnP ports mapped");
+            Ok(()) => {
+                tracing::info!(?ports, lan = %router.lan_ip, "UPnP ports mapped");
                 set(Status::Mapped {
                     external_ip: router.external_ip(),
                     lan_ip: router.lan_ip,
-                    permanent,
                 });
                 mapped = Some((router, ports.clone()));
             }

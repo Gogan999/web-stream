@@ -30,15 +30,27 @@ pub fn describe(e: Event) -> Option<String> {
                 data_dir.display()
             )
         }
-        Event::PairingOpened { link } => format!(
-            "pairing is open for two minutes: request a code in the browser, or open the \
-             client's address with this on the end (once)\n  PAIRING LINK #pair={link}\n"
-        ),
+        // Never the link: these lines are logged.
+        Event::PairingOpened { .. } => {
+            "pairing is open for two minutes: request a code in the browser".into()
+        }
         Event::UnpairedAll => "every paired browser was removed".into(),
         Event::Error(e) | Event::Update(e) => e,
         Event::Notice(n) => describe_notice(n),
         Event::File(f) => return describe_file(f),
     })
+}
+
+/// The pairing link's secret as a line for a console the host user reads
+/// directly (the test host's stdout), never for a log: it pairs a browser
+/// without a code while pairing is open.
+pub fn pairing_link_line(e: &Event) -> Option<String> {
+    match e {
+        Event::PairingOpened { link } => Some(format!(
+            "  PAIRING LINK #pair={link}  (open the client's address with this on the end, once)"
+        )),
+        _ => None,
+    }
 }
 
 fn describe_notice(n: Notice) -> String {
@@ -125,5 +137,15 @@ mod tests {
         );
         assert_eq!(parse_line(""), Line::Empty);
         assert_eq!(parse_line("bogus"), Line::Help);
+    }
+
+    #[test]
+    fn the_pairing_link_stays_out_of_logged_lines() {
+        let e = Event::PairingOpened {
+            link: "s3cret-link".into(),
+        };
+        assert!(!describe(e.clone()).unwrap().contains("s3cret"));
+        assert!(pairing_link_line(&e).unwrap().contains("#pair=s3cret-link"));
+        assert_eq!(pairing_link_line(&Event::UnpairedAll), None);
     }
 }

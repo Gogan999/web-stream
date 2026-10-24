@@ -46,9 +46,11 @@ pub struct Line {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Report {
     pub lines: Vec<Line>,
-    /// The public address, when one is known: for the QR code a phone on
-    /// mobile data opens.
-    pub public_ip: Option<IpAddr>,
+    /// The public address this host was found at (its own certificate
+    /// answered there), for the QR code a phone away from home opens. Only
+    /// a verified one: the router's word alone isn't enough, since any
+    /// device on the network can answer UPnP.
+    pub verified_ip: Option<IpAddr>,
 }
 
 impl Report {
@@ -103,7 +105,7 @@ pub fn run(input: &Input) -> Report {
     }
 
     // Where the internet sees this network.
-    let duck_ip = resolve_duckdns(&input.duckdns, input.port);
+    let duck_ip = resolve_duckdns(&input.duckdns, input.port).filter(|ip| is_public(*ip));
     if let (Some(name), Some(duck), Some(router)) = (duck_name(&input.duckdns), duck_ip, router_ip)
     {
         if duck != router && is_public(router) {
@@ -145,15 +147,17 @@ pub fn run(input: &Input) -> Report {
         );
         return r;
     };
-    r.public_ip = Some(public);
 
     // The ports, through the public address.
     let https = SocketAddr::new(public, input.port);
     match certificate_at(https) {
-        Ok(f) if &f == fingerprint => r.say(
-            Verdict::Ok,
-            format!("TCP {}: this host answers at {https}.", input.port),
-        ),
+        Ok(f) if &f == fingerprint => {
+            r.verified_ip = Some(public);
+            r.say(
+                Verdict::Ok,
+                format!("TCP {}: this host answers at {https}.", input.port),
+            );
+        }
         Ok(_) => r.say(
             Verdict::Bad,
             format!(
@@ -166,9 +170,10 @@ pub fn run(input: &Input) -> Report {
             Verdict::Warn,
             format!(
                 "TCP {}: no answer at {https} from inside your network. Either the port isn't \
-                 forwarded, or the router can't loop back to itself (many can't). Scan the QR \
-                 code below with your phone on mobile data, Wi-Fi off: if the page opens, it \
-                 works.",
+                 forwarded, or the router can't loop back to itself (many can't). On your \
+                 phone, Wi-Fi off, open https://{https}/: if the page opens, it works. To pair \
+                 the phone at that address, add {public} under Settings > Public addresses and \
+                 the QR code can use it.",
                 input.port
             ),
         ),

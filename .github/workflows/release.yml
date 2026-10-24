@@ -55,12 +55,17 @@ jobs:
     runs-on: windows-latest
     env:
       VERSION: ${{ needs.check.outputs.version }}
+      RUST_VERSION: 1.97.0
     steps:
       - uses: actions/checkout@v4
-      # No build cache: a release is built from scratch from Cargo.lock.
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+      # No build cache and no third-party action: a release is built from
+      # scratch from Cargo.lock, with a pinned compiler (rustup comes with
+      # the runner). Move RUST_VERSION forward deliberately.
+      - name: toolchain
+        run: |
+          rustup toolchain install $env:RUST_VERSION --profile minimal --component rustfmt,clippy
+          rustup override set $env:RUST_VERSION
+          rustc --version
       - name: fmt
         run: cargo fmt --all --check
       - name: clippy
@@ -116,8 +121,12 @@ jobs:
           set -euo pipefail
           cd dist
           # The tag's message is the release notes the host shows; it is
-          # signed with the rest of the manifest.
-          notes=$(git tag -l --format='%(contents)' "$TAG")
+          # signed with the rest of the manifest. An annotated tag only, and
+          # without its own signature block, if it has one.
+          if [ "$(git cat-file -t "refs/tags/$TAG")" != tag ]; then
+            echo "::error::$TAG is a lightweight tag: tag with git tag -a and the release notes as its message"; exit 1
+          fi
+          notes=$(git tag -l --format='%(contents:subject)%0a%0a%(contents:body)' "$TAG")
           files=$(for f in *.zip *.exe; do
             jq -n --arg name "$f" --argjson size "$(stat -c %s "$f")" \
               --arg sha256 "$(sha256sum "$f" | cut -d' ' -f1)" '{name: $name, size: $size, sha256: $sha256}'

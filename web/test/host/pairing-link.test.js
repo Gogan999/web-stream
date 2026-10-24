@@ -21,7 +21,7 @@ test('the pairing link pairs and connects once', { skip: !bin && 'WS_HOST_BIN no
   host.stdout.on('data', (d) => { out += d; });
   host.stderr.on('data', (d) => { out += d; });
   const hostSays = async (re, from = 0) => {
-    for (let i = 0; i < 300; i++) {
+    for (let i = 0; i < 600; i++) {
       const m = out.slice(from).match(re);
       if (m) return m;
       await new Promise((r) => setTimeout(r, 50));

@@ -276,21 +276,14 @@ impl App {
         }
     }
 
-    /// Public addresses known so far (router, port test), for the QR code.
+    /// The public address the port test found this host at, for the QR
+    /// code. Not the one the router reports: any device on the network can
+    /// answer UPnP, and the QR code carries the pairing secret.
     fn public_ips(&self) -> Vec<std::net::IpAddr> {
-        let mut out = Vec::new();
-        if let upnp::Status::Mapped {
-            external_ip: Some(ip),
-            ..
-        } = self.upnp.status()
-        {
-            out.push(ip);
+        match self.first_run.report() {
+            (_, Some(r)) => r.verified_ip.into_iter().collect(),
+            _ => Vec::new(),
         }
-        if let (_, Some(r)) = self.first_run.report() {
-            out.extend(r.public_ip);
-        }
-        out.retain(|ip| portcheck::is_public(*ip));
-        out
     }
 
     /// The pairing link as a QR code, with a choice of the address in it.
@@ -483,10 +476,11 @@ impl App {
                     left / 60,
                     left % 60
                 ));
-            } else if locked {
+            }
+            if locked {
                 ui.colored_label(
                     Color32::RED,
-                    "Locked after wrong codes; pair again to unlock",
+                    "Codes locked after wrong guesses; pair again to unlock",
                 );
             }
         });
@@ -498,7 +492,9 @@ impl App {
             ui.weak(format!("expires in {left}s"));
         }
         let link = self.host.state().pairing_link.clone();
-        if let (Some(link), None) = (&link, &code) {
+        // Whatever a browser does with codes: anyone who can reach the port
+        // can ask for one.
+        if let Some(link) = &link {
             self.pairing_qr_ui(ui, link);
         }
         if pairing_until.is_some() || code.is_some() {

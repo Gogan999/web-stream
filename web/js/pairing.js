@@ -40,12 +40,14 @@ export async function pairWithLink(link, deviceName) {
   throw new Error(pairingError(status, data));
 }
 
-// Takes `#pair=<secret>` off the address, so it doesn't stay in history or a bookmark.
+// Takes `#pair=<secret>` off the address, so it doesn't stay in history or a bookmark. null when
+// there is none, '' when it is damaged (cut short by a QR reader, say).
 export function takePairingLink(loc = location, hist = history) {
-  const m = /^#pair=([A-Za-z0-9_-]{16,64})$/.exec(loc.hash);
   if (!loc.hash.startsWith('#pair=')) return null;
+  // Read before replaceState, which empties location.hash.
+  const m = /^#pair=([A-Za-z0-9_-]{16,64})$/.exec(loc.hash);
   hist.replaceState(null, '', loc.pathname + loc.search);
-  return m ? m[1] : null;
+  return m ? m[1] : '';
 }
 
 export function pairingError(status, data = {}) {

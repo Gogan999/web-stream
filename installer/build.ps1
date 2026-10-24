@@ -22,9 +22,13 @@ if (-not $iscc) {
 }
 if (-not (Test-Path $iscc)) {
     Write-Host 'Installing Inno Setup'
-    choco install innosetup --no-progress -y | Out-Host
+    choco install innosetup --version=6.7.1 --no-progress -y | Out-Host
     $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
 }
+# The version the script is written and tested for.
+$innoVersion = (Get-Item $iscc).VersionInfo.ProductVersion
+if (-not $innoVersion.StartsWith('6.')) { throw "Inno Setup 6 needed, found $innoVersion" }
+Write-Host "Inno Setup $innoVersion"
 
 & $iscc "/DAppVersion=$Version" "/DAppNumericVersion=$numeric" (Join-Path $PSScriptRoot 'web-stream.iss')
 if ($LASTEXITCODE -ne 0) { throw "ISCC failed ($LASTEXITCODE)" }

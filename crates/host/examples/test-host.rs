@@ -14,7 +14,7 @@
 use std::io::{BufRead, IsTerminal};
 
 use tokio::sync::mpsc;
-use ws_host::console::{CONSOLE_HELP, Line, describe, parse_line};
+use ws_host::console::{CONSOLE_HELP, Line, describe, pairing_link_line, parse_line};
 use ws_host::options::{self, ServeOptions};
 use ws_host::serve::{self, Command, Event};
 
@@ -136,6 +136,9 @@ mod split {
 
 async fn print_events(mut events: mpsc::UnboundedReceiver<Event>) {
     while let Some(e) = events.recv().await {
+        if let Some(line) = pairing_link_line(&e) {
+            println!("{line}");
+        }
         if let Some(text) = describe(e) {
             println!("{text}");
         }

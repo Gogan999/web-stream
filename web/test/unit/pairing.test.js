@@ -5,7 +5,8 @@ import { takePairingLink } from '../../js/pairing.js';
 function fakeLocation(hash) {
   const calls = [];
   const loc = { hash, pathname: '/', search: '?autoconnect' };
-  const hist = { replaceState: (_s, _t, url) => calls.push(url) };
+  // Like a browser's: the fragment is gone once the address is replaced.
+  const hist = { replaceState: (_s, _t, url) => { calls.push(url); loc.hash = ''; } };
   return { loc, hist, calls };
 }
 
@@ -18,10 +19,10 @@ test('a pairing link is taken off the address', () => {
 
 test('a malformed pairing link is dropped, other fragments are left alone', () => {
   let f = fakeLocation('#pair=<script>');
-  assert.equal(takePairingLink(f.loc, f.hist), null);
+  assert.equal(takePairingLink(f.loc, f.hist), '');
   assert.equal(f.calls.length, 1);
   f = fakeLocation('#pair=short');
-  assert.equal(takePairingLink(f.loc, f.hist), null);
+  assert.equal(takePairingLink(f.loc, f.hist), '');
   f = fakeLocation('#settings');
   assert.equal(takePairingLink(f.loc, f.hist), null);
   assert.deepEqual(f.calls, []);

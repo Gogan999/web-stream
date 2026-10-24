@@ -64,15 +64,6 @@ pub enum ConfirmError {
     Locked,
 }
 
-/// Why a pairing link was refused.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LinkError {
-    /// Pairing is closed, or this is not the link it was opened with (the
-    /// two look the same to the browser).
-    Invalid,
-    Locked,
-}
-
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Persisted {
     failures: u32,
@@ -135,26 +126,23 @@ impl Pairing {
     }
 
     /// Pairs with the link the host showed; on success returns the device
-    /// name and closes pairing, like a right code.
-    pub fn redeem_link(
-        &mut self,
-        link: &str,
-        device_name: &str,
-        now: Instant,
-    ) -> Result<String, LinkError> {
-        if self.state.locked {
-            return Err(LinkError::Locked);
-        }
+    /// name and closes pairing, like a right code. `None` if pairing is
+    /// closed or this is not its link (the browser can't tell which).
+    ///
+    /// A code lockout doesn't stop the link: wrong codes from a stranger
+    /// would otherwise also take away the QR code the host user is
+    /// showing, and the link can't be guessed.
+    pub fn redeem_link(&mut self, link: &str, device_name: &str, now: Instant) -> Option<String> {
         let open = self.open_until.is_some_and(|t| now < t);
         let matches = self
             .link
             .as_ref()
             .is_some_and(|l| bool::from(l.as_bytes().ct_eq(link.trim().as_bytes())));
         if !(open && matches) {
-            return Err(LinkError::Invalid);
+            return None;
         }
         self.close();
-        Ok(clean_name(device_name))
+        Some(clean_name(device_name))
     }
 
     pub fn is_locked(&self) -> bool {
@@ -239,8 +227,9 @@ impl Pairing {
         self.state.failures += 1;
         let locked = self.state.failures >= MAX_FAILURES;
         if locked {
+            // Codes stop; the link stays until pairing closes.
             self.state.locked = true;
-            self.close();
+            self.pending = None;
         }
         self.save()?;
         Ok(Err(if locked {
@@ -430,37 +419,44 @@ mod tests {
         let mut p = Pairing::load(dir.path()).unwrap();
         let link = p.open(now, DEFAULT_WINDOW).unwrap();
         assert!(link.len() >= 32);
-        assert_eq!(p.redeem_link("nope", "x", now), Err(LinkError::Invalid));
+        assert_eq!(p.redeem_link("nope", "x", now), None);
         assert_eq!(
             p.redeem_link(&link, "iPhone\u{200B}", now),
-            Ok("iPhone".into())
+            Some("iPhone".into())
         );
         // Used up, and pairing is closed again.
-        assert_eq!(p.redeem_link(&link, "x", now), Err(LinkError::Invalid));
+        assert_eq!(p.redeem_link(&link, "x", now), None);
         assert_eq!(p.start("x", now).unwrap(), Err(StartError::Closed));
 
         // A new window makes a new link; the old one never works again.
         let second = p.open(now, DEFAULT_WINDOW).unwrap();
         assert_ne!(second, link);
-        assert_eq!(p.redeem_link(&link, "x", now), Err(LinkError::Invalid));
-        assert_eq!(
-            p.redeem_link(&second, "x", now + DEFAULT_WINDOW),
-            Err(LinkError::Invalid)
-        );
+        assert_eq!(p.redeem_link(&link, "x", now), None);
+        assert_eq!(p.redeem_link(&second, "x", now + DEFAULT_WINDOW), None);
     }
 
     #[test]
-    fn wrong_links_do_not_lock_and_a_lock_stops_links() {
+    fn wrong_links_do_not_lock_and_wrong_codes_do_not_stop_the_link() {
         let dir = tempfile::tempdir().unwrap();
         let now = Instant::now();
         let mut p = Pairing::load(dir.path()).unwrap();
         let link = p.open(now, DEFAULT_WINDOW).unwrap();
         for _ in 0..MAX_FAILURES * 2 {
-            assert_eq!(p.redeem_link("guess", "x", now), Err(LinkError::Invalid));
+            assert_eq!(p.redeem_link("guess", "x", now), None);
         }
         assert!(!p.is_locked());
-        p.state.locked = true;
-        assert_eq!(p.redeem_link(&link, "x", now), Err(LinkError::Locked));
+        // A stranger burns the codes until pairing locks...
+        for _ in 0..MAX_FAILURES {
+            let s = p.start("x", now).unwrap().unwrap();
+            p.confirm(&s.pairing_id, wrong(&s.code), now).unwrap().ok();
+            p.starts.clear();
+            p.pending = None;
+        }
+        assert!(p.is_locked());
+        assert_eq!(p.start("x", now).unwrap(), Err(StartError::Locked));
+        // ...and the QR code still pairs, once.
+        assert_eq!(p.redeem_link(&link, "phone", now), Some("phone".into()));
+        assert_eq!(p.redeem_link(&link, "phone", now), None);
     }
 
     #[test]
@@ -471,7 +467,7 @@ mod tests {
         let link = p.open(now, DEFAULT_WINDOW).unwrap();
         let s = p.start("x", now).unwrap().unwrap();
         p.confirm(&s.pairing_id, &s.code, now).unwrap().unwrap();
-        assert_eq!(p.redeem_link(&link, "x", now), Err(LinkError::Invalid));
+        assert_eq!(p.redeem_link(&link, "x", now), None);
     }
 
     #[test]

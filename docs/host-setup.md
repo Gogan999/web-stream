@@ -23,11 +23,16 @@ keeps them and updates the service in place.
 Windows SmartScreen warns about the unsigned download; see
 [the friend guide](friend-guide.md) for the clicks.
 
-Uninstalling (Settings > Apps) removes the service, the firewall rules, the
-router forwards UPnP made and the autostart entry, and asks whether to
-delete the settings and paired browsers too. The gamepad and microphone
+Uninstalling (Settings > Apps) removes the service, the firewall rules,
+the router forwards UPnP made (if the router answers within 15 seconds;
+otherwise they run out within the hour, since only leased forwards are
+made) and the autostart entry, and asks whether to delete the settings and
+paired browsers too. The autostart entry and settings it removes are those
+of the account the uninstaller runs as, which is the signed-in user when
+they are an administrator; another account's stay. The gamepad and microphone
 drivers stay, since other programs use them; remove them from Apps if
-wanted. Silent installs take the usual Inno Setup options, e.g.
+wanted. Setup and uninstall check only the signed-in session for a running
+tray app; quit it in other users' sessions first. Silent installs take the usual Inno Setup options, e.g.
 `/VERYSILENT /TASKS="gamepad,autostart"`; a silent uninstall keeps the
 settings unless given `/PURGE`.
 
@@ -38,13 +43,17 @@ The app opens on a setup section:
 1. **Use it away from home**: lists the ports the router has to forward,
    offers to have the router forward them itself (UPnP, off unless ticked;
    leased for an hour and renewed while the app runs, removed on quit and
-   uninstall), and **Test the ports**. The test learns the public address
+   uninstall; a router that only takes permanent forwards is refused), and
+   **Test the ports**. The test learns the public address
    from the router, the DuckDNS name or the address in Settings, connects
    to it from this PC and checks that the certificate answering is this
    host's (not, say, the router's admin page). It warns when the router's
    own address is a shared one (CGNAT), where forwarding can't work. Many
    routers can't loop back to themselves; then the test says so, and the
    phone on mobile data is the real test. UDP can't be tested from inside.
+   The public address goes into the QR code only once the test found this
+   host there (or when it is typed in Settings): the router's own word
+   isn't trusted, since any device on the network can answer UPnP.
 2. **Pair your phone**: opens pairing and shows a QR code. Scanning it
    opens the client with a one-time pairing link (`#pair=...`), which pairs
    that browser without typing a code. The address in the code can be

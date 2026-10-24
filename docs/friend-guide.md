@@ -37,7 +37,8 @@ TCP 8443, UDP 8443 and TCP 8444.
 
 - Tick **Let the router forward them (UPnP)**. If it says the router
   forwards the ports, you're done. Only those three ports go to this PC,
-  and they close again when you quit the app or uninstall it.
+  and they close again when you quit the app or uninstall it (or within
+  the hour if the PC is just switched off).
 - If no router answers (UPnP is off on many routers), forward them on the
   router's own settings page instead: look for "Port forwarding",
   "Virtual server" or "NAT", and add the three ports above, each to the
@@ -53,9 +54,10 @@ Then press **Test the ports**:
   [Tailscale](https://tailscale.com/download) on both the PC and the phone
   and open the PC's Tailscale address.
 - **"no answer from inside your network"**: many routers can't test
-  themselves. Do the real test: turn Wi-Fi off on your phone, pair it (next
-  step) with the public address chosen under the QR code, and see whether
-  the page opens.
+  themselves. Do the real test: turn Wi-Fi off on your phone and open the
+  address the test shows. If the page opens, it works; to pair the phone
+  that way, type that address under **Settings > Public addresses**, and
+  the QR code can use it.
 
 Optional: a free name from [duckdns.org](https://www.duckdns.org) (sign in,
 make a subdomain, copy the token) goes in **Settings > DuckDNS name** and

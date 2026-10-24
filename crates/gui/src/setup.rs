@@ -7,7 +7,9 @@
 //! ```
 //!
 //! None of them take a path or anything else to act on from the command
-//! line: the elevated ones only touch fixed places.
+//! line: the elevated ones only touch fixed places. Their log, setup.log,
+//! goes to the data folder of whoever runs them: for the elevated steps,
+//! the administrator account UAC ran them as.
 
 use anyhow::bail;
 
@@ -73,11 +75,23 @@ fn mic_driver() -> anyhow::Result<String> {
     bail!("Windows only")
 }
 
+/// Bounded, so a slow router can't hold up the uninstaller; whatever is
+/// left expires within the hour anyway (the leases aren't renewed).
 fn upnp_remove() -> anyhow::Result<String> {
-    Ok(match crate::upnp::find_router()? {
-        Some(router) => format!("removed {} port mappings", router.unmap_ours()),
-        None => "no router answers UPnP; nothing to remove".into(),
-    })
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("ws-upnp-remove".into())
+        .spawn(move || {
+            let _ = tx.send(crate::upnp::find_router().map(|r| r.map(|r| r.unmap_all_ours())));
+        })?;
+    match rx.recv_timeout(crate::upnp::REMOVE_DEADLINE) {
+        Ok(Ok(Some(n))) => Ok(format!("removed {n} port mappings")),
+        Ok(Ok(None)) => Ok("no router answers UPnP; nothing to remove".into()),
+        Ok(Err(e)) => Err(e),
+        Err(_) => {
+            Ok("the router didn't answer in time; its forwards expire within the hour".into())
+        }
+    }
 }
 
 #[cfg(test)]

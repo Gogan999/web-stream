@@ -14,6 +14,10 @@ import { DiagLog, diagEnabled } from './diag.js';
 import { ZoomView } from './zoom.js';
 
 const $ = (id) => document.getElementById(id);
+// First thing: the pairing link's secret leaves the address bar (and history) before anything else
+// runs. null: none; '': a damaged one.
+const pairingLink = pairing.takePairingLink();
+
 const ui = {
   connect: $('connect'), status: $('status'), display: $('display'), mouseMode: $('mouse-mode'),
   fullscreen: $('fullscreen'), statsToggle: $('stats-toggle'), statsLevel: $('stats-level'), stage: $('stage'), video: $('video'), stats: $('stats'),
@@ -890,13 +894,16 @@ async function pairFromLink(link) {
     showPairing(true);
     return true;
   } catch (err) {
-    ui.pairMsg.textContent = err.message;
+    // fetch's own TypeError means the host didn't answer at all; checkPairing has said so.
+    if (!(err instanceof TypeError)) ui.pairMsg.textContent = err.message;
     return false;
   }
 }
 
-const pairingLink = pairing.takePairingLink();
 checkPairing().then(async (paired) => {
+  if (!paired && pairingLink === '') {
+    ui.pairMsg.textContent = 'That pairing link was damaged. Scan the QR code on the host again.';
+  }
   if (!paired && pairingLink) paired = await pairFromLink(pairingLink);
   if (paired && (pairingLink || params.has('autoconnect'))) connect();
 });

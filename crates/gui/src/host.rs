@@ -135,12 +135,15 @@ impl State {
                 Notice::PairingFailed { attempts_left } => {
                     self.log(format!("wrong pairing code; {attempts_left} attempts left"))
                 }
+                // Codes stop; the QR code's link still works until pairing
+                // closes.
                 Notice::PairingLocked => {
                     self.code = None;
-                    self.pairing_until = None;
-                    self.pairing_link = None;
                     self.pairing_locked = true;
-                    self.log("too many wrong codes: pairing is locked until you open it again");
+                    self.log(
+                        "too many wrong codes: codes are locked until you open pairing again \
+                         (the QR code still works)",
+                    );
                 }
                 Notice::SessionStarted { device_name } => {
                     self.log(format!("{device_name:?} connected"));

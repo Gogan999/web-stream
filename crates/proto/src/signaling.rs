@@ -101,7 +101,15 @@ pub struct PairConfirm {
     pub code: String,
 }
 
-/// `POST /api/pair/confirm` 200 response; the `__Host-ws_device` cookie is set.
+/// `POST /api/pair/link` body: the secret from the pairing link (QR code)
+/// the host shows while pairing is open, instead of a code.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PairLink {
+    pub link: String,
+    pub device_name: String,
+}
+
+/// `POST /api/pair/confirm` (and `/api/pair/link`) 200 response; the `__Host-ws_device` cookie is set.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PairConfirmed {
     pub paired: bool,

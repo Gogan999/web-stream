@@ -8,6 +8,7 @@ mod acme;
 pub mod config;
 mod listen;
 mod pairing;
+mod probe;
 mod server;
 mod store;
 mod tls;
@@ -17,6 +18,7 @@ pub use acme::valid_name as valid_duckdns_name;
 pub use config::{
     DuckDns, LETS_ENCRYPT, LETS_ENCRYPT_STAGING, SignalingConfig, TlsSource, TurnServer,
 };
+pub use probe::certificate_at;
 pub use server::{
     Notice, SessionEvent, SignalingEvents, SignalingHandle, SignalingServer, SignalingSession,
 };

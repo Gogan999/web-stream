@@ -127,7 +127,9 @@ enum Down {
         web_root: Option<PathBuf>,
         data_dir: PathBuf,
     },
-    PairingOpened,
+    PairingOpened {
+        link: String,
+    },
     UnpairedAll,
     Notice(Notice),
     Error(String),
@@ -494,7 +496,7 @@ async fn pairing(net: &Network, cmd: PairingCommand, send: &impl Fn(&Down, &[u8]
     match cmd {
         PairingCommand::Open => send(
             &match net.signaling.open_pairing().await {
-                Ok(()) => Down::PairingOpened,
+                Ok(link) => Down::PairingOpened { link },
                 Err(e) => Down::Error(format!("could not open pairing: {e}")),
             },
             &[],
@@ -689,7 +691,7 @@ pub async fn serve_media(
                             data_dir,
                         });
                     }
-                    Down::PairingOpened => { let _ = events.send(Event::PairingOpened); }
+                    Down::PairingOpened { link } => { let _ = events.send(Event::PairingOpened { link: clean_link(&link) }); }
                     Down::UnpairedAll => { let _ = events.send(Event::UnpairedAll); }
                     Down::Notice(n) => { let _ = events.send(Event::Notice(clean_notice(n))); }
                     Down::Error(e) => { let _ = events.send(Event::Error(format!("network host: {}", clean(&e)))); }
@@ -759,6 +761,15 @@ pub async fn serve_media(
 /// Text from the network process, fit for the administrator's console: no
 /// control or invisible characters (which could rewrite what the console
 /// shows), and not too long.
+/// The pairing link's secret goes into a URL the host shows: base64url
+/// only, whatever the network host sent.
+fn clean_link(link: &str) -> String {
+    link.chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+        .take(64)
+        .collect()
+}
+
 fn clean(text: &str) -> String {
     const MAX: usize = 300;
     let mut out: String = text

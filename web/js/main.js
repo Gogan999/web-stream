@@ -883,4 +883,20 @@ ui.unpair.addEventListener('click', async () => {
   showPairing(false);
 });
 
-checkPairing().then((paired) => { if (paired && params.has('autoconnect')) connect(); });
+// A pairing link (the host's QR code) pairs this browser without a code.
+async function pairFromLink(link) {
+  try {
+    await pairing.pairWithLink(link, ui.deviceName.value.trim() || pairing.defaultDeviceName());
+    showPairing(true);
+    return true;
+  } catch (err) {
+    ui.pairMsg.textContent = err.message;
+    return false;
+  }
+}
+
+const pairingLink = pairing.takePairingLink();
+checkPairing().then(async (paired) => {
+  if (!paired && pairingLink) paired = await pairFromLink(pairingLink);
+  if (paired && (pairingLink || params.has('autoconnect'))) connect();
+});

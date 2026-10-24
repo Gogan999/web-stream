@@ -405,3 +405,53 @@ async fn serves_the_built_in_web_client() {
         404
     );
 }
+
+#[tokio::test]
+async fn pairing_link_pairs_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = SignalingConfig::new("127.0.0.1:0".parse().unwrap(), dir.path().to_path_buf());
+    let (server, mut events) = SignalingServer::new(config).unwrap();
+    let router = server.router();
+    let handle = server.handle();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let origin = format!("https://{addr}");
+    let origin = Some(origin.as_str());
+    let body = |link: &str| format!(r#"{{"link":"{link}","device_name":"Phone"}}"#);
+
+    // Closed: nothing to pair with.
+    let r = request(addr, "POST", "/api/pair/link", origin, None, &body("x")).await;
+    assert_eq!(
+        (r.status, &*body_json(&r)["error"].to_string()),
+        (403, "\"pairing_closed\"")
+    );
+
+    let link = handle.open_pairing().await.unwrap();
+    // Cross-origin is refused even with the right link.
+    let r = request(
+        addr,
+        "POST",
+        "/api/pair/link",
+        Some("https://evil.example"),
+        None,
+        &body(&link),
+    )
+    .await;
+    assert_eq!(r.status, 403);
+    let r = request(addr, "POST", "/api/pair/link", origin, None, &body("wrong")).await;
+    assert_eq!(r.status, 403);
+
+    let r = request(addr, "POST", "/api/pair/link", origin, None, &body(&link)).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert!(r.headers.contains("__Host-ws_device="));
+    assert_eq!(
+        events.notices.recv().await,
+        Some(Notice::Paired {
+            device_name: "Phone".into()
+        })
+    );
+    // Once only.
+    let r = request(addr, "POST", "/api/pair/link", origin, None, &body(&link)).await;
+    assert_eq!(r.status, 403);
+}

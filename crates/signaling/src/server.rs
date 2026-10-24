@@ -17,10 +17,10 @@ use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::timeout::TimeoutLayer;
 
 use crate::config::{SignalingConfig, TlsSource};
-use crate::pairing::{CODE_TTL, ConfirmError, DEFAULT_WINDOW, Pairing, StartError};
+use crate::pairing::{CODE_TTL, ConfirmError, DEFAULT_WINDOW, LinkError, Pairing, StartError};
 use crate::store::DeviceStore;
 use crate::{Error, tls};
-use ws_proto::{ByeReason, ClientSignal, HostSignal, PairConfirm, PairStart};
+use ws_proto::{ByeReason, ClientSignal, HostSignal, PairConfirm, PairLink, PairStart};
 
 /// `__Host-` makes the browser refuse the cookie unless it is Secure, has
 /// `Path=/` and no `Domain`, so a sibling subdomain cannot plant one.
@@ -181,18 +181,23 @@ impl SignalingHandle {
     /// Host-side action (tray or console): accept one pairing for the next
     /// two minutes. Pairing is otherwise closed, and this is also the only
     /// way to clear a lockout after repeated wrong codes.
-    pub async fn open_pairing(&self) -> Result<(), Error> {
+    ///
+    /// Returns the secret for a pairing link (`#pair=` on the client's URL,
+    /// shown as a QR code), which pairs once without a code while pairing
+    /// is open. Only the host UI may see it.
+    pub async fn open_pairing(&self) -> Result<String, Error> {
         self.open_pairing_for(DEFAULT_WINDOW).await
     }
 
-    pub async fn open_pairing_for(&self, window: Duration) -> Result<(), Error> {
-        self.shared
+    pub async fn open_pairing_for(&self, window: Duration) -> Result<String, Error> {
+        let link = self
+            .shared
             .pairing
             .lock()
             .await
             .open(Instant::now(), window)?;
         tracing::info!(secs = window.as_secs(), "pairing open");
-        Ok(())
+        Ok(link)
     }
 
     pub async fn close_pairing(&self) {
@@ -281,6 +286,7 @@ fn router(shared: Arc<Shared>) -> Router {
         .route("/api/session", get(session_status))
         .route("/api/pair/start", post(pair_start))
         .route("/api/pair/confirm", post(pair_confirm))
+        .route("/api/pair/link", post(pair_link))
         .route("/api/unpair", post(unpair))
         .route("/ws", get(ws_upgrade))
         .layer(DefaultBodyLimit::max(MAX_API_BODY))
@@ -515,30 +521,7 @@ async fn pair_confirm(
         }
     };
     match result {
-        Ok(device_name) => {
-            let token = match shared
-                .store
-                .lock()
-                .await
-                .add(&device_name, SystemTime::now())
-            {
-                Ok(t) => t,
-                Err(e) => {
-                    tracing::error!("saving paired device failed: {e}");
-                    return err(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        json!({"error": "internal"}),
-                    );
-                }
-            };
-            tracing::info!(device = %device_name, "device paired");
-            shared.notify(Notice::Paired { device_name });
-            (
-                [(header::SET_COOKIE, set_cookie(&token, COOKIE_MAX_AGE_SECS))],
-                axum::Json(json!({"paired": true})),
-            )
-                .into_response()
-        }
+        Ok(device_name) => paired(&shared, device_name).await,
         Err(ConfirmError::BadCode { attempts_left }) => {
             tracing::warn!(attempts_left, "wrong pairing code");
             shared.notify(Notice::PairingFailed { attempts_left });
@@ -554,6 +537,62 @@ async fn pair_confirm(
             err(StatusCode::LOCKED, json!({"error": "locked"}))
         }
     }
+}
+
+/// Pairing with the link from the host's QR code. A wrong link is answered
+/// like closed pairing, and doesn't count towards the lockout: it is too
+/// long to guess.
+async fn pair_link(
+    State(shared): State<Arc<Shared>>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    if !post_ok(&shared, &headers) {
+        return err(StatusCode::FORBIDDEN, json!({"error": "bad_origin"}));
+    }
+    let Ok(req) = serde_json::from_str::<PairLink>(&body) else {
+        return err(StatusCode::BAD_REQUEST, json!({"error": "bad_request"}));
+    };
+    let result =
+        shared
+            .pairing
+            .lock()
+            .await
+            .redeem_link(&req.link, &req.device_name, Instant::now());
+    match result {
+        Ok(device_name) => paired(&shared, device_name).await,
+        Err(LinkError::Invalid) => {
+            tracing::warn!("pairing link refused (closed, used or wrong)");
+            err(StatusCode::FORBIDDEN, json!({"error": "pairing_closed"}))
+        }
+        Err(LinkError::Locked) => err(StatusCode::LOCKED, json!({"error": "locked"})),
+    }
+}
+
+/// Saves the newly paired device and hands the browser its cookie.
+async fn paired(shared: &Shared, device_name: String) -> Response {
+    let token = match shared
+        .store
+        .lock()
+        .await
+        .add(&device_name, SystemTime::now())
+    {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::error!("saving paired device failed: {e}");
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                json!({"error": "internal"}),
+            );
+        }
+    };
+    tracing::info!(device = %device_name, "device paired");
+    shared.notify(Notice::Paired { device_name });
+    (
+        [(header::SET_COOKIE, set_cookie(&token, COOKIE_MAX_AGE_SECS))],
+        axum::Json(json!({"paired": true})),
+    )
+        .into_response()
 }
 
 async fn unpair(State(shared): State<Arc<Shared>>, headers: HeaderMap) -> Response {

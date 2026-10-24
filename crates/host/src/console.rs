@@ -30,9 +30,10 @@ pub fn describe(e: Event) -> Option<String> {
                 data_dir.display()
             )
         }
-        Event::PairingOpened => {
-            "pairing is open for two minutes: request a code in the browser".into()
-        }
+        Event::PairingOpened { link } => format!(
+            "pairing is open for two minutes: request a code in the browser, or open the \
+             client's address with this on the end (once)\n  PAIRING LINK #pair={link}\n"
+        ),
         Event::UnpairedAll => "every paired browser was removed".into(),
         Event::Error(e) | Event::Update(e) => e,
         Event::Notice(n) => describe_notice(n),

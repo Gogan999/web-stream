@@ -261,7 +261,7 @@ struct CertMeta {
     not_after: i64,
 }
 
-fn fingerprint(cert: &CertificateDer<'_>) -> String {
+pub(crate) fn fingerprint(cert: &CertificateDer<'_>) -> String {
     let digest = Sha256::digest(cert.as_ref());
     digest
         .iter()

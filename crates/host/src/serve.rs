@@ -55,8 +55,12 @@ pub enum Event {
         web_root: Option<PathBuf>,
         data_dir: PathBuf,
     },
-    /// Pairing is open for two minutes.
-    PairingOpened,
+    /// Pairing is open for two minutes. `link` is the secret of the pairing
+    /// link (`#pair=` on the client's URL), which pairs once without a code;
+    /// show it only to the host user (as a QR code), never log it.
+    PairingOpened {
+        link: String,
+    },
     /// Every paired browser was removed.
     UnpairedAll,
     Notice(Notice),
@@ -318,7 +322,7 @@ pub(crate) async fn open_pairing(
     events: &mpsc::UnboundedSender<Event>,
 ) {
     let _ = events.send(match signaling.open_pairing().await {
-        Ok(()) => Event::PairingOpened,
+        Ok(link) => Event::PairingOpened { link },
         Err(e) => Event::Error(format!("could not open pairing: {e}")),
     });
 }

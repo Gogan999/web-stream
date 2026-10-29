@@ -195,7 +195,7 @@ impl WindowsInput {
             }
             Err(e) => {
                 let msg = match e {
-                    vigem_client::Error::BusNotFound => "ViGEmBus driver is not installed, gamepads are unavailable (see docs/host-setup.md)".to_string(),
+                    vigem_client::Error::BusNotFound => "ViGEmBus driver is not installed, gamepads are unavailable (see docs/guide/audio-and-gamepads.md)".to_string(),
                     e => format!("cannot open ViGEmBus: {e}"),
                 };
                 warn!("{msg}");

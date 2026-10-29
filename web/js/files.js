@@ -1,4 +1,4 @@
-// Files the host user shares with this browser, and saving them. See docs/protocol.md (File transfer).
+// Files the host user shares with this browser, and saving them. See docs/dev/protocol.md (File transfer).
 //
 // The host offers a file on the control channel; Save asks for it, and its bytes come on the
 // "file" channel as chunks: 8-byte id, 8-byte offset (both big-endian), then data. A chunk is kept

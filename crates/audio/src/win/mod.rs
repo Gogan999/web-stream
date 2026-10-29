@@ -176,7 +176,7 @@ pub(crate) fn find_mic_device(name: &str) -> Result<IMMDevice> {
     }
     let names: Vec<_> = devices.into_iter().map(|(_, n)| n).collect();
     Err(AudioError::DeviceNotFound(format!(
-        "no virtual mic: install VB-CABLE or Steam's audio drivers (see docs/host-setup.md); available: {}",
+        "no virtual mic: install VB-CABLE or Steam's audio drivers (see docs/guide/audio-and-gamepads.md); available: {}",
         names.join(", ")
     )))
 }

@@ -1,10 +1,10 @@
 # Client ↔ host wire protocol
 
-What the browser client in `web/` speaks. Control-channel JSON follows `ws-proto` (`crates/proto`: `type`-tagged, camelCase). Agreed between the browser client, WebRTC transport and host input threads; change both sides together.
+What the browser client in `web/` speaks. Control-channel JSON follows `ws-proto` (`crates/proto`: `type`-tagged, camelCase). The browser and the host must change together: update both sides in the same pull request.
 
 ## Pairing, signaling and channels
 
-Defined by the WebRTC transport thread in `docs/signaling.md`, which is authoritative. The client implements it as written:
+Defined in [signaling.md](signaling.md), which is authoritative. The client implements it as written:
 
 - Pairing via `GET /api/session`, `POST /api/pair/start`, `POST /api/pair/confirm` and `POST /api/unpair`, using an HttpOnly `ws_device` cookie. A refused WebSocket upgrade sends the user back to the pairing screen.
 - WebSocket at `/ws`, same origin. The host sends `welcome {ice_servers}` and then `offer {sdp}`, and the browser replies `answer {sdp}` and `candidate {candidate,sdpMid,sdpMLineIndex}`. Once the connection is up and `control` is open, the browser sends `handoff` and the host closes the socket; the session then runs on the peer connection alone, and a `bye` comes over `control`. When ICE fails, the browser sends `restart` (up to 3 times) if the socket is still open, or opens a new socket (also up to 3 times) after a handoff, and answers the fresh offer on a new peer connection. `bye {reason}` and `error {code,message}` are shown to the user.
@@ -21,7 +21,7 @@ The client sets `jitterBufferTarget = 0` on video receivers. It always answers a
 
 ## Input messages (`input`, `input-motion`)
 
-One binary frame per message, little-endian, first byte is the type. The host input thread implements this in `ws-proto::input`.
+One binary frame per message, little-endian, first byte is the type. The host side is implemented in `ws-proto::input`.
 
 | Type | Name | Layout | Size | Channel |
 |---|---|---|---|---|

@@ -4,7 +4,7 @@
 //! first byte is the type. Motion and gamepad state ride the unordered,
 //! unreliable [`crate::channels::INPUT_MOTION`] channel; everything else rides
 //! the reliable [`crate::channels::INPUT`] one. The byte layouts are the table
-//! in `docs/protocol.md`.
+//! in `docs/dev/protocol.md`.
 
 use std::fmt;
 

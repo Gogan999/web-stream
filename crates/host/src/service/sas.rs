@@ -72,7 +72,7 @@ fn send() -> anyhow::Result<()> {
     if !policy_allows_services() {
         tracing::warn!(
             "Ctrl+Alt+Del: the SoftwareSASGeneration policy doesn't let services send it, \
-             so Windows will likely ignore it (see docs/host-setup.md)"
+             so Windows will likely ignore it (see docs/guide/windows-service.md)"
         );
     }
     // SAFETY: sas.dll from System32 only; SendSAS has the signature

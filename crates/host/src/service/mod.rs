@@ -18,7 +18,7 @@
 //! users) or either exits. If the network host can't be started, the
 //! session host runs the whole host, as before, and the log says why. The
 //! host has no console; elevated administrators control it through a named
-//! pipe: the tray app's service console window ([`control::connect`]).
+//! pipe: the tray app, run elevated, attaches to it ([`control::attach`]).
 
 // Off Windows only the tests use most of this.
 #![cfg_attr(not(windows), allow(dead_code))]
@@ -45,6 +45,7 @@ service install [host options]
                  prompts and programs run as administrator; copies this exe
                  to Program Files. Needs administrator rights.
 service update   copy this exe over the installed one and restart the service
+service start | stop
 service uninstall
 ";
 
@@ -85,6 +86,8 @@ pub fn main(args: &[String]) -> anyhow::Result<String> {
         Some("install") => imp::install(rest),
         Some("update") => imp::update(),
         Some("uninstall") => imp::uninstall(),
+        Some("start") => imp::start(),
+        Some("stop") => imp::stop(),
         // Started by the service control manager.
         Some("run") => imp::run(rest).map(|()| String::new()),
         // Started by the service in the user's session.
@@ -384,7 +387,7 @@ pub use scm::service_log;
 
 #[cfg(windows)]
 mod imp {
-    pub use super::scm::{install, query, run, uninstall, update};
+    pub use super::scm::{install, query, run, start, stop, uninstall, update};
 
     /// Running as SYSTEM, load DLLs only from System32 and the exe's
     /// folder, never the current directory or PATH.
@@ -462,6 +465,12 @@ mod imp {
         windows_only().map(|()| String::new())
     }
     pub fn uninstall() -> anyhow::Result<String> {
+        windows_only().map(|()| String::new())
+    }
+    pub fn start() -> anyhow::Result<String> {
+        windows_only().map(|()| String::new())
+    }
+    pub fn stop() -> anyhow::Result<String> {
         windows_only().map(|()| String::new())
     }
     pub fn query() -> anyhow::Result<Option<bool>> {

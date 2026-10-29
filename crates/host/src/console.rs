@@ -1,11 +1,17 @@
 //! The host's events as lines of text and typed commands, for the
 //! service's control pipe (and the test host in `examples`).
 
-use crate::serve::{Command, Event, FileEvent, Notice};
+use crate::serve::{Command, Event, FileEvent, FileId, Notice};
 
 pub const CONSOLE_HELP: &str = "\
 commands: pair (let a browser pair for two minutes), unpair-all, drop (end the session),
-          send <path> (offer a file to the connected browser), quit";
+          send <path> (offer a file to the connected browser),
+          unshare <id> (stop offering it), quit";
+
+/// Sent first by a console that wants the host's [`Event`]s as JSON, one
+/// per line, instead of lines of text (the tray app, attached to the
+/// service's host).
+pub const EVENTS_JSON: &str = "events json";
 
 /// An event as the host user reads it; `None` for those not worth a line.
 pub fn describe(e: Event) -> Option<String> {
@@ -113,6 +119,12 @@ pub fn parse_line(line: &str) -> Line {
         let path = path.trim().trim_matches('"');
         return Line::Command(Command::ShareFiles(vec![path.into()]));
     }
+    if let Some(id) = line.strip_prefix("unshare ") {
+        return match id.trim().parse() {
+            Ok(id) => Line::Command(Command::StopSharing(FileId(id))),
+            Err(_) => Line::Help,
+        };
+    }
     Line::Command(match line {
         "pair" | "p" => Command::OpenPairing,
         "drop" | "d" => Command::DropSession,
@@ -121,6 +133,24 @@ pub fn parse_line(line: &str) -> Line {
         "" => return Line::Empty,
         _ => return Line::Help,
     })
+}
+
+/// The lines that type `cmd` into a console ([`parse_line`] reads them
+/// back). A path with a line break in it can't be typed: it is left out.
+pub fn command_lines(cmd: &Command) -> Vec<String> {
+    match cmd {
+        Command::OpenPairing => vec!["pair".into()],
+        Command::DropSession => vec!["drop".into()],
+        Command::UnpairAll => vec!["unpair-all".into()],
+        Command::ShareFiles(paths) => paths
+            .iter()
+            .map(|p| p.display().to_string())
+            .filter(|p| !p.contains(['\r', '\n']))
+            .map(|p| format!("send {p}"))
+            .collect(),
+        Command::StopSharing(id) => vec![format!("unshare {}", id.0)],
+        Command::Quit => vec!["quit".into()],
+    }
 }
 
 #[cfg(test)]
@@ -137,6 +167,49 @@ mod tests {
         );
         assert_eq!(parse_line(""), Line::Empty);
         assert_eq!(parse_line("bogus"), Line::Help);
+        assert_eq!(parse_line("unshare x"), Line::Help);
+    }
+
+    #[test]
+    fn commands_round_trip_as_lines() {
+        for cmd in [
+            Command::OpenPairing,
+            Command::DropSession,
+            Command::UnpairAll,
+            Command::StopSharing(FileId(42)),
+            Command::Quit,
+            Command::ShareFiles(vec![r"C:\a b\c.txt".into()]),
+        ] {
+            let lines = command_lines(&cmd);
+            assert_eq!(lines.len(), 1, "{cmd:?}");
+            assert_eq!(parse_line(&lines[0]), Line::Command(cmd));
+        }
+        let two = command_lines(&Command::ShareFiles(vec!["a".into(), "b\nquit".into()]));
+        assert_eq!(two, ["send a"]);
+    }
+
+    #[test]
+    fn events_cross_as_json() {
+        let e = Event::Started {
+            port: 8443,
+            ips: vec!["192.168.1.5".parse().unwrap()],
+            fingerprint: "AB:CD".into(),
+            self_signed: true,
+            web_root: None,
+            data_dir: "data".into(),
+        };
+        let line = serde_json::to_string(&e).unwrap();
+        assert!(!line.contains('\n'));
+        assert_eq!(serde_json::from_str::<Event>(&line).unwrap(), e);
+        let f = Event::File(FileEvent::Shared {
+            id: FileId(7),
+            name: "a.txt".into(),
+            size: 3,
+        });
+        assert_eq!(
+            serde_json::from_str::<Event>(&serde_json::to_string(&f).unwrap()).unwrap(),
+            f
+        );
     }
 
     #[test]

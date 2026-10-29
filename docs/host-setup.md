@@ -419,15 +419,25 @@ input, audio) as SYSTEM, and the part that talks to the network (the web
 server, pairing, the peer connection) as LocalService with no privileges
 (see the security notes below).
 
-- **The tray app stops its own host** when installing, and doesn't start it
-  while the service is installed: they use the same ports. It keeps running
-  in the tray as the service's front end.
+- **Only one host runs.** While the service is installed the tray app never
+  starts a host of its own (they use the same ports): it stops its own when
+  it sees the service, and **Start** is replaced by the service's state.
+- **The tray app attaches to the service.** Run as administrator, it shows
+  the service's host in its own window, as it would its own: the address,
+  pairing codes and QR code, the connected browser, sending files. Click
+  **Connect (administrator)** (one UAC prompt): the app reopens as
+  administrator and attaches, and again by itself whenever the service
+  restarts its host. Without administrator rights it only shows whether
+  the service runs, because pairing with the service lets a browser answer
+  UAC prompts.
+- **Settings go to the service.** With the service installed, **Save and
+  apply to the service** saves the settings and reinstalls the service with
+  them, which restarts it. Attached, that takes no further prompt.
+  **Start the service** and **Stop the service** do what they say.
 - **Pair again.** The service has its own certificate (the browser warns
-  about a new one) and its own paired browsers. Click **Pair through the
-  service** (an administrator prompt), request a code in the browser, and
-  type the code the service console window shows. **Service console**
-  opens the same window without pairing: **Disconnect the browser**,
-  **Share files...** and **Unpair every browser** for the service's host.
+  about a new one) and its own paired browsers. Click **Pair a browser
+  (administrator)**, or **Pair a browser** once attached, request a code
+  in the browser, and type the code the app shows.
 - **Updating:** `scripts\update.ps1` updates the service too (one UAC
   prompt). By hand: build, then **Update the service** in the tray app.
 - **Logs and data** are in
@@ -485,7 +495,7 @@ What this changes for security:
   where they came from can't swap them.
 - The service picks a new random name for its control pipe each time it
   starts the host and keeps it, with the host's process id, in its data
-  folder. The service console connects only if that process
+  folder. The tray app attaches only if that process
   answers, so a program running as a normal user that takes the name
   can't pose as the host.
 - While the host restarts (signing out, switching users) the ports are
@@ -494,5 +504,5 @@ What this changes for security:
 - The service refuses `--web-root` (a folder a user could change would run
   their code in a browser that controls the PC), `--data-dir`, and receiving
   files from the browser (`--allow-upload`), which would write as SYSTEM into
-  a folder a user controls. Sending files from the host still works through
-  the service console.
+  a folder a user controls. Sending files from the host still works from the
+  tray app, attached to the service.

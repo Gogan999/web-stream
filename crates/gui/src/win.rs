@@ -14,12 +14,14 @@ use windows::Win32::Devices::DeviceAndDriverInstallation::{
 use windows::Win32::Foundation::{
     CloseHandle, ERROR_ALREADY_EXISTS, ERROR_SUCCESS, GetLastError, HWND,
 };
+use windows::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation};
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::Registry::{
     HKEY_CURRENT_USER, REG_SZ, RRF_RT_REG_SZ, RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW,
 };
 use windows::Win32::System::Threading::{
-    CreateMutexW, OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+    CreateMutexW, GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_SYNCHRONIZE,
+    WaitForSingleObject,
 };
 use windows::Win32::UI::Shell::{
     FOLDERID_ProgramFilesCommonX86, KF_FLAG_DEFAULT, SHGetKnownFolderPath, ShellExecuteW,
@@ -90,6 +92,31 @@ pub fn wait_for_exit(pid: u32, timeout: Duration) {
         WaitForSingleObject(process, timeout.as_millis().min(u32::MAX as u128) as u32);
         let _ = CloseHandle(process);
     }
+}
+
+/// Whether this process runs as an elevated administrator, which the
+/// service's control pipe takes.
+pub fn is_elevated() -> bool {
+    let mut token = Default::default();
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) }.is_err() {
+        return false;
+    }
+    let mut elevation = TOKEN_ELEVATION::default();
+    let mut len = 0u32;
+    let ok = unsafe {
+        GetTokenInformation(
+            token,
+            TokenElevation,
+            Some((&raw mut elevation).cast()),
+            size_of::<TOKEN_ELEVATION>() as u32,
+            &mut len,
+        )
+    }
+    .is_ok();
+    unsafe {
+        let _ = CloseHandle(token);
+    }
+    ok && elevation.TokenIsElevated != 0
 }
 
 /// Starts this exe with `args` as administrator (a UAC prompt); returns
@@ -230,6 +257,16 @@ pub fn quit(host: &Host) -> ! {
     hide_window();
     host.stop_and_wait(Duration::from_secs(15));
     crate::upnp::shutdown();
+    TRAY.with(|t| t.borrow_mut().take());
+    std::process::exit(0)
+}
+
+/// Exits for an elevated copy of this app (started with `--after` this
+/// process) to take over: like [`quit`], but the router keeps forwarding
+/// the ports, which the new copy goes on renewing.
+pub fn hand_over(host: &Host) -> ! {
+    hide_window();
+    host.stop_and_wait(Duration::from_secs(15));
     TRAY.with(|t| t.borrow_mut().take());
     std::process::exit(0)
 }

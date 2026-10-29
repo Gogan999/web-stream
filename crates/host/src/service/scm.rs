@@ -221,7 +221,7 @@ pub fn query() -> anyhow::Result<Option<bool>> {
 /// them into the network host's data folder, which only administrators (and
 /// that host) can change, so a user who can write where they came from
 /// can't swap them later.
-/// The same goes for `--duckdns`'s token, which is always passed as a
+/// The same goes for a named tunnel's token, which is always passed as a
 /// file in that folder.
 fn copy_certificate(
     args: &[String],
@@ -233,11 +233,15 @@ fn copy_certificate(
         copies.push(("--key", key, super::KEY_COPY));
     }
     let mut args = args.to_vec();
-    if let Some(duck) = &opts.duckdns {
-        if !args.iter().any(|a| a == "--duckdns-token-file") {
-            args.extend(["--duckdns-token-file".into(), String::new()]);
+    if let Some(crate::options::TunnelOptions {
+        kind: crate::options::TunnelKind::Named { token_file, .. },
+        ..
+    }) = &opts.tunnel
+    {
+        if !args.iter().any(|a| a == "--tunnel-token-file") {
+            args.extend(["--tunnel-token-file".into(), String::new()]);
         }
-        copies.push(("--duckdns-token-file", &duck.token_file, super::TOKEN_COPY));
+        copies.push(("--tunnel-token-file", token_file, super::TOKEN_COPY));
     }
     if copies.is_empty() {
         return Ok(args);
@@ -377,7 +381,7 @@ define_windows_service!(ffi_service_main, service_main);
 /// Runs as the service; started by the service control manager.
 pub fn run(args: &[String]) -> anyhow::Result<()> {
     super::imp::harden_dll_search();
-    let _ = SERVE_ARGS.set(args.to_vec());
+    let _ = SERVE_ARGS.set(crate::options::drop_retired_flags(args));
     service_dispatcher::start(SERVICE_NAME, ffi_service_main).context(
         "not started by the service control manager (install it from the tray app's settings)",
     )?;

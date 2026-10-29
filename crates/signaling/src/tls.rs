@@ -1,5 +1,5 @@
 use std::path::Path;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use rustls::ServerConfig;
 use rustls::crypto::CryptoProvider;
@@ -15,45 +15,21 @@ use crate::config::TlsSource;
 const CERT_FILE: &str = "tls-cert.pem";
 const KEY_FILE: &str = "tls-key.pem";
 const META_FILE: &str = "tls-cert.json";
-/// Where a certificate from Let's Encrypt is kept, with its key and the
-/// directory that issued it, in one file written at once (see
-/// [`crate::acme`]).
-pub(crate) const ACME_FILE: &str = "acme-cert.json";
 const VALIDITY: time::Duration = time::Duration::days(825);
 const RENEW_BEFORE: time::Duration = time::Duration::days(30);
 
 pub struct LoadedTls {
     pub config: Arc<ServerConfig>,
-    /// The certificate in use, which [`crate::acme`] can replace while the
-    /// server runs.
+    /// The certificate in use.
     pub certs: Arc<CertStore>,
 }
 
 pub fn load(source: &TlsSource, data_dir: &Path) -> Result<LoadedTls, Error> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let store = |(cert, key): (Vec<u8>, Vec<u8>)| CertStore::new(provider.clone(), &cert, &key);
+    let store = |(cert, key): (Vec<u8>, Vec<u8>)| CertStore::new(&provider, &cert, &key);
     let certs = match source {
         TlsSource::Files { cert, key } => store((std::fs::read(cert)?, std::fs::read(key)?))?,
         TlsSource::SelfSigned { hostnames } => store(self_signed(data_dir, hostnames)?)?,
-        TlsSource::DuckDns(duck) => {
-            let domain = duck.domain();
-            // Until Let's Encrypt has issued one (or if what is stored is
-            // unusable): browsers warn as with any self-signed certificate,
-            // but the host is reachable, and a new one is ordered at once.
-            let stored = stored_acme(data_dir, &domain, &duck.directory).and_then(|pair| {
-                store(pair)
-                    .inspect_err(|e| tracing::warn!("stored Let's Encrypt certificate: {e}"))
-                    .ok()
-            });
-            match stored {
-                Some(certs) => certs,
-                None => {
-                    let mut names = duck.hostnames.clone();
-                    names.push(domain);
-                    store(self_signed(data_dir, &names)?)?
-                }
-            }
-        }
     };
     let certs = Arc::new(certs);
     let mut config = ServerConfig::builder_with_provider(provider)
@@ -68,12 +44,10 @@ pub fn load(source: &TlsSource, data_dir: &Path) -> Result<LoadedTls, Error> {
     })
 }
 
-/// The certificate the server presents, swapped in place on renewal so the
-/// listener never restarts.
+/// The certificate the server presents.
 #[derive(Debug)]
 pub struct CertStore {
-    provider: Arc<CryptoProvider>,
-    current: RwLock<Current>,
+    current: Current,
 }
 
 #[derive(Debug)]
@@ -95,40 +69,20 @@ pub struct CertInfo {
 }
 
 impl CertStore {
-    fn new(provider: Arc<CryptoProvider>, cert_pem: &[u8], key_pem: &[u8]) -> Result<Self, Error> {
-        let current = parse(&provider, cert_pem, key_pem)?;
+    fn new(provider: &CryptoProvider, cert_pem: &[u8], key_pem: &[u8]) -> Result<Self, Error> {
         Ok(Self {
-            provider,
-            current: RwLock::new(current),
+            current: parse(provider, cert_pem, key_pem)?,
         })
     }
 
-    /// Serves `cert_pem` from the next handshake on.
-    pub fn replace(&self, cert_pem: &[u8], key_pem: &[u8]) -> Result<CertInfo, Error> {
-        let next = parse(&self.provider, cert_pem, key_pem)?;
-        let info = next.info.clone();
-        *self.current.write().unwrap_or_else(|e| e.into_inner()) = next;
-        Ok(info)
-    }
-
     pub fn info(&self) -> CertInfo {
-        self.current
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .info
-            .clone()
+        self.current.info.clone()
     }
 }
 
 impl ResolvesServerCert for CertStore {
     fn resolve(&self, _hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
-        Some(
-            self.current
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .key
-                .clone(),
-        )
+        Some(self.current.key.clone())
     }
 }
 
@@ -165,51 +119,6 @@ pub(crate) fn cert_info(leaf: &CertificateDer<'_>) -> Result<CertInfo, Error> {
         not_after: validity.not_after.timestamp(),
         self_signed: cert.issuer() == cert.subject(),
     })
-}
-
-/// A certificate from Let's Encrypt, as stored.
-#[derive(serde::Serialize, serde::Deserialize)]
-pub(crate) struct StoredCert {
-    /// The ACME directory that issued it: a staging certificate isn't kept
-    /// once staging is turned off.
-    pub directory: String,
-    pub cert: String,
-    pub key: String,
-}
-
-/// Stores a certificate and its key in one go, so a crash can never leave
-/// one without the other.
-pub(crate) fn store_acme(data_dir: &Path, stored: &StoredCert) -> Result<(), Error> {
-    let json = serde_json::to_vec(stored).expect("certificate serializes");
-    crate::store::write_private(&data_dir.join(ACME_FILE), &json)
-}
-
-/// The stored Let's Encrypt certificate for `domain` from `directory`,
-/// unless it has expired (then a self-signed one serves while a new one is
-/// issued).
-fn stored_acme(data_dir: &Path, domain: &str, directory: &str) -> Option<(Vec<u8>, Vec<u8>)> {
-    let stored: StoredCert =
-        serde_json::from_slice(&std::fs::read(data_dir.join(ACME_FILE)).ok()?).ok()?;
-    if stored.directory != directory {
-        return None;
-    }
-    let leaf = CertificateDer::pem_slice_iter(stored.cert.as_bytes())
-        .next()?
-        .ok()?;
-    let (_, cert) = x509_parser::parse_x509_certificate(leaf.as_ref()).ok()?;
-    let names_domain = cert
-        .subject_alternative_name()
-        .ok()
-        .flatten()
-        .is_some_and(|san| {
-            san.value.general_names.iter().any(|n| {
-                matches!(n, x509_parser::extensions::GeneralName::DNSName(d)
-                    if d.eq_ignore_ascii_case(domain))
-            })
-        });
-    let unexpired =
-        cert.validity().not_after.timestamp() > time::OffsetDateTime::now_utc().unix_timestamp();
-    (names_domain && unexpired).then(|| (stored.cert.into_bytes(), stored.key.into_bytes()))
 }
 
 /// Reuse the stored self-signed certificate, or make a new one on first run,
@@ -293,65 +202,5 @@ mod tests {
             load(&renamed, dir.path()).unwrap().certs.info().fingerprint,
             first.fingerprint
         );
-    }
-
-    #[test]
-    fn a_stored_certificate_serves_only_for_its_name_and_directory() {
-        let dir = tempfile::tempdir().unwrap();
-        let other = tempfile::tempdir().unwrap();
-        let domain = "my-pc.duckdns.org";
-        let duck = |directory: &str| {
-            TlsSource::DuckDns(crate::DuckDns {
-                name: "my-pc".into(),
-                token: "t".into(),
-                email: None,
-                directory: directory.into(),
-                update_address: false,
-                hostnames: vec!["192.168.1.20".into()],
-            })
-        };
-        // Nothing stored: a self-signed stand-in.
-        let stand_in = load(&duck("prod"), dir.path()).unwrap().certs.info();
-        assert!(stand_in.self_signed);
-        // (Self-signed, so it stands in for an issued one here.)
-        let (cert, key) = self_signed(other.path(), &[domain.into()]).unwrap();
-        let stored = |directory: &str, key: &[u8]| StoredCert {
-            directory: directory.into(),
-            cert: String::from_utf8(cert.clone()).unwrap(),
-            key: String::from_utf8(key.to_vec()).unwrap(),
-        };
-        store_acme(dir.path(), &stored("prod", &key)).unwrap();
-        let issued = load(&duck("prod"), dir.path()).unwrap().certs.info();
-        assert_ne!(issued.fingerprint, stand_in.fingerprint);
-        // From staging, once staging is off: the stand-in again.
-        let staging = load(&duck("staging"), dir.path()).unwrap().certs.info();
-        assert_eq!(staging.fingerprint, stand_in.fingerprint);
-        // A key that isn't the certificate's: the stand-in, not a failure.
-        let (_, wrong) = self_signed(tempfile::tempdir().unwrap().path(), &[]).unwrap();
-        store_acme(dir.path(), &stored("prod", &wrong)).unwrap();
-        let broken = load(&duck("prod"), dir.path()).unwrap().certs.info();
-        assert_eq!(broken.fingerprint, stand_in.fingerprint);
-    }
-
-    #[test]
-    fn a_replaced_certificate_serves_from_then_on() {
-        let dir = tempfile::tempdir().unwrap();
-        let tls = load(
-            &TlsSource::SelfSigned {
-                hostnames: Vec::new(),
-            },
-            dir.path(),
-        )
-        .unwrap();
-        let before = tls.certs.info();
-        let other = tempfile::tempdir().unwrap();
-        let (cert, key) = self_signed(other.path(), &["x.example".into()]).unwrap();
-        let after = tls.certs.replace(&cert, &key).unwrap();
-        assert_ne!(after.fingerprint, before.fingerprint);
-        assert_eq!(tls.certs.info(), after);
-        // A key that isn't the certificate's is refused, and the old pair stays.
-        let (_, wrong_key) = self_signed(dir.path(), &["y.example".into()]).unwrap();
-        assert!(tls.certs.replace(&cert, &wrong_key).is_err());
-        assert_eq!(tls.certs.info(), after);
     }
 }

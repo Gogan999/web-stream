@@ -32,6 +32,9 @@
 ; HKCU Run value the tray app's "Start with Windows" uses (crates/gui/src/win.rs).
 #define RunValue "web-stream host"
 #define ViGEm "ViGEmBus_1.22.0_x64_x86_arm64.exe"
+; Cloudflare Tunnel's connector, run by the host when a tunnel is on
+; (crates/host/src/tunnel.rs looks for it next to the exe).
+#define Cloudflared "cloudflared-windows-amd64.exe"
 #define SteamMicInf "Steam\drivers\Windows10\x64\SteamStreamingMicrophone.inf"
 
 [Setup]
@@ -82,6 +85,7 @@ Name: "autostart"; Description: "Start with Windows (in the tray)"
 
 [Files]
 Source: "..\target\release\{#AppExe}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "redist\{#Cloudflared}"; DestDir: "{app}"; DestName: "cloudflared.exe"; Flags: ignoreversion
 Source: "third-party\*"; DestDir: "{app}\licenses"; Flags: ignoreversion
 Source: "redist\{#ViGEm}"; DestDir: "{tmp}"; Flags: deleteafterinstall; Tasks: gamepad; Check: not ViGEmInstalled
 
@@ -155,6 +159,20 @@ begin
   if not ExecAsOriginalUser(ExpandConstant('{app}\{#AppExe}'), 'setup autostart ' + Arg, '',
       SW_HIDE, ewWaitUntilTerminated, Code) or (Code <> 0) then
     Log(Format('setup autostart %s failed (%d)', [Arg, Code]));
+end;
+
+// The service's network host runs cloudflared.exe while a tunnel is on,
+// which keeps the file in use: stop the service before the files are
+// replaced ("service update" below starts it again).
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  Code: Integer;
+begin
+  Result := '';
+  if ServiceInstalled then
+    if not Exec(ExpandConstant('{sys}\net.exe'), 'stop {#ServiceName}', '', SW_HIDE,
+        ewWaitUntilTerminated, Code) then
+      Log('net stop {#ServiceName} could not run');
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);

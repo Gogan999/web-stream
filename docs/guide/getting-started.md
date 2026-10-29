@@ -37,16 +37,19 @@ lives in the system tray (bottom right, near the clock); closing the window
 keeps it running there.
 
 - **Only using it at home?** Skip to step 3.
-- **Using it away from home too?** Follow
-  [Connecting from outside your home](remote-access.md), then come back.
+- **Using it away from home too?** If you were sent a Cloudflare Tunnel
+  token, open **Settings**, set **Cloudflare Tunnel** to **Named (token)**,
+  paste it in **Tunnel token** and save: the window then shows your own
+  address (like `https://alex.example.com/`). Then follow
+  [Connecting from outside your home](remote-access.md) for the stream's
+  ports, and come back.
 
 ## 3. Pair your phone
 
 1. Press **Pair a phone**. A QR code appears.
 2. Scan it with the phone's camera and open the link.
-3. The first time, the browser warns about the certificate (unless you set
-   up a name for the PC as described in
-   [Connecting from outside your home](remote-access.md)).
+3. The first time, the browser warns about the certificate (not through a
+   [Cloudflare Tunnel](cloudflare-tunnel.md)).
    - **iPhone:** **Show Details > visit this website > Visit Website**.
    - **Chrome:** **Advanced > Proceed**.
 4. The page pairs by itself and connects.

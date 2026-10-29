@@ -44,7 +44,7 @@ The settings cover:
 
 | Area | Settings |
 |---|---|
-| Network | Port, ICE-TCP fallback and its port, public addresses, extra host names for the certificate, DuckDNS name and token |
+| Network | Port, ICE-TCP fallback and its port, public addresses, extra host names for the certificate, Cloudflare Tunnel (off, named with its token and address, or quick) |
 | Pairing | How long an unused browser stays paired (30 days by default) |
 | Video | Display to stream first, codec, size, frame rate, bitrate cap, quality |
 | Audio | Game audio quality and the device it comes from, the device the browser mic plays into |

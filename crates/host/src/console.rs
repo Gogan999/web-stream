@@ -82,10 +82,8 @@ fn describe_notice(n: Notice) -> String {
         }
         Notice::SessionStarted { device_name } => format!("{device_name:?} connected"),
         Notice::SessionEnded { device_name } => format!("{device_name:?} disconnected"),
-        Notice::Certificate {
-            domain,
-            fingerprint,
-        } => format!("certificate from Let's Encrypt for {domain} in use, SHA-256 {fingerprint}"),
+        Notice::Tunnel { url: Some(url) } => format!("Cloudflare Tunnel up: {url}/"),
+        Notice::Tunnel { url: None } => "Cloudflare Tunnel down".into(),
         Notice::Warning(w) => w,
     }
 }
@@ -111,10 +109,11 @@ fn describe_file(f: FileEvent) -> Option<String> {
 }
 
 /// What a console that connects late is told first: the host's start,
-/// and the browser connected now.
+/// where the Cloudflare Tunnel is up, and the browser connected now.
 #[derive(Default)]
 pub struct Snapshot {
     started: Option<Event>,
+    tunnel_url: Option<String>,
     connected: Option<String>,
 }
 
@@ -122,6 +121,7 @@ impl Snapshot {
     pub fn update(&mut self, e: &Event) {
         match e {
             Event::Started { .. } => self.started = Some(e.clone()),
+            Event::Notice(Notice::Tunnel { url }) => self.tunnel_url = url.clone(),
             Event::Notice(Notice::SessionStarted { device_name }) => {
                 self.connected = Some(device_name.clone())
             }
@@ -136,6 +136,11 @@ impl Snapshot {
 
     pub fn events(&self) -> Vec<Event> {
         let mut out: Vec<Event> = self.started.iter().cloned().collect();
+        if let Some(url) = &self.tunnel_url {
+            out.push(Event::Notice(Notice::Tunnel {
+                url: Some(url.clone()),
+            }));
+        }
         if let Some(device_name) = &self.connected {
             out.push(Event::Notice(Notice::SessionStarted {
                 device_name: device_name.clone(),
@@ -336,6 +341,19 @@ mod tests {
             web_root: None,
             data_dir: "data".into(),
         }
+    }
+
+    #[test]
+    fn a_late_console_hears_where_the_tunnel_is() {
+        let mut snapshot = Snapshot::default();
+        snapshot.update(&started());
+        let up = Event::Notice(Notice::Tunnel {
+            url: Some("https://pc.example.com".into()),
+        });
+        snapshot.update(&up);
+        assert_eq!(snapshot.events(), vec![started(), up]);
+        snapshot.update(&Event::Notice(Notice::Tunnel { url: None }));
+        assert_eq!(snapshot.events(), vec![started()]);
     }
 
     /// A console on one end of an in-memory pipe, the session on the other.

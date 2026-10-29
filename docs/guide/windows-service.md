@@ -91,7 +91,7 @@ everyone else:
 - **The network side has no privileges.** The host runs as two processes.
   Everything that reads what comes off the network (HTTPS and TLS, the
   signaling socket, the peer connection's DTLS, SRTP and data channels,
-  Let's Encrypt) runs as LocalService with every privilege removed but one
+  cloudflared) runs as LocalService with every privilege removed but one
   (it can't impersonate other accounts, which would be a way back to
   SYSTEM), and can only read and write its own data folder. A bug there
   gives an attacker that process: they could stream the screen and send
@@ -113,7 +113,7 @@ everyone else:
   retried later, never replaced by a SYSTEM one.
 - **Only administrators can change what runs.** What runs as SYSTEM is the
   copy in Program Files, never a build folder in a source checkout.
-  `--cert`, `--key` and the DuckDNS token are copied into the network
+  `--cert`, `--key` and the Cloudflare Tunnel token are copied into the network
   process's data folder on install, so a user who can write where they came
   from can't swap them.
 - **The control pipe can't be impersonated.** The service picks a new

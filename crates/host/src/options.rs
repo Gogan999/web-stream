@@ -19,14 +19,16 @@ host options:
   --public-ip IP       public address that forwards to the host (repeatable)
   --hostname NAME      extra name or IP for the self-signed certificate (repeatable)
   --cert FILE --key FILE   PEM certificate instead of a self-signed one
-  --duckdns NAME       get a Let's Encrypt certificate for NAME.duckdns.org, and
-                       keep that name pointing at this PC (no extra ports)
-  --duckdns-token-file FILE  the DuckDNS token, default duckdns-token.txt in
-                       --data-dir
-  --no-duckdns-address  only the certificate: leave the name's address alone
-  --acme-email ADDR    a contact address for the Let's Encrypt account (optional)
-  --acme-staging       Let's Encrypt's staging server (untrusted certificates,
-                       looser rate limits), for trying --duckdns out
+  --tunnel named|quick  serve the web page through a Cloudflare Tunnel
+                       (cloudflared): \"named\" is a tunnel made in the Cloudflare
+                       dashboard, with its token in --tunnel-token-file;
+                       \"quick\" needs no account but gets a new
+                       trycloudflare.com name on every start
+  --tunnel-token-file FILE  the named tunnel's token, default
+                       cloudflare-tunnel-token.txt in --data-dir
+  --tunnel-hostname NAME  the named tunnel's public name (default: the one
+                       cloudflared reports)
+  --cloudflared FILE   cloudflared.exe, default the one next to this program
   --data-dir DIR       certificate and paired devices
   --forget-after DAYS  unpair a browser unused for this long, default 30
   --allow-origin URL   extra origin allowed to use the API, e.g. a reverse
@@ -62,8 +64,8 @@ pub struct ServeOptions {
     pub public_ips: Vec<IpAddr>,
     pub hostnames: Vec<String>,
     pub cert: Option<(PathBuf, PathBuf)>,
-    /// A Let's Encrypt certificate for a DuckDNS name (`--duckdns`).
-    pub duckdns: Option<DuckDnsOptions>,
+    /// A Cloudflare Tunnel for the web page and signaling (`--tunnel`).
+    pub tunnel: Option<TunnelOptions>,
     pub data_dir: PathBuf,
     /// A paired browser unused for this long is unpaired.
     pub device_idle_expiry: Duration,
@@ -75,25 +77,79 @@ pub struct ServeOptions {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct DuckDnsOptions {
-    /// The subdomain, without `.duckdns.org`.
-    pub name: String,
-    /// Holds the token, so it is never on a command line.
-    pub token_file: PathBuf,
-    pub email: Option<String>,
-    pub staging: bool,
-    pub update_address: bool,
+pub struct TunnelOptions {
+    pub kind: TunnelKind,
+    /// The cloudflared program.
+    pub cloudflared: PathBuf,
 }
 
-/// The DuckDNS token's file when `--duckdns-token-file` isn't given.
-pub const DUCKDNS_TOKEN_FILE: &str = "duckdns-token.txt";
+#[derive(Debug, Clone, PartialEq)]
+pub enum TunnelKind {
+    /// A tunnel made in the Cloudflare dashboard, with a name that stays.
+    Named {
+        /// Holds the token, so it is never on a command line.
+        token_file: PathBuf,
+        /// The public name, when cloudflared shouldn't be asked.
+        hostname: Option<String>,
+    },
+    /// A trycloudflare.com tunnel: no account, a new name on every start.
+    Quick,
+}
 
-/// Saves the DuckDNS token in `dir`'s [`DUCKDNS_TOKEN_FILE`], readable only
-/// by this user (and SYSTEM).
-pub fn save_duckdns_token(dir: &std::path::Path, token: &str) -> anyhow::Result<()> {
-    let path = dir.join(DUCKDNS_TOKEN_FILE);
+/// The tunnel token's file when `--tunnel-token-file` isn't given.
+pub const TUNNEL_TOKEN_FILE: &str = "cloudflare-tunnel-token.txt";
+
+/// Saves a Cloudflare Tunnel token in `dir`'s [`TUNNEL_TOKEN_FILE`],
+/// readable only by this user (and SYSTEM).
+pub fn save_tunnel_token(dir: &std::path::Path, token: &str) -> anyhow::Result<()> {
+    let path = dir.join(TUNNEL_TOKEN_FILE);
     ws_signaling::write_private(&path, token.as_bytes())
         .with_context(|| format!("{}", path.display()))
+}
+
+/// cloudflared.exe next to this program (the installer puts it there).
+pub fn default_cloudflared() -> PathBuf {
+    let name = if cfg!(windows) {
+        "cloudflared.exe"
+    } else {
+        "cloudflared"
+    };
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join(name)))
+        .unwrap_or_else(|| PathBuf::from(name))
+}
+
+/// `args` without the flags of the DuckDNS / Let's Encrypt certificate,
+/// which the Cloudflare Tunnel replaced: a service installed with them
+/// still starts.
+pub fn drop_retired_flags(args: &[String]) -> Vec<String> {
+    const WITH_VALUE: &[&str] = &["--duckdns", "--duckdns-token-file", "--acme-email"];
+    const ALONE: &[&str] = &["--no-duckdns-address", "--acme-staging"];
+    let mut out = Vec::new();
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        if WITH_VALUE.contains(&arg.as_str()) {
+            tracing::warn!("{arg} is no longer supported: use a Cloudflare Tunnel (--tunnel)");
+            it.next();
+        } else if ALONE.contains(&arg.as_str()) {
+            tracing::warn!("{arg} is no longer supported");
+        } else {
+            out.push(arg.clone());
+        }
+    }
+    out
+}
+
+/// A DNS name as typed: letters, digits, dots and hyphens.
+fn valid_hostname(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 253
+        && name.split('.').all(|l| {
+            !l.is_empty()
+                && l.len() <= 63
+                && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        })
 }
 
 /// What [`crate::media`] needs to know.
@@ -134,11 +190,10 @@ impl ServeOptions {
         let mut public_ips = Vec::new();
         let mut hostnames = Vec::new();
         let (mut cert, mut key) = (None, None);
-        let mut duckdns: Option<String> = None;
-        let mut duckdns_token_file = None;
-        let mut duckdns_address = true;
-        let mut acme_email = None;
-        let mut acme_staging = false;
+        let mut tunnel: Option<String> = None;
+        let mut tunnel_token_file = None;
+        let mut tunnel_hostname = None;
+        let mut cloudflared = None;
         let mut data_dir = None;
         let mut web_root = None;
         let mut forget_after_days = 30u32;
@@ -176,27 +231,16 @@ impl ServeOptions {
                 "--hostname" => hostnames.push(value()?.clone()),
                 "--cert" => cert = Some(PathBuf::from(value()?)),
                 "--key" => key = Some(PathBuf::from(value()?)),
-                "--duckdns" => {
-                    let name = value()?.to_ascii_lowercase();
-                    let name = name
-                        .strip_suffix(".duckdns.org")
-                        .unwrap_or(&name)
-                        .to_string();
-                    if !ws_signaling::valid_duckdns_name(&name) {
-                        bail!("--duckdns {name:?}: give the DuckDNS subdomain, e.g. my-pc");
+                "--tunnel" => tunnel = Some(value()?.clone()),
+                "--tunnel-token-file" => tunnel_token_file = Some(PathBuf::from(value()?)),
+                "--tunnel-hostname" => {
+                    let name = value()?.trim().trim_end_matches('.').to_ascii_lowercase();
+                    if !valid_hostname(&name) {
+                        bail!("--tunnel-hostname {name:?} is not a host name");
                     }
-                    duckdns = Some(name);
+                    tunnel_hostname = Some(name);
                 }
-                "--duckdns-token-file" => duckdns_token_file = Some(PathBuf::from(value()?)),
-                "--no-duckdns-address" => duckdns_address = false,
-                "--acme-email" => {
-                    let email = value()?.clone();
-                    if !email.contains('@') || email.contains([' ', ',', '/']) {
-                        bail!("--acme-email {email:?} is not an email address");
-                    }
-                    acme_email = Some(email);
-                }
-                "--acme-staging" => acme_staging = true,
+                "--cloudflared" => cloudflared = Some(PathBuf::from(value()?)),
                 "--data-dir" => data_dir = Some(PathBuf::from(value()?)),
                 "--web-root" => web_root = Some(PathBuf::from(value()?)),
                 "--forget-after" => {
@@ -270,26 +314,37 @@ impl ServeOptions {
             );
         }
         let data_dir = data_dir.unwrap_or_else(default_data_dir);
-        if duckdns.is_some() && cert.is_some() {
-            bail!("--duckdns gets its own certificate: leave out --cert and --key");
-        }
-        if duckdns.is_none()
-            && (duckdns_token_file.is_some()
-                || acme_email.is_some()
-                || acme_staging
-                || !duckdns_address)
-        {
-            bail!(
-                "--duckdns-token-file, --no-duckdns-address, --acme-email and --acme-staging go with --duckdns"
-            );
-        }
-        let duckdns = duckdns.map(|name| DuckDnsOptions {
-            name,
-            token_file: duckdns_token_file.unwrap_or_else(|| data_dir.join(DUCKDNS_TOKEN_FILE)),
-            email: acme_email,
-            staging: acme_staging,
-            update_address: duckdns_address,
-        });
+        let tunnel = match tunnel.as_deref() {
+            None => {
+                if tunnel_token_file.is_some() || tunnel_hostname.is_some() || cloudflared.is_some()
+                {
+                    bail!(
+                        "--tunnel-token-file, --tunnel-hostname and --cloudflared go with --tunnel"
+                    );
+                }
+                None
+            }
+            Some(kind) => {
+                let kind = match kind {
+                    "named" => TunnelKind::Named {
+                        token_file: tunnel_token_file
+                            .unwrap_or_else(|| data_dir.join(TUNNEL_TOKEN_FILE)),
+                        hostname: tunnel_hostname,
+                    },
+                    "quick" => {
+                        if tunnel_token_file.is_some() || tunnel_hostname.is_some() {
+                            bail!("a quick tunnel has no token or name of its own");
+                        }
+                        TunnelKind::Quick
+                    }
+                    k => bail!("--tunnel {k:?}: named or quick"),
+                };
+                Some(TunnelOptions {
+                    kind,
+                    cloudflared: cloudflared.unwrap_or_else(default_cloudflared),
+                })
+            }
+        };
         if allow_remote_update {
             media.update_log = Some(data_dir.join("update.log"));
         }
@@ -300,7 +355,7 @@ impl ServeOptions {
             public_ips,
             hostnames,
             cert,
-            duckdns,
+            tunnel,
             data_dir,
             device_idle_expiry: Duration::from_secs(u64::from(forget_after_days) * 24 * 3600),
             extra_origins,
@@ -495,39 +550,70 @@ mod tests {
     }
 
     #[test]
-    fn duckdns() {
-        assert_eq!(parse(&[]).unwrap().duckdns, None);
-        let o = parse(&["--duckdns", "My-PC.duckdns.org", "--data-dir", "d"]).unwrap();
+    fn tunnel() {
+        assert_eq!(parse(&[]).unwrap().tunnel, None);
+        let o = parse(&["--tunnel", "named", "--data-dir", "d"])
+            .unwrap()
+            .tunnel
+            .unwrap();
         assert_eq!(
-            o.duckdns,
-            Some(DuckDnsOptions {
-                name: "my-pc".into(),
-                token_file: PathBuf::from("d").join(DUCKDNS_TOKEN_FILE),
-                email: None,
-                staging: false,
-                update_address: true,
-            })
+            o.kind,
+            TunnelKind::Named {
+                token_file: PathBuf::from("d").join(TUNNEL_TOKEN_FILE),
+                hostname: None,
+            }
         );
+        assert_eq!(o.cloudflared, default_cloudflared());
         let o = parse(&[
+            "--tunnel",
+            "named",
+            "--tunnel-token-file",
+            "t.txt",
+            "--tunnel-hostname",
+            "PC.Example.com.",
+            "--cloudflared",
+            "c.exe",
+        ])
+        .unwrap()
+        .tunnel
+        .unwrap();
+        assert_eq!(
+            o.kind,
+            TunnelKind::Named {
+                token_file: PathBuf::from("t.txt"),
+                hostname: Some("pc.example.com".into()),
+            }
+        );
+        assert_eq!(o.cloudflared, PathBuf::from("c.exe"));
+        let quick = parse(&["--tunnel", "quick"]).unwrap().tunnel.unwrap();
+        assert_eq!(quick.kind, TunnelKind::Quick);
+        assert!(parse(&["--tunnel", "quick", "--tunnel-hostname", "x.example"]).is_err());
+        assert!(parse(&["--tunnel", "other"]).is_err());
+        assert!(parse(&["--tunnel-token-file", "t.txt"]).is_err());
+        assert!(parse(&["--tunnel", "named", "--tunnel-hostname", "a b"]).is_err());
+        assert!(parse(&["--tunnel", "named", "--tunnel-hostname", "a..b"]).is_err());
+    }
+
+    #[test]
+    fn retired_flags_are_dropped() {
+        let old: Vec<String> = [
+            "--port",
+            "9000",
             "--duckdns",
             "my-pc",
             "--duckdns-token-file",
             "t.txt",
-            "--acme-email",
-            "me@example.com",
             "--acme-staging",
-            "--no-duckdns-address",
-        ])
-        .unwrap()
-        .duckdns
-        .unwrap();
-        assert_eq!(o.token_file, PathBuf::from("t.txt"));
-        assert_eq!(o.email.as_deref(), Some("me@example.com"));
-        assert!(o.staging && !o.update_address);
-        assert!(parse(&["--duckdns", "a&b"]).is_err());
-        assert!(parse(&["--duckdns", "x", "--cert", "c", "--key", "k"]).is_err());
-        assert!(parse(&["--acme-staging"]).is_err());
-        assert!(parse(&["--duckdns", "x", "--acme-email", "nope"]).is_err());
+            "--codec",
+            "av1",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(
+            drop_retired_flags(&old),
+            ["--port", "9000", "--codec", "av1"]
+        );
     }
 
     #[test]

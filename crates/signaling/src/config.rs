@@ -21,7 +21,7 @@ pub struct SignalingConfig {
     /// A paired device unused for this long is revoked.
     pub device_idle_expiry: Duration,
     /// Extra origins allowed to call the API besides the host's own, for
-    /// example a DDNS name behind a reverse proxy.
+    /// example a name behind a reverse proxy.
     pub extra_origins: Vec<String>,
 }
 
@@ -47,57 +47,8 @@ pub enum TlsSource {
     /// Generate a certificate on first run and keep it in `data_dir`.
     /// `hostnames` are extra names or IPs to put in it besides localhost.
     SelfSigned { hostnames: Vec<String> },
-    /// PEM files, for example from Let's Encrypt.
+    /// PEM files.
     Files { cert: PathBuf, key: PathBuf },
-    /// A Let's Encrypt certificate for a DuckDNS name, issued and renewed
-    /// by the host itself (see [`DuckDns`]).
-    DuckDns(DuckDns),
-}
-
-pub const LETS_ENCRYPT: &str = "https://acme-v02.api.letsencrypt.org/directory";
-pub const LETS_ENCRYPT_STAGING: &str = "https://acme-staging-v02.api.letsencrypt.org/directory";
-
-/// `name.duckdns.org`, kept pointing at this PC's public address, with a
-/// certificate from Let's Encrypt. The certificate is proven with a DNS
-/// record (ACME DNS-01) that DuckDNS sets on request, so no port beyond the
-/// host's own needs forwarding, and it renews on its own.
-#[derive(Clone)]
-pub struct DuckDns {
-    /// The DuckDNS subdomain, without `.duckdns.org`.
-    pub name: String,
-    /// The DuckDNS account token.
-    pub token: String,
-    /// The contact Let's Encrypt keeps for the account (optional; it no
-    /// longer sends expiry warnings).
-    pub email: Option<String>,
-    /// The ACME directory: [`LETS_ENCRYPT`], or [`LETS_ENCRYPT_STAGING`]
-    /// to try things out under looser rate limits.
-    pub directory: String,
-    /// Also update the name's address every few minutes (a DDNS client).
-    pub update_address: bool,
-    /// Other names the self-signed stand-in covers until Let's Encrypt has
-    /// issued one (as [`TlsSource::SelfSigned`]'s), so the LAN fingerprint
-    /// stays the same with and without DuckDNS.
-    pub hostnames: Vec<String>,
-}
-
-impl DuckDns {
-    pub fn domain(&self) -> String {
-        format!("{}.duckdns.org", self.name)
-    }
-}
-
-impl std::fmt::Debug for DuckDns {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DuckDns")
-            .field("name", &self.name)
-            .field("token", &"<redacted>")
-            .field("email", &self.email)
-            .field("directory", &self.directory)
-            .field("update_address", &self.update_address)
-            .field("hostnames", &self.hostnames)
-            .finish()
-    }
 }
 
 /// A TURN server using the shared-secret REST credential scheme (coturn

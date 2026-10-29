@@ -16,7 +16,7 @@ use tower_http::services::ServeDir;
 use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::timeout::TimeoutLayer;
 
-use crate::config::{SignalingConfig, TlsSource};
+use crate::config::SignalingConfig;
 use crate::pairing::{CODE_TTL, ConfirmError, DEFAULT_WINDOW, Pairing, StartError};
 use crate::store::DeviceStore;
 use crate::{Error, tls};
@@ -25,6 +25,8 @@ use ws_proto::{ByeReason, ClientSignal, HostSignal, PairConfirm, PairLink, PairS
 /// `__Host-` makes the browser refuse the cookie unless it is Secure, has
 /// `Path=/` and no `Domain`, so a sibling subdomain cannot plant one.
 const COOKIE: &str = "__Host-ws_device";
+/// Set by Cloudflare on every request it passes through a tunnel.
+const CF_CONNECTING_IP: &str = "cf-connecting-ip";
 const COOKIE_MAX_AGE_SECS: u64 = 365 * 24 * 3600;
 const MAX_WS_MESSAGE: usize = 64 * 1024;
 const MAX_API_BODY: usize = 4 * 1024;
@@ -67,13 +69,13 @@ pub enum Notice {
     SessionEnded {
         device_name: String,
     },
-    /// A certificate from Let's Encrypt is in use from now on.
-    Certificate {
-        domain: String,
-        fingerprint: String,
+    /// The Cloudflare Tunnel is up at `url` (`None`: down, or up with a
+    /// name the host doesn't know).
+    Tunnel {
+        url: Option<String>,
     },
-    /// Something the host user should know about (a certificate that could
-    /// not be issued, say); the host keeps running.
+    /// Something the host user should know about (the tunnel stopped, say);
+    /// the host keeps running.
     Warning(String),
 }
 
@@ -86,8 +88,9 @@ pub struct SignalingSession {
     pub device_id: String,
     /// The host name or address the browser used to reach us (its URL's
     /// host, from the `Host` header, without the port). From outside the
-    /// LAN this is the WAN address or DDNS name, which the media
-    /// candidates must include.
+    /// LAN this is the WAN address or a DDNS name, which the media
+    /// candidates must include. `None` through a Cloudflare Tunnel, whose
+    /// name points at Cloudflare.
     pub host: Option<String>,
     incoming: mpsc::Receiver<SessionEvent>,
     outgoing: mpsc::Sender<HostSignal>,
@@ -166,6 +169,12 @@ pub struct SignalingHandle {
 }
 
 impl SignalingHandle {
+    /// Passes a notice from elsewhere in the host (the tunnel) to whoever
+    /// reads [`SignalingEvents::notices`].
+    pub fn notice(&self, notice: Notice) {
+        self.shared.notify(notice);
+    }
+
     /// End the live session, if any. The device stays paired.
     pub async fn drop_session(&self) {
         self.shared.kick_current(ByeReason::HostShutdown).await;
@@ -258,26 +267,7 @@ impl SignalingServer {
         let addr = self.shared.config.bind;
         let app = router(self.shared.clone());
         tracing::info!(%addr, fingerprint = %self.tls.certs.info().fingerprint, "signaling listening");
-        // Issues and renews the certificate while the server runs; ends
-        // with it.
-        let _acme = match &self.shared.config.tls {
-            TlsSource::DuckDns(duck) => Some(AbortOnDrop(tokio::spawn(crate::acme::maintain(
-                self.tls.certs.clone(),
-                duck.clone(),
-                self.shared.config.data_dir.clone(),
-                self.shared.notices.clone(),
-            )))),
-            _ => None,
-        };
         crate::listen::serve(addr, self.tls.config.clone(), app).await
-    }
-}
-
-struct AbortOnDrop(tokio::task::JoinHandle<()>);
-
-impl Drop for AbortOnDrop {
-    fn drop(&mut self) {
-        self.0.abort();
     }
 }
 
@@ -652,7 +642,13 @@ async fn ws_upgrade(
             );
         }
     };
-    let host = request_host(&headers);
+    // Through a Cloudflare Tunnel the name is Cloudflare's, not this PC's:
+    // the media must not be offered there.
+    let host = if headers.contains_key(CF_CONNECTING_IP) {
+        None
+    } else {
+        request_host(&headers)
+    };
     ws.max_message_size(MAX_WS_MESSAGE)
         .max_frame_size(MAX_WS_MESSAGE)
         .on_upgrade(move |socket| run_socket(shared, socket, token, device.name, host))

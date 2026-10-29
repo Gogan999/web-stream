@@ -25,11 +25,21 @@ certificate and paired browsers in `%LOCALAPPDATA%\web-stream`.
 |---|---|
 | `--hostname NAME` | Extra name or IP in the self-signed certificate (repeatable) |
 | `--cert FILE --key FILE` | Use this PEM certificate and key instead of a self-signed one |
-| `--duckdns NAME` | Get a Let's Encrypt certificate for `NAME.duckdns.org` and keep the name pointing here (see [Connecting from outside your home](../guide/remote-access.md)) |
-| `--duckdns-token-file FILE` | DuckDNS token. Default: `duckdns-token.txt` in the data folder |
-| `--no-duckdns-address` | Don't update the DuckDNS name's address (when the router already does) |
-| `--acme-email ADDR` | Contact address for the Let's Encrypt account |
-| `--acme-staging` | Use Let's Encrypt's staging server (looser limits, untrusted certificates) for testing. A staging certificate is dropped as soon as this is turned off |
+
+## Cloudflare Tunnel
+
+See [Cloudflare Tunnel](../guide/cloudflare-tunnel.md).
+
+| Flag | Meaning |
+|---|---|
+| `--tunnel named\|quick` | Serve the page, pairing and signaling through a Cloudflare Tunnel run by `cloudflared`. `named`: a tunnel made in the Cloudflare dashboard. `quick`: no account, a new trycloudflare.com name on every start |
+| `--tunnel-token-file FILE` | The named tunnel's token. Default: `cloudflare-tunnel-token.txt` in the data folder |
+| `--tunnel-hostname NAME` | The named tunnel's public name. Default: the one cloudflared reports |
+| `--cloudflared FILE` | The cloudflared program. Default: `cloudflared.exe` next to the host (refused for the service) |
+
+The old `--duckdns`, `--duckdns-token-file`, `--no-duckdns-address`,
+`--acme-email` and `--acme-staging` flags are gone; a service installed
+with them drops them with a warning.
 
 ## Pairing and data
 

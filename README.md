@@ -47,6 +47,7 @@ and follow [Getting started](docs/guide/getting-started.md).
 - [Getting started](docs/guide/getting-started.md): install, set up and
   pair a phone
 - [Connecting from outside your home](docs/guide/remote-access.md)
+- [Cloudflare Tunnel](docs/guide/cloudflare-tunnel.md)
 - [Using the browser client](docs/guide/browser-client.md)
 - [The host app](docs/guide/host-app.md)
 - [Microphone, game audio and controllers](docs/guide/audio-and-gamepads.md)

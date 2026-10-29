@@ -1,7 +1,8 @@
 //! TLS accept loop with the limits a host on the open internet needs:
 //! connection caps (global and per IP), a TLS handshake deadline, a
 //! request-header deadline that also closes idle keep-alive connections, and
-//! HTTP/1.1 only.
+//! HTTP/1.1 only. Loopback has no per-IP cap: a Cloudflare Tunnel's
+//! connector on this PC carries every remote browser from 127.0.0.1.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -56,9 +57,14 @@ pub async fn serve_listener(
             tracing::debug!(%peer, "connection limit reached");
             continue;
         };
-        let Some(ip_guard) = IpGuard::acquire(&per_ip, peer.ip()) else {
-            tracing::debug!(%peer, "per-IP connection limit reached");
-            continue;
+        let ip_guard = if peer.ip().is_loopback() {
+            None
+        } else {
+            let Some(guard) = IpGuard::acquire(&per_ip, peer.ip()) else {
+                tracing::debug!(%peer, "per-IP connection limit reached");
+                continue;
+            };
+            Some(guard)
         };
         let _ = tcp.set_nodelay(true);
         let acceptor = acceptor.clone();

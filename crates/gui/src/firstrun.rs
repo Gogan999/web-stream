@@ -1,5 +1,5 @@
-//! The first-run setup: reach the host from outside (opt-in UPnP, the port
-//! test, DuckDNS), then pair a phone with a QR code. Shown when the app
+//! The first-run setup: reach the host from outside (a Cloudflare Tunnel,
+//! opt-in UPnP, the port test), then pair a phone with a QR code. Shown when the app
 //! opens until the user finishes or hides it; "Setup" in the footer brings
 //! it back.
 
@@ -110,31 +110,46 @@ pub fn upnp_status_ui(ui: &mut egui::Ui, status: &upnp::Status) {
     }
 }
 
-/// Addresses a phone can open the client at: the DuckDNS name and host
-/// names first (no certificate warning, and they work away from home with
-/// DuckDNS), then the LAN addresses, then the public address.
-pub fn addresses(settings: &Settings, lan: &[IpAddr], public: &[IpAddr]) -> Vec<String> {
+/// Addresses a phone can open the client at, as `https://host[:port]`:
+/// the Cloudflare Tunnel first (no certificate warning, and it works away
+/// from home), then the LAN addresses, the host names and the public
+/// address.
+pub fn addresses(
+    settings: &Settings,
+    port: u16,
+    tunnel_url: Option<&str>,
+    lan: &[IpAddr],
+    public: &[IpAddr],
+) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut add = |s: String| {
-        if !s.is_empty() && !out.contains(&s) {
+        if !out.contains(&s) {
             out.push(s);
         }
     };
-    for ip in lan.iter().filter(|ip| !ip.is_loopback()) {
-        add(host_part(*ip));
+    if let Some(url) = tunnel_url {
+        add(url.trim_end_matches('/').to_string());
     }
-    let duck = settings.duckdns.trim();
-    if !duck.is_empty() {
-        add(format!("{duck}.duckdns.org"));
-    }
-    for name in settings.hostnames.split([' ', ',', ';']) {
-        add(name.trim().to_string());
-    }
-    for ip in public {
-        add(host_part(*ip));
-    }
-    for ip in settings.public_ips.split([' ', ',', ';']) {
-        add(ip.trim().to_string());
+    let mut names: Vec<String> = lan
+        .iter()
+        .filter(|ip| !ip.is_loopback())
+        .map(|ip| host_part(*ip))
+        .collect();
+    names.extend(
+        settings
+            .hostnames
+            .split([' ', ',', ';'])
+            .map(|n| n.trim().to_string()),
+    );
+    names.extend(public.iter().map(|ip| host_part(*ip)));
+    names.extend(
+        settings
+            .public_ips
+            .split([' ', ',', ';'])
+            .map(|n| n.trim().to_string()),
+    );
+    for name in names.into_iter().filter(|n| !n.is_empty()) {
+        add(format!("https://{name}:{port}"));
     }
     out
 }
@@ -146,10 +161,11 @@ fn host_part(ip: IpAddr) -> String {
     }
 }
 
-/// The client's address with the pairing link on the end. The secret goes
-/// after `#`, which browsers never send to a server.
-pub fn pairing_url(host: &str, port: u16, link: &str) -> String {
-    format!("https://{host}:{port}/#pair={link}")
+/// The client's address (`https://host[:port]`) with the pairing link on
+/// the end. The secret goes after `#`, which browsers never send to a
+/// server.
+pub fn pairing_url(origin: &str, link: &str) -> String {
+    format!("{origin}/#pair={link}")
 }
 
 #[cfg(test)]
@@ -159,7 +175,6 @@ mod tests {
     #[test]
     fn addresses_in_order_without_repeats() {
         let s = Settings {
-            duckdns: "my-pc".into(),
             hostnames: "home.example.net, 192.168.1.20".into(),
             public_ips: "203.0.113.5".into(),
             ..Settings::default()
@@ -171,22 +186,27 @@ mod tests {
         ];
         let public: Vec<IpAddr> = vec!["203.0.113.5".parse().unwrap()];
         assert_eq!(
-            addresses(&s, &lan, &public),
+            addresses(&s, 8443, Some("https://pc.example.com"), &lan, &public),
             [
-                "192.168.1.20",
-                "[fd00::5]",
-                "my-pc.duckdns.org",
-                "home.example.net",
-                "203.0.113.5"
+                "https://pc.example.com",
+                "https://192.168.1.20:8443",
+                "https://[fd00::5]:8443",
+                "https://home.example.net:8443",
+                "https://203.0.113.5:8443"
             ]
         );
+        assert_eq!(addresses(&s, 8443, None, &lan, &public).len(), 4);
     }
 
     #[test]
     fn the_link_is_a_fragment() {
         assert_eq!(
-            pairing_url("192.168.1.20", 8443, "abc_-"),
+            pairing_url("https://192.168.1.20:8443", "abc_-"),
             "https://192.168.1.20:8443/#pair=abc_-"
+        );
+        assert_eq!(
+            pairing_url("https://pc.example.com", "abc_-"),
+            "https://pc.example.com/#pair=abc_-"
         );
     }
 }

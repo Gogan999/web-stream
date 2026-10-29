@@ -1,13 +1,22 @@
 # Connecting from outside your home
 
 At home, a phone or computer on the same Wi-Fi reaches the PC directly.
-To use it from anywhere else, your router has to pass three ports to the PC:
+From anywhere else, two things are needed:
+
+- **The web page.** The easiest way is a
+  [Cloudflare Tunnel](cloudflare-tunnel.md): the page, pairing and
+  signaling come through Cloudflare with a certificate browsers trust, and
+  nothing needs forwarding for them. Without a tunnel, the router forwards
+  TCP 8443 to the PC instead, and browsers warn about the host's own
+  certificate.
+- **The stream.** Video, audio and input always go straight to the PC, so
+  the router passes these ports to it:
 
 | Port | Protocol | Used for |
 |---|---|---|
-| 8443 | TCP | The web page, pairing and signaling (HTTPS) |
 | 8443 | UDP | The stream: video, audio and input |
 | 8444 | TCP | Fallback for networks that block UDP |
+| 8443 | TCP | The web page, pairing and signaling (HTTPS); only without a tunnel |
 
 ## Forward the ports
 
@@ -15,14 +24,14 @@ The first-run setup in the host app (also under **Setup** at the bottom of
 the window) does this for you where it can.
 
 - **Automatically (UPnP):** tick **Let the router forward them (UPnP)**. If
-  it says the router forwards the ports, you're done. Only these three
-  ports go to this PC. The forwards are leased for an hour and renewed
+  it says the router forwards the ports, you're done. Only these ports go
+  to this PC (with a tunnel on, not TCP 8443). The forwards are leased for an hour and renewed
   while the app runs, and removed when you quit or uninstall it (or within
   the hour if the PC is switched off). A router that only accepts permanent
   forwards is refused.
 - **By hand:** if no router answers (UPnP is off on many routers), open the
   router's settings page and look for "Port forwarding", "Virtual server"
-  or "NAT". Add the three ports above, each to the same port on this PC's
+  or "NAT". Add the ports above, each to the same port on this PC's
   address (the window shows it, for example `192.168.1.20`). Your router
   maker's website has instructions for your model.
 
@@ -33,10 +42,11 @@ like a network problem, because connecting from the PC itself still works.
 
 ## Test the ports
 
-Press **Test the ports** in the host app. It learns the public address
-(from the router, the DuckDNS name or the address typed in Settings),
-connects to it from this PC, and checks that the certificate that answers
-is this host's and not, say, the router's admin page.
+Press **Test the ports** in the host app. With a tunnel on, it first says
+whether the tunnel is up. It learns the public address (from the router or
+the address typed in Settings) and connects to it from this PC. Without a
+tunnel it checks that the certificate answering on TCP 8443 is this host's
+and not, say, the router's admin page.
 
 - **✔** means a phone away from home can reach this PC.
 - **"not a public address" / CGNAT:** your internet provider shares one
@@ -58,44 +68,24 @@ The public address only goes into the pairing QR code once the test has
 found this host there, or when you type it in Settings. The router's own
 report isn't trusted, since any device on the network can answer UPnP.
 
-## Give the PC a name and a trusted certificate
+## A trusted certificate
 
 Out of the box the host makes its own (self-signed) certificate, and each
 browser warns about it once. That is fine at home, where you can compare
 the fingerprint the host app shows with the browser's. Away from home it is
 a risk: on a network you don't control, someone could show the browser a
 different certificate, and clicking past that warning would let them pair.
-With a trusted certificate there is no warning to click past, and the
-address stays the same when your home IP changes.
-
-The easiest way is a free [DuckDNS](https://www.duckdns.org) name:
-
-1. Sign in at duckdns.org and add a subdomain, for example `my-pc`.
-2. In the host app's **Settings**, enter `my-pc` as the **DuckDNS name** and
-   paste the account token shown on duckdns.org as the **DuckDNS token**.
-3. Open `https://my-pc.duckdns.org:8443/`.
-
-The host keeps the name pointing at your public address and gets a
-certificate for it from Let's Encrypt, which checks a DNS record the host
-sets through DuckDNS, so no extra ports need forwarding. The first
-certificate takes a minute or so; until then the host serves its
-self-signed one. It renews automatically when a third of its lifetime is
-left. Problems, such as a wrong token or Let's Encrypt being unreachable,
-show in the host app's log and are retried: after a failed attempt the host
-waits an hour, doubling up to 12 hours, and remembers this across restarts
-so it stays within Let's Encrypt's limits.
-
-The certificate, its key and the Let's Encrypt account key are kept in the
-data folder. With another DNS provider, get a certificate with a tool such
-as [win-acme](https://www.win-acme.com) and pass it with `--cert` and
-`--key` under **More options**. The related options (`--duckdns`,
-`--no-duckdns-address`, `--acme-email`, `--acme-staging`) are listed in the
-[host options reference](../dev/host-options.md).
+Through a [Cloudflare Tunnel](cloudflare-tunnel.md) there is no warning to
+click past, and the address stays the same when your home IP changes. A
+certificate from elsewhere can be passed with `--cert` and `--key` under
+**More options** (see the [host options reference](../dev/host-options.md)).
 
 ## How the browser finds the stream
 
 The host advertises the address in the browser's address bar (resolving a
-DNS name) as a media address, alongside its LAN addresses. If browsers
+DNS name) as a media address, alongside its LAN addresses. Through a
+Cloudflare Tunnel that name is Cloudflare's, so the host offers the public
+address it learns from Cloudflare's STUN server instead. If browsers
 reach the host by some other name, add its public address under
 **Settings > Public addresses** (`--public-ip`). Behind a reverse proxy
 that rewrites the Host header, pass the proxy's address with

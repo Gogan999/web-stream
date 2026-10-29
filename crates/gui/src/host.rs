@@ -69,6 +69,8 @@ pub struct State {
     pub connected: Option<String>,
     /// Files on offer to the connected browser.
     pub shared: Vec<SharedFile>,
+    /// Where the Cloudflare Tunnel serves the client, while it is up.
+    pub tunnel_url: Option<String>,
     pub log: VecDeque<String>,
     /// What runs (or ran last) is the Windows service's host, attached to,
     /// not this app's own.
@@ -158,22 +160,14 @@ impl State {
                         self.connected = None;
                     }
                 }
-                Notice::Certificate {
-                    domain,
-                    fingerprint: new,
-                } => {
-                    self.log(format!(
-                        "certificate from Let's Encrypt for {domain} in use"
-                    ));
-                    if let Status::Running {
-                        fingerprint,
-                        self_signed,
-                        ..
-                    } = &mut self.status
-                    {
-                        *fingerprint = new;
-                        *self_signed = false;
+                Notice::Tunnel { url } => {
+                    if url != self.tunnel_url {
+                        self.log(match &url {
+                            Some(url) => format!("Cloudflare Tunnel up: {url}/"),
+                            None => "Cloudflare Tunnel down".into(),
+                        });
                     }
+                    self.tunnel_url = url;
                 }
                 Notice::Warning(w) => self.log(w),
             },
@@ -237,6 +231,7 @@ impl State {
         self.code = None;
         self.connected = None;
         self.shared.clear();
+        self.tunnel_url = None;
         let what = if self.service {
             "detached from the service's host"
         } else {
@@ -291,6 +286,7 @@ impl Host {
                     pairing_locked: false,
                     connected: None,
                     shared: Vec::new(),
+                    tunnel_url: None,
                     log: VecDeque::new(),
                     service: false,
                 }),

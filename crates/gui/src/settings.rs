@@ -14,6 +14,12 @@ pub const FILE_NAME: &str = "gui-settings.json";
 pub const CODECS: &[&str] = &["h264", "h265", "av1"];
 pub const QUALITIES: &[&str] = &["speed", "balanced", "clarity"];
 pub const GAMEPADS: &[(&str, &str)] = &[("xbox360", "Xbox 360"), ("ds4", "DualShock 4")];
+/// The Cloudflare Tunnel choices: (setting, label).
+pub const TUNNELS: &[(&str, &str)] = &[
+    ("off", "Off"),
+    ("named", "Named (token)"),
+    ("quick", "Quick (no account)"),
+];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -27,15 +33,15 @@ pub struct Settings {
     /// Names or IPs browsers reach this PC by (a DDNS name), for the
     /// self-signed certificate; separated like `public_ips`.
     pub hostnames: String,
-    /// A DuckDNS subdomain: the host gets a Let's Encrypt certificate for
-    /// it and keeps it pointing here (`--duckdns`). Empty: none.
-    pub duckdns: String,
-    /// A newly typed DuckDNS token, until saved to its own file in the data
-    /// folder ([`ws_host::options::DUCKDNS_TOKEN_FILE`]); never in the JSON.
+    /// One of [`TUNNELS`]: serve the web page through a Cloudflare Tunnel
+    /// (`--tunnel`).
+    pub tunnel: String,
+    /// A newly typed tunnel token, until saved to its own file in the data
+    /// folder ([`ws_host::options::TUNNEL_TOKEN_FILE`]); never in the JSON.
     #[serde(skip)]
-    pub duckdns_token: String,
-    /// Where Let's Encrypt sends expiry warnings (optional).
-    pub acme_email: String,
+    pub tunnel_token: String,
+    /// The named tunnel's public name; empty: the one cloudflared reports.
+    pub tunnel_hostname: String,
     /// A paired browser unused for this many days is unpaired.
     pub forget_after_days: u32,
     /// Empty: the web client built into the host.
@@ -87,9 +93,9 @@ impl Default for Settings {
             ice_tcp_port: None,
             public_ips: String::new(),
             hostnames: String::new(),
-            duckdns: String::new(),
-            duckdns_token: String::new(),
-            acme_email: String::new(),
+            tunnel: "off".into(),
+            tunnel_token: String::new(),
+            tunnel_hostname: String::new(),
             forget_after_days: 30,
             web_root: String::new(),
             display: None,
@@ -131,9 +137,9 @@ impl Settings {
 
     pub fn save(&self, dir: &Path) -> anyhow::Result<()> {
         std::fs::create_dir_all(dir)?;
-        let token = self.duckdns_token.trim();
+        let token = self.tunnel_token.trim();
         if !token.is_empty() {
-            ws_host::options::save_duckdns_token(dir, token)?;
+            ws_host::options::save_tunnel_token(dir, token)?;
         }
         let path = dir.join(FILE_NAME);
         let tmp = path.with_extension("json.tmp");
@@ -155,12 +161,14 @@ impl Settings {
         for name in list(&self.hostnames) {
             args.extend(["--hostname".into(), name.into()]);
         }
-        let duckdns = self.duckdns.trim();
-        if !duckdns.is_empty() {
-            args.extend(["--duckdns".into(), duckdns.into()]);
-            let email = self.acme_email.trim();
-            if !email.is_empty() {
-                args.extend(["--acme-email".into(), email.into()]);
+        match self.tunnel.as_str() {
+            "" | "off" => {}
+            kind => {
+                args.extend(["--tunnel".into(), kind.into()]);
+                let name = self.tunnel_hostname.trim();
+                if kind == "named" && !name.is_empty() {
+                    args.extend(["--tunnel-hostname".into(), name.into()]);
+                }
             }
         }
         args.extend(["--forget-after".into(), self.forget_after_days.to_string()]);
@@ -219,12 +227,18 @@ impl Settings {
         Ok(args)
     }
 
-    /// The ports a router forwards to this PC, for UPnP.
+    /// Whether a Cloudflare Tunnel serves the web page.
+    pub fn tunnel_on(&self) -> bool {
+        !matches!(self.tunnel.as_str(), "" | "off")
+    }
+
+    /// The ports a router forwards to this PC, for UPnP. With a tunnel the
+    /// web page comes through Cloudflare, so only the media's.
     pub fn forwarded_ports(&self) -> Vec<crate::upnp::Port> {
         let ice_tcp = self
             .ice_tcp
             .then(|| self.ice_tcp_port.unwrap_or(self.port.saturating_add(1)));
-        crate::upnp::ports(self.port, ice_tcp)
+        crate::upnp::ports(self.port, !self.tunnel_on(), ice_tcp)
     }
 
     pub fn serve_options(&self) -> anyhow::Result<ServeOptions> {
@@ -363,22 +377,49 @@ mod tests {
     }
 
     #[test]
-    fn duckdns_token_goes_to_its_own_file() {
+    fn tunnel_token_goes_to_its_own_file() {
         let dir = tempfile::tempdir().unwrap();
         let s = Settings {
-            duckdns: "my-pc".into(),
-            duckdns_token: " a7c4d0ad-token \n".into(),
-            acme_email: "me@example.com".into(),
+            tunnel: "named".into(),
+            tunnel_token: " eyJhIjoiMTIzIn0 \n".into(),
+            tunnel_hostname: "pc.example.com".into(),
             ..Settings::default()
         };
         s.save(dir.path()).unwrap();
-        let token = dir.path().join(ws_host::options::DUCKDNS_TOKEN_FILE);
-        assert_eq!(std::fs::read_to_string(token).unwrap(), "a7c4d0ad-token");
+        let token = dir.path().join(ws_host::options::TUNNEL_TOKEN_FILE);
+        assert_eq!(std::fs::read_to_string(token).unwrap(), "eyJhIjoiMTIzIn0");
         let saved = std::fs::read_to_string(dir.path().join(FILE_NAME)).unwrap();
-        assert!(!saved.contains("a7c4d0ad"));
-        let o = s.serve_options().unwrap().duckdns.unwrap();
-        assert_eq!(o.name, "my-pc");
-        assert_eq!(o.email.as_deref(), Some("me@example.com"));
+        assert!(!saved.contains("eyJhIjoiMTIzIn0"));
+        let o = s.serve_options().unwrap().tunnel.unwrap();
+        assert!(matches!(
+            o.kind,
+            ws_host::options::TunnelKind::Named { hostname: Some(ref h), .. } if h == "pc.example.com"
+        ));
+        let quick = Settings {
+            tunnel: "quick".into(),
+            tunnel_hostname: "ignored.example.com".into(),
+            ..Settings::default()
+        };
+        assert_eq!(
+            quick.serve_options().unwrap().tunnel.unwrap().kind,
+            ws_host::options::TunnelKind::Quick
+        );
+        // Only the media's ports are forwarded with a tunnel.
+        assert_eq!(quick.forwarded_ports().len(), 2);
+        assert_eq!(Settings::default().forwarded_ports().len(), 3);
+    }
+
+    #[test]
+    fn old_duckdns_settings_still_load() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(FILE_NAME),
+            r#"{"port": 9200, "duckdns": "my-pc", "acme_email": "me@example.com"}"#,
+        )
+        .unwrap();
+        let loaded = Settings::load(dir.path()).unwrap();
+        assert_eq!((loaded.port, loaded.tunnel.as_str()), (9200, "off"));
+        assert!(loaded.serve_options().is_ok());
     }
 
     #[test]

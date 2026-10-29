@@ -17,8 +17,8 @@ profile. The stream can fall back to TCP 8444 if that is forwarded.
 
 **The browser warns about the certificate.** Expected the first time with
 the host's own certificate; compare the fingerprint the host app shows.
-Away from home, set up a trusted certificate as described in
-[Connecting from outside your home](remote-access.md#give-the-pc-a-name-and-a-trusted-certificate).
+Away from home, use a [Cloudflare Tunnel](cloudflare-tunnel.md), whose
+address has a certificate browsers trust.
 A *new* warning for a browser that was already paired means the host's
 certificate changed, for example after installing the Windows service. If
 you don't know why it changed, don't click past it.

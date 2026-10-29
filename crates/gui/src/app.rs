@@ -11,7 +11,7 @@ use ws_host::serve::{Command, Event};
 
 use crate::firstrun::{self, FirstRun};
 use crate::host::{FileStatus, Host, Status};
-use crate::settings::{CODECS, GAMEPADS, QUALITIES, Settings};
+use crate::settings::{CODECS, GAMEPADS, QUALITIES, Settings, TUNNELS};
 use crate::{portcheck, qr, upnp};
 
 pub struct App {
@@ -191,7 +191,7 @@ impl App {
             return false;
         }
         // Saved to its own file; the form doesn't keep it.
-        self.draft.duckdns_token.clear();
+        self.draft.tunnel_token.clear();
         self.settings_error = None;
         self.settings = self.draft.clone();
         // The ports may have changed.
@@ -217,10 +217,29 @@ impl App {
         ui.add_space(4.0);
         ui.label(RichText::new("1. Use it away from home (optional)").strong());
         ui.label(
-            "At home on the same Wi-Fi nothing is needed. From elsewhere, the router has to \
-             forward these ports to this PC:",
+            "At home on the same Wi-Fi nothing is needed. From elsewhere, a Cloudflare Tunnel \
+             (Settings below) serves the page with no certificate warning, and the router has \
+             to forward these ports to this PC:",
         );
         ui.monospace(forward_ports(&self.settings));
+        match (
+            self.settings.tunnel_on(),
+            self.host.state().tunnel_url.clone(),
+        ) {
+            (true, Some(url)) => {
+                ui.colored_label(Color32::GREEN, format!("Cloudflare Tunnel up at {url}/"));
+            }
+            (true, None) => {
+                ui.colored_label(
+                    Color32::YELLOW,
+                    "Cloudflare Tunnel not up yet (it is when the host is running and the \
+                     token is right).",
+                );
+            }
+            (false, _) => {
+                ui.weak("Cloudflare Tunnel: off (Settings > Cloudflare Tunnel).");
+            }
+        }
         let mut on = self.settings.upnp;
         if ui
             .checkbox(&mut on, "Let the router forward them (UPnP)")
@@ -257,7 +276,10 @@ impl App {
                             .unwrap_or(self.settings.port.saturating_add(1))
                     }),
                     fingerprint,
-                    duckdns: self.settings.duckdns.clone(),
+                    tunnel: self
+                        .settings
+                        .tunnel_on()
+                        .then(|| self.host.state().tunnel_url.clone()),
                     public_ips: self
                         .settings
                         .public_ips
@@ -275,10 +297,6 @@ impl App {
         if let Some(report) = &report {
             firstrun::report_ui(ui, report);
         }
-        ui.weak(
-            "For a name that works from anywhere, with no certificate warning in the browser, \
-             fill in DuckDNS under Settings below.",
-        );
 
         ui.add_space(6.0);
         ui.label(RichText::new("2. Pair your phone").strong());
@@ -315,11 +333,20 @@ impl App {
 
     /// The pairing link as a QR code, with a choice of the address in it.
     fn pairing_qr_ui(&mut self, ui: &mut egui::Ui, link: &str) {
-        let (port, lan) = match &self.host.state().status {
-            Status::Running { port, ips, .. } => (*port, ips.clone()),
-            _ => return,
+        let (port, lan, tunnel_url) = {
+            let state = self.host.state();
+            match &state.status {
+                Status::Running { port, ips, .. } => (*port, ips.clone(), state.tunnel_url.clone()),
+                _ => return,
+            }
         };
-        let choices = firstrun::addresses(&self.settings, &lan, &self.public_ips());
+        let choices = firstrun::addresses(
+            &self.settings,
+            port,
+            tunnel_url.as_deref(),
+            &lan,
+            &self.public_ips(),
+        );
         let Some(first) = choices.first().cloned() else {
             return;
         };
@@ -339,14 +366,14 @@ impl App {
                 })
                 .response
                 .on_hover_text(
-                    "A home address works on the same Wi-Fi. A DuckDNS name or the public address \
-                     also works away from home, once the ports are forwarded",
+                    "The Cloudflare Tunnel address works anywhere. A home address works on the \
+                     same Wi-Fi; the public address away from home, once the ports are forwarded",
                 );
             if selected != host {
                 self.first_run.qr_host = Some(selected);
             }
         });
-        let url = firstrun::pairing_url(&host, port, link);
+        let url = firstrun::pairing_url(&host, link);
         qr::show(ui, &url, 200.0).on_hover_text("Pairs one browser, once, while pairing is open");
         ui.weak("Pairs once, while pairing is open. Anyone who can see this code can pair.");
     }
@@ -546,9 +573,20 @@ impl App {
                 self_signed,
                 web_root,
             } => {
+                let tunnel_url = self.host.state().tunnel_url.clone();
                 egui::Grid::new("running").num_columns(2).show(ui, |ui| {
                     ui.label("Open in the browser");
                     ui.vertical(|ui| {
+                        if let Some(url) = &tunnel_url {
+                            let url = format!("{url}/");
+                            if ui
+                                .link(RichText::new(&url).monospace())
+                                .on_hover_text("Through the Cloudflare Tunnel. Click to copy")
+                                .clicked()
+                            {
+                                ui.ctx().copy_text(url);
+                            }
+                        }
                         if ips.is_empty() {
                             ui.monospace(format!("https://<this PC>:{port}/"));
                         }
@@ -576,8 +614,8 @@ impl App {
                         if *self_signed {
                             ui.weak(
                                 "Self-signed: browsers warn until you accept it. Compare this \
-                                 fingerprint before you do. Away from home, a DuckDNS name \
-                                 (Settings) gets a certificate with no warning.",
+                                 fingerprint before you do. The Cloudflare Tunnel address \
+                                 (Settings) has no warning.",
                             )
                             .on_hover_text(
                                 "Someone on the network could show a different certificate; \
@@ -804,41 +842,48 @@ impl App {
                         .hint_text("e.g. a DDNS name (optional)"),
                 );
                 ui.end_row();
-                ui.label("DuckDNS name").on_hover_text(
-                    "For use away from home: a free name from duckdns.org. The host keeps it \
-                     pointing at this PC and gets a Let's Encrypt certificate for it, so \
-                     browsers open https://NAME.duckdns.org:PORT/ without a warning. No \
-                     extra ports to forward",
+                ui.label("Cloudflare Tunnel").on_hover_text(
+                    "Serves the web page through Cloudflare, with Cloudflare's certificate: no \
+                     warning in the browser, and no HTTPS port to forward. Video, audio and \
+                     input still come straight to this PC. Named: a tunnel made in the \
+                     Cloudflare dashboard, with a name that stays. Quick: no account, but a new \
+                     trycloudflare.com address (and pairing again) every time the host starts",
                 );
-                ui.horizontal(|ui| {
-                    ui.add(
-                        egui::TextEdit::singleline(&mut d.duckdns)
-                            .desired_width(120.0)
-                            .hint_text("e.g. my-pc"),
-                    );
-                    ui.weak(".duckdns.org");
-                });
+                let label = TUNNELS
+                    .iter()
+                    .find(|(v, _)| *v == d.tunnel)
+                    .map_or("Off", |(_, l)| *l);
+                egui::ComboBox::from_id_salt("tunnel")
+                    .selected_text(label)
+                    .show_ui(ui, |ui| {
+                        for (value, label) in TUNNELS {
+                            ui.selectable_value(&mut d.tunnel, value.to_string(), *label);
+                        }
+                    });
                 ui.end_row();
-                if !d.duckdns.trim().is_empty() {
+                if d.tunnel == "named" {
                     let saved = self
                         .data_dir
-                        .join(ws_host::options::DUCKDNS_TOKEN_FILE)
+                        .join(ws_host::options::TUNNEL_TOKEN_FILE)
                         .exists();
-                    ui.label("DuckDNS token");
+                    ui.label("Tunnel token");
                     ui.add(
-                        egui::TextEdit::singleline(&mut d.duckdns_token)
+                        egui::TextEdit::singleline(&mut d.tunnel_token)
                             .password(true)
                             .hint_text(if saved {
-                                "saved (type to replace)"
+                                "saved (paste to replace)"
                             } else {
-                                "from duckdns.org, after signing in"
+                                "from the Cloudflare dashboard"
                             }),
                     );
                     ui.end_row();
-                    ui.label("Certificate email");
+                    ui.label("Tunnel address").on_hover_text(
+                        "The public hostname set for the tunnel in the dashboard. Empty: the \
+                         one cloudflared reports",
+                    );
                     ui.add(
-                        egui::TextEdit::singleline(&mut d.acme_email)
-                            .hint_text("a contact for Let's Encrypt (optional)"),
+                        egui::TextEdit::singleline(&mut d.tunnel_hostname)
+                            .hint_text("e.g. pc.example.com (optional)"),
                     );
                     ui.end_row();
                 }
@@ -1191,7 +1236,11 @@ fn device_combo(
 
 /// The ports a router forwards to this PC, as the host was started.
 fn forward_ports(s: &Settings) -> String {
-    let mut out = format!("TCP {p}, UDP {p}", p = s.port);
+    let mut out = if s.tunnel_on() {
+        format!("UDP {}", s.port)
+    } else {
+        format!("TCP {p}, UDP {p}", p = s.port)
+    };
     if s.ice_tcp {
         let tcp = s.ice_tcp_port.unwrap_or(s.port.saturating_add(1));
         out.push_str(&format!(", TCP {tcp}"));

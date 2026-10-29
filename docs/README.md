@@ -6,6 +6,7 @@
 |---|---|
 | [Getting started](guide/getting-started.md) | Installing the host, first-run setup and pairing a phone |
 | [Connecting from outside your home](guide/remote-access.md) | Port forwarding, testing the ports, a trusted certificate |
+| [Cloudflare Tunnel](guide/cloudflare-tunnel.md) | Serving the page through Cloudflare: named and quick tunnels, dashboard setup |
 | [Using the browser client](guide/browser-client.md) | Controls, hotkeys, stream settings, files, phones and tablets |
 | [The host app](guide/host-app.md) | The tray app's window and settings, sharing files, where data is kept |
 | [Microphone, game audio and controllers](guide/audio-and-gamepads.md) | Drivers for the virtual mic and gamepads, audio quality |

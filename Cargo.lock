@@ -5902,7 +5902,7 @@ checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
 
 [[package]]
 name = "ws-audio"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bytes",
  "opus",
@@ -5915,7 +5915,7 @@ dependencies = [
 
 [[package]]
 name = "ws-capture"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bytes",
  "thiserror 2.0.21",
@@ -5930,7 +5930,7 @@ dependencies = [
 
 [[package]]
 name = "ws-desktop"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "tracing",
  "windows",
@@ -5938,14 +5938,14 @@ dependencies = [
 
 [[package]]
 name = "ws-diag"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ws-proto",
 ]
 
 [[package]]
 name = "ws-host"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "getrandom 0.3.4",
@@ -5968,7 +5968,7 @@ dependencies = [
 
 [[package]]
 name = "ws-host-gui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "eframe",
@@ -5992,7 +5992,7 @@ dependencies = [
 
 [[package]]
 name = "ws-input"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "thiserror 2.0.21",
  "tracing",
@@ -6004,11 +6004,11 @@ dependencies = [
 
 [[package]]
 name = "ws-nvenc-sys"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "ws-proto"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64",
  "bytes",
@@ -6018,7 +6018,7 @@ dependencies = [
 
 [[package]]
 name = "ws-signaling"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "base64",
@@ -6049,7 +6049,7 @@ dependencies = [
 
 [[package]]
 name = "ws-transport"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bytes",
  "local-ip-address",

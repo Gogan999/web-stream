@@ -1,14 +1,17 @@
 //! The first-run port test: can a phone away from home reach this host?
 //!
+//! With a Cloudflare Tunnel the web page comes through Cloudflare, and the
+//! test reports whether the tunnel is up; only the media ports need
+//! forwarding then.
+//!
 //! Nothing outside the network is asked. The test learns the public
-//! address from the router (UPnP), the DuckDNS name or the address typed
-//! in the settings, and connects to it from this PC. Most routers pass
-//! that back in ("hairpin"), and the certificate that answers tells this
-//! host apart from the router's own admin page on the same port. When the
-//! router doesn't loop back, the test says so and the phone on mobile data
-//! is the test.
+//! address from the router (UPnP) or the address typed in the settings,
+//! and connects to it from this PC. Most routers pass that back in
+//! ("hairpin"), and the certificate that answers tells this host apart from
+//! the router's own admin page on the same port. When the router doesn't
+//! loop back, the test says so and the phone on mobile data is the test.
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
 use std::time::Duration;
 
 use crate::upnp;
@@ -22,8 +25,9 @@ pub struct Input {
     pub ice_tcp_port: Option<u16>,
     /// The running host's certificate, `None` when it isn't hosting.
     pub fingerprint: Option<String>,
-    /// A DuckDNS name (without `.duckdns.org`), or empty.
-    pub duckdns: String,
+    /// Whether a Cloudflare Tunnel carries the web page, and where it is up
+    /// (`None` while it isn't).
+    pub tunnel: Option<Option<String>>,
     /// Public addresses typed in the settings.
     pub public_ips: Vec<IpAddr>,
 }
@@ -104,23 +108,22 @@ pub fn run(input: &Input) -> Report {
         ),
     }
 
-    // Where the internet sees this network.
-    let duck_ip = resolve_duckdns(&input.duckdns, input.port).filter(|ip| is_public(*ip));
-    if let (Some(name), Some(duck), Some(router)) = (duck_name(&input.duckdns), duck_ip, router_ip)
-    {
-        if duck != router && is_public(router) {
-            r.say(
-                Verdict::Warn,
-                format!(
-                    "{name} points at {duck}, but the router's address is {router}. The host \
-                     updates it within a few minutes of starting; test again then."
-                ),
-            );
-        }
+    // The web page.
+    match &input.tunnel {
+        Some(Some(url)) => r.say(
+            Verdict::Ok,
+            format!("The web page is up through Cloudflare at {url}/ (no port to forward for it)."),
+        ),
+        Some(None) => r.say(
+            Verdict::Bad,
+            "The Cloudflare Tunnel isn't up: check the token in Settings, and the log below.",
+        ),
+        None => {}
     }
+
+    // Where the internet sees this network.
     let public = router_ip
         .filter(|ip| is_public(*ip))
-        .or(duck_ip)
         .or_else(|| input.public_ips.first().copied());
     if let Some(ip) = router_ip.filter(|ip| !is_public(*ip)) {
         r.say(
@@ -140,25 +143,26 @@ pub fn run(input: &Input) -> Report {
     let Some(public) = public else {
         r.say(
             Verdict::Warn,
-            "This PC's public address isn't known (no UPnP, no DuckDNS name, none in Settings), \
-             so it can't be tested from here. Test from your phone instead: Wi-Fi off, open \
-             https://<your public address>:PORT/."
-                .replace("PORT", &input.port.to_string()),
+            "This PC's public address isn't known (no UPnP, none in Settings), so the ports \
+             can't be tested from here. Test from your phone instead, with Wi-Fi off.",
         );
         return r;
     };
 
-    // The ports, through the public address.
+    // The ports, through the public address. Through a tunnel nothing
+    // answers on the HTTPS port from outside, and needn't.
     let https = SocketAddr::new(public, input.port);
-    match certificate_at(https) {
-        Ok(f) if &f == fingerprint => {
+    let check_https = input.tunnel.is_none();
+    match check_https.then(|| certificate_at(https)) {
+        None => {}
+        Some(Ok(f)) if &f == fingerprint => {
             r.verified_ip = Some(public);
             r.say(
                 Verdict::Ok,
                 format!("TCP {}: this host answers at {https}.", input.port),
             );
         }
-        Ok(_) => r.say(
+        Some(Ok(_)) => r.say(
             Verdict::Bad,
             format!(
                 "TCP {}: something else answers at {https} (often the router's own remote \
@@ -166,7 +170,7 @@ pub fn run(input: &Input) -> Report {
                 input.port
             ),
         ),
-        Err(_) => r.say(
+        Some(Err(_)) => r.say(
             Verdict::Warn,
             format!(
                 "TCP {}: no answer at {https} from inside your network. Either the port isn't \
@@ -204,20 +208,6 @@ pub fn run(input: &Input) -> Report {
         ),
     );
     r
-}
-
-fn duck_name(sub: &str) -> Option<String> {
-    let sub = sub.trim();
-    (!sub.is_empty()).then(|| format!("{sub}.duckdns.org"))
-}
-
-fn resolve_duckdns(sub: &str, port: u16) -> Option<IpAddr> {
-    let name = duck_name(sub)?;
-    (name.as_str(), port)
-        .to_socket_addrs()
-        .ok()?
-        .map(|a| a.ip())
-        .find(|ip| ip.is_ipv4())
 }
 
 fn certificate_at(addr: SocketAddr) -> anyhow::Result<String> {
@@ -273,7 +263,7 @@ mod tests {
             port: 8443,
             ice_tcp_port: Some(8444),
             fingerprint: None,
-            duckdns: String::new(),
+            tunnel: None,
             public_ips: vec![],
         });
         assert_eq!(r.lines.len(), 1);
@@ -299,7 +289,7 @@ mod tests {
             port: addr.port(),
             ice_tcp_port: None,
             fingerprint: Some(fingerprint),
-            duckdns: String::new(),
+            tunnel: None,
             public_ips: vec![addr.ip()],
         };
         let r = run(&input);

@@ -14,6 +14,7 @@ mod scale;
 pub mod serve;
 pub mod service;
 pub mod split;
+mod tunnel;
 pub mod update;
 mod uploads;
 

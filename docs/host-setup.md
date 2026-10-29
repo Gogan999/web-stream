@@ -40,12 +40,14 @@ settings unless given `/PURGE`.
 
 The app opens on a setup section:
 
-1. **Use it away from home**: lists the ports the router has to forward,
+1. **Use it away from home**: shows whether the Cloudflare Tunnel is up
+   ([cloudflare-tunnel.md](cloudflare-tunnel.md)), lists the ports the
+   router has to forward (only the media's with a tunnel),
    offers to have the router forward them itself (UPnP, off unless ticked;
    leased for an hour and renewed while the app runs, removed on quit and
    uninstall; a router that only takes permanent forwards is refused), and
-   **Test the ports**. The test learns the public address
-   from the router, the DuckDNS name or the address in Settings, connects
+   **Test the ports**. The test reports the tunnel, learns the public
+   address from the router or the address in Settings, connects
    to it from this PC and checks that the certificate answering is this
    host's (not, say, the router's admin page). It warns when the router's
    own address is a shared one (CGNAT), where forwarding can't work. Many
@@ -57,7 +59,7 @@ The app opens on a setup section:
 2. **Pair your phone**: opens pairing and shows a QR code. Scanning it
    opens the client with a one-time pairing link (`#pair=...`), which pairs
    that browser without typing a code. The address in the code can be
-   switched between the home address, the DuckDNS name and the public
+   switched between the tunnel's address, the home address and the public
    address. The link works once, only while pairing is open (two minutes).
 
 **Done** hides it; **Setup** at the bottom of the window brings it back.
@@ -156,8 +158,8 @@ and paired browsers in `%LOCALAPPDATA%\web-stream`.
 --public-ip IP       public address that forwards to the host (repeatable)
 --hostname NAME      extra name or IP for the self-signed certificate (repeatable)
 --cert FILE --key FILE   PEM certificate instead of a self-signed one
---duckdns NAME       Let's Encrypt certificate for NAME.duckdns.org (see below)
---duckdns-token-file FILE  --no-duckdns-address  --acme-email ADDR  --acme-staging
+--tunnel named|quick  serve the page through a Cloudflare Tunnel (see below)
+--tunnel-token-file FILE  --tunnel-hostname NAME  --cloudflared FILE
 --data-dir DIR       certificate and paired devices
 --forget-after DAYS  unpair a browser unused for this long, default 30
 --allow-origin URL   extra origin allowed to use the API (repeatable)
@@ -233,64 +235,36 @@ The file is inside `.git`, so nothing pulled from GitHub can change it.
 
 ## Connecting from outside your network
 
+The simplest way is a Cloudflare Tunnel: the page comes through Cloudflare
+with a certificate browsers trust, and only the media ports need
+forwarding. See [cloudflare-tunnel.md](cloudflare-tunnel.md).
+
+Without one:
+
 1. On the router, forward TCP 8443, UDP 8443 and TCP 8444 to this PC, to the
-   same port numbers.
+   same port numbers (with a tunnel, only UDP 8443 and TCP 8444).
 2. Allow `ws-host-gui` through Windows
    Firewall on those ports for the Public profile as well as Private.
    Localhost works without this, which can make a firewall block look like
    a network problem.
 3. Open the host by its WAN address or a DDNS name that points at it, for
-   example `https://home.example.net:8443/`. Better, give it a real
-   certificate (next section), so the browser never shows a warning to
-   click past.
+   example `https://home.example.net:8443/`.
 
 The host advertises the address in the browser's URL (resolving a DDNS name)
-as a media address. `--public-ip` adds more, for when browsers reach the
-host by some other name. If pairing works but the stream never starts, a
-media port is not forwarded or the firewall is blocking it.
+as a media address; through a tunnel it advertises the public address it
+learns over STUN instead. `--public-ip` adds more, for when browsers reach
+the host by some other name. If pairing works but the stream never starts,
+a media port is not forwarded or the firewall is blocking it.
 
-### A certificate browsers trust
+### Certificates
 
 Out of the box the host makes its own (self-signed) certificate, and each
 browser warns about it once. That is fine at home, where you can compare the
 fingerprint the tray app shows with the browser's. Away from home it's a
 risk: on a network you don't control, someone could show the browser a
 different certificate, and clicking past that warning hands them a paired
-browser. With a real certificate there is no warning to click past.
-
-The easy way is a free [DuckDNS](https://www.duckdns.org) name:
-
-1. Sign in at duckdns.org and add a subdomain, say `my-pc`.
-2. In the tray app's Settings, type `my-pc` as the DuckDNS name and paste
-   the account token shown on duckdns.org. (Flags: `--duckdns my-pc`, with
-   the token in `duckdns-token.txt` in the data folder, or
-   `--duckdns-token-file FILE`.)
-3. Open `https://my-pc.duckdns.org:8443/`.
-
-The host keeps the name pointing at this PC's public address, and asks
-Let's Encrypt for a certificate for it. Let's Encrypt checks a DNS record
-that the host sets through DuckDNS, so no port beyond the three above needs
-forwarding. The first certificate takes a minute or so; until then the host
-serves its self-signed one. It renews by itself when a third of its life is
-left, and the browser gets the new one on its next connection. Problems
-(a wrong token, Let's Encrypt unreachable) show in the tray app's log and
-are retried.
-
-- `--no-duckdns-address` leaves the name's address alone, if the router
-  already updates it.
-- `--acme-email` gives Let's Encrypt a contact address for the account (it
-  no longer sends expiry warnings; the host renews by itself).
-- `--acme-staging` uses Let's Encrypt's staging server, whose rate limits
-  are looser but whose certificates browsers don't trust, to try things
-  out. A staging certificate is dropped as soon as staging is turned off.
-
-After a failed order the host waits an hour before the next, doubling up to
-12 hours, and remembers this across restarts, so restarting it doesn't run
-into Let's Encrypt's limits.
-
-The certificate, its key and the Let's Encrypt account key are kept in the
-data folder. With another DNS provider, get a certificate with a tool such
-as win-acme and pass it with `--cert` and `--key`.
+browser. Through a Cloudflare Tunnel there is no warning to click past.
+A certificate from elsewhere can be passed with `--cert` and `--key`.
 
 Capture, game audio, the mic and input start when a browser connects and
 stop when it leaves; dropping the session releases every held key and
@@ -459,7 +433,7 @@ What this changes for security:
   normal user can't open pairing.
 - Everything that reads what comes off the network (HTTPS and TLS, the
   signaling socket, the peer connection's DTLS, SRTP and data channels,
-  Let's Encrypt) runs in the network process, as LocalService with every
+  cloudflared) runs in the network process, as LocalService with every
   privilege removed but one (it can't impersonate other accounts, which
   would be a way back to SYSTEM). It can read and write only its own data
   folder. A bug there gives an attacker that process: they could stream
@@ -480,7 +454,7 @@ What this changes for security:
   later, never replaced by a SYSTEM one.
 - What runs as SYSTEM is the copy in Program Files, which only
   administrators can change, never the build folder in your checkout.
-- `--cert` and `--key`, and the DuckDNS token, are copied into the
+- `--cert` and `--key`, and the Cloudflare Tunnel token, are copied into the
   network process's data folder when you install, so a user who can write
   where they came from can't swap them.
 - The service picks a new random name for its control pipe each time it

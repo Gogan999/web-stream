@@ -20,6 +20,7 @@ use crate::files::FileCommand;
 pub use crate::files::FileEvent;
 use crate::media;
 use crate::options::ServeOptions;
+use crate::tunnel::Tunnel;
 pub use ws_proto::FileId;
 
 /// What the host user asks for.
@@ -49,8 +50,7 @@ pub enum Event {
         ips: Vec<IpAddr>,
         fingerprint: String,
         /// Browsers warn about the certificate until the user accepts it
-        /// (no `--cert` or `--duckdns`, or Let's Encrypt hasn't issued one
-        /// yet).
+        /// (no `--cert`). Through a Cloudflare Tunnel they see Cloudflare's.
         self_signed: bool,
         web_root: Option<PathBuf>,
         data_dir: PathBuf,
@@ -147,6 +147,8 @@ pub(crate) struct Network {
     pub started: Event,
     signaling_stop: Option<oneshot::Sender<()>>,
     sessions: tokio::task::JoinHandle<()>,
+    /// cloudflared, while the host runs.
+    _tunnel: Option<Tunnel>,
 }
 
 impl Network {
@@ -156,13 +158,12 @@ impl Network {
         config.embedded_web = crate::web::WEB_FILES;
         config.device_idle_expiry = opts.device_idle_expiry;
         config.extra_origins = opts.extra_origins.clone();
-        config.tls = match (&opts.cert, &opts.duckdns) {
-            (Some((cert, key)), _) => TlsSource::Files {
+        config.tls = match &opts.cert {
+            Some((cert, key)) => TlsSource::Files {
                 cert: cert.clone(),
                 key: key.clone(),
             },
-            (None, Some(duck)) => TlsSource::DuckDns(duckdns(duck, &opts.hostnames)?),
-            (None, None) => TlsSource::SelfSigned {
+            None => TlsSource::SelfSigned {
                 hostnames: opts.hostnames.clone(),
             },
         };
@@ -171,12 +172,20 @@ impl Network {
             .context("signaling server")?;
         let signaling = server.handle();
         let certificate = server.certificate();
-        if certificate.self_signed && opts.duckdns.is_none() {
+        if certificate.self_signed && opts.tunnel.is_none() {
             tracing::info!(
                 "self-signed certificate: browsers warn until it is accepted. For use away from \
-                 home, a real one (--duckdns, or --cert/--key) means no warning to click past"
+                 home, a Cloudflare Tunnel (--tunnel) means no warning to click past"
             );
         }
+        let tunnel = opts
+            .tunnel
+            .clone()
+            .map(|t| Tunnel::start(t, opts.port, signaling.clone()));
+        let public_ip = match &tunnel {
+            Some(t) => t.public_ip(),
+            None => watch::channel(None).1,
+        };
 
         let (transport, transport_events) = Transport::start(TransportConfig {
             ips: opts.ips.clone(),
@@ -197,6 +206,7 @@ impl Network {
             transport.clone(),
             codecs_tx,
             peers_tx,
+            public_ip,
             signaling_stop_rx,
         ));
         let started = Event::Started {
@@ -222,6 +232,7 @@ impl Network {
             started,
             signaling_stop: Some(signaling_stop),
             sessions,
+            _tunnel: tunnel,
         })
     }
 
@@ -270,35 +281,6 @@ pub(crate) async fn unpair_all(signaling: &SignalingHandle, events: &mpsc::Unbou
         Ok(()) => Event::UnpairedAll,
         Err(e) => Event::Error(format!("could not remove paired browsers: {e}")),
     });
-}
-
-/// `--duckdns`'s settings, with the token read from its file.
-fn duckdns(
-    opts: &crate::options::DuckDnsOptions,
-    hostnames: &[String],
-) -> anyhow::Result<ws_signaling::DuckDns> {
-    let token = std::fs::read_to_string(&opts.token_file)
-        .with_context(|| {
-            format!(
-                "--duckdns needs the DuckDNS token (from duckdns.org, after signing in) in {}",
-                opts.token_file.display()
-            )
-        })?
-        .trim()
-        .to_string();
-    Ok(ws_signaling::DuckDns {
-        name: opts.name.clone(),
-        token,
-        email: opts.email.clone(),
-        directory: if opts.staging {
-            ws_signaling::LETS_ENCRYPT_STAGING
-        } else {
-            ws_signaling::LETS_ENCRYPT
-        }
-        .into(),
-        update_address: opts.update_address,
-        hostnames: hostnames.to_vec(),
-    })
 }
 
 /// Access denied on the data dir usually means the host once ran as
@@ -356,6 +338,7 @@ async fn run_signaling(
     transport: Transport,
     codecs: watch::Sender<Option<Vec<VideoCodec>>>,
     peers: watch::Sender<media::Peer>,
+    public_ip: watch::Receiver<Option<IpAddr>>,
     mut stop: oneshot::Receiver<()>,
 ) {
     let mut current: Option<SignalingSession> = None;
@@ -391,7 +374,8 @@ async fn run_signaling(
                     p.count += 1;
                     p.device = device;
                 });
-                if !send_offer(&transport, current.as_ref()).await {
+                let ip = *public_ip.borrow();
+                if !send_offer(&transport, current.as_ref(), ip).await {
                     current = None;
                 }
                 continue;
@@ -433,7 +417,8 @@ async fn run_signaling(
             Some(SessionEvent::Signal(ClientSignal::Restart)) => {
                 codecs.send_replace(None);
                 peers.send_modify(|p| p.count += 1);
-                if !send_offer(&transport, current.as_ref()).await {
+                let ip = *public_ip.borrow();
+                if !send_offer(&transport, current.as_ref(), ip).await {
                     current = None;
                     transport.close();
                 }
@@ -478,10 +463,16 @@ async fn next_signal(session: &mut Option<SignalingSession>) -> Option<SessionEv
     }
 }
 
-/// Starts a fresh peer connection and sends its offer. False if the browser
-/// is gone.
-async fn send_offer(transport: &Transport, session: Option<&SignalingSession>) -> bool {
-    let public = reachable_at(session.and_then(|s| s.host.as_deref())).await;
+/// Starts a fresh peer connection and sends its offer, reachable at the
+/// address the browser used and at `public_ip` (learned over STUN when a
+/// tunnel hides the first). False if the browser is gone.
+async fn send_offer(
+    transport: &Transport,
+    session: Option<&SignalingSession>,
+    public_ip: Option<IpAddr>,
+) -> bool {
+    let mut public = reachable_at(session.and_then(|s| s.host.as_deref())).await;
+    public.extend(public_ip.filter(|ip| !public.contains(ip)));
     if !public.is_empty() {
         tracing::info!(?public, "advertising the address the browser used");
     }

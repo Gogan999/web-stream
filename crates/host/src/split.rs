@@ -803,12 +803,8 @@ fn clean_notice(n: Notice) -> Notice {
         Notice::SessionEnded { device_name } => Notice::SessionEnded {
             device_name: clean(&device_name),
         },
-        Notice::Certificate {
-            domain,
-            fingerprint,
-        } => Notice::Certificate {
-            domain: clean(&domain),
-            fingerprint: clean(&fingerprint),
+        Notice::Tunnel { url } => Notice::Tunnel {
+            url: url.map(|u| clean(&u)),
         },
         Notice::Warning(w) => Notice::Warning(format!("network host: {}", clean(&w))),
         n @ (Notice::PairingFailed { .. } | Notice::PairingLocked) => n,

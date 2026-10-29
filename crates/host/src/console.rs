@@ -71,10 +71,8 @@ fn describe_notice(n: Notice) -> String {
         }
         Notice::SessionStarted { device_name } => format!("{device_name:?} connected"),
         Notice::SessionEnded { device_name } => format!("{device_name:?} disconnected"),
-        Notice::Certificate {
-            domain,
-            fingerprint,
-        } => format!("certificate from Let's Encrypt for {domain} in use, SHA-256 {fingerprint}"),
+        Notice::Tunnel { url: Some(url) } => format!("Cloudflare Tunnel up: {url}/"),
+        Notice::Tunnel { url: None } => "Cloudflare Tunnel down".into(),
         Notice::Warning(w) => w,
     }
 }

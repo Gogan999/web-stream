@@ -51,6 +51,11 @@ service uninstall
 /// Serve options the service refuses, and why.
 const REFUSED: &[(&str, &str)] = &[
     (
+        "--cloudflared",
+        "the service runs the cloudflared installed next to it: one a user can swap would \
+         run their code as the service",
+    ),
+    (
         "--web-root",
         "the service serves the web client built into it: a folder a user can change would \
          run their code in a browser that controls this PC as SYSTEM",
@@ -258,18 +263,15 @@ pub const NETWORK_FILES: &[&str] = &[
     "tls-cert.json",
     "devices.json",
     "pairing.json",
-    "acme-account.json",
-    "acme-cert.json",
-    "acme-retry.json",
     CERT_COPY,
     KEY_COPY,
     TOKEN_COPY,
 ];
 
-/// The service's copies of `--cert`, `--key` and `--duckdns-token-file`.
+/// The service's copies of `--cert`, `--key` and `--tunnel-token-file`.
 pub const CERT_COPY: &str = "service-cert.pem";
 pub const KEY_COPY: &str = "service-key.pem";
-pub const TOKEN_COPY: &str = "service-duckdns-token.txt";
+pub const TOKEN_COPY: &str = "service-tunnel-token.txt";
 
 /// Points the file flags that name a file directly in `from` (an install
 /// from before the split) at the same file in `to`.
@@ -278,7 +280,7 @@ pub fn relocate_files(args: &[String], from: &Path, to: &Path) -> Vec<String> {
     for i in 1..out.len() {
         if !matches!(
             out[i - 1].as_str(),
-            "--cert" | "--key" | "--duckdns-token-file"
+            "--cert" | "--key" | "--tunnel-token-file"
         ) {
             continue;
         }
@@ -340,6 +342,13 @@ pub fn check_install_args(args: &[String]) -> anyhow::Result<ServeOptions> {
 pub fn check_session_host_options(opts: &ServeOptions) -> anyhow::Result<()> {
     if opts.web_root.is_some() || opts.media.upload_dir.is_some() {
         bail!("the service's host never serves a web root or receives files");
+    }
+    if opts
+        .tunnel
+        .as_ref()
+        .is_some_and(|t| t.cloudflared != crate::options::default_cloudflared())
+    {
+        bail!("the service only runs the cloudflared installed next to it");
     }
     // Refused at install too; checked again in case the service's command
     // line was edited.
@@ -494,6 +503,12 @@ mod tests {
             assert!(e.to_string().contains(flag), "{e}");
         }
         assert!(check_install_args(&args(&["--allow-upload"])).is_err());
+        let swapped = args(&["--tunnel", "quick", "--cloudflared", "x.exe"]);
+        assert!(check_install_args(&swapped).is_err());
+        let o = ServeOptions::parse(&swapped).unwrap();
+        assert!(check_session_host_options(&o).is_err());
+        let o = check_install_args(&args(&["--tunnel", "quick"])).unwrap();
+        assert!(check_session_host_options(&o).is_ok());
         assert!(check_install_args(&args(&["--bogus"])).is_err());
         let o = check_install_args(&args(&["--port", "9000", "--codec", "av1"])).unwrap();
         assert_eq!(o.port, 9000);
@@ -554,7 +569,7 @@ mod tests {
             in_old(CERT_COPY),
             "--key".into(),
             other.display().to_string(),
-            "--duckdns-token-file".into(),
+            "--tunnel-token-file".into(),
             in_old(TOKEN_COPY),
             "--web-root".into(),
             in_old("x"),

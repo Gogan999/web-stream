@@ -32,16 +32,24 @@ running there.
 
 **At home only?** Skip to "Pair your phone".
 
-**Away from home too?** Your router has to pass three ports to this PC:
-TCP 8443, UDP 8443 and TCP 8444.
+**Away from home too?** If you were sent a Cloudflare Tunnel token, open
+**Settings**, set **Cloudflare Tunnel** to **Named (token)**, paste the
+token in **Tunnel token** and save. The window then shows your own address
+(like `https://alex.example.com/`), with no certificate warning. Without a
+token, **Quick (no account)** works too, but its address changes every time
+the host starts, so phones have to pair again. See
+[cloudflare-tunnel.md](cloudflare-tunnel.md).
+
+Your router also has to pass the stream's ports to this PC: UDP 8443 and
+TCP 8444 (and TCP 8443 too, without a tunnel).
 
 - Tick **Let the router forward them (UPnP)**. If it says the router
-  forwards the ports, you're done. Only those three ports go to this PC,
+  forwards the ports, you're done. Only those ports go to this PC,
   and they close again when you quit the app or uninstall it (or within
   the hour if the PC is just switched off).
 - If no router answers (UPnP is off on many routers), forward them on the
   router's own settings page instead: look for "Port forwarding",
-  "Virtual server" or "NAT", and add the three ports above, each to the
+  "Virtual server" or "NAT", and add the ports above, each to the
   same port on this PC's address (the window shows it, e.g.
   192.168.1.20). Your router maker's site has a page on it.
 
@@ -59,18 +67,12 @@ Then press **Test the ports**:
   that way, type that address under **Settings > Public addresses**, and
   the QR code can use it.
 
-Optional: a free name from [duckdns.org](https://www.duckdns.org) (sign in,
-make a subdomain, copy the token) goes in **Settings > DuckDNS name** and
-**DuckDNS token**. The host then keeps the name pointing at your home and
-gets a proper certificate, so browsers stop warning and the address
-doesn't change.
-
 ## 3. Pair your phone
 
 1. Press **Pair a phone**. A QR code appears.
 2. Scan it with the phone's camera and open the link.
-3. The browser warns about the certificate the first time (unless you set
-   up DuckDNS). On iPhone: **Show Details > visit this website > Visit
+3. The browser warns about the certificate the first time (not through a
+   Cloudflare Tunnel). On iPhone: **Show Details > visit this website > Visit
    Website**. On Chrome: **Advanced > Proceed**.
 4. The page pairs by itself and connects. On iPhone, **Share > Add to Home
    Screen** keeps it one tap away.

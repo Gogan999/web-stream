@@ -55,14 +55,24 @@ fn body_json(h: &Http) -> serde_json::Value {
     serde_json::from_str(&h.body).unwrap_or_else(|_| panic!("not json: {}", h.body))
 }
 
-async fn ws_connect(
+type Ws = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>;
+
+async fn ws_connect(addr: SocketAddr, cookie: &str) -> Result<Ws, u16> {
+    ws_connect_with(addr, cookie, &[]).await
+}
+
+async fn ws_connect_with(
     addr: SocketAddr,
     cookie: &str,
-) -> Result<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>, u16> {
+    headers: &[(&'static str, &str)],
+) -> Result<Ws, u16> {
     let mut req = format!("ws://{addr}/ws").into_client_request().unwrap();
     req.headers_mut()
         .insert("Origin", format!("https://{addr}").parse().unwrap());
     req.headers_mut().insert("Cookie", cookie.parse().unwrap());
+    for (name, value) in headers {
+        req.headers_mut().insert(*name, value.parse().unwrap());
+    }
     match tokio_tungstenite::connect_async(req).await {
         Ok((ws, _)) => Ok(ws),
         Err(tokio_tungstenite::tungstenite::Error::Http(resp)) => Err(resp.status().as_u16()),
@@ -252,6 +262,7 @@ async fn pair_then_signal() {
     );
     let mut session = events.sessions.recv().await.unwrap();
     assert_eq!(session.device_name, "Test browser");
+    assert_eq!(session.host.as_deref(), Some("127.0.0.1"));
     assert!(session.send(HostSignal::Offer { sdp: "v=0".into() }).await);
     assert_eq!(
         next_host_msg(&mut ws).await,
@@ -290,6 +301,7 @@ async fn pair_then_signal() {
     );
     assert_eq!(session.recv().await, None);
     let mut session2 = events.sessions.recv().await.unwrap();
+    assert!(session2.host.is_some());
 
     // A handoff closes the socket but keeps the session live.
     ws2.send(Message::text(r#"{"type":"handoff"}"#))
@@ -310,8 +322,11 @@ async fn pair_then_signal() {
     );
 
     // A new connection still replaces it; the host hears why, to tell the
-    // browser over the peer connection.
-    let mut ws3 = ws_connect(addr, &cookie).await.unwrap();
+    // browser over the peer connection. (This one came through a Cloudflare
+    // Tunnel, whose name is no place to send media.)
+    let mut ws3 = ws_connect_with(addr, &cookie, &[("cf-connecting-ip", "198.51.100.9")])
+        .await
+        .unwrap();
     assert_eq!(
         next_host_msg(&mut ws3).await,
         HostSignal::Welcome {
@@ -324,6 +339,7 @@ async fn pair_then_signal() {
     );
     assert_eq!(session2.recv().await, None);
     let mut session3 = events.sessions.recv().await.unwrap();
+    assert_eq!(session3.host, None);
 
     // Unpairing a handed-off session ends it too.
     ws3.send(Message::text(r#"{"type":"handoff"}"#))

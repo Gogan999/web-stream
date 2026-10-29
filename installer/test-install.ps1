@@ -91,6 +91,7 @@ Install (Join-Path $env:RUNNER_TEMP 'setup2.log')
 
 Check (Test-Path $Exe) 'the tray app is in Program Files'
 Check (Test-Path (Join-Path $App 'licenses\ViGEmBus-LICENSE.txt')) 'third-party licences are installed'
+Check (Test-Path (Join-Path $App 'cloudflared.exe')) 'cloudflared is installed next to the host'
 Check (Test-Path $Shortcut) 'Start menu shortcut'
 Check (@(Get-FirewallRules).Count -eq 2) 'two firewall rules (tray app and service copy)'
 $run = Get-RunValue

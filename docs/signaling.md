@@ -17,7 +17,10 @@ For access from the internet, forward these three ports to the host, to the
 same port numbers. Each offer carries host candidates for the LAN
 addresses, for every `--public-ip`, and for the address the browser used to
 reach the host (the `Host` header of its `/ws` request, resolved if it is a
-DDNS name). The public ones are advertised as `typ host`, not `srflx`,
+DDNS name). Through a Cloudflare Tunnel (a `/ws` request carrying
+`CF-Connecting-IP`) that name is Cloudflare's, so it is left out and the
+public address the host learns over STUN is offered instead; TCP 8443 then
+needs no forward. The public ones are advertised as `typ host`, not `srflx`,
 because str0m drops non-host local candidates in ICE-lite mode. Checks sent
 to them arrive through the port forward on the LAN address and are answered
 from there.

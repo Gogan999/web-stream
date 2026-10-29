@@ -28,7 +28,7 @@
     verifies against those keys, instead of whatever is on main. Then a
     commit merged to main (by anyone with access to the GitHub repository)
     only reaches this PC once the owner of one of those keys has signed a
-    tag for it. See docs/host-setup.md.
+    tag for it. See docs/dev/building.md.
 
 .PARAMETER Force
     Rebuild and restart even when the build is already the latest main.

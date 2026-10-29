@@ -1,4 +1,4 @@
-// WebSocket signaling client. JSON text frames; see docs/signaling.md.
+// WebSocket signaling client. JSON text frames; see docs/dev/signaling.md.
 // Auth is the HttpOnly pairing cookie, which the browser sends on the upgrade by itself.
 
 export class Signaling extends EventTarget {

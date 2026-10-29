@@ -325,7 +325,7 @@ ui.matchHost.addEventListener('change', () => {
   }
 });
 
-// Starts or stops sending the mic. The host plays it into its virtual cable (see docs/host-setup.md).
+// Starts or stops sending the mic. The host plays it into its virtual cable (see docs/guide/audio-and-gamepads.md).
 let micGen = 0;
 async function setMic(on) {
   const s = session;

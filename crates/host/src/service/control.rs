@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::options::ServeOptions;
-use crate::serve::{self, Event, Notice};
+use crate::serve::{self, Event};
 use anyhow::{Context, bail};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeServer, ServerOptions};
@@ -26,7 +26,7 @@ use windows::Win32::System::Pipes::GetNamedPipeServerProcessId;
 use windows::core::PCWSTR;
 
 use super::launch::wide;
-use crate::console::{CONSOLE_HELP, EVENTS_JSON, Line, command_lines, describe, parse_line};
+use crate::console::{self, EVENTS_JSON, command_lines, describe};
 
 /// Protected DACL: full access for SYSTEM and Administrators, nobody else.
 /// An administrator's unelevated token has Administrators as deny-only, so
@@ -36,41 +36,6 @@ const ERROR_ACCESS_DENIED: i32 = 5;
 const ERROR_FILE_NOT_FOUND: i32 = 2;
 const ERROR_PIPE_BUSY: i32 = 231;
 
-/// What a console that connects late is told first: the host's start,
-/// and the browser connected now.
-#[derive(Default)]
-struct Snapshot {
-    started: Option<Event>,
-    connected: Option<String>,
-}
-
-impl Snapshot {
-    fn update(&mut self, e: &Event) {
-        match e {
-            Event::Started { .. } => self.started = Some(e.clone()),
-            Event::Notice(Notice::SessionStarted { device_name }) => {
-                self.connected = Some(device_name.clone())
-            }
-            Event::Notice(Notice::SessionEnded { device_name })
-                if self.connected.as_ref() == Some(device_name) =>
-            {
-                self.connected = None
-            }
-            _ => {}
-        }
-    }
-
-    fn events(&self) -> Vec<Event> {
-        let mut out: Vec<Event> = self.started.iter().cloned().collect();
-        if let Some(device_name) = &self.connected {
-            out.push(Event::Notice(Notice::SessionStarted {
-                device_name: device_name.clone(),
-            }));
-        }
-        out
-    }
-}
-
 /// Runs the host with its console on the pipe, until it is told to quit.
 /// `pipe` is the name the service picked (see `PIPE_PREFIX`). With a `link`
 /// (an inherited pipe handle; 0 for none) this is the media side, and the
@@ -79,7 +44,7 @@ pub async fn serve(pipe: String, link: usize, opts: ServeOptions) -> anyhow::Res
     let (commands, commands_rx) = mpsc::channel(8);
     let (events_tx, mut events) = mpsc::unbounded_channel::<Event>();
     let (sent, _) = broadcast::channel::<Event>(256);
-    let snapshot = Arc::new(Mutex::new(Snapshot::default()));
+    let snapshot = Arc::new(Mutex::new(console::Snapshot::default()));
 
     // The first instance fails if anyone else holds the name.
     let first = create(&pipe, true).with_context(|| format!("control pipe {pipe} is taken"))?;
@@ -152,7 +117,7 @@ async fn accept(
     mut server: NamedPipeServer,
     commands: mpsc::Sender<serve::Command>,
     sent: broadcast::Sender<Event>,
-    snapshot: Arc<Mutex<Snapshot>>,
+    snapshot: Arc<Mutex<console::Snapshot>>,
 ) {
     loop {
         let connected = server.connect().await;
@@ -172,88 +137,7 @@ async fn accept(
             let snapshot = snapshot.lock().unwrap();
             (snapshot.events(), sent.subscribe())
         };
-        tokio::spawn(client_session(client, commands.clone(), events, greeting));
-    }
-}
-
-/// How a console reads the host's events.
-#[derive(Clone, Copy, PartialEq)]
-enum Format {
-    Text,
-    Json,
-}
-
-/// `e` as the console reads it, ending in a line break; `None` if there
-/// is nothing to say.
-fn format_event(e: &Event, format: Format) -> Option<String> {
-    match format {
-        Format::Text => describe(e.clone()).map(|t| format!("{t}\n")),
-        Format::Json => serde_json::to_string(e).ok().map(|j| format!("{j}\n")),
-    }
-}
-
-async fn client_session(
-    client: NamedPipeServer,
-    commands: mpsc::Sender<serve::Command>,
-    mut events: broadcast::Receiver<Event>,
-    greeting: Vec<Event>,
-) {
-    let (read, mut write) = tokio::io::split(client);
-    let mut read = BufReader::new(read).lines();
-    let mut format = Format::Text;
-    // The host's start, in text, for a console typed into by hand. One
-    // that asks for JSON gets it again as JSON.
-    if let Some(text) = greeting.first().and_then(|e| format_event(e, format)) {
-        if write.write_all(text.as_bytes()).await.is_err() {
-            return;
-        }
-    }
-    loop {
-        tokio::select! {
-            line = read.next_line() => {
-                let Ok(Some(line)) = line else { return };
-                if line.trim() == EVENTS_JSON {
-                    format = Format::Json;
-                    for e in &greeting {
-                        let Some(text) = format_event(e, format) else { continue };
-                        if write.write_all(text.as_bytes()).await.is_err() {
-                            return;
-                        }
-                    }
-                    continue;
-                }
-                match parse_line(&line) {
-                    Line::Command(cmd) => {
-                        if commands.send(cmd).await.is_err() {
-                            return;
-                        }
-                    }
-                    Line::Empty => {}
-                    Line::Help => {
-                        if format == Format::Json {
-                            continue;
-                        }
-                        let help = format!("{CONSOLE_HELP}\n(quit restarts the host)\n");
-                        if write.write_all(help.as_bytes()).await.is_err() {
-                            return;
-                        }
-                    }
-                }
-            }
-            e = events.recv() => match e {
-                Ok(e) => {
-                    let Some(text) = format_event(&e, format) else { continue };
-                    if write.write_all(text.as_bytes()).await.is_err() {
-                        return;
-                    }
-                }
-                // A console that fell this far behind has missed events it
-                // can't do without: it connects again.
-                Err(broadcast::error::RecvError::Lagged(_)) if format == Format::Json => return,
-                Err(broadcast::error::RecvError::Lagged(_)) => {}
-                Err(broadcast::error::RecvError::Closed) => return,
-            },
-        }
+        tokio::spawn(console::session(client, commands.clone(), events, greeting));
     }
 }
 

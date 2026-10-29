@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use ws_host::serve::Command;
 
-use crate::host::Host;
+use crate::host::{Host, Status};
 
 /// How often the service is asked about.
 const POLL: Duration = Duration::from_secs(3);
@@ -93,10 +93,13 @@ impl Watcher {
                     host.stop();
                 } else if running && self.elevated && !host.is_active() {
                     host.attach();
-                    if self.pair.swap(false, Ordering::Relaxed) {
-                        // Waits in the queue until the pipe is open.
-                        host.command(Command::OpenPairing);
-                    }
+                } else if host.attached()
+                    && matches!(host.state().status, Status::Running { .. })
+                    && self.pair.swap(false, Ordering::Relaxed)
+                {
+                    // Only once attached: an attempt that fails would lose
+                    // the command.
+                    host.command(Command::OpenPairing);
                 }
             }
         }

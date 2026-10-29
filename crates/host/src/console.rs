@@ -1,6 +1,11 @@
 //! The host's events as lines of text and typed commands, for the
 //! service's control pipe (and the test host in `examples`).
 
+use std::time::Duration;
+
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::sync::{broadcast, mpsc};
+
 use crate::serve::{Command, Event, FileEvent, FileId, Notice};
 
 pub const CONSOLE_HELP: &str = "\
@@ -105,6 +110,140 @@ fn describe_file(f: FileEvent) -> Option<String> {
     })
 }
 
+/// What a console that connects late is told first: the host's start,
+/// and the browser connected now.
+#[derive(Default)]
+pub struct Snapshot {
+    started: Option<Event>,
+    connected: Option<String>,
+}
+
+impl Snapshot {
+    pub fn update(&mut self, e: &Event) {
+        match e {
+            Event::Started { .. } => self.started = Some(e.clone()),
+            Event::Notice(Notice::SessionStarted { device_name }) => {
+                self.connected = Some(device_name.clone())
+            }
+            Event::Notice(Notice::SessionEnded { device_name })
+                if self.connected.as_ref() == Some(device_name) =>
+            {
+                self.connected = None
+            }
+            _ => {}
+        }
+    }
+
+    pub fn events(&self) -> Vec<Event> {
+        let mut out: Vec<Event> = self.started.iter().cloned().collect();
+        if let Some(device_name) = &self.connected {
+            out.push(Event::Notice(Notice::SessionStarted {
+                device_name: device_name.clone(),
+            }));
+        }
+        out
+    }
+}
+
+/// How a console reads the host's events.
+#[derive(Clone, Copy, PartialEq)]
+enum Format {
+    Text,
+    Json,
+}
+
+/// `e` as the console reads it, ending in a line break; `None` if there
+/// is nothing to say.
+fn format_event(e: &Event, format: Format) -> Option<String> {
+    match format {
+        Format::Text => describe(e.clone()).map(|t| format!("{t}\n")),
+        Format::Json => serde_json::to_string(e).ok().map(|j| format!("{j}\n")),
+    }
+}
+
+/// How long a console has to ask for JSON ([`EVENTS_JSON`]) before it is
+/// greeted in text.
+const ASK_FOR_JSON: Duration = Duration::from_millis(300);
+
+/// One console on the service's control pipe: commands typed into it go to
+/// the host, the host's events come back. `greeting` is the snapshot of
+/// the host when it connected (see [`Snapshot`]).
+pub async fn session<S: AsyncRead + AsyncWrite>(
+    client: S,
+    commands: mpsc::Sender<Command>,
+    mut events: broadcast::Receiver<Event>,
+    greeting: Vec<Event>,
+) {
+    let (read, mut write) = tokio::io::split(client);
+    let mut read = BufReader::new(read).lines();
+    // A console that wants JSON says so first, before it is greeted; one
+    // typed into by hand gets the host's start in text.
+    let first = match tokio::time::timeout(ASK_FOR_JSON, read.next_line()).await {
+        Ok(Ok(Some(line))) => Some(line),
+        Ok(_) => return,
+        Err(_) => None,
+    };
+    let (format, greeting) = match &first {
+        Some(line) if line.trim() == EVENTS_JSON => (Format::Json, &greeting[..]),
+        _ => (Format::Text, greeting.get(..1).unwrap_or_default()),
+    };
+    for e in greeting {
+        let Some(text) = format_event(e, format) else {
+            continue;
+        };
+        if write.write_all(text.as_bytes()).await.is_err() {
+            return;
+        }
+    }
+    let mut pending = first.filter(|_| format == Format::Text);
+    loop {
+        let line = match pending.take() {
+            Some(line) => Some(line),
+            None => tokio::select! {
+                line = read.next_line() => {
+                    let Ok(Some(line)) = line else { return };
+                    Some(line)
+                }
+                e = events.recv() => {
+                    match e {
+                        Ok(e) => {
+                            let Some(text) = format_event(&e, format) else { continue };
+                            if write.write_all(text.as_bytes()).await.is_err() {
+                                return;
+                            }
+                        }
+                        // A JSON console that fell this far behind has
+                        // missed events it can't do without: it connects
+                        // again.
+                        Err(broadcast::error::RecvError::Lagged(_)) if format == Format::Json => {
+                            return;
+                        }
+                        Err(broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(broadcast::error::RecvError::Closed) => return,
+                    }
+                    None
+                }
+            },
+        };
+        let Some(line) = line else { continue };
+        match parse_line(&line) {
+            Line::Command(cmd) => {
+                if commands.send(cmd).await.is_err() {
+                    return;
+                }
+            }
+            Line::Empty => {}
+            Line::Help if format == Format::Json => {}
+            Line::Help => {
+                let help = format!("{CONSOLE_HELP}\n(quit restarts the host)\n");
+                if write.write_all(help.as_bytes()).await.is_err() {
+                    return;
+                }
+            }
+        }
+    }
+}
+
 /// A line typed by the host user.
 #[derive(Debug, PartialEq)]
 pub enum Line {
@@ -186,6 +325,85 @@ mod tests {
         }
         let two = command_lines(&Command::ShareFiles(vec!["a".into(), "b\nquit".into()]));
         assert_eq!(two, ["send a"]);
+    }
+
+    fn started() -> Event {
+        Event::Started {
+            port: 8443,
+            ips: vec![],
+            fingerprint: "AB:CD".into(),
+            self_signed: true,
+            web_root: None,
+            data_dir: "data".into(),
+        }
+    }
+
+    /// A console on one end of an in-memory pipe, the session on the other.
+    fn console() -> (
+        tokio::io::DuplexStream,
+        mpsc::Receiver<Command>,
+        broadcast::Sender<Event>,
+    ) {
+        let (ours, theirs) = tokio::io::duplex(4096);
+        let (commands, commands_rx) = mpsc::channel(8);
+        let (events, events_rx) = broadcast::channel(16);
+        let mut snapshot = Snapshot::default();
+        snapshot.update(&started());
+        snapshot.update(&Event::Notice(Notice::SessionStarted {
+            device_name: "phone".into(),
+        }));
+        tokio::spawn(session(theirs, commands, events_rx, snapshot.events()));
+        (ours, commands_rx, events)
+    }
+
+    #[tokio::test]
+    async fn a_json_console_gets_only_json() {
+        let (ours, mut commands, events) = console();
+        let (read, mut write) = tokio::io::split(ours);
+        let mut read = BufReader::new(read).lines();
+        write
+            .write_all(format!("{EVENTS_JSON}\n").as_bytes())
+            .await
+            .unwrap();
+        let next = |line: Option<String>| serde_json::from_str::<Event>(&line.unwrap()).unwrap();
+        assert_eq!(next(read.next_line().await.unwrap()), started());
+        assert_eq!(
+            next(read.next_line().await.unwrap()),
+            Event::Notice(Notice::SessionStarted {
+                device_name: "phone".into()
+            })
+        );
+        let link = Event::PairingOpened {
+            link: "secret".into(),
+        };
+        events.send(link.clone()).unwrap();
+        assert_eq!(next(read.next_line().await.unwrap()), link);
+        write.write_all(b"pair\nbogus\n").await.unwrap();
+        assert_eq!(commands.recv().await, Some(Command::OpenPairing));
+        // No help text for a JSON console.
+        events.send(Event::UnpairedAll).unwrap();
+        assert_eq!(next(read.next_line().await.unwrap()), Event::UnpairedAll);
+    }
+
+    #[tokio::test]
+    async fn a_console_typed_into_is_greeted_in_text() {
+        let (ours, mut commands, _events) = console();
+        let (read, mut write) = tokio::io::split(ours);
+        let mut read = BufReader::new(read).lines();
+        // Says nothing at first: greeted after a moment.
+        let first = read.next_line().await.unwrap().unwrap();
+        assert!(first.starts_with("web-stream host on https://"), "{first}");
+        write.write_all(b"drop\n").await.unwrap();
+        assert_eq!(commands.recv().await, Some(Command::DropSession));
+
+        // A command typed at once is carried out after the greeting.
+        let (ours, mut commands, _events) = console();
+        let (read, mut write) = tokio::io::split(ours);
+        let mut read = BufReader::new(read).lines();
+        write.write_all(b"pair\n").await.unwrap();
+        assert_eq!(commands.recv().await, Some(Command::OpenPairing));
+        let first = read.next_line().await.unwrap().unwrap();
+        assert!(first.starts_with("web-stream host on https://"), "{first}");
     }
 
     #[test]

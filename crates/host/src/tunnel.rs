@@ -301,6 +301,10 @@ mod job {
 
     pub struct Job(HANDLE);
 
+    // SAFETY: a job handle is a plain kernel handle, usable from any
+    // thread; `Job` only closes it, once, on drop.
+    unsafe impl Send for Job {}
+
     impl Drop for Job {
         fn drop(&mut self) {
             // SAFETY: the handle is this struct's own.

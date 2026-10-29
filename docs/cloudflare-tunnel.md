@@ -77,7 +77,11 @@ only for those two).
 - The host still listens on TCP 8443 for browsers on the same network
   (with the self-signed certificate). It no longer needs to be forwarded.
 - Requests through the tunnel all come from `127.0.0.1`, so the per-address
-  connection cap doesn't apply to loopback; the overall cap (64) still does.
+  connection cap (8) doesn't apply to loopback: with the tunnel on it no
+  longer limits a single remote browser. The overall cap (64) still does,
+  and Cloudflare sits in front.
+- The tunnel needs `cloudflared.exe` next to the host: the installer and
+  the release zip both include it.
 - The service only runs the `cloudflared.exe` in Program Files
   (`--cloudflared` is refused there).
 - The DuckDNS / Let's Encrypt certificate this replaces is gone. A service

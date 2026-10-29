@@ -103,7 +103,16 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
-          Compress-Archive -Path target/release/ws-host-gui.exe, installer/third-party `
+          # cloudflared goes next to the exe, where the host looks for it
+          # when a Cloudflare Tunnel is on.
+          ./installer/fetch-redist.ps1
+          $stage = 'target/zip'
+          Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force $stage | Out-Null
+          Copy-Item target/release/ws-host-gui.exe $stage
+          Copy-Item installer/redist/cloudflared-windows-amd64.exe "$stage/cloudflared.exe"
+          Copy-Item -Recurse installer/third-party $stage
+          Compress-Archive -Path "$stage/*" `
             -DestinationPath "dist/web-stream-host-$env:VERSION-windows-x64.zip"
       - name: installer
         shell: pwsh

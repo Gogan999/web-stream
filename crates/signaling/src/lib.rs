@@ -1,7 +1,7 @@
 //! The HTTPS server built into the host agent: it serves the web client,
 //! pairs browsers with a one-time code, and carries WebRTC signaling over a
 //! WebSocket. Messages are [`ws_proto::HostSignal`] and
-//! [`ws_proto::ClientSignal`]; the full contract is in `docs/signaling.md`.
+//! [`ws_proto::ClientSignal`]; the full contract is in `docs/dev/signaling.md`.
 
 mod acl;
 pub mod config;

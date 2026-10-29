@@ -1,5 +1,5 @@
 // One streaming session: signaling + RTCPeerConnection + data channels.
-// The host is the offerer and opens the data channels. See docs/signaling.md.
+// The host is the offerer and opens the data channels. See docs/dev/signaling.md.
 // Once the connection is up and `control` is open, signaling is handed off: the WebSocket closes
 // and everything, `bye` included, goes over the peer connection. Recovering from a failed
 // connection then takes a new WebSocket.

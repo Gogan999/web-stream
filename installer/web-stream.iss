@@ -44,7 +44,7 @@ AppVersion={#AppVersion}
 AppVerName={#AppName} {#AppVersion}
 AppPublisher=web-stream
 AppPublisherURL=https://github.com/Gogan999/web-stream
-AppSupportURL=https://github.com/Gogan999/web-stream/blob/main/docs/friend-guide.md
+AppSupportURL=https://github.com/Gogan999/web-stream/blob/main/docs/guide/getting-started.md
 VersionInfoVersion={#AppNumericVersion}
 DefaultDirName={autopf}\web-stream
 ; Fixed: the service copy, the firewall rules and the updater expect it here.

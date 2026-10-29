@@ -40,8 +40,9 @@ pub enum Command {
     Quit,
 }
 
-/// What the host user should see.
-#[derive(Debug, Clone, PartialEq)]
+/// What the host user should see. Serialized for the service's control
+/// pipe, which carries it to the tray app.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Event {
     /// Everything is listening.
     Started {

@@ -197,9 +197,9 @@ pub fn install(args: &[String]) -> anyhow::Result<String> {
     Ok(format!(
         "Installed and started the {SERVICE_NAME} service ({}).\n\
          Its data (certificate, paired browsers, logs) is in {}.\n\n\
-         It uses the same ports as the tray app's own host, so the tray app stops hosting \
-         while the service runs. The service has its own certificate and paired browsers: \
-         pair again with \"Pair through the service\" in the tray app.",
+         It uses the same ports as the tray app's own host, so the tray app no longer hosts \
+         while the service is installed: it shows and controls the service instead. The \
+         service has its own certificate and paired browsers: pair again from the tray app.",
         exe.display(),
         data_dir()?.display()
     ))
@@ -281,6 +281,28 @@ pub fn update() -> anyhow::Result<String> {
         "Updated {} and restarted the service.",
         exe.display()
     ))
+}
+
+/// Starts the installed service (it also starts with Windows).
+pub fn start() -> anyhow::Result<String> {
+    let manager = manager(ServiceManagerAccess::CONNECT)?;
+    let Some(service) = open_installed(&manager)? else {
+        bail!("the service is not installed: install it from the tray app's settings");
+    };
+    if service.query_status()?.current_state == ServiceState::Stopped {
+        service.start::<&str>(&[]).context("start the service")?;
+    }
+    Ok("Started the service.".into())
+}
+
+/// Stops the service until it is started again, or Windows starts.
+pub fn stop() -> anyhow::Result<String> {
+    let manager = manager(ServiceManagerAccess::CONNECT)?;
+    let Some(service) = open_installed(&manager)? else {
+        bail!("the service is not installed");
+    };
+    stop_and_wait(&service)?;
+    Ok("Stopped the service; it starts again with Windows.".into())
 }
 
 pub fn uninstall() -> anyhow::Result<String> {

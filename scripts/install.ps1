@@ -278,7 +278,7 @@ if (-not $GamepadDriver) {
 }
 if (-not $micReady) {
     Write-Host 'The browser mic needs a virtual mic: run this script again with -MicDriver'
-    Write-Host 'if Steam is installed, or install VB-CABLE; see docs\host-setup.md.'
+    Write-Host 'if Steam is installed, or install VB-CABLE; see docs\guide\audio-and-gamepads.md.'
 }
 
 if ($Run) {

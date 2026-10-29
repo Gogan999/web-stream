@@ -3,14 +3,14 @@
 //! service.
 //!
 //! ```text
-//! ws-host-gui [--hidden] [--after PID]
+//! ws-host-gui [--hidden] [--after PID] [--pair]
 //!     --hidden     start in the tray (used by "Start with Windows" and updates)
-//!     --after PID  wait for process PID to exit first (the build an update replaces)
-//! ws-host-gui service install|update|uninstall [--quiet]
+//!     --after PID  wait for process PID to exit first (the build an update
+//!                  replaces, or the copy that handed over to this elevated one)
+//!     --pair       open pairing once hosting, or attached to the service's host
+//! ws-host-gui service install|update|start|stop|uninstall [--quiet]
 //!     started elevated from the settings; shows the result unless --quiet
-//! ws-host-gui service console [--pair]
-//!     the service's host: pairing, the connected browser, files (elevated)
-//! ws-host-gui service run|session-host ...
+//! ws-host-gui service run|session-host|network-host ...
 //!     the service and the host it starts (see ws_host::service)
 //! ws-host-gui setup autostart on|off | mic-driver | upnp-remove
 //!     steps the installer and uninstaller run (see setup.rs)
@@ -19,6 +19,10 @@
 //! Closing the window keeps the host running in the tray; Quit stops it.
 //! Settings are saved in the data dir and started as the equivalent host
 //! options (`ws_host::options`).
+//!
+//! While the Windows service is installed the app never hosts itself: the
+//! service does, and the app, run elevated, attaches to the service's host
+//! and applies saved settings to it (see `service_watch`).
 
 // No console window on Windows.
 #![cfg_attr(windows, windows_subsystem = "windows")]
@@ -29,7 +33,7 @@ mod host;
 mod portcheck;
 mod qr;
 #[cfg(windows)]
-mod service_console;
+mod service_watch;
 mod settings;
 mod setup;
 mod upnp;
@@ -69,23 +73,11 @@ fn main() {
 
 /// `service ...`: the exit code.
 fn service(args: &[String]) -> i32 {
-    if args.first().is_some_and(|a| a == "console") {
-        return match run_service_console(args.iter().any(|a| a == "--pair")) {
-            Ok(()) => 0,
-            Err(e) => {
-                #[cfg(windows)]
-                win::error_box(&format!("{e:#}"));
-                #[cfg(not(windows))]
-                eprintln!("{e:#}");
-                1
-            }
-        };
-    }
     // An administrator asked (from the settings, or update.ps1 with
     // --quiet): say how it went. The service and its host run unseen.
     let asked = matches!(
         args.first().map(String::as_str),
-        Some("install" | "update" | "uninstall") | Some("-h" | "--help") | None
+        Some("install" | "update" | "start" | "stop" | "uninstall") | Some("-h" | "--help") | None
     );
     let quiet = args.iter().any(|a| a == "--quiet");
     let args: Vec<String> = args.iter().filter(|a| *a != "--quiet").cloned().collect();
@@ -111,18 +103,9 @@ fn service(args: &[String]) -> i32 {
     i32::from(result.is_err())
 }
 
-#[cfg(windows)]
-fn run_service_console(pair: bool) -> anyhow::Result<()> {
-    service_console::run(pair)
-}
-
-#[cfg(not(windows))]
-fn run_service_console(_pair: bool) -> anyhow::Result<()> {
-    anyhow::bail!("the host service is Windows only")
-}
-
 fn run(args: &[String]) -> anyhow::Result<()> {
     let hidden = args.iter().any(|a| a == "--hidden");
+    let pair = args.iter().any(|a| a == "--pair");
     let after = args
         .iter()
         .position(|a| a == "--after")
@@ -170,7 +153,11 @@ fn run(args: &[String]) -> anyhow::Result<()> {
     eframe::run_native(
         TITLE,
         options,
-        Box::new(move |cc| Ok(Box::new(app::App::new(cc, settings, data_dir, hidden)))),
+        Box::new(move |cc| {
+            Ok(Box::new(app::App::new(
+                cc, settings, data_dir, hidden, pair,
+            )))
+        }),
     )
     .map_err(|e| anyhow::anyhow!("{e}"))
 }

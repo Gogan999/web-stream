@@ -50,7 +50,7 @@ const QUEUE: usize = 256;
 const NAME_MAX: usize = 200;
 
 /// What the host user sees happen to shared files.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum FileEvent {
     /// Offered to the browser.
     Shared { id: FileId, name: String, size: u64 },

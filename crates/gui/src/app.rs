@@ -30,10 +30,10 @@ pub struct App {
     settings_error: Option<String>,
     #[cfg(windows)]
     autostart: bool,
-    /// The web-stream service: installed (`Some`) and running, and when
-    /// that was last asked.
+    /// The web-stream service, which hosts instead of this app while it is
+    /// installed.
     #[cfg(windows)]
-    service: (Option<bool>, Option<Instant>),
+    service: crate::service_watch::Watcher,
     first_run: FirstRun,
     /// Shows the first-run setup at the top of the window.
     show_setup: bool,
@@ -50,6 +50,7 @@ impl App {
         settings: Settings,
         data_dir: PathBuf,
         hidden: bool,
+        pair: bool,
     ) -> Self {
         let ctx = cc.egui_ctx.clone();
         let host = Host::new(Arc::new(move |e: Option<&Event>| {
@@ -70,6 +71,13 @@ impl App {
                 host.log(format!("could not add the tray icon: {e:#}"));
             }
         }
+        #[cfg(windows)]
+        let service = {
+            let repaint = cc.egui_ctx.clone();
+            crate::service_watch::Watcher::start(host.clone(), pair, move || {
+                repaint.request_repaint()
+            })
+        };
 
         let displays = match ws_capture::list_displays() {
             Ok(list) => list
@@ -115,7 +123,7 @@ impl App {
             #[cfg(windows)]
             autostart: crate::win::autostart_enabled(),
             #[cfg(windows)]
-            service: (None, None),
+            service,
             hide_in_frames: hidden.then_some(2),
         };
         // A browser may ask for an update (when the settings allow it):
@@ -124,22 +132,41 @@ impl App {
         ws_host::update::enable(move || crate::restart_after_update(&restarting));
 
         // The service hosts on the same ports.
-        #[cfg(windows)]
-        let service_installed = app.service_installed().is_some();
-        #[cfg(not(windows))]
-        let service_installed = false;
-        if service_installed {
-            app.host.log(
-                "the web-stream service is installed and hosts this PC, so this app doesn't \
-                 start its own host (Start does, once the service is uninstalled)",
-            );
-        } else if app.settings.start_hosting {
+        if app.service_installed().is_some() {
+            #[cfg(windows)]
+            app.host.log(if app.service.elevated {
+                "the Windows service hosts this PC: this app shows it and applies saved \
+                 settings to it"
+            } else {
+                "the Windows service hosts this PC: \"Connect\" (administrator) shows it here"
+            });
+        } else if app.settings.start_hosting || pair {
             app.start();
+            if pair {
+                app.host.command(Command::OpenPairing);
+            }
         }
         app
     }
 
+    /// Whether the service is installed (`Some`), and running.
+    fn service_installed(&self) -> Option<bool> {
+        #[cfg(windows)]
+        return self.service.installed();
+        #[cfg(not(windows))]
+        None
+    }
+
+    /// Starts this app's own host, unless the service is installed: only
+    /// one host may run.
     fn start(&mut self) {
+        if self.service_installed().is_some() {
+            self.host.log(
+                "the Windows service is installed and hosts this PC, so this app doesn't \
+                 start a host of its own (uninstall the service first)",
+            );
+            return;
+        }
         match self.settings.serve_options() {
             Ok(opts) => {
                 self.settings_error = None;
@@ -368,6 +395,19 @@ impl App {
             self.start();
         }
         let status = self.host.state().status.clone();
+        #[cfg(windows)]
+        if let Some(running) = self.service_installed() {
+            self.service_status_ui(ui, running, &status);
+        } else {
+            self.own_status_ui(ui, active, &status);
+        }
+        #[cfg(not(windows))]
+        self.own_status_ui(ui, active, &status);
+        self.running_ui(ui, &status);
+    }
+
+    /// Start and Stop for this app's own host.
+    fn own_status_ui(&mut self, ui: &mut egui::Ui, active: bool, status: &Status) {
         ui.horizontal(|ui| {
             let (text, color) = match &status {
                 Status::Stopped => ("Stopped".to_string(), Color32::GRAY),
@@ -393,7 +433,136 @@ impl App {
                 }
             });
         });
-        match &status {
+    }
+
+    /// The service's state, and what this app can do about it: attached
+    /// (elevated), it shows the service's host like its own.
+    #[cfg(windows)]
+    fn service_status_ui(&mut self, ui: &mut egui::Ui, running: bool, status: &Status) {
+        let elevated = self.service.elevated;
+        let attached = self.host.attached();
+        ui.horizontal(|ui| {
+            let (text, color) = match (running, status) {
+                (false, _) => ("The Windows service is stopped".to_string(), Color32::GRAY),
+                (true, Status::Running { port, .. }) if attached => (
+                    format!("The Windows service is hosting on port {port}"),
+                    Color32::GREEN,
+                ),
+                (true, _) if elevated => (
+                    "The Windows service is starting its host...".to_string(),
+                    Color32::YELLOW,
+                ),
+                (true, _) => (
+                    "The Windows service hosts this PC".to_string(),
+                    Color32::GREEN,
+                ),
+            };
+            ui.label(RichText::new(text).strong().color(color))
+                .on_hover_text(
+                    "While the service is installed it hosts this PC, and this app doesn't: \
+                     only one host can have the ports",
+                );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if !running {
+                    if ui.button("Start the service").clicked() {
+                        self.run_service(&["start"]);
+                    }
+                } else if !elevated {
+                    if ui
+                        .button("Connect (administrator)")
+                        .on_hover_text(
+                            "Opens this app as administrator, which pairing, the connected \
+                             browser and files for the service take",
+                        )
+                        .clicked()
+                    {
+                        self.hand_over(false);
+                    }
+                } else if ui
+                    .button("Stop the service")
+                    .on_hover_text("Until you start it again, or Windows restarts")
+                    .clicked()
+                {
+                    self.run_service(&["stop"]);
+                }
+            });
+        });
+        if running && !attached && !elevated {
+            ui.weak(
+                "Pairing, the connected browser and sending files take administrator rights \
+                 while the service hosts: click Connect.",
+            );
+        }
+    }
+
+    /// Hands over to a copy of this app run as administrator (a UAC
+    /// prompt), which attaches to the service's host; with `pair`, it opens
+    /// pairing once attached. This copy exits once that one has started.
+    #[cfg(windows)]
+    fn hand_over(&mut self, pair: bool) {
+        let mut args = vec!["--after".to_string(), std::process::id().to_string()];
+        if pair {
+            args.push("--pair".into());
+        }
+        match crate::win::run_elevated(&args) {
+            Ok(()) => crate::win::hand_over(&self.host),
+            Err(e) => self.host.log(format!("connect to the service: {e:#}")),
+        }
+    }
+
+    /// Runs `service <rest>` as administrator: in a child process when this
+    /// app already is one (the result goes to the log), else with a UAC
+    /// prompt (the result shows in a message box).
+    #[cfg(windows)]
+    fn run_service(&mut self, rest: &[&str]) {
+        let args: Vec<String> = std::iter::once("service")
+            .chain(rest.iter().copied())
+            .map(String::from)
+            .collect();
+        let what = rest.first().copied().unwrap_or_default().to_string();
+        if self.service.elevated {
+            let host = self.host.clone();
+            let service = self.service.clone();
+            host.log(format!("service {what}..."));
+            let failed = format!("service {what}");
+            let spawned = std::thread::Builder::new()
+                .name("ws-service-cmd".into())
+                .spawn(move || {
+                    let result = std::env::current_exe().and_then(|exe| {
+                        std::process::Command::new(exe)
+                            .args(&args)
+                            .arg("--quiet")
+                            .output()
+                    });
+                    match result {
+                        Ok(out) if out.status.success() => {
+                            host.log(format!("service {what}: done"))
+                        }
+                        Ok(out) => {
+                            let text = String::from_utf8_lossy(&out.stdout);
+                            let last = text.lines().rev().find(|l| !l.trim().is_empty());
+                            host.log(format!(
+                                "service {what} failed: {}",
+                                last.unwrap_or("see service.log")
+                            ));
+                        }
+                        Err(e) => host.log(format!("service {what}: {e}")),
+                    }
+                    service.refresh();
+                });
+            if let Err(e) = spawned {
+                self.host.log(format!("{failed}: {e}"));
+            }
+        } else if let Err(e) = crate::win::run_elevated(&args) {
+            self.host.log(format!("service: {e:#}"));
+        }
+        self.service.refresh();
+    }
+
+    /// Where the running host (this app's own, or the service's) can be
+    /// reached.
+    fn running_ui(&mut self, ui: &mut egui::Ui, status: &Status) {
+        match status {
             Status::Failed(e) => {
                 ui.colored_label(Color32::RED, e);
             }
@@ -500,7 +669,24 @@ impl App {
         }
 
         ui.horizontal(|ui| {
-            if ui
+            // The service hosts, and its pairing takes an administrator.
+            #[cfg(windows)]
+            let hand_over = self.service_installed() == Some(true) && !self.service.elevated;
+            #[cfg(not(windows))]
+            let hand_over = false;
+            if hand_over {
+                if ui
+                    .button("Pair a browser (administrator)")
+                    .on_hover_text(
+                        "Opens this app as administrator, attached to the service, and lets a \
+                         browser ask for a pairing code for two minutes",
+                    )
+                    .clicked()
+                {
+                    #[cfg(windows)]
+                    self.hand_over(true);
+                }
+            } else if ui
                 .add_enabled(running, egui::Button::new("Pair a browser"))
                 .on_hover_text("Lets a browser ask for a pairing code for two minutes")
                 .clicked()
@@ -896,14 +1082,30 @@ impl App {
             ui.colored_label(Color32::RED, e);
         }
         let changed = self.draft != self.settings;
+        let service = self.service_installed().is_some();
         ui.horizontal(|ui| {
+            let (label, hover) = if service {
+                (
+                    "Save and apply to the service",
+                    "Reinstalls the service with these settings and restarts it (an \
+                     administrator prompt, unless this app runs as one)",
+                )
+            } else {
+                (
+                    "Save and restart",
+                    "Settings take effect when the host starts",
+                )
+            };
             if ui
-                .add_enabled(changed, egui::Button::new("Save and restart"))
-                .on_hover_text("Settings take effect when the host starts")
+                .add_enabled(changed, egui::Button::new(label))
+                .on_hover_text(hover)
                 .clicked()
                 && self.save_settings()
             {
-                if self.host.is_active() {
+                if service {
+                    #[cfg(windows)]
+                    self.apply_to_service();
+                } else if self.host.is_active() {
                     self.host.stop();
                     self.restart = true;
                 } else {
@@ -923,28 +1125,21 @@ impl App {
         }
     }
 
-    /// Whether the service is installed (`Some`) and running; asked again
-    /// every few seconds.
+    /// Reinstalls the service with the saved settings, which restarts it.
     #[cfg(windows)]
-    fn service_installed(&mut self) -> Option<bool> {
-        let stale = self
-            .service
-            .1
-            .is_none_or(|t| t.elapsed() > Duration::from_secs(3));
-        if stale {
-            self.service = (
-                ws_host::service::query().unwrap_or_else(|e| {
-                    tracing::warn!("could not ask about the service: {e:#}");
-                    None
-                }),
-                Some(Instant::now()),
-            );
+    fn apply_to_service(&mut self) {
+        match self.settings.service_args() {
+            Ok(rest) => {
+                let mut args = vec!["install"];
+                args.extend(rest.iter().map(String::as_str));
+                self.run_service(&args);
+            }
+            Err(e) => self.settings_error = Some(format!("{e:#}")),
         }
-        self.service.0
     }
 
     /// The web-stream service: streams the sign-in screen, UAC prompts and
-    /// elevated programs. Each action is a UAC prompt.
+    /// elevated programs. Each action takes an administrator.
     #[cfg(windows)]
     fn service_ui(&mut self, ui: &mut egui::Ui) {
         let installed = self.service_installed();
@@ -956,29 +1151,9 @@ impl App {
                  and has its own paired browsers",
             );
         ui.label(match installed {
-            None => "Not installed",
-            Some(true) => "Installed and running: it hosts this PC instead of this app",
-            Some(false) => "Installed, not running",
+            None => "Not installed: this app hosts",
+            Some(_) => "Installed: it hosts this PC instead of this app, with the saved settings",
         });
-        // (args, stop this app's host first)
-        let mut run: Option<(Vec<String>, bool)> = None;
-        let service = |rest: &[&str]| -> Vec<String> {
-            std::iter::once("service")
-                .chain(rest.iter().copied())
-                .map(String::from)
-                .collect()
-        };
-        let mut install = |run: &mut Option<(Vec<String>, bool)>, stop: bool| match self
-            .settings
-            .service_args()
-        {
-            Ok(rest) => {
-                let mut args = service(&["install"]);
-                args.extend(rest);
-                *run = Some((args, stop));
-            }
-            Err(e) => self.settings_error = Some(format!("{e:#}")),
-        };
         ui.horizontal_wrapped(|ui| match installed {
             None => {
                 if ui
@@ -989,57 +1164,32 @@ impl App {
                     )
                     .clicked()
                 {
-                    install(&mut run, true);
+                    // Once it is installed, this app's own host stops (see
+                    // service_watch); the service retries until the ports
+                    // are free.
+                    self.apply_to_service();
                 }
             }
             Some(_) => {
-                let buttons: [(&str, &str, &[&str]); 3] = [
-                    (
-                        "Pair through the service",
-                        "Opens the service console and pairing",
-                        &["console", "--pair"],
-                    ),
-                    (
-                        "Service console",
-                        "Pairing, the connected browser and files, for the service's host",
-                        &["console"],
-                    ),
-                    (
-                        "Update the service",
-                        "Copies this build to the service and restarts it",
-                        &["update"],
-                    ),
-                ];
-                for (label, hover, rest) in buttons {
-                    if ui.button(label).on_hover_text(hover).clicked() {
-                        run = Some((service(rest), false));
-                    }
-                }
                 if ui
-                    .button("Reinstall with these settings")
-                    .on_hover_text("The service takes the saved settings")
+                    .button("Update the service")
+                    .on_hover_text("Copies this build to the service and restarts it")
                     .clicked()
                 {
-                    install(&mut run, false);
+                    self.run_service(&["update"]);
                 }
                 if ui
                     .button("Uninstall")
-                    .on_hover_text("Removes the service; its paired browsers and logs stay")
+                    .on_hover_text(
+                        "Removes the service; its paired browsers and logs stay. Then this \
+                         app hosts again (Start)",
+                    )
                     .clicked()
                 {
-                    run = Some((service(&["uninstall"]), false));
+                    self.run_service(&["uninstall"]);
                 }
             }
         });
-        if let Some((args, stop_host)) = run {
-            match crate::win::run_elevated(&args) {
-                // The service retries until the ports are free.
-                Ok(()) if stop_host => self.host.stop(),
-                Ok(()) => {}
-                Err(e) => self.host.log(format!("service: {e:#}")),
-            }
-            self.service.1 = None;
-        }
     }
 
     fn log_ui(&self, ui: &mut egui::Ui) {

@@ -1,4 +1,4 @@
-// Pairing API client (same origin). See docs/signaling.md.
+// Pairing API client (same origin). See docs/dev/signaling.md.
 
 async function call(method, path, body) {
   const res = await fetch(path, {

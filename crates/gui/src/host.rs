@@ -72,6 +72,9 @@ pub struct State {
     /// Where the Cloudflare Tunnel serves the client, while it is up.
     pub tunnel_url: Option<String>,
     pub log: VecDeque<String>,
+    /// What runs (or ran last) is the Windows service's host, attached to,
+    /// not this app's own.
+    pub service: bool,
 }
 
 impl State {
@@ -229,14 +232,24 @@ impl State {
         self.connected = None;
         self.shared.clear();
         self.tunnel_url = None;
+        let what = if self.service {
+            "detached from the service's host"
+        } else {
+            "host stopped"
+        };
         match result {
             Ok(()) => {
                 self.status = Status::Stopped;
-                self.log("host stopped");
+                self.log(what);
             }
             Err(e) => {
                 let e = format!("{e:#}");
-                self.log(format!("host stopped: {e}"));
+                let line = format!("{what}: {e}");
+                // Attaching is tried again every few seconds while the
+                // service's host is down: once in the log is enough.
+                if self.log.back() != Some(&line) {
+                    self.log(line);
+                }
                 self.status = Status::Failed(e);
             }
         }
@@ -275,6 +288,7 @@ impl Host {
                     shared: Vec::new(),
                     tunnel_url: None,
                     log: VecDeque::new(),
+                    service: false,
                 }),
                 commands: Mutex::new(None),
                 thread: Mutex::new(None),
@@ -308,18 +322,44 @@ impl Host {
 
     /// Starts the host unless one is still running.
     pub fn start(&self, opts: ServeOptions) {
+        self.spawn(false, move |host, commands| host.run(opts, commands));
+    }
+
+    /// Attaches to the Windows service's host on its control pipe, unless
+    /// a host (this app's own, or the service's) is still active: it shows
+    /// and takes commands as this app's own would. Needs an elevated
+    /// administrator. Ends when the service's host stops.
+    #[cfg(windows)]
+    pub fn attach(&self) {
+        self.spawn(true, |host, commands| host.run_attached(commands));
+    }
+
+    /// True while attached to the service's host (or trying to).
+    pub fn attached(&self) -> bool {
+        self.is_active() && self.state().service
+    }
+
+    fn spawn(
+        &self,
+        service: bool,
+        run: impl FnOnce(&Host, mpsc::Receiver<Command>) -> anyhow::Result<()> + Send + 'static,
+    ) {
         if self.is_active() {
             return;
         }
         let (commands, commands_rx) = mpsc::channel(8);
         *self.shared.commands.lock().expect("host commands lock") = Some(commands);
-        self.state().status = Status::Starting;
+        {
+            let mut state = self.state();
+            state.status = Status::Starting;
+            state.service = service;
+        }
         let host = self.clone();
         let thread = std::thread::Builder::new()
             .name("ws-host".into())
             .spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    host.run(opts, commands_rx)
+                    run(&host, commands_rx)
                 }))
                 .unwrap_or_else(|_| Err(anyhow::anyhow!("the host crashed (see the log)")));
                 host.state().stopped(result);
@@ -327,6 +367,26 @@ impl Host {
             })
             .expect("spawn host thread");
         *self.shared.thread.lock().expect("host thread lock") = Some(thread);
+    }
+
+    #[cfg(windows)]
+    fn run_attached(&self, commands: mpsc::Receiver<Command>) -> anyhow::Result<()> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let (events_tx, mut events) = mpsc::unbounded_channel::<Event>();
+        let host = self.clone();
+        let pump = rt.spawn(async move {
+            while let Some(e) = events.recv().await {
+                host.state().apply(e.clone());
+                (host.on_change)(Some(&e));
+            }
+        });
+        let result = rt.block_on(ws_host::service::control::attach(commands, events_tx));
+        rt.block_on(async {
+            let _ = tokio::time::timeout(Duration::from_millis(500), pump).await;
+        });
+        result
     }
 
     /// One runtime per run: dropping it closes every socket the host opened,
@@ -367,6 +427,7 @@ impl Host {
     }
 
     /// Asks the host to stop; [`Host::is_active`] turns false when it has.
+    /// Attached to the service's host, only detaches.
     pub fn stop(&self) {
         if !self.is_active() {
             return;

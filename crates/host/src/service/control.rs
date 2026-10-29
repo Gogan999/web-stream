@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use crate::options::ServeOptions;
 use crate::serve::{self, Event};
-use anyhow::Context;
+use anyhow::{Context, bail};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeServer, ServerOptions};
 use tokio::sync::{broadcast, mpsc};
@@ -26,7 +26,7 @@ use windows::Win32::System::Pipes::GetNamedPipeServerProcessId;
 use windows::core::PCWSTR;
 
 use super::launch::wide;
-use crate::console::{CONSOLE_HELP, Line, describe, parse_line};
+use crate::console::{self, EVENTS_JSON, command_lines, describe};
 
 /// Protected DACL: full access for SYSTEM and Administrators, nobody else.
 /// An administrator's unelevated token has Administrators as deny-only, so
@@ -42,10 +42,9 @@ const ERROR_PIPE_BUSY: i32 = 231;
 /// network host at the other end serves the browser.
 pub async fn serve(pipe: String, link: usize, opts: ServeOptions) -> anyhow::Result<()> {
     let (commands, commands_rx) = mpsc::channel(8);
-    let (events_tx, mut events) = mpsc::unbounded_channel();
-    let (lines, _) = broadcast::channel::<String>(256);
-    // What the host printed on starting, for each console that connects.
-    let started = Arc::new(Mutex::new(None::<String>));
+    let (events_tx, mut events) = mpsc::unbounded_channel::<Event>();
+    let (sent, _) = broadcast::channel::<Event>(256);
+    let snapshot = Arc::new(Mutex::new(console::Snapshot::default()));
 
     // The first instance fails if anyone else holds the name.
     let first = create(&pipe, true).with_context(|| format!("control pipe {pipe} is taken"))?;
@@ -53,18 +52,19 @@ pub async fn serve(pipe: String, link: usize, opts: ServeOptions) -> anyhow::Res
         pipe,
         first,
         commands,
-        lines.clone(),
-        started.clone(),
+        sent.clone(),
+        snapshot.clone(),
     ));
     tokio::spawn(async move {
         while let Some(e) = events.recv().await {
-            let is_start = matches!(e, Event::Started { .. });
-            let Some(text) = describe(e) else { continue };
-            tracing::info!("{text}");
-            if is_start {
-                *started.lock().unwrap() = Some(text.clone());
+            if let Some(text) = describe(e.clone()) {
+                tracing::info!("{text}");
             }
-            let _ = lines.send(text);
+            // Under the lock, so a console that connects now gets either
+            // the snapshot with this event, or this event.
+            let mut snapshot = snapshot.lock().unwrap();
+            snapshot.update(&e);
+            let _ = sent.send(e);
         }
     });
     if link == 0 {
@@ -116,8 +116,8 @@ async fn accept(
     name: String,
     mut server: NamedPipeServer,
     commands: mpsc::Sender<serve::Command>,
-    lines: broadcast::Sender<String>,
-    started: Arc<Mutex<Option<String>>>,
+    sent: broadcast::Sender<Event>,
+    snapshot: Arc<Mutex<console::Snapshot>>,
 ) {
     loop {
         let connected = server.connect().await;
@@ -133,62 +133,11 @@ async fn accept(
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             continue;
         }
-        let greeting = started.lock().unwrap().clone();
-        tokio::spawn(client_session(
-            client,
-            commands.clone(),
-            lines.subscribe(),
-            greeting,
-        ));
-    }
-}
-
-async fn client_session(
-    client: NamedPipeServer,
-    commands: mpsc::Sender<serve::Command>,
-    mut lines: broadcast::Receiver<String>,
-    greeting: Option<String>,
-) {
-    let (read, mut write) = tokio::io::split(client);
-    let mut read = BufReader::new(read).lines();
-    if let Some(text) = greeting {
-        if write
-            .write_all(format!("{text}\n").as_bytes())
-            .await
-            .is_err()
-        {
-            return;
-        }
-    }
-    loop {
-        tokio::select! {
-            line = read.next_line() => {
-                let Ok(Some(line)) = line else { return };
-                match parse_line(&line) {
-                    Line::Command(cmd) => {
-                        if commands.send(cmd).await.is_err() {
-                            return;
-                        }
-                    }
-                    Line::Empty => {}
-                    Line::Help => {
-                        let help = format!("{CONSOLE_HELP}\n(quit restarts the host)\n");
-                        if write.write_all(help.as_bytes()).await.is_err() {
-                            return;
-                        }
-                    }
-                }
-            }
-            text = lines.recv() => match text {
-                Ok(text) => {
-                    if write.write_all(format!("{text}\n").as_bytes()).await.is_err() {
-                        return;
-                    }
-                }
-                Err(broadcast::error::RecvError::Lagged(_)) => {}
-                Err(broadcast::error::RecvError::Closed) => return,
-            },
-        }
+        let (greeting, events) = {
+            let snapshot = snapshot.lock().unwrap();
+            (snapshot.events(), sent.subscribe())
+        };
+        tokio::spawn(console::session(client, commands.clone(), events, greeting));
     }
 }
 
@@ -239,83 +188,58 @@ fn check_server(handle: HANDLE, name: &str, pid: u32) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A connection to the service's host on its control pipe: what the host
-/// says, and the commands typed into it. The tray app's service console
-/// window, run as an elevated administrator, is the one user.
-pub struct ServiceConsole {
-    /// Lines from the host; disconnected once the host stops or the pipe
-    /// breaks.
-    pub lines: std::sync::mpsc::Receiver<String>,
-    commands: mpsc::UnboundedSender<String>,
-}
-
-impl ServiceConsole {
-    /// Types `line` (`pair`, `drop`, `unpair-all`, `send <path>`) into the
-    /// host; false once the connection is gone.
-    pub fn send(&self, line: &str) -> bool {
-        self.commands.send(line.to_owned()).is_ok()
-    }
-}
-
-/// Connects to the service's host, checking it is the process the service
-/// started. `notify` is called (on another thread) after each line.
-pub fn connect(notify: impl Fn() + Send + 'static) -> anyhow::Result<ServiceConsole> {
-    let (lines_tx, lines) = std::sync::mpsc::channel();
-    let (commands, mut commands_rx) = mpsc::unbounded_channel::<String>();
-    let (ready_tx, ready) = std::sync::mpsc::sync_channel::<anyhow::Result<()>>(1);
-    std::thread::Builder::new()
-        .name("ws-service-console".into())
-        .spawn(move || {
-            let rt = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
-                Err(e) => {
-                    let _ = ready_tx.send(Err(e.into()));
-                    return;
-                }
-            };
-            rt.block_on(async move {
-                let client = match open_client().await {
-                    Ok(c) => c,
-                    Err(e) => {
-                        let _ = ready_tx.send(Err(e));
-                        return;
-                    }
+/// Attaches to the service's host, checking it is the process the service
+/// started, and passes on its events until the pipe breaks (the host
+/// stopped) or `commands` closes. The tray app, run as an elevated
+/// administrator, is the one user: it shows the service's host as it
+/// would its own. [`serve::Command::Quit`] only detaches; it never stops
+/// the service's host.
+pub async fn attach(
+    mut commands: mpsc::Receiver<serve::Command>,
+    events: mpsc::UnboundedSender<Event>,
+) -> anyhow::Result<()> {
+    let client = open_client().await?;
+    let (read, mut write) = tokio::io::split(client);
+    let mut read = BufReader::new(read).lines();
+    write
+        .write_all(format!("{EVENTS_JSON}\n").as_bytes())
+        .await
+        .context("write to the service's host")?;
+    loop {
+        tokio::select! {
+            line = read.next_line() => {
+                let Some(line) = line.context("read from the service's host")? else {
+                    bail!("the service's host stopped; the service starts it again");
                 };
-                let _ = ready_tx.send(Ok(()));
-                let (read, mut write) = tokio::io::split(client);
-                let mut read = BufReader::new(read).lines();
-                loop {
-                    tokio::select! {
-                        line = read.next_line() => {
-                            let Ok(Some(line)) = line else {
-                                let _ = lines_tx.send(
-                                    "the service's host stopped; the service starts it again".into(),
-                                );
-                                notify();
-                                return;
-                            };
-                            if lines_tx.send(line).is_err() {
-                                return;
-                            }
-                            notify();
-                        }
-                        cmd = commands_rx.recv() => {
-                            let Some(cmd) = cmd else { return };
-                            if write.write_all(format!("{cmd}\n").as_bytes()).await.is_err() {
-                                return;
-                            }
-                        }
-                    }
+                if line.trim().is_empty() {
+                    continue;
                 }
-            });
-        })?;
-    ready
-        .recv()
-        .unwrap_or_else(|_| Err(anyhow::anyhow!("the control pipe thread stopped")))?;
-    Ok(ServiceConsole { lines, commands })
+                // A build from before the tray app could attach greets
+                // in text.
+                let e = serde_json::from_str::<Event>(&line).map_err(|_| {
+                    anyhow::anyhow!(
+                        "the service runs an older build: click \"Update the service\" \
+                         in the settings"
+                    )
+                })?;
+                if events.send(e).is_err() {
+                    return Ok(());
+                }
+            }
+            cmd = commands.recv() => {
+                let Some(cmd) = cmd else { return Ok(()) };
+                if cmd == serve::Command::Quit {
+                    return Ok(());
+                }
+                for line in command_lines(&cmd) {
+                    write
+                        .write_all(format!("{line}\n").as_bytes())
+                        .await
+                        .context("write to the service's host")?;
+                }
+            }
+        }
+    }
 }
 
 async fn open_client() -> anyhow::Result<tokio::net::windows::named_pipe::NamedPipeClient> {

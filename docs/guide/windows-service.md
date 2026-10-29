@@ -28,15 +28,26 @@ and types into programs running as administrator.
 
 ## Using it
 
-- **The tray app stops its own host** when installing the service, and
-  doesn't start it while the service is installed, because they use the
-  same ports. It keeps running in the tray as the service's front end.
+- **Only one host runs.** While the service is installed the tray app never
+  starts a host of its own, because they use the same ports: it stops its
+  own when it sees the service, and **Start** is replaced by the service's
+  state.
+- **The tray app attaches to the service.** Run as administrator, it shows
+  the service's host in its own window as it would its own: the addresses,
+  pairing codes and QR code, the connected browser, sending files. Click
+  **Connect (administrator)** (one UAC prompt): the app reopens as
+  administrator and attaches, and attaches again by itself whenever the
+  service restarts its host. Without administrator rights it only shows
+  whether the service runs, because pairing with the service lets a
+  browser answer UAC prompts.
+- **Settings go to the service.** With the service installed, **Save and
+  apply to the service** saves the settings and reinstalls the service with
+  them, which restarts it. Once attached, that takes no further prompt.
+  **Start the service** and **Stop the service** do what they say.
 - **Pair again.** The service has its own certificate (the browser warns
-  about a new one) and its own paired browsers. Click **Pair through the
-  service** (an administrator prompt), request a code in the browser, and
-  type the code the service console window shows. **Service console** opens
-  the same window without pairing, with **Disconnect the browser**,
-  **Share files...** and **Unpair every browser**.
+  about a new one) and its own paired browsers. Click **Pair a browser
+  (administrator)**, or **Pair a browser** once attached, request a code in
+  the browser, and type the code the app shows.
 - **Updating:** a newer installer updates the service in place. From
   source, `scripts\update.ps1` updates it too (one UAC prompt), or build and
   click **Update the service** in the tray app.
@@ -51,7 +62,7 @@ and types into programs running as administrator.
 
 The service refuses a few settings: serving the web client from a folder,
 receiving files from the browser, and updates from the browser. Sending
-files from the host still works through the service console.
+files from the host still works from the tray app, attached to the service.
 
 ## Ctrl+Alt+Del
 
@@ -107,8 +118,8 @@ everyone else:
   from can't swap them.
 - **The control pipe can't be impersonated.** The service picks a new
   random name for it each time it starts the host and records it, with the
-  host's process id, in its data folder. The service console connects only
-  if that process answers.
+  host's process id, in its data folder. The tray app attaches only if that
+  process answers.
 - **Brief gap on restart.** While the host restarts (signing out, switching
   users) the ports are briefly free and any local program could listen on
   them. A browser that connects then sees a certificate other than the one

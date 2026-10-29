@@ -9,6 +9,10 @@ the host.
 Only one copy of the app runs at a time. Starting it again brings the
 existing window forward.
 
+While the [Windows service](windows-service.md) is installed, the app
+never hosts on its own: the service does, and the app, run as
+administrator, attaches to it and shows it in this window.
+
 ## The window
 
 - **Status:** whether the host is running, the addresses to open in a
@@ -23,7 +27,7 @@ existing window forward.
 - **Send file...:** offers files to the connected browser (or drop files
   onto the window). See [Sharing files](#sharing-files).
 - **Settings:** see below.
-- **Windows service:** installs, pairs, updates and removes the service
+- **Windows service:** installs, updates and removes the service
   that also streams the sign-in screen and UAC prompts. See
   [Sign-in screen and administrator programs](windows-service.md).
 - **Start with Windows:** starts the app in the tray when you sign in.
@@ -48,7 +52,8 @@ The settings cover:
 | Permissions | Let the browser change this PC's resolution, send files to this PC, and update and restart the host |
 | More options | Any other host option, as command-line flags (see the [host options reference](../dev/host-options.md)); quote paths that contain spaces |
 
-**Save and restart** applies the changes. A browser that is streaming is
+**Save and restart** applies the changes (with the Windows service
+installed, **Save and apply to the service** applies them to the service). A browser that is streaming is
 disconnected and can reconnect straight away. While hosting, the window also
 lists the ports to forward on the router.
 

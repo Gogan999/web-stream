@@ -1,5 +1,5 @@
 //! WebRTC data channel labels. The host opens all of them (see
-//! `docs/signaling.md`); the browser picks them up in `ondatachannel`.
+//! `docs/dev/signaling.md`); the browser picks them up in `ondatachannel`.
 
 /// Ordered, reliable: [`crate::ClientControl`] / [`crate::HostControl`].
 pub const CONTROL: &str = "control";

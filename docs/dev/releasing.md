@@ -19,11 +19,11 @@ pre-release) on a commit on `main`, with `version` in `Cargo.toml`'s
    `SHA256SUMS.txt`, and creates the GitHub release with them and the files.
 
 Release files are not signed, and nothing needs a key or a secret. The
-hashes in `manifest.json` let the host's updater (Phase 2) check that a
+hashes in `manifest.json` let the host's built-in updater (planned) check that a
 download is complete and is the file the release lists; trust in the
 release itself comes from GitHub (only the repository's maintainers can
 publish one, over HTTPS). Windows code signing isn't used either: friends
-click past SmartScreen (see `friend-guide.md`).
+click past SmartScreen (see [Getting started](../guide/getting-started.md)).
 
 ## Optional: approve each release
 

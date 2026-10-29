@@ -1,4 +1,4 @@
-//! Signaling and pairing messages, as specified in `docs/signaling.md`
+//! Signaling and pairing messages, as specified in `docs/dev/signaling.md`
 //! (owned by the transport work). The host serves both itself: pairing over
 //! same-origin HTTPS under `/api`, signaling over the `/ws` WebSocket. The
 //! host is always the offerer and never trickles candidates.

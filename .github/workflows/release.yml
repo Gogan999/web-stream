@@ -3,7 +3,7 @@ name: release
 # Push a tag vX.Y.Z (or vX.Y.Z-rc.1 for a pre-release) on a commit on main,
 # or run it from the Actions tab on main with the version and notes; then the
 # tag is made only once the build has passed. The build runs on its own; publishing waits for approval in the `release`
-# environment if it has a required reviewer. See docs/releasing.md.
+# environment if it has a required reviewer. See docs/dev/releasing.md.
 on:
   push:
     tags: ['v*']

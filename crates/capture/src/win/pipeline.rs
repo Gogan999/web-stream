@@ -754,7 +754,7 @@ fn deliver(
             |from: Instant, to: Instant| to.saturating_duration_since(from).as_secs_f64() * 1000.0;
         diag!(
             "frame",
-            "idx={} idr={} intra={} repair={} why={} repeat={} bytes={bytes} held_ms={:.2} enc_ms={:.2} kbps={} out={out} pre_ms={:.2} slot_ms={:.2} submit_ms={:.2} event_ms={:.2} bits_ms={:.2} inenc_ms={:.2} submit_at_us={} wait_at_us={} completed_at_us={}",
+            "idx={} idr={} intra={} repair={} why={} repeat={} bytes={bytes} held_ms={:.2} enc_ms={:.2} kbps={} out={out} pre_ms={:.2} slot_ms={:.2} submit_ms={:.2} event_ms={:.2} bits_ms={:.2} inenc_ms={:.2} submit_at_us={} wait_at_us={} completed_at_us={} lock_retries={}",
             meta.index,
             meta.idr,
             meta.intra,
@@ -773,6 +773,7 @@ fn deliver(
             mono_micros(t.submitted),
             mono_micros(t.wait_at),
             mono_micros(t.completed),
+            t.lock_retries,
         );
         let done = Instant::now();
         let since = *stats.since.get_or_insert(done);

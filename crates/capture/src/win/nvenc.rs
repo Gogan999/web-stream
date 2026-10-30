@@ -127,6 +127,44 @@ macro_rules! call {
 pub(crate) const SLOTS: usize = 2;
 /// A frame not out of the encoder in this long means the GPU hung.
 const FRAME_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long after the completion event the lock is retried by yielding
+/// rather than sleeping. The wait that is left is expected to be a few
+/// milliseconds at most, and a flat sleep would round it up to its own
+/// granule (and `thread::sleep` on Windows is coarser than asked, since this
+/// crate never raises the timer resolution), so the lock would end up no
+/// quicker than the blocking call it replaces.
+const LOCK_SPIN_WINDOW: Duration = Duration::from_micros(500);
+/// The sleep between attempts once the spin window has passed, so a long
+/// wait does not burn a core.
+const LOCK_SLEEP: Duration = Duration::from_millis(1);
+
+/// What to do after the lock answered `NV_ENC_ERR_LOCK_BUSY`.
+#[derive(Debug, PartialEq, Eq)]
+enum LockBackoff {
+    /// Try again at once.
+    Now,
+    /// Give up the time slice, then try again.
+    Yield,
+    /// Sleep this long, then try again.
+    Sleep(Duration),
+    /// The frame has not become lockable within `FRAME_TIMEOUT`.
+    GiveUp,
+}
+
+/// The retry policy for a busy lock, given the time since the completion
+/// event and how many retries have been made. Pure, so it can be tested
+/// without an encoder.
+fn lock_backoff(since_completed: Duration, retries: u32) -> LockBackoff {
+    if since_completed >= FRAME_TIMEOUT {
+        LockBackoff::GiveUp
+    } else if retries == 0 {
+        LockBackoff::Now
+    } else if since_completed < LOCK_SPIN_WINDOW {
+        LockBackoff::Yield
+    } else {
+        LockBackoff::Sleep(LOCK_SLEEP)
+    }
+}
 /// Sent in place of a slot once a frame has failed: the encoder is done for.
 const FAILED_SLOT: usize = usize::MAX;
 
@@ -177,6 +215,9 @@ pub(crate) struct EncodeTiming {
     pub completed: Instant,
     /// The bitstream was copied out and unlocked.
     pub done: Instant,
+    /// How many times the lock answered `NV_ENC_ERR_LOCK_BUSY` and was tried
+    /// again. Reported on the `frame` line to show whether it happens at all.
+    pub lock_retries: u32,
 }
 
 /// What the output thread hands on for each frame.
@@ -950,7 +991,7 @@ fn output_loop<M: Send>(
         let done = Instant::now();
         let encode_time = done.saturating_duration_since(p.submitted);
         match result {
-            Ok((data, keyframe, completed)) => {
+            Ok((data, keyframe, completed, lock_retries)) => {
                 // Back first: the capture thread may be waiting for it.
                 let _ = returned.send(p.slot);
                 on_output(Ok(Encoded {
@@ -965,6 +1006,7 @@ fn output_loop<M: Send>(
                         wait_at,
                         completed,
                         done,
+                        lock_retries,
                     },
                 }));
             }
@@ -987,9 +1029,10 @@ fn output_loop<M: Send>(
 
 /// Waits for one frame and copies its bitstream out. The instant the wait
 /// ended comes back with it, so the wait can be told apart from the copy.
-fn finish<M>(session: Session, p: &Pending<M>) -> Result<(Bytes, bool, Instant)> {
+fn finish<M>(session: Session, p: &Pending<M>) -> Result<(Bytes, bool, Instant, u32)> {
     let Session { api, encoder } = session;
-    if !p.event.is_null() {
+    let asynchronous = !p.event.is_null();
+    if asynchronous {
         let waited =
             unsafe { WaitForSingleObject(HANDLE(p.event), FRAME_TIMEOUT.as_millis() as u32) };
         if waited != WAIT_OBJECT_0 {
@@ -1000,18 +1043,49 @@ fn finish<M>(session: Session, p: &Pending<M>) -> Result<(Bytes, bool, Instant)>
         }
     }
     let completed = Instant::now();
-    let mut lock = nv::NV_ENC_LOCK_BITSTREAM {
-        version: nv::NV_ENC_LOCK_BITSTREAM_VER,
-        outputBitstream: p.bitstream,
-        ..Default::default()
-    };
-    let status = unsafe { call!(api, nvEncLockBitstream(encoder, &mut lock)) };
-    if status != nv::NVENCSTATUS::NV_ENC_SUCCESS {
+    let mut lock_retries = 0u32;
+    let lock = loop {
+        let mut lock = nv::NV_ENC_LOCK_BITSTREAM {
+            version: nv::NV_ENC_LOCK_BITSTREAM_VER,
+            outputBitstream: p.bitstream,
+            ..Default::default()
+        };
+        // NVIDIA's Video Codec SDK Programming Guide documents two patterns.
+        // A synchronous client leaves `doNotWait` at 0, because the lock call
+        // is what waits for the frame (section 6.2). An asynchronous client
+        // has already waited on the completion event and locks with
+        // `doNotWait` set (section 6.1), so the lock reports the frame
+        // instead of blocking in the driver.
+        if asynchronous {
+            lock.set_doNotWait(1);
+        }
+        let status = unsafe { call!(api, nvEncLockBitstream(encoder, &mut lock)) };
+        if status == nv::NVENCSTATUS::NV_ENC_SUCCESS {
+            break lock;
+        }
+        // Documented as non-fatal: try again after a few milliseconds. The
+        // sleep keeps this from spinning, and the deadline from waiting on a
+        // frame that never becomes lockable.
+        if status == nv::NVENCSTATUS::NV_ENC_ERR_LOCK_BUSY {
+            match lock_backoff(completed.elapsed(), lock_retries) {
+                LockBackoff::GiveUp => {
+                    return Err(CaptureError::Platform(format!(
+                        "the encoder did not finish a frame in {} s",
+                        FRAME_TIMEOUT.as_secs()
+                    )));
+                }
+                LockBackoff::Now => {}
+                LockBackoff::Yield => std::thread::yield_now(),
+                LockBackoff::Sleep(d) => std::thread::sleep(d),
+            }
+            lock_retries += 1;
+            continue;
+        }
         return Err(CaptureError::Platform(format!(
             "nvEncLockBitstream: {}",
             last_error(api, encoder, status)
         )));
-    }
+    };
     // SAFETY: NVENC guarantees the pointer/size describe the locked
     // bitstream until nvEncUnlockBitstream.
     let data: &[u8] = if lock.bitstreamBufferPtr.is_null() || lock.bitstreamSizeInBytes == 0 {
@@ -1033,7 +1107,7 @@ fn finish<M>(session: Session, p: &Pending<M>) -> Result<(Bytes, bool, Instant)>
             last_error(api, encoder, status)
         )));
     }
-    Ok((data, keyframe, completed))
+    Ok((data, keyframe, completed, lock_retries))
 }
 
 fn last_error(
@@ -1100,4 +1174,42 @@ fn set_vui_bt709(vui: &mut nv::NV_ENC_CONFIG_H264_VUI_PARAMETERS) {
     vui.transferCharacteristics =
         nv::NV_ENC_VUI_TRANSFER_CHARACTERISTIC::NV_ENC_VUI_TRANSFER_CHARACTERISTIC_BT709;
     vui.colourMatrix = nv::NV_ENC_VUI_MATRIX_COEFFS::NV_ENC_VUI_MATRIX_COEFFS_BT709;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn first_retry_is_immediate() {
+        assert_eq!(lock_backoff(Duration::ZERO, 0), LockBackoff::Now);
+        assert_eq!(lock_backoff(Duration::from_millis(3), 0), LockBackoff::Now);
+    }
+
+    #[test]
+    fn yields_inside_the_spin_window() {
+        let t = LOCK_SPIN_WINDOW - Duration::from_micros(1);
+        assert_eq!(lock_backoff(t, 1), LockBackoff::Yield);
+    }
+
+    #[test]
+    fn sleeps_after_the_spin_window() {
+        assert_eq!(
+            lock_backoff(LOCK_SPIN_WINDOW, 5),
+            LockBackoff::Sleep(LOCK_SLEEP)
+        );
+        assert_eq!(
+            lock_backoff(FRAME_TIMEOUT - Duration::from_millis(1), 100),
+            LockBackoff::Sleep(LOCK_SLEEP)
+        );
+    }
+
+    #[test]
+    fn gives_up_at_the_frame_timeout() {
+        assert_eq!(lock_backoff(FRAME_TIMEOUT, 0), LockBackoff::GiveUp);
+        assert_eq!(
+            lock_backoff(FRAME_TIMEOUT + Duration::from_secs(1), 9),
+            LockBackoff::GiveUp
+        );
+    }
 }

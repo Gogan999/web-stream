@@ -78,12 +78,15 @@ pub struct Session {
     unsupported_codec: Option<VideoCodec>,
 }
 
-pub enum Step {
+/// One thing str0m produced, handed to the sink given to [`Session::poll`] as
+/// it is produced. A transmit borrows str0m's own packet buffer, so the media
+/// path makes no copy of its own: the sink sends it before polling goes on.
+pub enum Step<'a> {
     Transmit {
         proto: Protocol,
         source: SocketAddr,
         destination: SocketAddr,
-        data: Vec<u8>,
+        data: &'a [u8],
     },
     Event(TransportEvent),
 }
@@ -434,7 +437,9 @@ impl Session {
     }
 
     /// Drain everything str0m has to say until it only has a timeout left.
-    pub fn poll(&mut self, out: &mut Vec<Step>) -> Instant {
+    /// Each step goes to `out` the moment str0m yields it, so packets and
+    /// events keep str0m's order and a transmit never outlives its poll.
+    pub fn poll(&mut self, mut out: impl FnMut(Step<'_>)) -> Instant {
         let mut early = 0;
         let mut fed: Option<Instant> = None;
         loop {
@@ -462,22 +467,22 @@ impl Session {
                         return t;
                     }
                 }
-                Ok(Output::Transmit(t)) => out.push(Step::Transmit {
+                Ok(Output::Transmit(t)) => out(Step::Transmit {
                     proto: t.proto,
                     source: t.source,
                     destination: t.destination,
-                    data: t.contents.to_vec(),
+                    data: &t.contents,
                 }),
                 Ok(Output::Event(e)) => {
                     if let Some(ev) = self.translate(e) {
-                        out.push(Step::Event(ev));
+                        out(Step::Event(ev));
                     }
                 }
                 Err(e) => {
                     tracing::warn!("rtc failed: {e}");
                     self.rtc.disconnect();
                     if self.mark_down() {
-                        out.push(Step::Event(TransportEvent::Disconnected));
+                        out(Step::Event(TransportEvent::Disconnected));
                     }
                     return Instant::now() + Duration::from_secs(1);
                 }
@@ -703,5 +708,89 @@ mod tests {
         assert!(!follows(Some(5), &repair(8, 6)));
         // Still nothing to build on before the first keyframe.
         assert!(!follows(None, &repair(8, 0)));
+    }
+
+    /// The sink fires, at least one packet reaches it before `Connected`, and
+    /// replaying the packets to the client in the order the sink saw them
+    /// completes the handshake. Ordering needs no test of its own: the sink
+    /// runs in str0m's yield order, just as the old code pushed to and drained
+    /// a `Vec` in that order, so there is no reordering to regress;
+    /// `tests/loopback.rs` is the behavioural net.
+    #[test]
+    fn poll_hands_packets_to_the_sink_before_connecting() {
+        use str0m::change::SdpOffer;
+
+        let host: SocketAddr = "127.0.0.1:10000".parse().unwrap();
+        let peer: SocketAddr = "127.0.0.1:10001".parse().unwrap();
+        let t0 = Instant::now();
+        let (mut session, offer) = Session::offer(
+            &TransportConfig::default(),
+            &[Candidate::host(host, "udp").unwrap()],
+            t0,
+        )
+        .unwrap();
+        let mut client = Rtc::builder().build(t0);
+        client.add_local_candidate(Candidate::host(peer, "udp").unwrap());
+        let answer = client
+            .sdp_api()
+            .accept_offer(SdpOffer::from_sdp_string(&offer).unwrap())
+            .unwrap();
+        session.accept_answer(&answer.to_sdp_string()).unwrap();
+
+        // What the client says goes to the session; what the session's sink
+        // sees goes back, in the order the sink saw it.
+        let mut sent_before_connected = 0;
+        let mut connected = false;
+        for _ in 0..200 {
+            let mut to_session = Vec::new();
+            while let Ok(out) = client.poll_output() {
+                match out {
+                    Output::Transmit(t) => to_session.push(t.contents.to_vec()),
+                    Output::Event(_) => {}
+                    Output::Timeout(_) => break,
+                }
+            }
+            for p in to_session {
+                session.receive(Instant::now(), Protocol::Udp, peer, host, &p);
+            }
+            let mut to_client = Vec::new();
+            session.poll(|step| match step {
+                Step::Transmit { data, .. } => {
+                    if !connected {
+                        sent_before_connected += 1;
+                    }
+                    to_client.push(data.to_vec());
+                }
+                Step::Event(TransportEvent::Connected) => {
+                    connected = true;
+                }
+                Step::Event(_) => {}
+            });
+            for p in to_client {
+                let contents = p.as_slice().try_into().unwrap();
+                client
+                    .handle_input(Input::Receive(
+                        Instant::now(),
+                        Receive {
+                            proto: Protocol::Udp,
+                            source: host,
+                            destination: peer,
+                            contents,
+                        },
+                    ))
+                    .unwrap();
+            }
+            if connected {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+            client.handle_input(Input::Timeout(Instant::now())).unwrap();
+        }
+        assert!(connected, "the handshake never completed");
+
+        assert!(
+            sent_before_connected > 0,
+            "Connected came with no packets before it"
+        );
     }
 }

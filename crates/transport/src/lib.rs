@@ -586,7 +586,6 @@ impl Transport {
                         confirmed: HashSet::new(),
                         session: None,
                         shared: thread_shared,
-                        steps: Vec::new(),
                         last_estimate: None,
                     };
                     if ready_tx.send(Ok(())).is_err() {
@@ -872,7 +871,6 @@ struct Driver {
     confirmed: HashSet<SocketAddr>,
     session: Option<Session>,
     shared: Arc<Shared>,
-    steps: Vec<Step>,
     /// The last bandwidth estimate, and when.
     last_estimate: Option<(u64, Instant)>,
 }
@@ -980,9 +978,10 @@ impl Driver {
         let Some(s) = &mut self.session else {
             return Instant::now() + Duration::from_secs(3600);
         };
-        let deadline = s.poll(&mut self.steps);
-        let alive = s.is_alive();
-        for step in self.steps.drain(..) {
+        // Each step is acted on as str0m yields it, so a packet goes to the socket
+        // straight from str0m's buffer, in order, and an event still takes effect
+        // after the packets before it and before those after it.
+        let deadline = s.poll(|step| {
             match step {
                 Step::Transmit {
                     proto,
@@ -996,7 +995,7 @@ impl Driver {
                             .expect("filter lock")
                             .confirm(destination);
                     }
-                    if !self.net.send(proto, source, destination, &data) {
+                    if !self.net.send(proto, source, destination, data) {
                         diag!(
                             "send_drop",
                             "proto={proto:?} dst={destination} bytes={}",
@@ -1042,7 +1041,8 @@ impl Driver {
                     ev => self.shared.emit(ev),
                 },
             }
-        }
+        });
+        let alive = s.is_alive();
         if !alive {
             self.end_session();
         } else if let Some(s) = &mut self.session {

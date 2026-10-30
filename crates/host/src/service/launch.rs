@@ -42,9 +42,9 @@ use windows::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_ATTRIBUTE_DIRECTORY,
     FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_FIRST_PIPE_INSTANCE,
     FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_OVERLAPPED, FILE_FLAGS_AND_ATTRIBUTES,
-    FILE_READ_ATTRIBUTES, FILE_SHARE_NONE, FILE_SHARE_READ, GetFileInformationByHandle,
-    OPEN_EXISTING, PIPE_ACCESS_DUPLEX, READ_CONTROL, SECURITY_IDENTIFICATION,
-    SECURITY_SQOS_PRESENT, WRITE_DAC,
+    FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_NONE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    GetFileInformationByHandle, OPEN_EXISTING, PIPE_ACCESS_DUPLEX, READ_CONTROL,
+    SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT, WRITE_DAC,
 };
 use windows::Win32::System::Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock};
 use windows::Win32::System::JobObjects::{
@@ -82,6 +82,17 @@ const KEEP_PRIVILEGES: &[&str] = &[
 /// rights on every folder above them (its data folder is inside SYSTEM's
 /// profile).
 const NETWORK_KEEP_PRIVILEGES: &[&str] = &["SeChangeNotifyPrivilege"];
+
+/// The service's data folder: full access for SYSTEM and administrators,
+/// inherited by what is created inside; nothing from the folder above. The
+/// administrators' ACE is what lets the tray app, run elevated, read the
+/// control pipe's name and attach to the service's host.
+pub const DATA_DIR_SDDL: &str = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)";
+
+/// A file in the service's data folder (its logs, the control pipe's name).
+/// The folder's ACEs reach what is created from now on; a file a build from
+/// before kept to itself has to be set on its own.
+pub const DATA_FILE_SDDL: &str = "D:P(A;;FA;;;SY)(A;;FA;;;BA)";
 
 /// The network host's data folder: full access for SYSTEM, administrators
 /// and LocalService, inherited by what is created inside; nothing from the
@@ -560,6 +571,16 @@ pub fn pipe_has_data(read: &Owned) -> bool {
 /// reparse point (whoever can write the folder could have made it one, to
 /// send this change elsewhere).
 pub fn secure_dir(path: &Path, sddl: &str) -> anyhow::Result<()> {
+    set_dacl(path, sddl, true)
+}
+
+/// The same for a plain file, which may be open elsewhere: a log the service
+/// or one of its hosts is writing, so it is opened sharing everything.
+pub fn secure_file(path: &Path, sddl: &str) -> anyhow::Result<()> {
+    set_dacl(path, sddl, false)
+}
+
+fn set_dacl(path: &Path, sddl: &str, want_dir: bool) -> anyhow::Result<()> {
     let sd = SecurityDescriptor::new(sddl)?;
     let path_w = wide(&path.display().to_string());
     // SAFETY: a NUL-terminated path; the handle is closed by `Owned`.
@@ -568,7 +589,11 @@ pub fn secure_dir(path: &Path, sddl: &str) -> anyhow::Result<()> {
             CreateFileW(
                 PCWSTR(path_w.as_ptr()),
                 (READ_CONTROL | WRITE_DAC | FILE_READ_ATTRIBUTES).0,
-                FILE_SHARE_READ,
+                if want_dir {
+                    FILE_SHARE_READ
+                } else {
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE
+                },
                 None,
                 OPEN_EXISTING,
                 FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
@@ -582,10 +607,11 @@ pub fn secure_dir(path: &Path, sddl: &str) -> anyhow::Result<()> {
     unsafe { GetFileInformationByHandle(dir.0, &mut info) }
         .context("GetFileInformationByHandle")?;
     let attributes = FILE_FLAGS_AND_ATTRIBUTES(info.dwFileAttributes);
-    if !attributes.contains(FILE_ATTRIBUTE_DIRECTORY)
+    if attributes.contains(FILE_ATTRIBUTE_DIRECTORY) != want_dir
         || attributes.contains(FILE_ATTRIBUTE_REPARSE_POINT)
     {
-        anyhow::bail!("{} is not a plain folder", path.display());
+        let what = if want_dir { "folder" } else { "file" };
+        anyhow::bail!("{} is not a plain {what}", path.display());
     }
     let mut present = windows::core::BOOL::default();
     let mut defaulted = windows::core::BOOL::default();

@@ -1,12 +1,19 @@
 //! Keep the TLS key and device store private to the account running the
 //! host. Unix gets 0600/0700 modes at creation; Windows gets a protected DACL
-//! allowing only the user running the host and SYSTEM, since a data dir under
-//! `ProgramData` would otherwise be readable by every local user.
+//! allowing only the user running the host, administrators and SYSTEM, since
+//! a data dir under `ProgramData` would otherwise be readable by every local
+//! user.
 //!
 //! The Windows ACE names the user's own SID, not "owner rights": a host run
 //! as administrator creates files owned by the Administrators group, and an
 //! owner-rights ACE then locks the same user out when they run the host
 //! (or the tray app) normally.
+//!
+//! Administrators are named too, and not only for the folders they can take
+//! anyway: run by the service, the host is SYSTEM (or LocalService), so
+//! "this user and SYSTEM" would come out as a folder no administrator can
+//! read, and the tray app could never attach to the service's host (it
+//! reads the control pipe's name from the service's data folder).
 
 use std::path::Path;
 
@@ -35,9 +42,7 @@ pub fn restrict_to_owner(path: &Path) -> std::io::Result<()> {
         SetFileSecurityW,
     };
 
-    // Full access for this user and SYSTEM, inherited by anything created
-    // inside a directory; P = do not inherit the parent's ACEs.
-    let sddl: Vec<u16> = format!("D:P(A;OICI;FA;;;{})(A;OICI;FA;;;SY)", user_sid()?)
+    let sddl: Vec<u16> = dacl_sddl(&user_sid()?)
         .encode_utf16()
         .chain(Some(0))
         .collect();
@@ -67,6 +72,13 @@ pub fn restrict_to_owner(path: &Path) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Full access for `sid`, administrators and SYSTEM, inherited by anything
+/// created inside a directory; `P` = do not inherit the parent's ACEs.
+#[cfg(windows)]
+fn dacl_sddl(sid: &str) -> String {
+    format!("D:P(A;OICI;FA;;;{sid})(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)")
 }
 
 /// The SID of the user this process runs as, in string form ("S-1-5-21-...").
@@ -128,6 +140,21 @@ pub fn restrict_to_owner(path: &Path) -> std::io::Result<()> {
 #[cfg(not(any(unix, windows)))]
 pub fn restrict_to_owner(_path: &Path) -> std::io::Result<()> {
     Ok(())
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    /// Run by the service the host is SYSTEM, so a DACL naming only "this
+    /// user" and SYSTEM came out as SYSTEM alone: the folder held the
+    /// control pipe's name, and the tray app, however elevated, could no
+    /// longer read it to attach to the service's host.
+    #[test]
+    fn a_system_host_leaves_the_folder_readable_by_administrators() {
+        let sddl = super::dacl_sddl("S-1-5-18");
+        assert!(sddl.starts_with("D:P("), "{sddl}");
+        assert!(sddl.contains("(A;OICI;FA;;;BA)"), "{sddl}");
+        assert!(sddl.contains("(A;OICI;FA;;;SY)"), "{sddl}");
+    }
 }
 
 #[cfg(all(test, unix))]

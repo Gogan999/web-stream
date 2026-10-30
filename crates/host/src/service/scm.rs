@@ -205,6 +205,23 @@ pub fn install(args: &[String]) -> anyhow::Result<String> {
     ))
 }
 
+/// The service's data folder and the files directly in it: full access
+/// for SYSTEM and administrators, nobody else. The folder's inherited
+/// ACEs only reach what is created from now on, so the logs and the pipe
+/// file a build from before this fix left behind are set one by one.
+/// Subfolders are left alone: `network` has its own permissions, which
+/// also let LocalService write there.
+fn secure_data_dir(dir: &Path) -> anyhow::Result<()> {
+    launch::secure_dir(dir, launch::DATA_DIR_SDDL)?;
+    for entry in std::fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))? {
+        let entry = entry?;
+        if entry.file_type()?.is_file() {
+            launch::secure_file(&entry.path(), launch::DATA_FILE_SDDL)?;
+        }
+    }
+    Ok(())
+}
+
 /// Whether the service is installed (`Some`), and running.
 pub fn query() -> anyhow::Result<Option<bool>> {
     let manager = manager(ServiceManagerAccess::CONNECT)?;
@@ -506,6 +523,19 @@ impl Supervisor {
         let data_dir = data_dir()?;
         std::fs::create_dir_all(&data_dir)
             .with_context(|| format!("create {}", data_dir.display()))?;
+        // Every start, not just the first: a host that ran as SYSTEM
+        // before this was fixed left the folder, and the files in it,
+        // readable by SYSTEM alone, and the tray app then can't read the
+        // control pipe's name to attach. Not fatal: the folder is inside
+        // SYSTEM's profile either way, so the service can still host.
+        if let Err(e) = secure_data_dir(&data_dir) {
+            tracing::warn!(
+                "could not set the permissions of {}: {e:#}. The tray app may not be \
+                 able to attach to the service's host, and its logs may not be \
+                 readable",
+                data_dir.display()
+            );
+        }
         tracing::info!("service started");
         let sas_event = match super::sas::new_event() {
             Ok(event) => {

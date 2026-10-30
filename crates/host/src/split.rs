@@ -203,19 +203,40 @@ impl From<SendError> for ws_transport::Error {
     }
 }
 
-/// One frame, ready to write.
-fn frame<H: Serialize>(header: &H, payload: &[u8]) -> Vec<u8> {
+/// One frame, ready to write: the length, header length and header in one
+/// buffer, and the payload kept apart so it is never copied into it. The
+/// payload is whatever the caller already holds (a `Vec`, a shared `Bytes`),
+/// so a video frame goes from the encoder to the pipe without a copy.
+struct Frame {
+    head: Vec<u8>,
+    payload: Box<dyn AsRef<[u8]> + Send>,
+}
+
+impl Frame {
+    /// Bytes on the wire.
+    fn len(&self) -> usize {
+        self.head.len() + self.payload.as_ref().as_ref().len()
+    }
+}
+
+/// The wire form is `[u32 len][u32 header_len][header][payload]`, little
+/// endian, where `len` counts everything after itself.
+fn frame<H: Serialize>(header: &H, payload: impl AsRef<[u8]> + Send + 'static) -> Frame {
     let header = serde_json::to_vec(header).expect("bridge messages serialize");
-    let len = 4 + header.len() + payload.len();
-    let mut out = Vec::with_capacity(4 + len);
-    out.extend_from_slice(&(len as u32).to_le_bytes());
-    out.extend_from_slice(&(header.len() as u32).to_le_bytes());
-    out.extend_from_slice(&header);
-    out.extend_from_slice(payload);
-    out
+    let len = 4 + header.len() + payload.as_ref().len();
+    let mut head = Vec::with_capacity(8 + header.len());
+    head.extend_from_slice(&(len as u32).to_le_bytes());
+    head.extend_from_slice(&(header.len() as u32).to_le_bytes());
+    head.extend_from_slice(&header);
+    Frame {
+        head,
+        payload: Box::new(payload),
+    }
 }
 
 /// The next frame's header and payload; `None` at a clean end of stream.
+/// The payload is read straight into its own buffer, so nothing is shifted
+/// after the read.
 async fn read_frame<H: DeserializeOwned>(
     read: &mut (impl AsyncRead + Unpin),
     max: usize,
@@ -231,15 +252,18 @@ async fn read_frame<H: DeserializeOwned>(
     if !(4..=max).contains(&len) {
         anyhow::bail!("bad frame length {len}");
     }
-    let mut buf = vec![0u8; len];
-    read.read_exact(&mut buf).await?;
-    let header_len = u32::from_le_bytes(buf[..4].try_into().expect("4 bytes")) as usize;
+    let mut header_len = [0u8; 4];
+    read.read_exact(&mut header_len).await?;
+    let header_len = u32::from_le_bytes(header_len) as usize;
     if header_len > len - 4 {
         anyhow::bail!("bad header length {header_len}");
     }
-    let header = serde_json::from_slice(&buf[4..4 + header_len]).context("bad header")?;
-    buf.drain(..4 + header_len);
-    Ok(Some((header, buf)))
+    let mut header = vec![0u8; header_len];
+    read.read_exact(&mut header).await?;
+    let header = serde_json::from_slice(&header).context("bad header")?;
+    let mut payload = vec![0u8; len - 4 - header_len];
+    read.read_exact(&mut payload).await?;
+    Ok(Some((header, payload)))
 }
 
 /// Reads frames of up to `max` bytes into a channel until the stream ends
@@ -270,12 +294,12 @@ fn spawn_reader<H: DeserializeOwned + Send + 'static>(
 /// Frames waiting to be written, and how many bytes they hold.
 #[derive(Clone)]
 struct Out {
-    tx: mpsc::UnboundedSender<Vec<u8>>,
+    tx: mpsc::UnboundedSender<Frame>,
     queued: Arc<AtomicUsize>,
 }
 
 impl Out {
-    fn send(&self, frame: Vec<u8>) {
+    fn send(&self, frame: Frame) {
         let len = frame.len();
         self.queued.fetch_add(len, Ordering::Relaxed);
         if self.tx.send(frame).is_err() {
@@ -294,7 +318,7 @@ impl Out {
 fn spawn_writer(
     mut write: impl AsyncWrite + Unpin + Send + 'static,
 ) -> (Out, tokio::task::JoinHandle<()>) {
-    let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (tx, mut rx) = mpsc::unbounded_channel::<Frame>();
     let queued = Arc::new(AtomicUsize::new(0));
     let out = Out {
         tx,
@@ -302,7 +326,12 @@ fn spawn_writer(
     };
     let task = tokio::spawn(async move {
         while let Some(frame) = rx.recv().await {
-            let result = write.write_all(&frame).await;
+            // Only this task writes, so the two writes stay one run of bytes.
+            let mut result = write.write_all(&frame.head).await;
+            let payload = frame.payload.as_ref().as_ref();
+            if result.is_ok() && !payload.is_empty() {
+                result = write.write_all(payload).await;
+            }
             queued.fetch_sub(frame.len(), Ordering::Relaxed);
             if let Err(e) = result {
                 return tracing::debug!("bridge: {e}");
@@ -342,7 +371,7 @@ pub async fn serve_network(
     let mut incoming = spawn_reader::<Up>(read, MAX_UP);
     let (out, writer) = spawn_writer(write);
     let send = |msg: &Down, payload: &[u8]| {
-        out.send(frame(msg, payload));
+        out.send(frame(msg, payload.to_vec()));
     };
 
     let mut net = Network::start(&opts).await?;
@@ -387,7 +416,7 @@ pub async fn serve_network(
                     .send_data(&channel, binary, data)
                     .await
                     .map_err(SendError::from);
-                out.send(frame(&Down::DataSent { id, result }, &[]));
+                out.send(frame(&Down::DataSent { id, result }, []));
             }
         }
     });
@@ -440,7 +469,7 @@ pub async fn serve_network(
                                 ws_transport::VideoSignal::Keyframe => Report::KeyframeNeeded,
                                 ws_transport::VideoSignal::FramesLost(from) => Report::FramesLost(from),
                             };
-                            out.send(frame(&Down::Transport(report), &[]));
+                            out.send(frame(&Down::Transport(report), []));
                         }));
                     }
                     Up::VideoSink(false) => transport.clear_video_sink(),
@@ -451,7 +480,7 @@ pub async fn serve_network(
                 let Some(ev) = ev else { break Err(anyhow::anyhow!("transport stopped")) };
                 let transition = matches!(ev, TransportEvent::Connected | TransportEvent::Disconnected);
                 let (report, payload) = report(ev);
-                send(&Down::Transport(report), &payload);
+                out.send(frame(&Down::Transport(report), payload));
                 if transition {
                     // Input goes across as it arrives, after the event that
                     // says which connection it belongs to.
@@ -459,7 +488,7 @@ pub async fn serve_network(
                     let out = out.clone();
                     transport.set_input_sink(
                         Box::new(move |data| {
-                            out.send(frame(&Down::Transport(Report::Input), data));
+                            out.send(frame(&Down::Transport(Report::Input), data.to_vec()));
                         }),
                         transitions,
                     );
@@ -635,7 +664,7 @@ pub async fn serve_media(
     let mut incoming = spawn_reader::<Down>(read, MAX_DOWN);
     let (out, writer) = spawn_writer(write);
     let send = |msg: &Up, payload: &[u8]| {
-        out.send(frame(msg, payload));
+        out.send(frame(msg, payload.to_vec()));
     };
 
     let (transport, transport_events, mut remote) = Transport::remote();
@@ -701,7 +730,7 @@ pub async fn serve_media(
                 Some(RemoteCmd::Video(_) | RemoteCmd::Audio(_)) if out.queued() > MAX_QUEUED => {
                     tracing::debug!("the network process is behind; dropping media");
                 }
-                Some(RemoteCmd::Video(f)) => send(
+                Some(RemoteCmd::Video(f)) => out.send(frame(
                     &Up::Video {
                         display: f.display,
                         codec: f.codec,
@@ -713,21 +742,21 @@ pub async fn serve_media(
                         width: f.width,
                         height: f.height,
                     },
-                    &f.data,
-                ),
-                Some(RemoteCmd::Audio(p)) => send(
+                    f.data,
+                )),
+                Some(RemoteCmd::Audio(p)) => out.send(frame(
                     &Up::Audio {
                         sequence: p.sequence,
                         capture_age_us: age(p.capture_time),
                         sample_rate: p.sample_rate,
                         channels: p.channels,
                     },
-                    &p.data,
-                ),
+                    p.data,
+                )),
                 Some(RemoteCmd::Data { channel, binary, data, reply }) => {
                     next_id += 1;
                     replies.insert(next_id, reply);
-                    send(&Up::Data { id: next_id, channel, binary }, &data);
+                    out.send(frame(&Up::Data { id: next_id, channel, binary }, data));
                 }
                 Some(RemoteCmd::MaxBitrate(bps)) => send(&Up::MaxBitrate(bps), &[]),
                 Some(RemoteCmd::VideoSink(set)) => send(&Up::VideoSink(set), &[]),
@@ -815,39 +844,96 @@ fn clean_notice(n: Notice) -> Notice {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn frames_round_trip_and_bad_ones_are_refused() {
-        let (mut a, mut b) = tokio::io::duplex(1 << 16);
-        let msg = Up::Data {
+    /// A frame as `spawn_writer` puts it on the wire.
+    fn wire(f: &Frame) -> Vec<u8> {
+        let mut out = f.head.clone();
+        out.extend_from_slice(f.payload.as_ref().as_ref());
+        out
+    }
+
+    fn data_msg() -> Up {
+        Up::Data {
             id: 7,
             channel: channels::FILE.into(),
             binary: true,
-        };
-        a.write_all(&frame(&msg, b"payload")).await.unwrap();
-        let (got, payload) = read_frame::<Up>(&mut b, MAX_DOWN).await.unwrap().unwrap();
-        assert!(matches!(
-            got,
-            Up::Data {
-                id: 7,
-                binary: true,
-                ..
-            }
-        ));
-        assert_eq!(payload, b"payload");
+        }
+    }
 
-        a.write_all(&((MAX_DOWN as u32) + 1).to_le_bytes())
+    #[tokio::test]
+    async fn frames_have_the_documented_bytes_and_round_trip() {
+        // Written out by hand, not derived from the code under test: the two
+        // sides of the link can be different builds, so this layout must not
+        // drift. len 23 = 4 + 16 header bytes + 3 payload bytes.
+        let expected: &[u8] = b"\x17\0\0\0\x10\0\0\0{\"MaxBitrate\":5}abc";
+        assert_eq!(expected.len(), 4 + 23);
+        let f = frame(&Up::MaxBitrate(5), b"abc");
+        assert_eq!(wire(&f), expected);
+        assert_eq!(f.len(), expected.len());
+
+        let (got, payload) = read_frame::<Up>(&mut std::io::Cursor::new(expected), MAX_DOWN)
             .await
+            .unwrap()
             .unwrap();
-        assert!(read_frame::<Up>(&mut b, MAX_DOWN).await.is_err());
+        assert!(matches!(got, Up::MaxBitrate(5)));
+        assert_eq!(payload, b"abc");
+    }
 
-        let (mut a, mut b) = tokio::io::duplex(1 << 16);
+    #[tokio::test]
+    async fn empty_and_large_payloads_round_trip() {
+        let (mut a, mut b) = tokio::io::duplex(1 << 10);
+        let big: Vec<u8> = (0..300_000u32).map(|i| i as u8).collect();
+        let writer = {
+            let big = big.clone();
+            tokio::spawn(async move {
+                a.write_all(&wire(&frame(&data_msg(), Vec::new())))
+                    .await
+                    .unwrap();
+                a.write_all(&wire(&frame(&data_msg(), big))).await.unwrap();
+            })
+        };
+        let (_, empty) = read_frame::<Up>(&mut b, MAX_DOWN).await.unwrap().unwrap();
+        assert!(empty.is_empty());
+        let (_, payload) = read_frame::<Up>(&mut b, MAX_DOWN).await.unwrap().unwrap();
+        assert_eq!(payload, big);
+        writer.await.unwrap();
+    }
+
+    async fn read(bytes: &[u8], max: usize) -> anyhow::Result<Option<(Up, Vec<u8>)>> {
+        read_frame::<Up>(&mut std::io::Cursor::new(bytes.to_vec()), max).await
+    }
+
+    #[tokio::test]
+    async fn bad_frames_are_refused() {
+        let err = |r: anyhow::Result<Option<(Up, Vec<u8>)>>| format!("{:#}", r.unwrap_err());
+        assert_eq!(
+            err(read(&3u32.to_le_bytes(), 100).await),
+            "bad frame length 3"
+        );
+        assert_eq!(
+            err(read(&((MAX_DOWN as u32) + 1).to_le_bytes(), MAX_DOWN).await),
+            format!("bad frame length {}", MAX_DOWN + 1)
+        );
         // A header longer than its frame.
-        a.write_all(&8u32.to_le_bytes()).await.unwrap();
-        a.write_all(&100u32.to_le_bytes()).await.unwrap();
-        a.write_all(b"{}{}").await.unwrap();
-        assert!(read_frame::<Up>(&mut b, MAX_DOWN).await.is_err());
-        drop(a);
-        assert!(read_frame::<Up>(&mut b, MAX_DOWN).await.unwrap().is_none());
+        let mut bytes = 8u32.to_le_bytes().to_vec();
+        bytes.extend_from_slice(&100u32.to_le_bytes());
+        bytes.extend_from_slice(b"{}{}");
+        assert_eq!(err(read(&bytes, 100).await), "bad header length 100");
+        // A header that is not JSON for the type.
+        let mut bytes = 8u32.to_le_bytes().to_vec();
+        bytes.extend_from_slice(&4u32.to_le_bytes());
+        bytes.extend_from_slice(b"{}{}");
+        assert!(err(read(&bytes, 100).await).starts_with("bad header:"));
+    }
+
+    #[tokio::test]
+    async fn end_of_stream_is_clean_only_between_frames() {
+        assert!(read(&[], 100).await.unwrap().is_none());
+        // Stopping inside the length itself is the same end of stream.
+        assert!(read(&[0, 1], 100).await.unwrap().is_none());
+        let bytes = wire(&frame(&data_msg(), b"payload"));
+        for cut in [5, 9, bytes.len() - 10, bytes.len() - 1] {
+            assert!(read(&bytes[..cut], MAX_DOWN).await.is_err(), "cut at {cut}");
+        }
     }
 
     #[test]
@@ -878,7 +964,7 @@ mod tests {
         ];
         for ev in events {
             let (report, payload) = report(ev.clone());
-            let wire = frame(&Down::Transport(report), &payload);
+            let wire = wire(&frame(&Down::Transport(report), payload));
             let header_len = u32::from_le_bytes(wire[4..8].try_into().unwrap()) as usize;
             let Down::Transport(back) = serde_json::from_slice(&wire[8..8 + header_len]).unwrap()
             else {

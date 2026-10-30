@@ -756,19 +756,23 @@ impl App {
                 self.host.command(Command::OpenPairing);
             }
             if let Some(left) = view.countdown {
+                // Locked codes can't be requested, so don't say to.
+                let tail = if view.locked {
+                    ""
+                } else {
+                    ": request a code in the browser"
+                };
                 ui.label(format!(
-                    "Pairing open for {}:{:02}: request a code in the browser",
+                    "Pairing open for {}:{:02}{tail}",
                     left / 60,
                     left % 60
                 ));
             }
-            if view.locked {
-                ui.colored_label(
-                    Color32::RED,
-                    "Codes locked after wrong guesses; pair again to unlock",
-                );
-            }
         });
+        // The red notice lives here, not beside the button, so it is said once.
+        if let Some(notice) = locked_notice(&view) {
+            ui.colored_label(Color32::RED, notice);
+        }
         match (view.stage, &code) {
             (PairingStage::Code, Some(code)) => {
                 ui.add_space(4.0);
@@ -778,6 +782,7 @@ impl App {
                 ui.weak(format!("expires in {left}s"));
             }
             (PairingStage::AwaitingCode, _) => self.pairing_instructions_ui(ui),
+            (PairingStage::CodesLocked, _) => {}
             _ => {}
         }
         // Whatever a browser does with codes: anyone who can reach the port
@@ -1464,6 +1469,10 @@ enum PairingStage {
     AwaitingCode,
     /// A device asked and its code is on screen.
     Code,
+    /// Pairing is open but codes are locked after wrong guesses. Its own
+    /// stage so the "ask for a code" instructions can't show: asking can't
+    /// work now, though the QR link and reopening pairing both still do.
+    CodesLocked,
 }
 
 /// What the pairing area shows, decided apart from egui so it can be tested.
@@ -1491,6 +1500,7 @@ fn pairing_view(
 ) -> PairingView {
     let stage = match (code, pairing_until) {
         (Some(_), _) => PairingStage::Code,
+        (None, Some(_)) if locked => PairingStage::CodesLocked,
         (None, Some(_)) => PairingStage::AwaitingCode,
         (None, None) => PairingStage::Closed,
     };
@@ -1499,6 +1509,27 @@ fn pairing_view(
         countdown: pairing_until.map(|u| u.saturating_duration_since(now).as_secs()),
         locked,
         offer_qr: has_link,
+    }
+}
+
+/// The red notice for locked codes, if any. A code lockout doesn't stop the
+/// QR link, and pairing again clears the lockout, so an open window names
+/// both; a closed one has no QR left to promise. A code on screen can't be
+/// locked (the lock clears it), so that stage never gets a notice.
+fn locked_notice(view: &PairingView) -> Option<&'static str> {
+    if !view.locked {
+        return None;
+    }
+    match view.stage {
+        PairingStage::CodesLocked => Some(
+            "Codes are locked after too many wrong tries. The QR code still works (tick \
+             \"Show QR code\"), or click Pair a browser again to unlock codes.",
+        ),
+        PairingStage::Closed => Some(
+            "Codes are locked after too many wrong tries. Click Pair a browser to \
+             unlock them.",
+        ),
+        PairingStage::AwaitingCode | PairingStage::Code => None,
     }
 }
 
@@ -1547,8 +1578,42 @@ mod tests {
         assert_eq!(v.stage, PairingStage::Closed);
         assert!(v.locked);
         let open = pairing_view(Some(now + Duration::from_secs(5)), None, true, true, now);
-        assert_eq!(open.stage, PairingStage::AwaitingCode);
+        assert_eq!(open.stage, PairingStage::CodesLocked);
         assert!(open.locked);
+    }
+
+    #[test]
+    fn locked_with_the_window_open_names_the_qr_and_reopening() {
+        let now = Instant::now();
+        let v = pairing_view(Some(now + Duration::from_secs(60)), None, true, true, now);
+        assert_eq!(v.countdown, Some(60));
+        assert!(v.offer_qr);
+        let notice = locked_notice(&v).expect("a notice while locked");
+        assert!(notice.contains("QR code still works"));
+        assert!(notice.contains("Show QR code"));
+        assert!(notice.contains("again to unlock"));
+        assert!(!notice.contains("ask for"));
+    }
+
+    #[test]
+    fn locked_with_the_window_closed_promises_no_qr() {
+        let now = Instant::now();
+        let v = pairing_view(None, None, false, true, now);
+        assert!(!v.offer_qr);
+        let notice = locked_notice(&v).expect("a notice while locked");
+        assert!(!notice.contains("QR"));
+        assert!(notice.contains("unlock"));
+    }
+
+    #[test]
+    fn unlocked_has_no_locked_notice() {
+        let now = Instant::now();
+        let open = pairing_view(Some(now + Duration::from_secs(5)), None, true, false, now);
+        assert_eq!(locked_notice(&open), None);
+        assert_eq!(
+            locked_notice(&pairing_view(None, None, false, false, now)),
+            None
+        );
     }
 
     #[test]

@@ -10,7 +10,7 @@ use ws_host::serve::Notice;
 use ws_host::serve::{Command, Event};
 
 use crate::firstrun::{self, FirstRun};
-use crate::host::{FileStatus, Host, Status};
+use crate::host::{FileStatus, Host, PairingCode, Status};
 use crate::settings::{CODECS, GAMEPADS, QUALITIES, Settings, TUNNELS};
 use crate::{portcheck, qr, upnp};
 
@@ -42,6 +42,10 @@ pub struct App {
     /// the window after the first frame whatever it was built with.
     #[cfg_attr(not(windows), allow(dead_code))]
     hide_in_frames: Option<u8>,
+    /// Whether the pairing QR code is drawn. Off at first: the code to type
+    /// is the way to pair, and the QR code carries the pairing secret, so it
+    /// should not sit on screen unless asked for. Not saved.
+    show_qr: bool,
 }
 
 impl App {
@@ -125,6 +129,7 @@ impl App {
             #[cfg(windows)]
             service,
             hide_in_frames: hidden.then_some(2),
+            show_qr: false,
         };
         // A browser may ask for an update (when the settings allow it):
         // update.ps1 builds, then this app restarts itself on the build.
@@ -331,13 +336,15 @@ impl App {
         }
     }
 
-    /// The pairing link as a QR code, with a choice of the address in it.
-    fn pairing_qr_ui(&mut self, ui: &mut egui::Ui, link: &str) {
+    /// The addresses a device could open the client at, and the one in use.
+    /// Shared by the instructions and the QR code so both name the same
+    /// address. `None` while the host is not running or has nothing to offer.
+    fn pairing_addresses(&self) -> Option<(Vec<String>, String)> {
         let (port, lan, tunnel_url) = {
             let state = self.host.state();
             match &state.status {
                 Status::Running { port, ips, .. } => (*port, ips.clone(), state.tunnel_url.clone()),
-                _ => return,
+                _ => return None,
             }
         };
         let choices = firstrun::addresses(
@@ -347,32 +354,84 @@ impl App {
             &lan,
             &self.public_ips(),
         );
-        let Some(first) = choices.first().cloned() else {
-            return;
-        };
+        let first = choices.first().cloned()?;
         let host = match &self.first_run.qr_host {
             Some(h) if choices.contains(h) => h.clone(),
             _ => first,
         };
-        ui.horizontal(|ui| {
-            ui.label("Or scan with the phone's camera. Address:");
-            let mut selected = host.clone();
-            egui::ComboBox::from_id_salt("qr-host")
-                .selected_text(&selected)
-                .show_ui(ui, |ui| {
-                    for c in &choices {
-                        ui.selectable_value(&mut selected, c.clone(), c);
-                    }
-                })
-                .response
-                .on_hover_text(
-                    "The Cloudflare Tunnel address works anywhere. A home address works on the \
-                     same Wi-Fi; the public address away from home, once the ports are forwarded",
+        Some((choices, host))
+    }
+
+    /// The choice of address, remembered for the instructions and the QR code.
+    fn address_combo(&mut self, ui: &mut egui::Ui, choices: &[String], host: &str) {
+        let mut selected = host.to_string();
+        egui::ComboBox::from_id_salt("qr-host")
+            .selected_text(&selected)
+            .show_ui(ui, |ui| {
+                for c in choices {
+                    ui.selectable_value(&mut selected, c.clone(), c);
+                }
+            })
+            .response
+            .on_hover_text(
+                "The Cloudflare Tunnel address works anywhere. A home address works on the \
+                 same Wi-Fi; the public address away from home, once the ports are forwarded",
+            );
+        if selected != host {
+            self.first_run.qr_host = Some(selected);
+        }
+    }
+
+    /// What to do while pairing is open and no device has asked yet. The code
+    /// only exists once a device asks for it, so this says where to ask.
+    fn pairing_instructions_ui(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(4.0);
+        match self.pairing_addresses() {
+            Some((choices, host)) => {
+                ui.label(
+                    RichText::new(format!(
+                        "On the device, open {host} and ask for a pairing code there."
+                    ))
+                    .size(18.0)
+                    .strong(),
                 );
-            if selected != host {
-                self.first_run.qr_host = Some(selected);
+                ui.horizontal(|ui| {
+                    ui.label("Address:");
+                    self.address_combo(ui, &choices, &host);
+                });
             }
-        });
+            None => {
+                ui.label(
+                    RichText::new(
+                        "On the device, open this PC's address (listed above) and ask for a \
+                         pairing code there.",
+                    )
+                    .size(18.0)
+                    .strong(),
+                );
+            }
+        }
+        ui.weak("The code appears here, with the device's name.");
+    }
+
+    /// The pairing link as a QR code. `with_choice` adds the address choice;
+    /// the instructions already show it while waiting for a code.
+    fn pairing_qr_ui(&mut self, ui: &mut egui::Ui, link: &str, with_choice: bool) {
+        let Some((choices, host)) = self.pairing_addresses() else {
+            ui.weak(
+                "No address to put in a QR code yet: the host is not running or has no \
+                 address.",
+            );
+            return;
+        };
+        if with_choice {
+            ui.horizontal(|ui| {
+                ui.label("Scan with the phone's camera. Address:");
+                self.address_combo(ui, &choices, &host);
+            });
+        } else {
+            ui.label("Scan with the phone's camera.");
+        }
         let url = firstrun::pairing_url(&host, link);
         qr::show(ui, &url, 200.0).on_hover_text("Pairs one browser, once, while pairing is open");
         ui.weak("Pairs once, while pairing is open. Anyone who can see this code can pair.");
@@ -668,6 +727,9 @@ impl App {
             self.files_ui(ui);
         }
 
+        let link = self.host.state().pairing_link.clone();
+        let view = pairing_view(pairing_until, code.as_ref(), link.is_some(), locked, now);
+
         ui.horizontal(|ui| {
             // The service hosts, and its pairing takes an administrator.
             #[cfg(windows)]
@@ -693,33 +755,38 @@ impl App {
             {
                 self.host.command(Command::OpenPairing);
             }
-            if let Some(until) = pairing_until {
-                let left = until.saturating_duration_since(now).as_secs();
+            if let Some(left) = view.countdown {
                 ui.label(format!(
                     "Pairing open for {}:{:02}: request a code in the browser",
                     left / 60,
                     left % 60
                 ));
             }
-            if locked {
+            if view.locked {
                 ui.colored_label(
                     Color32::RED,
                     "Codes locked after wrong guesses; pair again to unlock",
                 );
             }
         });
-        if let Some(code) = &code {
-            ui.add_space(4.0);
-            ui.label(format!("Type this code in {:?}:", code.device_name));
-            ui.label(RichText::new(&code.code).monospace().size(36.0).strong());
-            let left = code.expires.saturating_duration_since(now).as_secs();
-            ui.weak(format!("expires in {left}s"));
+        match (view.stage, &code) {
+            (PairingStage::Code, Some(code)) => {
+                ui.add_space(4.0);
+                ui.label(format!("Type this code in {:?}:", code.device_name));
+                ui.label(RichText::new(&code.code).monospace().size(36.0).strong());
+                let left = code.expires.saturating_duration_since(now).as_secs();
+                ui.weak(format!("expires in {left}s"));
+            }
+            (PairingStage::AwaitingCode, _) => self.pairing_instructions_ui(ui),
+            _ => {}
         }
-        let link = self.host.state().pairing_link.clone();
         // Whatever a browser does with codes: anyone who can reach the port
         // can ask for one.
-        if let Some(link) = &link {
-            self.pairing_qr_ui(ui, link);
+        if let (true, Some(link)) = (view.offer_qr, &link) {
+            ui.checkbox(&mut self.show_qr, "Show QR code");
+            if self.show_qr {
+                self.pairing_qr_ui(ui, link, view.stage != PairingStage::AwaitingCode);
+            }
         }
         if pairing_until.is_some() || code.is_some() {
             ui.ctx().request_repaint_after(Duration::from_millis(500));
@@ -1385,5 +1452,126 @@ fn open_folder(dir: &std::path::Path) {
     let opener = "xdg-open";
     if let Err(e) = std::process::Command::new(opener).arg(dir).spawn() {
         tracing::warn!("could not open {}: {e}", dir.display());
+    }
+}
+
+/// Which part of the pairing flow the window is in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PairingStage {
+    /// Nothing to pair.
+    Closed,
+    /// Pairing is open and no device has asked for a code yet.
+    AwaitingCode,
+    /// A device asked and its code is on screen.
+    Code,
+}
+
+/// What the pairing area shows, decided apart from egui so it can be tested.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PairingView {
+    stage: PairingStage,
+    /// Whole seconds until pairing closes, while it is open.
+    countdown: Option<u64>,
+    /// Codes are locked after wrong guesses.
+    locked: bool,
+    /// Whether the "Show QR code" toggle is offered: only with a link, which
+    /// exists only while pairing is open.
+    offer_qr: bool,
+}
+
+/// The code is minted per request and bound to the asking device, so until a
+/// device asks there is none to show; the window says where to ask instead.
+/// A code on screen wins over the instructions.
+fn pairing_view(
+    pairing_until: Option<Instant>,
+    code: Option<&PairingCode>,
+    has_link: bool,
+    locked: bool,
+    now: Instant,
+) -> PairingView {
+    let stage = match (code, pairing_until) {
+        (Some(_), _) => PairingStage::Code,
+        (None, Some(_)) => PairingStage::AwaitingCode,
+        (None, None) => PairingStage::Closed,
+    };
+    PairingView {
+        stage,
+        countdown: pairing_until.map(|u| u.saturating_duration_since(now).as_secs()),
+        locked,
+        offer_qr: has_link,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn code(now: Instant) -> PairingCode {
+        PairingCode {
+            code: "123456".into(),
+            device_name: "Phone".into(),
+            expires: now + Duration::from_secs(60),
+        }
+    }
+
+    #[test]
+    fn open_without_a_code_asks_the_device_for_one() {
+        let now = Instant::now();
+        let v = pairing_view(Some(now + Duration::from_secs(90)), None, true, false, now);
+        assert_eq!(v.stage, PairingStage::AwaitingCode);
+        assert_eq!(v.countdown, Some(90));
+        assert!(v.offer_qr);
+        assert!(!v.locked);
+    }
+
+    #[test]
+    fn a_code_takes_over_from_the_instructions() {
+        let now = Instant::now();
+        let c = code(now);
+        let v = pairing_view(
+            Some(now + Duration::from_secs(90)),
+            Some(&c),
+            true,
+            false,
+            now,
+        );
+        assert_eq!(v.stage, PairingStage::Code);
+        assert_eq!(v.countdown, Some(90));
+        assert!(v.offer_qr);
+    }
+
+    #[test]
+    fn locked_is_reported_whatever_the_stage() {
+        let now = Instant::now();
+        let v = pairing_view(None, None, false, true, now);
+        assert_eq!(v.stage, PairingStage::Closed);
+        assert!(v.locked);
+        let open = pairing_view(Some(now + Duration::from_secs(5)), None, true, true, now);
+        assert_eq!(open.stage, PairingStage::AwaitingCode);
+        assert!(open.locked);
+    }
+
+    #[test]
+    fn closed_shows_nothing() {
+        let now = Instant::now();
+        let v = pairing_view(None, None, false, false, now);
+        assert_eq!(
+            v,
+            PairingView {
+                stage: PairingStage::Closed,
+                countdown: None,
+                locked: false,
+                offer_qr: false,
+            }
+        );
+    }
+
+    #[test]
+    fn a_code_without_a_link_offers_no_qr_toggle() {
+        let now = Instant::now();
+        let c = code(now);
+        let v = pairing_view(None, Some(&c), false, false, now);
+        assert_eq!(v.stage, PairingStage::Code);
+        assert!(!v.offer_qr);
     }
 }

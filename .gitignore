@@ -1,2 +1,6 @@
 /target
 *.pdb
+
+# Local Claude Code workflow files, not part of the project.
+/CLAUDE.md
+/.claude/

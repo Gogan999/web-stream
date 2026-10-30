@@ -140,6 +140,9 @@ enum Down {
     },
     PairingOpened {
         link: String,
+        /// Seconds the window lasts; absent from a build that predates it.
+        #[serde(default)]
+        remaining_secs: Option<u64>,
     },
     UnpairedAll,
     Notice(Notice),
@@ -610,7 +613,10 @@ pub async fn serve_network(
 async fn pairing(net: &Network, cmd: PairingCommand, send: &impl Fn(&Down)) {
     match cmd {
         PairingCommand::Open => send(&match net.signaling.open_pairing().await {
-            Ok(link) => Down::PairingOpened { link },
+            Ok(link) => Down::PairingOpened {
+                link,
+                remaining_secs: Some(crate::serve::PAIRING_WINDOW.as_secs()),
+            },
             Err(e) => Down::Error(format!("could not open pairing: {e}")),
         }),
         PairingCommand::DropSession => net.signaling.drop_session().await,
@@ -800,7 +806,7 @@ pub async fn serve_media(
                             data_dir,
                         });
                     }
-                    Down::PairingOpened { link } => { let _ = events.send(Event::PairingOpened { link: clean_link(&link) }); }
+                    Down::PairingOpened { link, remaining_secs } => { let _ = events.send(Event::PairingOpened { link: clean_link(&link), remaining_secs }); }
                     Down::UnpairedAll => { let _ = events.send(Event::UnpairedAll); }
                     Down::Notice(n) => { let _ = events.send(Event::Notice(clean_notice(n))); }
                     Down::Error(e) => { let _ = events.send(Event::Error(format!("network host: {}", clean(&e)))); }
@@ -923,6 +929,22 @@ fn clean_notice(n: Notice) -> Notice {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pairing_opened_from_an_older_build_has_no_remaining_time() {
+        // The link's two ends can be different builds: a missing field is
+        // "no information", not an expired window.
+        let old = r#"{"PairingOpened":{"link":"secret"}}"#;
+        let Down::PairingOpened {
+            link,
+            remaining_secs,
+        } = serde_json::from_str(old).unwrap()
+        else {
+            panic!("not PairingOpened");
+        };
+        assert_eq!(link, "secret");
+        assert_eq!(remaining_secs, None);
+    }
 
     #[test]
     fn backlog_sends_are_spaced_and_never_stale() {

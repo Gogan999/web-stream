@@ -1,12 +1,12 @@
 //! The host's events as lines of text and typed commands, for the
 //! service's control pipe (and the test host in `examples`).
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::{broadcast, mpsc};
 
-use crate::serve::{Command, Event, FileEvent, FileId, Notice};
+use crate::serve::{Command, Event, FileEvent, FileId, Notice, PAIRING_WINDOW};
 
 pub const CONSOLE_HELP: &str = "\
 commands: pair (let a browser pair for two minutes), unpair-all, drop (end the session),
@@ -57,7 +57,7 @@ pub fn describe(e: Event) -> Option<String> {
 /// without a code while pairing is open.
 pub fn pairing_link_line(e: &Event) -> Option<String> {
     match e {
-        Event::PairingOpened { link } => Some(format!(
+        Event::PairingOpened { link, .. } => Some(format!(
             "  PAIRING LINK #pair={link}  (open the client's address with this on the end, once)"
         )),
         _ => None,
@@ -108,19 +108,82 @@ fn describe_file(f: FileEvent) -> Option<String> {
     })
 }
 
+/// The pairing window as last heard, with when it ends.
+struct OpenWindow {
+    link: String,
+    until: Instant,
+}
+
+/// The pairing code as last heard, with when it ends.
+struct IssuedCode {
+    code: String,
+    device_name: String,
+    until: Instant,
+}
+
 /// What a console that connects late is told first: the host's start,
-/// where the Cloudflare Tunnel is up, and the browser connected now.
+/// where the Cloudflare Tunnel is up, the browser connected now, and the
+/// pairing in progress.
+///
+/// Pairing events carry time relative to when they were sent, so the
+/// snapshot turns them into deadlines and, at greeting time, back into what
+/// remains; whatever has run out is left out. The aim is that a console
+/// ends up in the state it would have reached had it listened all along.
+/// That follows the tray app's rules: opening pairing lifts a lockout (as
+/// the host does), a lockout withdraws the code, and a completed pairing
+/// ends the window and the code but not a lockout. The lockout lasts until
+/// pairing is opened again, however long ago the window closed.
 #[derive(Default)]
 pub struct Snapshot {
     started: Option<Event>,
     tunnel_url: Option<String>,
     connected: Option<String>,
+    window: Option<OpenWindow>,
+    code: Option<IssuedCode>,
+    locked: bool,
 }
 
 impl Snapshot {
     pub fn update(&mut self, e: &Event) {
+        self.update_at(e, Instant::now());
+    }
+
+    /// [`update`](Self::update) for an event heard at `now`.
+    fn update_at(&mut self, e: &Event, now: Instant) {
         match e {
             Event::Started { .. } => self.started = Some(e.clone()),
+            Event::PairingOpened {
+                link,
+                remaining_secs,
+            } => {
+                let window = remaining_secs.map_or(PAIRING_WINDOW, Duration::from_secs);
+                self.window = Some(OpenWindow {
+                    link: link.clone(),
+                    until: now + window,
+                });
+                self.locked = false;
+            }
+            Event::Notice(Notice::PairingCode {
+                code,
+                device_name,
+                expires_in_secs,
+            }) => {
+                self.code = Some(IssuedCode {
+                    code: code.clone(),
+                    device_name: device_name.clone(),
+                    until: now + Duration::from_secs(*expires_in_secs),
+                });
+            }
+            // A failed attempt changes nothing the tray app shows beyond
+            // its log, so it is not recorded.
+            Event::Notice(Notice::Paired { .. }) => {
+                self.window = None;
+                self.code = None;
+            }
+            Event::Notice(Notice::PairingLocked) => {
+                self.code = None;
+                self.locked = true;
+            }
             Event::Notice(Notice::Tunnel { url }) => self.tunnel_url = url.clone(),
             Event::Notice(Notice::SessionStarted { device_name }) => {
                 self.connected = Some(device_name.clone())
@@ -135,6 +198,11 @@ impl Snapshot {
     }
 
     pub fn events(&self) -> Vec<Event> {
+        self.events_at(Instant::now())
+    }
+
+    /// [`events`](Self::events) as of `now`.
+    fn events_at(&self, now: Instant) -> Vec<Event> {
         let mut out: Vec<Event> = self.started.iter().cloned().collect();
         if let Some(url) = &self.tunnel_url {
             out.push(Event::Notice(Notice::Tunnel {
@@ -145,6 +213,26 @@ impl Snapshot {
             out.push(Event::Notice(Notice::SessionStarted {
                 device_name: device_name.clone(),
             }));
+        }
+        // Opened before locked: hearing the opening lifts a lockout.
+        // Less than a whole second left is as good as over: it would be
+        // sent as zero, a state the console would only tidy away.
+        let live = |until: Instant| until >= now + Duration::from_secs(1);
+        if let Some(w) = self.window.as_ref().filter(|w| live(w.until)) {
+            out.push(Event::PairingOpened {
+                link: w.link.clone(),
+                remaining_secs: Some((w.until - now).as_secs()),
+            });
+        }
+        if let Some(c) = self.code.as_ref().filter(|c| live(c.until)) {
+            out.push(Event::Notice(Notice::PairingCode {
+                code: c.code.clone(),
+                device_name: c.device_name.clone(),
+                expires_in_secs: (c.until - now).as_secs(),
+            }));
+        }
+        if self.locked {
+            out.push(Event::Notice(Notice::PairingLocked));
         }
         out
     }
@@ -188,9 +276,18 @@ pub async fn session<S: AsyncRead + AsyncWrite>(
         Ok(_) => return,
         Err(_) => None,
     };
-    let (format, greeting) = match &first {
-        Some(line) if line.trim() == EVENTS_JSON => (Format::Json, &greeting[..]),
-        _ => (Format::Text, greeting.get(..1).unwrap_or_default()),
+    // A text console is told only of the host's start: the rest of the
+    // greeting is state for the tray app.
+    let (format, greeting): (_, Vec<&Event>) = match &first {
+        Some(line) if line.trim() == EVENTS_JSON => (Format::Json, greeting.iter().collect()),
+        _ => (
+            Format::Text,
+            greeting
+                .iter()
+                .take(1)
+                .filter(|e| matches!(e, Event::Started { .. }))
+                .collect(),
+        ),
     };
     for e in greeting {
         let Some(text) = format_event(e, format) else {
@@ -356,6 +453,152 @@ mod tests {
         assert_eq!(snapshot.events(), vec![started()]);
     }
 
+    fn opened(remaining_secs: Option<u64>) -> Event {
+        Event::PairingOpened {
+            link: "secret".into(),
+            remaining_secs,
+        }
+    }
+
+    fn code(expires_in_secs: u64) -> Event {
+        Event::Notice(Notice::PairingCode {
+            code: "123456".into(),
+            device_name: "phone".into(),
+            expires_in_secs,
+        })
+    }
+
+    #[test]
+    fn a_console_attaching_while_pairing_is_open_hears_what_is_left() {
+        let t = Instant::now();
+        let mut snapshot = Snapshot::default();
+        snapshot.update_at(&started(), t);
+        snapshot.update_at(&opened(Some(120)), t);
+        let later = t + Duration::from_secs(45);
+        assert_eq!(snapshot.events_at(later), vec![started(), opened(Some(75))]);
+    }
+
+    #[test]
+    fn a_console_attaching_after_a_code_hears_it_with_its_time_left() {
+        let t = Instant::now();
+        let mut snapshot = Snapshot::default();
+        snapshot.update_at(&opened(Some(120)), t);
+        snapshot.update_at(&code(120), t + Duration::from_secs(10));
+        // The window ends before the code does: only the code is left.
+        assert_eq!(
+            snapshot.events_at(t + Duration::from_secs(100)),
+            vec![opened(Some(20)), code(30)]
+        );
+        assert_eq!(
+            snapshot.events_at(t + Duration::from_secs(125)),
+            vec![code(5)]
+        );
+    }
+
+    #[test]
+    fn expired_pairing_is_not_replayed() {
+        let t = Instant::now();
+        let mut snapshot = Snapshot::default();
+        snapshot.update_at(&opened(Some(120)), t);
+        snapshot.update_at(&code(120), t);
+        assert!(snapshot.events_at(t + Duration::from_secs(120)).is_empty());
+        assert!(snapshot.events_at(t + Duration::from_secs(500)).is_empty());
+        // About half a second left would be sent as zero: left out.
+        assert!(
+            snapshot
+                .events_at(t + Duration::from_millis(119_500))
+                .is_empty()
+        );
+        assert_eq!(
+            snapshot.events_at(t + Duration::from_millis(119_000)),
+            vec![opened(Some(1)), code(1)]
+        );
+    }
+
+    #[test]
+    fn a_finished_pairing_is_not_replayed_as_open() {
+        let t = Instant::now();
+        let mut snapshot = Snapshot::default();
+        snapshot.update_at(&opened(Some(120)), t);
+        snapshot.update_at(&code(120), t);
+        snapshot.update_at(
+            &Event::Notice(Notice::Paired {
+                device_name: "phone".into(),
+            }),
+            t,
+        );
+        assert!(snapshot.events_at(t + Duration::from_secs(1)).is_empty());
+    }
+
+    #[test]
+    fn a_missing_remaining_time_means_a_full_window_not_an_expired_one() {
+        // From a build that predates the field.
+        let old = r#"{"PairingOpened":{"link":"secret"}}"#;
+        let e: Event = serde_json::from_str(old).unwrap();
+        assert_eq!(e, opened(None));
+        let t = Instant::now();
+        let mut snapshot = Snapshot::default();
+        snapshot.update_at(&e, t);
+        assert_eq!(
+            snapshot.events_at(t + Duration::from_secs(20)),
+            vec![opened(Some(PAIRING_WINDOW.as_secs() - 20))]
+        );
+    }
+
+    #[test]
+    fn a_lockout_follows_the_opening_and_is_lifted_by_the_next() {
+        let t = Instant::now();
+        let locked = Event::Notice(Notice::PairingLocked);
+        let mut snapshot = Snapshot::default();
+        snapshot.update_at(&opened(Some(120)), t);
+        snapshot.update_at(&code(120), t);
+        snapshot.update_at(&locked, t);
+        // The code is withdrawn; the link works on, and the lockout comes
+        // after the opening, which would lift it.
+        assert_eq!(
+            snapshot.events_at(t + Duration::from_secs(10)),
+            vec![opened(Some(110)), locked.clone()]
+        );
+        // The lockout outlives the window.
+        assert_eq!(
+            snapshot.events_at(t + Duration::from_secs(200)),
+            vec![locked]
+        );
+        snapshot.update_at(&opened(Some(120)), t + Duration::from_secs(200));
+        assert_eq!(
+            snapshot.events_at(t + Duration::from_secs(200)),
+            vec![opened(Some(120))]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_text_console_is_not_told_of_pairing() {
+        let (ours, theirs) = tokio::io::duplex(4096);
+        let (commands, _commands_rx) = mpsc::channel(8);
+        let (events, events_rx) = broadcast::channel(16);
+        let mut snapshot = Snapshot::default();
+        snapshot.update(&started());
+        snapshot.update(&opened(Some(120)));
+        snapshot.update(&code(120));
+        assert_eq!(snapshot.events().len(), 3);
+        tokio::spawn(session(theirs, commands, events_rx, snapshot.events()));
+        let (read, write) = tokio::io::split(ours);
+        let mut read = BufReader::new(read).lines();
+        let first = read.next_line().await.unwrap().unwrap();
+        assert!(first.starts_with("web-stream host on https://"), "{first}");
+        events.send(Event::UnpairedAll).unwrap();
+        // The start is several lines; nothing about pairing comes before
+        // the live event.
+        loop {
+            let line = read.next_line().await.unwrap().unwrap();
+            assert!(!line.to_lowercase().contains("pairing"), "{line}");
+            if line.starts_with("every paired browser") {
+                break;
+            }
+        }
+        drop(write);
+    }
+
     /// A console on one end of an in-memory pipe, the session on the other.
     fn console() -> (
         tokio::io::DuplexStream,
@@ -393,6 +636,7 @@ mod tests {
         );
         let link = Event::PairingOpened {
             link: "secret".into(),
+            remaining_secs: Some(120),
         };
         events.send(link.clone()).unwrap();
         assert_eq!(next(read.next_line().await.unwrap()), link);
@@ -452,6 +696,7 @@ mod tests {
     fn the_pairing_link_stays_out_of_logged_lines() {
         let e = Event::PairingOpened {
             link: "s3cret-link".into(),
+            remaining_secs: None,
         };
         assert!(!describe(e.clone()).unwrap().contains("s3cret"));
         assert!(pairing_link_line(&e).unwrap().contains("#pair=s3cret-link"));

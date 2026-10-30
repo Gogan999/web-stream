@@ -23,6 +23,10 @@ use crate::options::ServeOptions;
 use crate::tunnel::Tunnel;
 pub use ws_proto::FileId;
 
+/// How long opening pairing lets a browser pair: the signaling server's own
+/// window, so that every countdown built on it agrees with the real one.
+pub use ws_signaling::DEFAULT_WINDOW as PAIRING_WINDOW;
+
 /// What the host user asks for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
@@ -61,6 +65,14 @@ pub enum Event {
     /// show it only to the host user (as a QR code), never log it.
     PairingOpened {
         link: String,
+        /// Seconds left in the window. A console that attaches late is
+        /// replayed this event with what remains, since a receiver counts
+        /// the window from when it hears of it. `None` is "no information"
+        /// (the two sides of the service's link can be different builds, so
+        /// a missing value must not read as an expired window): the
+        /// receiver assumes a full [`PAIRING_WINDOW`].
+        #[serde(default)]
+        remaining_secs: Option<u64>,
     },
     /// Every paired browser was removed.
     UnpairedAll,
@@ -305,7 +317,10 @@ pub(crate) async fn open_pairing(
     events: &mpsc::UnboundedSender<Event>,
 ) {
     let _ = events.send(match signaling.open_pairing().await {
-        Ok(link) => Event::PairingOpened { link },
+        Ok(link) => Event::PairingOpened {
+            link,
+            remaining_secs: Some(PAIRING_WINDOW.as_secs()),
+        },
         Err(e) => Event::Error(format!("could not open pairing: {e}")),
     });
 }

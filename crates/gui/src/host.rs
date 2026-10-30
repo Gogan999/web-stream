@@ -9,10 +9,11 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 use ws_host::options::ServeOptions;
-use ws_host::serve::{self, Command, Event, FileEvent, FileId, Notice};
+use ws_host::serve::{self, Command, Event, FileEvent, FileId, Notice, PAIRING_WINDOW};
 
 const LOG_LINES: usize = 200;
-const PAIRING_OPEN: Duration = Duration::from_secs(120);
+/// What a pairing window lasts when the host doesn't say how much is left.
+const PAIRING_OPEN: Duration = PAIRING_WINDOW;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Status {
@@ -109,11 +110,18 @@ impl State {
                     web_root,
                 };
             }
-            Event::PairingOpened { link } => {
-                self.pairing_until = Some(Instant::now() + PAIRING_OPEN);
+            Event::PairingOpened {
+                link,
+                remaining_secs,
+            } => {
+                let window = remaining_secs.map_or(PAIRING_OPEN, Duration::from_secs);
+                self.pairing_until = Some(Instant::now() + window);
                 self.pairing_link = Some(link);
                 self.pairing_locked = false;
-                self.log("pairing is open for two minutes: request a code in the browser");
+                self.log(format!(
+                    "pairing is open for {}s: request a code in the browser",
+                    window.as_secs()
+                ));
             }
             Event::UnpairedAll => self.log("every paired browser was removed"),
             Event::Error(e) | Event::Update(e) => self.log(e),

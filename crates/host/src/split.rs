@@ -449,8 +449,8 @@ pub async fn serve_network(
     let (read, write) = tokio::io::split(link);
     let mut incoming = spawn_reader::<Up>(read, MAX_UP);
     let (out, writer) = spawn_writer(write);
-    let send = |msg: &Down, payload: &[u8]| {
-        out.send(frame(msg, payload.to_vec()));
+    let send = |msg: &Down| {
+        out.send(frame(msg, []));
     };
 
     let mut net = Network::start(&opts).await?;
@@ -468,17 +468,14 @@ pub async fn serve_network(
         data_dir,
     } = net.started.clone()
     {
-        send(
-            &Down::Started {
-                port,
-                ips,
-                fingerprint,
-                self_signed,
-                web_root,
-                data_dir,
-            },
-            &[],
-        );
+        send(&Down::Started {
+            port,
+            ips,
+            fingerprint,
+            self_signed,
+            web_root,
+            data_dir,
+        });
     }
     if opts.pair_at_start {
         pairing(&net, PairingCommand::Open, &send).await;
@@ -508,13 +505,10 @@ pub async fn serve_network(
         let backlog = transport.send_backlog().get();
         let now = tokio::time::Instant::now();
         if let Some((connected, backlog)) = reporter.check(now, connected, backlog, paced) {
-            send(
-                &Down::State {
-                    connected,
-                    backlog_us: micros(backlog),
-                },
-                &[],
-            );
+            send(&Down::State {
+                connected,
+                backlog_us: micros(backlog),
+            });
         }
     };
     let mut poll = tokio::time::interval(STATE_POLL);
@@ -596,13 +590,13 @@ pub async fn serve_network(
             }
             Ok(()) = codecs.changed() => {
                 let accepted = codecs.borrow_and_update().clone();
-                send(&Down::Codecs(accepted), &[]);
+                send(&Down::Codecs(accepted));
             }
             Ok(()) = peers.changed() => {
                 let peer = peers.borrow_and_update().clone();
-                send(&Down::Peer { count: peer.count, device: peer.device }, &[]);
+                send(&Down::Peer { count: peer.count, device: peer.device });
             }
-            Some(notice) = notices.recv() => send(&Down::Notice(notice), &[]),
+            Some(notice) = notices.recv() => send(&Down::Notice(notice)),
         }
     };
     net.close().await;
@@ -613,23 +607,17 @@ pub async fn serve_network(
     result
 }
 
-async fn pairing(net: &Network, cmd: PairingCommand, send: &impl Fn(&Down, &[u8])) {
+async fn pairing(net: &Network, cmd: PairingCommand, send: &impl Fn(&Down)) {
     match cmd {
-        PairingCommand::Open => send(
-            &match net.signaling.open_pairing().await {
-                Ok(link) => Down::PairingOpened { link },
-                Err(e) => Down::Error(format!("could not open pairing: {e}")),
-            },
-            &[],
-        ),
+        PairingCommand::Open => send(&match net.signaling.open_pairing().await {
+            Ok(link) => Down::PairingOpened { link },
+            Err(e) => Down::Error(format!("could not open pairing: {e}")),
+        }),
         PairingCommand::DropSession => net.signaling.drop_session().await,
-        PairingCommand::UnpairAll => send(
-            &match net.signaling.revoke_all().await {
-                Ok(()) => Down::UnpairedAll,
-                Err(e) => Down::Error(format!("could not remove paired browsers: {e}")),
-            },
-            &[],
-        ),
+        PairingCommand::UnpairAll => send(&match net.signaling.revoke_all().await {
+            Ok(()) => Down::UnpairedAll,
+            Err(e) => Down::Error(format!("could not remove paired browsers: {e}")),
+        }),
     }
 }
 
@@ -755,8 +743,8 @@ pub async fn serve_media(
     let (read, write) = tokio::io::split(link);
     let mut incoming = spawn_reader::<Down>(read, MAX_DOWN);
     let (out, writer) = spawn_writer(write);
-    let send = |msg: &Up, payload: &[u8]| {
-        out.send(frame(msg, payload.to_vec()));
+    let send = |msg: &Up| {
+        out.send(frame(msg, []));
     };
 
     let (transport, transport_events, mut remote) = Transport::remote();
@@ -850,14 +838,14 @@ pub async fn serve_media(
                     replies.insert(next_id, reply);
                     out.send(frame(&Up::Data { id: next_id, channel, binary }, data));
                 }
-                Some(RemoteCmd::MaxBitrate(bps)) => send(&Up::MaxBitrate(bps), &[]),
-                Some(RemoteCmd::VideoSink(set)) => send(&Up::VideoSink(set), &[]),
+                Some(RemoteCmd::MaxBitrate(bps)) => send(&Up::MaxBitrate(bps)),
+                Some(RemoteCmd::VideoSink(set)) => send(&Up::VideoSink(set)),
                 None => break Ok(()),
             },
             cmd = commands.recv() => match cmd {
-                Some(Command::OpenPairing) => send(&Up::Pairing(PairingCommand::Open), &[]),
-                Some(Command::DropSession) => send(&Up::Pairing(PairingCommand::DropSession), &[]),
-                Some(Command::UnpairAll) => send(&Up::Pairing(PairingCommand::UnpairAll), &[]),
+                Some(Command::OpenPairing) => send(&Up::Pairing(PairingCommand::Open)),
+                Some(Command::DropSession) => send(&Up::Pairing(PairingCommand::DropSession)),
+                Some(Command::UnpairAll) => send(&Up::Pairing(PairingCommand::UnpairAll)),
                 Some(Command::ShareFiles(paths)) => {
                     let _ = files.send(FileCommand::Share(paths)).await;
                 }

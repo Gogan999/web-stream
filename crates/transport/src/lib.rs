@@ -367,6 +367,8 @@ struct Shared {
     video: Mutex<Option<VideoSink>>,
     /// Age of the oldest unsent video packet, for the encoder.
     backlog: SendBacklog,
+    /// Woken when `backlog` changes, so a watcher need not poll it.
+    backlog_changed: Notify,
     /// The next offer starts from the configured estimate.
     forget_estimate: AtomicBool,
     /// Fires once the transport thread has dropped its runtime, and with it
@@ -375,6 +377,17 @@ struct Shared {
 }
 
 impl Shared {
+    /// Store the backlog and wake the watcher if it moved. `notify_one`
+    /// keeps a permit when nobody is waiting, so a change between the
+    /// watcher's awaits still wakes its next one. Unchanged values (the
+    /// usual case while idle or steady) wake nothing.
+    fn set_backlog(&self, age: Duration) {
+        if self.backlog.get() != age {
+            self.backlog.set(age);
+            self.backlog_changed.notify_one();
+        }
+    }
+
     fn emit(&self, ev: TransportEvent) {
         let transition = matches!(ev, TransportEvent::Connected | TransportEvent::Disconnected);
         // Held across the send, so a sink set meanwhile is checked against
@@ -623,6 +636,7 @@ impl Transport {
             input: Mutex::default(),
             video: Mutex::default(),
             backlog: SendBacklog::default(),
+            backlog_changed: Notify::new(),
             forget_estimate: AtomicBool::new(false),
             exited: Mutex::new(Some(exit_rx)),
         });
@@ -825,6 +839,15 @@ impl Transport {
     /// would only be dropped as late.
     pub fn send_backlog(&self) -> SendBacklog {
         self.shared.backlog.clone()
+    }
+
+    /// Resolve when the send backlog has changed since the last time this
+    /// returned. A change made while nobody was waiting is not lost: the
+    /// next call returns at once. It says only that the value moved (read it
+    /// with [`Transport::send_backlog`]), and the move can be tiny, so the
+    /// caller decides what is worth acting on. Meant for one watcher.
+    pub async fn backlog_changed(&self) {
+        self.shared.backlog_changed.notified().await;
     }
 
     /// Change the most the bandwidth estimate probes up to (see
@@ -1053,7 +1076,7 @@ impl Driver {
             } else {
                 Duration::ZERO
             };
-            self.shared.backlog.set(age);
+            self.shared.set_backlog(age);
         }
         deadline
     }
@@ -1095,7 +1118,7 @@ impl Driver {
             }
         }
         self.shared.connected.store(false, Ordering::Relaxed);
-        self.shared.backlog.set(Duration::ZERO);
+        self.shared.set_backlog(Duration::ZERO);
         self.shared.input_route().reset();
         self.filter.lock().expect("filter lock").reset(None);
         self.confirmed.clear();
@@ -1162,6 +1185,34 @@ impl Driver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_backlog_change_between_waits_is_not_lost() {
+        let (transport, _events, _ends) = Transport::new();
+        transport.shared.set_backlog(Duration::from_millis(5));
+        tokio::time::timeout(Duration::from_secs(1), transport.backlog_changed())
+            .await
+            .expect("the change made before waiting wakes the wait");
+        // Several changes before one wait coalesce into a single wakeup.
+        for ms in [6, 7, 8] {
+            transport.shared.set_backlog(Duration::from_millis(ms));
+        }
+        tokio::time::timeout(Duration::from_secs(1), transport.backlog_changed())
+            .await
+            .expect("the changes wake one wait");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), transport.backlog_changed())
+                .await
+                .is_err()
+        );
+        // Setting the same value again is no change, so nothing wakes.
+        transport.shared.set_backlog(Duration::from_millis(8));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), transport.backlog_changed())
+                .await
+                .is_err()
+        );
+    }
 
     #[tokio::test]
     async fn input_waits_for_the_current_connections_sink_in_order() {

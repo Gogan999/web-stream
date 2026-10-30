@@ -50,9 +50,20 @@ const MAX_DOWN: usize = 4 << 20;
 /// Frames read but not yet handled. Past this the reader stops reading,
 /// so a flood from the other side waits in the pipe, not in memory.
 const READ_QUEUE: usize = 256;
-/// How often the network side checks the connection state and send
-/// backlog, which the encoder reads to hold frames back.
-const STATE_POLL: Duration = Duration::from_millis(5);
+/// The longest the network side goes without checking the connection state.
+/// A backlog change is sent as it happens (the encoder reads it to hold
+/// frames back), so this only has to catch connection changes and keep
+/// nothing depending on a message arriving. Slow, since a 5 ms tick woke the
+/// process about 200 times a second even with nothing streaming; idle it
+/// now wakes about 5 times a second.
+const STATE_POLL: Duration = Duration::from_millis(200);
+/// The least time between `State` messages sent because the backlog moved.
+/// Sending on change removes the ceiling the old 5 ms tick gave, about 200
+/// a second, and under load the backlog can cross [`BACKLOG_STEP`] on every
+/// driver pass; each message costs the media process a pipe read, a parse
+/// and a wakeup. A change after a quiet spell still goes at once, and one
+/// held back goes when this has passed. Connection changes ignore it.
+const BACKLOG_SPACING: Duration = Duration::from_millis(5);
 /// A backlog change smaller than this isn't worth a message.
 const BACKLOG_STEP: Duration = Duration::from_millis(1);
 /// Video and game audio waiting for the network process past this are
@@ -352,6 +363,74 @@ fn ago(age: u64) -> u64 {
     mono_now().saturating_sub(age)
 }
 
+/// The state to send now, if it differs enough from the last one sent: the
+/// connection changed, or the backlog moved by at least [`BACKLOG_STEP`].
+/// Anything less, including a steady backlog, sends nothing.
+fn state_change(
+    sent: (bool, Duration),
+    connected: bool,
+    backlog: Duration,
+) -> Option<(bool, Duration)> {
+    let backlog = if connected { backlog } else { Duration::ZERO };
+    (connected != sent.0 || backlog.abs_diff(sent.1) >= BACKLOG_STEP)
+        .then_some((connected, backlog))
+}
+
+/// What the network side last told the media side, and when, so backlog
+/// changes can be sent promptly without exceeding [`BACKLOG_SPACING`].
+struct StateReporter {
+    sent: (bool, Duration),
+    last_send: Option<tokio::time::Instant>,
+    /// A step-sized backlog change arrived inside the spacing and has not
+    /// been sent. Nothing is stored of its value: it is read again when the
+    /// spacing ends, so what goes out is current, and a change that has since
+    /// reversed sends nothing.
+    held: bool,
+}
+
+impl StateReporter {
+    fn new() -> Self {
+        Self {
+            sent: (false, Duration::ZERO),
+            last_send: None,
+            held: false,
+        }
+    }
+
+    /// When a held change may be sent, if one is held.
+    fn due(&self) -> Option<tokio::time::Instant> {
+        self.held.then(|| {
+            self.last_send
+                .map_or_else(tokio::time::Instant::now, |t| t + BACKLOG_SPACING)
+        })
+    }
+
+    /// Look at the current state; return what to send, if anything. The
+    /// periodic floor passes `paced = false`, since it is already far
+    /// slower than the spacing. A backlog wakeup passes `true`.
+    fn check(
+        &mut self,
+        now: tokio::time::Instant,
+        connected: bool,
+        backlog: Duration,
+        paced: bool,
+    ) -> Option<(bool, Duration)> {
+        let Some(next) = state_change(self.sent, connected, backlog) else {
+            self.held = false;
+            return None;
+        };
+        let spaced = self.last_send.is_none_or(|t| now >= t + BACKLOG_SPACING);
+        if paced && next.0 == self.sent.0 && !spaced {
+            self.held = true;
+            return None;
+        }
+        self.held = false;
+        self.sent = next;
+        self.last_send = Some(now);
+        Some(next)
+    }
+}
+
 fn micros(d: Duration) -> u64 {
     d.as_micros().min(u128::from(u64::MAX)) as u64
 }
@@ -422,10 +501,26 @@ pub async fn serve_network(
     });
 
     let mut transitions = 0u64;
-    let mut state = (false, Duration::ZERO);
+    let mut reporter = StateReporter::new();
+    // Read the live state and send it if it is worth a message.
+    let report_state = |reporter: &mut StateReporter, paced: bool| {
+        let connected = transport.is_connected();
+        let backlog = transport.send_backlog().get();
+        let now = tokio::time::Instant::now();
+        if let Some((connected, backlog)) = reporter.check(now, connected, backlog, paced) {
+            send(
+                &Down::State {
+                    connected,
+                    backlog_us: micros(backlog),
+                },
+                &[],
+            );
+        }
+    };
     let mut poll = tokio::time::interval(STATE_POLL);
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let result = loop {
+        let hold_end = reporter.due();
         tokio::select! {
             r = &mut net.server_task => break serve::server_stopped(r),
             msg = incoming.recv() => {
@@ -494,13 +589,10 @@ pub async fn serve_network(
                     );
                 }
             }
-            _ = poll.tick() => {
-                let connected = transport.is_connected();
-                let backlog = if connected { transport.send_backlog().get() } else { Duration::ZERO };
-                if connected != state.0 || backlog.abs_diff(state.1) >= BACKLOG_STEP {
-                    state = (connected, backlog);
-                    send(&Down::State { connected, backlog_us: micros(backlog) }, &[]);
-                }
+            _ = poll.tick() => report_state(&mut reporter, false),
+            () = transport.backlog_changed() => report_state(&mut reporter, true),
+            () = tokio::time::sleep_until(hold_end.unwrap_or_else(tokio::time::Instant::now)), if hold_end.is_some() => {
+                report_state(&mut reporter, true);
             }
             Ok(()) = codecs.changed() => {
                 let accepted = codecs.borrow_and_update().clone();
@@ -843,6 +935,66 @@ fn clean_notice(n: Notice) -> Notice {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn backlog_sends_are_spaced_and_never_stale() {
+        use tokio::time::Instant;
+        let t0 = Instant::now();
+        let ms = Duration::from_millis;
+        let mut r = StateReporter::new();
+        // Connect: sent at once.
+        assert_eq!(r.check(t0, true, ms(0), true), Some((true, ms(0))));
+        // A change after a quiet spell: at once.
+        let t1 = t0 + ms(100);
+        assert_eq!(r.check(t1, true, ms(10), true), Some((true, ms(10))));
+        // Another inside the spacing is held, not sent, and due at the end.
+        assert_eq!(r.check(t1 + ms(1), true, ms(20), true), None);
+        assert_eq!(r.due(), Some(t1 + BACKLOG_SPACING));
+        // Rapid oscillation stays held; the send carries the current value.
+        assert_eq!(r.check(t1 + ms(2), true, ms(30), true), None);
+        assert_eq!(
+            r.check(t1 + BACKLOG_SPACING, true, ms(40), true),
+            Some((true, ms(40)))
+        );
+        assert_eq!(r.due(), None);
+        // A held change that reversed sends nothing and clears the hold.
+        let t2 = t1 + ms(50);
+        assert_eq!(r.check(t2, true, ms(60), true), Some((true, ms(60))));
+        assert_eq!(r.check(t2 + ms(1), true, ms(70), true), None);
+        assert_eq!(r.check(t2 + BACKLOG_SPACING, true, ms(60), true), None);
+        assert_eq!(r.due(), None);
+        // A connection change inside the spacing is not held.
+        assert_eq!(
+            r.check(t2 + BACKLOG_SPACING + ms(1), true, ms(70), true),
+            Some((true, ms(70)))
+        );
+        assert_eq!(
+            r.check(t2 + BACKLOG_SPACING + ms(2), false, ms(70), true),
+            Some((false, Duration::ZERO))
+        );
+    }
+
+    #[test]
+    fn only_a_connection_change_or_a_full_step_is_sent() {
+        let base = Duration::from_millis(10);
+        let live = (true, base);
+        // Steady, and moves smaller than the step: nothing.
+        assert_eq!(state_change(live, true, base), None);
+        assert_eq!(state_change(live, true, base + BACKLOG_STEP / 2), None);
+        assert_eq!(state_change(live, true, base - BACKLOG_STEP / 2), None);
+        // A full step either way is sent, carrying the new value.
+        let up = base + BACKLOG_STEP;
+        assert_eq!(state_change(live, true, up), Some((true, up)));
+        let down = base - BACKLOG_STEP;
+        assert_eq!(state_change(live, true, down), Some((true, down)));
+        // A connection change is sent even at the same backlog, and a
+        // disconnected link reports no backlog.
+        assert_eq!(
+            state_change(live, false, base),
+            Some((false, Duration::ZERO))
+        );
+        assert_eq!(state_change((false, Duration::ZERO), false, base), None);
+    }
 
     /// A frame as `spawn_writer` puts it on the wire.
     fn wire(f: &Frame) -> Vec<u8> {

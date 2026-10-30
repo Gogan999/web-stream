@@ -181,8 +181,12 @@ struct FrameMeta {
     why: Option<&'static str>,
     /// Re-encodes the last image because the desktop was still.
     repeat: bool,
-    /// Captured -> into the encoder.
+    /// Captured -> the start of `encode`. It ends before the encoder's own
+    /// timing starts (slot wait, copy and encode call), which
+    /// `EncodeTiming` covers, with `pre_ms` bridging from `started`.
     held: Duration,
+    /// Where `held` ends.
+    started: Instant,
     kbps: u32,
 }
 
@@ -660,6 +664,7 @@ impl Session {
             repair: self.sched.repair_requested(),
             why: self.sched.idr_cause(),
             repeat: job.captured == now,
+            started: start,
             held: start.saturating_duration_since(job.captured),
             kbps: kbps.unwrap_or(self.config.bitrate_kbps),
         };
@@ -744,9 +749,12 @@ fn deliver(
             }
         };
         stats.encode_time += encoded.encode_time;
+        let t = encoded.timing;
+        let ms =
+            |from: Instant, to: Instant| to.saturating_duration_since(from).as_secs_f64() * 1000.0;
         diag!(
             "frame",
-            "idx={} idr={} intra={} repair={} why={} repeat={} bytes={bytes} held_ms={:.2} enc_ms={:.2} kbps={} out={out}",
+            "idx={} idr={} intra={} repair={} why={} repeat={} bytes={bytes} held_ms={:.2} enc_ms={:.2} kbps={} out={out} pre_ms={:.2} slot_ms={:.2} submit_ms={:.2} event_ms={:.2} bits_ms={:.2} inenc_ms={:.2} submit_at_us={} wait_at_us={} completed_at_us={}",
             meta.index,
             meta.idr,
             meta.intra,
@@ -756,6 +764,15 @@ fn deliver(
             meta.held.as_secs_f64() * 1000.0,
             encoded.encode_time.as_secs_f64() * 1000.0,
             meta.kbps,
+            ms(meta.started, t.before_slot),
+            ms(t.before_slot, t.slot_taken),
+            ms(t.slot_taken, t.submitted),
+            ms(t.submitted, t.completed),
+            ms(t.completed, t.done),
+            ms(t.slot_taken, t.done),
+            mono_micros(t.submitted),
+            mono_micros(t.wait_at),
+            mono_micros(t.completed),
         );
         let done = Instant::now();
         let since = *stats.since.get_or_insert(done);

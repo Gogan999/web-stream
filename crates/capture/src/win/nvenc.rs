@@ -138,6 +138,45 @@ pub(crate) struct Encoded<M> {
     pub meta: M,
     /// From going in to the bitstream being ready.
     pub encode_time: Duration,
+    /// Where the time in [`Self::encode_time`] and before it went.
+    pub timing: EncodeTiming,
+}
+
+/// The instants one frame passed through the encoder, kept as plain values
+/// and only reported later, so that measuring costs the measured span
+/// nothing beyond reading the clock. They let a log line up one frame's
+/// completion against the next frame's submit.
+///
+/// Where the time shows up depends on the mode. Asynchronously the encode
+/// call returns at once and the frame is waited for on the event
+/// (`completed - wait_at`). Synchronously `nvEncEncodePicture` itself
+/// blocks, so the time lands in the submit span, the event is null and not
+/// waited on, and the bitstream lock returns almost at once: `enc_ms` is then
+/// tiny and says nothing, and the event wait carries no information. To
+/// compare modes use the time from `slot_taken` to `done` (`inenc_ms` in the
+/// log). The log prints milliseconds with two decimals, so the parts can
+/// differ from `enc_ms` by 0.01 ms there while the instants are exact.
+#[derive(Clone, Copy)]
+pub(crate) struct EncodeTiming {
+    /// Just before a slot was asked for.
+    pub before_slot: Instant,
+    /// A slot was in hand (after any wait for one to come back).
+    pub slot_taken: Instant,
+    /// The encode call returned: the frame is in the encoder.
+    pub submitted: Instant,
+    /// The output thread got to the frame, before it waited for completion.
+    /// If this is late but `completed` follows at once, the thread was busy
+    /// with the frame before and the event had long since been signalled; if
+    /// it is early and `completed` is far after it, the signal itself was
+    /// late.
+    pub wait_at: Instant,
+    /// The wait for the completion event returned, before the bitstream was
+    /// touched. That is when the wait ended, not when NVENC signalled. A
+    /// synchronous encoder has no event, so this is just the start of the
+    /// bitstream work and says nothing about the encode.
+    pub completed: Instant,
+    /// The bitstream was copied out and unlocked.
+    pub done: Instant,
 }
 
 /// What the output thread hands on for each frame.
@@ -163,6 +202,8 @@ struct Pending<M> {
     slot: usize,
     bitstream: nv::NV_ENC_OUTPUT_PTR,
     event: *mut c_void,
+    before_slot: Instant,
+    slot_taken: Instant,
     submitted: Instant,
     meta: M,
 }
@@ -668,7 +709,9 @@ impl<M: Send + 'static> NvEncoder<M> {
         if let Some(e) = self.failed.lock().unwrap_or_else(|e| e.into_inner()).take() {
             return Err(CaptureError::Platform(e));
         }
+        let before_slot = Instant::now();
         let index = self.take_slot()?;
+        let slot_taken = Instant::now();
         let result = self.submit_to(index, context, src, timestamp, force_idr, intra, kbps);
         let Err(e) = result else {
             let slot = &self.slots[index];
@@ -676,6 +719,8 @@ impl<M: Send + 'static> NvEncoder<M> {
                 slot: index,
                 bitstream: slot.bitstream,
                 event: slot.event,
+                before_slot,
+                slot_taken,
                 submitted: Instant::now(),
                 meta,
             };
@@ -896,14 +941,16 @@ fn output_loop<M: Send>(
 ) {
     let mut broken = false;
     while let Ok(p) = pending.recv() {
+        let wait_at = Instant::now();
         let result = if broken {
             Err(CaptureError::Platform("an earlier frame failed".into()))
         } else {
             finish(session, &p)
         };
-        let encode_time = p.submitted.elapsed();
+        let done = Instant::now();
+        let encode_time = done.saturating_duration_since(p.submitted);
         match result {
-            Ok((data, keyframe)) => {
+            Ok((data, keyframe, completed)) => {
                 // Back first: the capture thread may be waiting for it.
                 let _ = returned.send(p.slot);
                 on_output(Ok(Encoded {
@@ -911,6 +958,14 @@ fn output_loop<M: Send>(
                     keyframe,
                     meta: p.meta,
                     encode_time,
+                    timing: EncodeTiming {
+                        before_slot: p.before_slot,
+                        slot_taken: p.slot_taken,
+                        submitted: p.submitted,
+                        wait_at,
+                        completed,
+                        done,
+                    },
                 }));
             }
             Err(e) => {
@@ -930,8 +985,9 @@ fn output_loop<M: Send>(
     }
 }
 
-/// Waits for one frame and copies its bitstream out.
-fn finish<M>(session: Session, p: &Pending<M>) -> Result<(Bytes, bool)> {
+/// Waits for one frame and copies its bitstream out. The instant the wait
+/// ended comes back with it, so the wait can be told apart from the copy.
+fn finish<M>(session: Session, p: &Pending<M>) -> Result<(Bytes, bool, Instant)> {
     let Session { api, encoder } = session;
     if !p.event.is_null() {
         let waited =
@@ -943,6 +999,7 @@ fn finish<M>(session: Session, p: &Pending<M>) -> Result<(Bytes, bool)> {
             )));
         }
     }
+    let completed = Instant::now();
     let mut lock = nv::NV_ENC_LOCK_BITSTREAM {
         version: nv::NV_ENC_LOCK_BITSTREAM_VER,
         outputBitstream: p.bitstream,
@@ -976,7 +1033,7 @@ fn finish<M>(session: Session, p: &Pending<M>) -> Result<(Bytes, bool)> {
             last_error(api, encoder, status)
         )));
     }
-    Ok((data, keyframe))
+    Ok((data, keyframe, completed))
 }
 
 fn last_error(

@@ -403,7 +403,7 @@ impl App {
             None => {
                 ui.label(
                     RichText::new(
-                        "On the device, open this PC's address (listed above) and ask for a \
+                        "On the device, open this PC's address and ask for a \
                          pairing code there.",
                     )
                     .size(18.0)
@@ -1564,6 +1564,17 @@ mod tests {
                 offer_qr: false,
             }
         );
+    }
+
+    #[test]
+    fn a_deadline_already_past_counts_down_to_zero() {
+        let deadline = Instant::now();
+        let now = deadline + Duration::from_secs(30);
+        let v = pairing_view(Some(deadline), None, true, false, now);
+        assert_eq!(v.stage, PairingStage::AwaitingCode);
+        assert_eq!(v.countdown, Some(0));
+        assert!(v.offer_qr);
+        assert!(!v.locked);
     }
 
     #[test]

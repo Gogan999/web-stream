@@ -1,0 +1,36 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>web-stream GPU load</title>
+<style>html,body{margin:0;background:#000;overflow:hidden}canvas{display:block;width:100vw;height:100vh}</style>
+<canvas id="c"></canvas>
+<script>
+// A heavy full-screen fragment shader, to keep the GPU busy while a stream runs. ?heavy=N sets
+// the loop count (default 400). window.__loadFrames counts frames drawn.
+const c = document.getElementById('c');
+const gl = c.getContext('webgl2', { antialias: false, powerPreference: 'high-performance' });
+const heavy = Number(new URLSearchParams(location.search).get('heavy') || 400);
+const vs = `#version 300 es
+in vec2 p; void main(){ gl_Position = vec4(p, 0., 1.); }`;
+const fs = `#version 300 es
+precision highp float; uniform float t; uniform vec2 r; out vec4 o;
+void main(){
+  vec2 uv = gl_FragCoord.xy / r; float a = 0.;
+  for (int i = 0; i < ${heavy}; i++) { float f = float(i); a += sin(uv.x * (f + 3.) + t) * cos(uv.y * (f * .7 + 2.) - t * .5) / (f + 1.); }
+  o = vec4(.5 + .5 * sin(a), .5 + .5 * cos(a * 1.3), .5 + .5 * sin(a * .7), 1.);
+}`;
+function sh(type, src) { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s); return s; }
+const prog = gl.createProgram();
+gl.attachShader(prog, sh(gl.VERTEX_SHADER, vs)); gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, fs));
+gl.linkProgram(prog); gl.useProgram(prog);
+gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+const loc = gl.getAttribLocation(prog, 'p'); gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+const tU = gl.getUniformLocation(prog, 't'), rU = gl.getUniformLocation(prog, 'r');
+window.__loadFrames = 0;
+(function frame(now) {
+  c.width = innerWidth; c.height = innerHeight; gl.viewport(0, 0, c.width, c.height);
+  gl.uniform1f(tU, now / 1000); gl.uniform2f(rU, c.width, c.height);
+  gl.drawArrays(gl.TRIANGLES, 0, 3); window.__loadFrames++;
+  requestAnimationFrame(frame);
+})(0);
+</script>

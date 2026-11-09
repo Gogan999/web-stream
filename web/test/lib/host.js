@@ -11,11 +11,15 @@ import { chromium } from 'playwright';
 export const bin = process.env.WS_HOST_BIN;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-export async function startHost(t, args = []) {
+// opts.bin: the host program (default WS_HOST_BIN). opts.ip: the one address media binds to,
+// '127.0.0.1' by default so a test never depends on the machine's network; null binds every LAN
+// address, as a real host does (a browser that offers its LAN addresses, which Chrome does once
+// it has media permission, can't connect to a loopback-only host). opts.iceTcp: also listen for ICE-TCP.
+export async function startHost(t, args = [], { bin: exe = bin, ip = '127.0.0.1', iceTcp = false } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'ws-media-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const port = 20000 + Math.floor(Math.random() * 20000);
-  const proc = spawn(bin, ['--port', String(port), '--no-ice-tcp', '--data-dir', join(dir, 'data'), '--ip', '127.0.0.1',
+  const proc = spawn(exe, ['--port', String(port), ...(iceTcp ? [] : ['--no-ice-tcp']), '--data-dir', join(dir, 'data'), ...(ip ? ['--ip', ip] : []),
     '--web-root', fileURLToPath(new URL('../..', import.meta.url)), ...args], { stdio: ['pipe', 'pipe', 'pipe'] });
   t.after(() => proc.kill());
   const host = { port, proc, out: '' };

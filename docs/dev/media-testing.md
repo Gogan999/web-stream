@@ -58,3 +58,29 @@ in any CI and needs no `tc netem`.
 
 Unit tests for the stamp, metrics and proxy are in `web/test/unit` (the stamp test checks the same
 vector as the Rust one, so the two sides can't drift).
+
+## Real hardware (one command)
+
+The synthetic source can't tell you about DXGI, NVENC, WASAPI or SendInput. `web/test/hardware/run.mjs`
+checks those on a real PC, with the real host, in a minute or two:
+
+```text
+cargo build --release -p ws-host --example test-host
+cd web && npm ci
+node test/hardware/run.mjs --displays "0,0;2560,0" --gpu-load
+```
+
+It opens a full-screen Chrome on each display (`source.html`: the stamp, moving noise, and a beep at
+the top of every Unix second), streams them with the host, and measures from a headless Chrome
+client: fps, latency, freezes, bitrate, audio latency and A/V offset, then display switching, then
+input (mouse and keys sent from the client must reach the page on the streamed display), then the
+mic (the client's fake microphone must come out of the virtual cable; needs VB-CABLE), and with
+`--gpu-load` all of it again while `load.html` keeps the GPU busy. It writes a JSON report and
+exits 1 if any check found a problem. Run it with `--help`-style options in the file's header.
+
+It takes over the displays and moves the mouse pointer while it runs, so the PC can't be in use.
+Needs an unlocked interactive session (a disconnected one has nothing to capture), Google Chrome,
+and an audio output device. The first run may raise a Windows Firewall prompt for `test-host.exe`;
+Cancel is fine, and answering it before the input phase matters, because the prompt would swallow
+the injected input. The host is bound to every LAN address, as in real use: a host bound to
+loopback only can't answer the LAN addresses Chrome offers once it has media permission.

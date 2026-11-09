@@ -5,10 +5,10 @@
 <canvas id="c"></canvas>
 <script>
 // A heavy full-screen fragment shader, to keep the GPU busy while a stream runs. ?heavy=N sets
-// the loop count (default 400). window.__loadFrames counts frames drawn.
+// the loop count (default 600). window.__loadFrames counts frames drawn.
 const c = document.getElementById('c');
 const gl = c.getContext('webgl2', { antialias: false, powerPreference: 'high-performance' });
-const heavy = Number(new URLSearchParams(location.search).get('heavy') || 400);
+const heavy = Number(new URLSearchParams(location.search).get('heavy') || 600);
 const vs = `#version 300 es
 in vec2 p; void main(){ gl_Position = vec4(p, 0., 1.); }`;
 const fs = `#version 300 es
@@ -28,9 +28,12 @@ const loc = gl.getAttribLocation(prog, 'p'); gl.enableVertexAttribArray(loc); gl
 const tU = gl.getUniformLocation(prog, 't'), rU = gl.getUniformLocation(prog, 'r');
 window.__loadFrames = 0;
 (function frame(now) {
-  c.width = innerWidth; c.height = innerHeight; gl.viewport(0, 0, c.width, c.height);
+  // A fixed big render size, scaled to whatever window this is in: the cost no longer depends on how
+  // much of the display the window covers (run.mjs keeps it small so it hides no stamp).
+  c.width = 3072; c.height = 3072; gl.viewport(0, 0, c.width, c.height);
   gl.uniform1f(tU, now / 1000); gl.uniform2f(rU, c.width, c.height);
-  gl.drawArrays(gl.TRIANGLES, 0, 3); window.__loadFrames++;
+  for (let k = 0; k < 3; k++) gl.drawArrays(gl.TRIANGLES, 0, 3);
+  window.__loadFrames++;
   requestAnimationFrame(frame);
 })(0);
 </script>

@@ -25,13 +25,14 @@
 //   --size WxH --fps N --kbps N   what the client asks for (default 1920x1080 60 20000)
 //   --seconds N         length of each steady measurement (default 20)
 //   --gpu-load          repeat the measurements with a heavy shader running on --load-at
-//   --load-at "x,y"     where the load window goes (default: the last display)
+//   --load-at "x,y"     where the small load window goes (default: low on the right of the last display)
 //   --skip LIST         comma list of: switch,input,mic,audio
 //   --chrome FILE       a Chrome to use instead of the installed Google Chrome
 //   --report FILE       where the JSON goes (default hardware-report.json)
 //   --synthetic[=N]     development: stream the host's synthetic source (needs a host built with
 //                       --features synthetic) and skip the pages, input and mic
 import { mkdir, writeFile } from 'node:fs/promises';
+import { execSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -93,12 +94,22 @@ async function launch(extraArgs = [], { headless = false } = {}) {
 }
 
 // A full-screen Chrome on the display whose top-left corner is (x, y), showing `page` of this folder.
-async function openOn(x, y, file, query = '') {
-  const browser = await launch([`--window-position=${x},${y}`, '--window-size=800,600', '--kiosk']);
+// `fullscreen: false` leaves a small window at (x, y) instead (the load page, which must not hide a
+// source page's stamp).
+async function openOn(x, y, file, query = '', { fullscreen = true } = {}) {
+  const browser = await launch([`--window-position=${x},${y}`, '--window-size=800,600', ...(fullscreen ? ['--kiosk'] : [])]);
   const ctx = await browser.newContext({ viewport: null });
   const page = await ctx.newPage();
   page.on('pageerror', (e) => problem(`${file}: ${e.message}`));
   await page.goto(`${pathToFileURL(resolve(here, file)).href}${query}`);
+  if (!fullscreen) return page;
+  // --kiosk under Playwright leaves an ordinary window with borders (2544x1345 on a 2560x1440
+  // display), so the stamp sits off the capture's top-left and no frame decodes. Ask for real full
+  // screen, on the display the window was placed on.
+  const cdp = await ctx.newCDPSession(page);
+  const { windowId } = await cdp.send('Browser.getWindowForTarget');
+  await cdp.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'fullscreen' } });
+  await sleep(1000);
   return page;
 }
 
@@ -130,10 +141,17 @@ async function measure(client, ms) {
 // first frame stamped with the new display.
 async function switching(client, order) {
   const out = [];
-  if (!(await client.isVisible('#display'))) await client.click('#more-toggle');
+  // `order` holds display positions (the order of --displays, and the number the stamp carries); the
+  // dropdown's values are the host's display ids, which start at 1.
+  const values = await client.evaluate(() => [...document.getElementById('display').options].map((o) => o.value));
   for (const id of order) {
     const at = await now(client);
-    await client.selectOption('#display', String(id));
+    // Set the value the way a pick does; the select sits in the collapsed settings panel, so it is not clickable.
+    await client.evaluate((v) => {
+      const s = document.getElementById('display');
+      s.value = v;
+      s.dispatchEvent(new Event('change'));
+    }, values[id]);
     try {
       await client.waitForFunction(([id, at]) => window.__probe.frames.some((f) => f.display === id && f.shown > at), [id, at], { timeout: 10000 });
     } catch {
@@ -198,7 +216,8 @@ async function run() {
 
   // 5. Input: mouse and keys from the client, as the page on display 0 sees them.
   if (!opts.skip.includes('input') && !synthetic) {
-    if (ids.length > 1) await client.selectOption('#display', '0');
+    // The stream is on display 0 here: it starts on the primary one and the switching above ends there.
+    // (The display dropdown is in the collapsed settings panel, so selectOption could not click it.)
     await sleep(1500);
     await sources[0].evaluate(() => { window.__events.length = 0; });
     const box = await client.locator('#video').boundingBox();
@@ -244,9 +263,18 @@ async function run() {
 
   // 7. The same under GPU load.
   if (opts.gpuLoad) {
-    const [lx, ly] = (opts.loadAt ?? opts.positions.at(-1).join(',')).split(',').map(Number);
-    const load = await openOn(lx, ly, 'load.html');
+    // A small window low on the last display: load.html renders at a fixed big size whatever the window
+    // is, so the GPU is as busy as full screen, and the stamp rows at the top of that display's source
+    // page stay visible.
+    const last = opts.positions.at(-1);
+    const [lx, ly] = opts.loadAt ? opts.loadAt.split(',').map(Number) : [last[0] + 1700, last[1] + 700];
+    const load = await openOn(lx, ly, 'load.html', '', { fullscreen: false });
     await sleep(4000);
+    const gpu = () => { try { return execSync('nvidia-smi --query-gpu=utilization.gpu,utilization.encoder,clocks.sm --format=csv,noheader,nounits').toString().trim().split(/,\s*/).map(Number); } catch { return null; } };
+    const [gpuUtil, encUtil, smMhz] = gpu() ?? [];
+    report.gpuBeforeMeasure = { utilPct: gpuUtil, nvencPct: encUtil, smMhz };
+    say(`GPU: ${gpuUtil ?? '?'}% busy, NVENC ${encUtil ?? '?'}%, ${smMhz ?? '?'} MHz`);
+    if (gpuUtil != null && gpuUtil < 80) problem(`the load only kept the GPU ${gpuUtil}% busy: raise it with load.html?heavy=N`);
     say(`GPU load running (${await load.evaluate(() => window.__loadFrames)} frames so far); measuring...`);
     report.phases.loaded = await measure(client, opts.seconds * 1000);
     const l = report.phases.loaded;

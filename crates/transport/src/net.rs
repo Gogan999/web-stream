@@ -208,6 +208,7 @@ impl Net {
     pub async fn bind(
         ips: &[IpAddr],
         udp_port: u16,
+        extra_udp_ports: &[u16],
         tcp_port: Option<u16>,
         filter: SharedFilter,
         incoming: mpsc::Sender<Packet>,
@@ -221,14 +222,31 @@ impl Net {
             tcp_addrs: Vec::new(),
         };
         for ip in ips {
-            let socket = Arc::new(UdpSocket::bind(SocketAddr::new(*ip, udp_port)).await?);
-            if let Err(e) = socket2::SockRef::from(&*socket).set_send_buffer_size(UDP_SNDBUF) {
-                tracing::debug!("udp send buffer: {e}");
+            let mut udp_ports = vec![udp_port];
+            for p in extra_udp_ports {
+                // Port 0 would pick a fresh port per entry, which nobody
+                // could know to forward.
+                if *p != 0 && !udp_ports.contains(p) {
+                    udp_ports.push(*p);
+                }
             }
-            let local = socket.local_addr()?;
-            net.udp_addrs.push(local);
-            net.udp.push((local, socket.clone()));
-            tokio::spawn(udp_reader(socket, local, filter.clone(), incoming.clone()));
+            for (i, port) in udp_ports.into_iter().enumerate() {
+                let socket = match UdpSocket::bind(SocketAddr::new(*ip, port)).await {
+                    Ok(s) => Arc::new(s),
+                    Err(e) if i > 0 => {
+                        tracing::warn!(%ip, port, "extra UDP port not bound: {e}");
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                };
+                if let Err(e) = socket2::SockRef::from(&*socket).set_send_buffer_size(UDP_SNDBUF) {
+                    tracing::debug!("udp send buffer: {e}");
+                }
+                let local = socket.local_addr()?;
+                net.udp_addrs.push(local);
+                net.udp.push((local, socket.clone()));
+                tokio::spawn(udp_reader(socket, local, filter.clone(), incoming.clone()));
+            }
 
             if let Some(port) = tcp_port {
                 let listener = TcpListener::bind(SocketAddr::new(*ip, port)).await?;

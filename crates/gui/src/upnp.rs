@@ -45,14 +45,19 @@ pub type Port = (Proto, u16);
 
 /// The ports the host needs forwarded: HTTPS (unless a Cloudflare Tunnel
 /// carries the web page) and media on `port`, and the ICE-TCP fallback
-/// when it is on.
-pub fn ports(port: u16, https: bool, ice_tcp: Option<u16>) -> Vec<Port> {
+/// when it is on, and any extra UDP media ports.
+pub fn ports(port: u16, https: bool, ice_tcp: Option<u16>, extra_udp: &[u16]) -> Vec<Port> {
     let mut out = Vec::new();
     if https {
         out.push((Proto::Tcp, port));
     }
     out.push((Proto::Udp, port));
     out.extend(ice_tcp.map(|p| (Proto::Tcp, p)));
+    for &p in extra_udp {
+        if !out.contains(&(Proto::Udp, p)) {
+            out.push((Proto::Udp, p));
+        }
+    }
     out
 }
 
@@ -304,12 +309,12 @@ mod tests {
     #[test]
     fn the_three_ports() {
         assert_eq!(
-            ports(8443, true, Some(8444)),
+            ports(8443, true, Some(8444), &[]),
             vec![(Proto::Tcp, 8443), (Proto::Udp, 8443), (Proto::Tcp, 8444)]
         );
-        assert_eq!(ports(9000, true, None).len(), 2);
+        assert_eq!(ports(9000, true, None, &[]).len(), 2);
         assert_eq!(
-            ports(8443, false, Some(8444)),
+            ports(8443, false, Some(8444), &[]),
             vec![(Proto::Udp, 8443), (Proto::Tcp, 8444)]
         );
     }

@@ -28,6 +28,9 @@ pub struct Settings {
     pub ice_tcp: bool,
     /// `None`: the port after `port`.
     pub ice_tcp_port: Option<u16>,
+    /// More UDP media ports, separated by spaces or commas (443 for clients
+    /// on networks that block the main port).
+    pub extra_udp_ports: String,
     /// Public addresses that forward to this PC, separated by spaces or commas.
     pub public_ips: String,
     /// Names or IPs browsers reach this PC by (a DDNS name), for the
@@ -91,6 +94,7 @@ impl Default for Settings {
             port: 8443,
             ice_tcp: true,
             ice_tcp_port: None,
+            extra_udp_ports: String::new(),
             public_ips: String::new(),
             hostnames: String::new(),
             tunnel: "off".into(),
@@ -154,6 +158,9 @@ impl Settings {
             args.push("--no-ice-tcp".into());
         } else if let Some(p) = self.ice_tcp_port {
             args.extend(["--ice-tcp-port".into(), p.to_string()]);
+        }
+        for p in list(&self.extra_udp_ports) {
+            args.extend(["--extra-udp-port".into(), p.into()]);
         }
         for ip in list(&self.public_ips) {
             args.extend(["--public-ip".into(), ip.into()]);
@@ -238,7 +245,11 @@ impl Settings {
         let ice_tcp = self
             .ice_tcp
             .then(|| self.ice_tcp_port.unwrap_or(self.port.saturating_add(1)));
-        crate::upnp::ports(self.port, !self.tunnel_on(), ice_tcp)
+        let extra: Vec<u16> = list(&self.extra_udp_ports)
+            .filter_map(|p| p.parse().ok())
+            .filter(|p| *p != 0 && *p != self.port)
+            .collect();
+        crate::upnp::ports(self.port, !self.tunnel_on(), ice_tcp, &extra)
     }
 
     pub fn serve_options(&self) -> anyhow::Result<ServeOptions> {
@@ -407,6 +418,25 @@ mod tests {
         // Only the media's ports are forwarded with a tunnel.
         assert_eq!(quick.forwarded_ports().len(), 2);
         assert_eq!(Settings::default().forwarded_ports().len(), 3);
+    }
+
+    #[test]
+    fn extra_udp_ports_become_flags_and_forwards() {
+        let s = Settings {
+            extra_udp_ports: "443, 3478 443".into(),
+            ..Settings::default()
+        };
+        let o = s.serve_options().unwrap();
+        assert_eq!(o.extra_udp_ports, vec![443, 3478]);
+        let fwd = s.forwarded_ports();
+        assert!(fwd.contains(&(crate::upnp::Proto::Udp, 443)));
+        assert!(fwd.contains(&(crate::upnp::Proto::Udp, 3478)));
+        assert_eq!(fwd.len(), 5);
+        let bad = Settings {
+            extra_udp_ports: "nope".into(),
+            ..Settings::default()
+        };
+        assert!(bad.serve_options().is_err());
     }
 
     #[test]

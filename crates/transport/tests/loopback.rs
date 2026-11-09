@@ -218,6 +218,51 @@ async fn no_keyframe_requests_without_a_session() {
 }
 
 #[tokio::test]
+async fn offers_every_extra_udp_port_and_skips_ones_in_use() {
+    let _shared = REAL_TIME.read().await;
+    let free = {
+        let s = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        s.local_addr().unwrap().port()
+    };
+    let taken = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let taken_port = taken.local_addr().unwrap().port();
+    let (transport, _events) = Transport::start(TransportConfig {
+        ips: vec![[127, 0, 0, 1].into()],
+        public_ips: vec!["203.0.113.9".parse().unwrap()],
+        udp_port: 0,
+        extra_udp_ports: vec![free, taken_port, free],
+        tcp_port: None,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let offer = transport.offer().await.unwrap();
+    let udp_ports = |ip: &str| -> Vec<u16> {
+        offer
+            .lines()
+            .filter(|l| l.starts_with("a=candidate"))
+            .filter_map(|l| {
+                let f: Vec<_> = l.split_whitespace().collect();
+                (f[2].eq_ignore_ascii_case("udp") && f[4] == ip).then(|| f[5].parse().unwrap())
+            })
+            .collect()
+    };
+    let local = udp_ports("127.0.0.1");
+    assert_eq!(local.len(), 2, "{local:?}");
+    assert!(local.contains(&free) && !local.contains(&taken_port));
+    // The public address is offered on each bound port.
+    let mut public = udp_ports("203.0.113.9");
+    let mut want = local.clone();
+    public.sort();
+    want.sort();
+    assert_eq!(public, want);
+    // A packet to the extra port reaches the transport (no panic, still responsive).
+    let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let _ = sock.send_to(&[0x80; 50], ("127.0.0.1", free)).await;
+    assert!(transport.offer().await.is_ok());
+}
+
+#[tokio::test]
 async fn junk_and_bad_tcp_are_ignored() {
     let _shared = REAL_TIME.read().await;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};

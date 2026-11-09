@@ -13,6 +13,7 @@ certificate and paired browsers in `%LOCALAPPDATA%\web-stream`.
 | Flag | Meaning |
 |---|---|
 | `--port P` | HTTPS (TCP) and media (UDP) port. Default 8443 |
+| `--extra-udp-port P` | Also listen for media on UDP port P (repeatable). `443` helps clients on networks that block 8443. Forward it on the router too. A port that can't be bound is skipped with a warning |
 | `--ice-tcp-port P` | ICE-TCP fallback port. Default `port + 1` |
 | `--no-ice-tcp` | Don't listen for ICE-TCP |
 | `--ip IP` | Local address for media (repeatable). Default: every LAN IPv4 address |

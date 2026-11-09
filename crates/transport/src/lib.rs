@@ -75,6 +75,11 @@ pub struct TransportConfig {
     pub public_ips: Vec<IpAddr>,
     /// UDP port for all media and data. 0 picks a free port.
     pub udp_port: u16,
+    /// More UDP ports for the same media, for clients whose network lets
+    /// only some ports through (UDP 443 is often open where 8443 is not).
+    /// A port that can't be bound (in use, or not allowed) is skipped with
+    /// a warning; the first `udp_port` must bind.
+    pub extra_udp_ports: Vec<u16>,
     /// ICE-TCP port, or `None` to disable the TCP fallback.
     pub tcp_port: Option<u16>,
     /// Don't resend packets older than this; a keyframe repairs the loss
@@ -100,6 +105,7 @@ impl Default for TransportConfig {
             ips: Vec::new(),
             public_ips: Vec::new(),
             udp_port: 8443,
+            extra_udp_ports: Vec::new(),
             tcp_port: Some(8444),
             max_resend_age: Duration::from_millis(250),
             max_send_delay: Duration::from_millis(50),
@@ -579,6 +585,7 @@ impl Transport {
                     let net = match Net::bind(
                         &ips,
                         config.udp_port,
+                        &config.extra_udp_ports,
                         config.tcp_port,
                         filter.clone(),
                         pkt_tx,

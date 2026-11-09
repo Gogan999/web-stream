@@ -13,6 +13,8 @@ use ws_proto::{DisplayId, VideoCodec, VideoConfig, VideoQuality};
 pub const USAGE: &str = "\
 host options:
   --port P             HTTPS (TCP) and media (UDP) port, default 8443
+  --extra-udp-port P   also listen for media on UDP port P (repeatable), e.g. 443
+                       for clients on networks that block 8443
   --ice-tcp-port P     ICE-TCP fallback port, default port+1
   --no-ice-tcp         don't listen for ICE-TCP
   --ip IP              local address for media (repeatable; default: every LAN IPv4)
@@ -60,6 +62,8 @@ host options:
 pub struct ServeOptions {
     pub port: u16,
     pub ice_tcp_port: Option<u16>,
+    /// More UDP media ports (`--extra-udp-port`).
+    pub extra_udp_ports: Vec<u16>,
     pub ips: Vec<IpAddr>,
     pub public_ips: Vec<IpAddr>,
     pub hostnames: Vec<String>,
@@ -185,6 +189,7 @@ impl ServeOptions {
     pub fn parse(args: &[String]) -> anyhow::Result<Self> {
         let mut port = 8443u16;
         let mut ice_tcp_port = None;
+        let mut extra_udp_ports: Vec<u16> = Vec::new();
         let mut no_ice_tcp = false;
         let mut ips = Vec::new();
         let mut public_ips = Vec::new();
@@ -224,6 +229,15 @@ impl ServeOptions {
                 "--port" => port = value()?.parse().context("--port")?,
                 "--ice-tcp-port" => {
                     ice_tcp_port = Some(value()?.parse().context("--ice-tcp-port")?)
+                }
+                "--extra-udp-port" => {
+                    let p: u16 = value()?.parse().context("--extra-udp-port")?;
+                    if p == 0 {
+                        bail!("--extra-udp-port 0 is not a port");
+                    }
+                    if !extra_udp_ports.contains(&p) {
+                        extra_udp_ports.push(p);
+                    }
                 }
                 "--no-ice-tcp" => no_ice_tcp = true,
                 "--ip" => ips.push(value()?.parse().context("--ip")?),
@@ -351,6 +365,7 @@ impl ServeOptions {
         Ok(Self {
             port,
             ice_tcp_port,
+            extra_udp_ports,
             ips,
             public_ips,
             hostnames,
@@ -547,6 +562,18 @@ mod tests {
         assert_eq!(o.media.display, Some(DisplayId(2)));
         assert!(o.pair_at_start);
         assert_eq!(parse(&["--no-ice-tcp"]).unwrap().ice_tcp_port, None);
+        let o = parse(&[
+            "--extra-udp-port",
+            "443",
+            "--extra-udp-port",
+            "443",
+            "--extra-udp-port",
+            "3478",
+        ])
+        .unwrap();
+        assert_eq!(o.extra_udp_ports, vec![443, 3478]);
+        assert!(parse(&["--extra-udp-port", "0"]).is_err());
+        assert!(parse(&[]).unwrap().extra_udp_ports.is_empty());
     }
 
     #[test]

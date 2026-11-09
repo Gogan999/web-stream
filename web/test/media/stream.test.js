@@ -70,6 +70,13 @@ test('synthetic stream: rate, latency, audio, mic and display switching', { skip
     report.switches.push(sw);
     t.diagnostic(`switch: ${JSON.stringify(sw)}`);
     assert.ok(sw.switchMs < 1500, `display ${id} showed after ${sw.switchMs} ms`);
+    if (after.displays.length !== 1) {
+      // Show the order the browser presented things in around the switch, to tell a late frame
+      // from the old display from a mis-read.
+      const around = data.frames.filter((f) => f.shown > at - 100 && f.shown < first.shown + 400)
+        .map((f) => (f.bad ? 'bad' : `d${f.display}#${f.frame}@${Math.round(f.shown - at)}p${f.presented}`));
+      t.diagnostic(`switch to ${id} at 0, first new frame ${Math.round(first.shown - at)} ms: ${around.join(' ')}`);
+    }
     assert.deepEqual(after.displays, [id], `only display ${id} after the switch`);
     assert.ok(after.fps >= 20, `fps ${after.fps} after switching to display ${id}`);
   }

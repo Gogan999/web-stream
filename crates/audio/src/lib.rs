@@ -17,6 +17,7 @@
 pub mod convert;
 pub mod encode;
 pub mod mic;
+pub mod synthetic;
 
 #[cfg(windows)]
 mod win;

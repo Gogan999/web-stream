@@ -7,7 +7,8 @@
     "dev": "node dev/server.mjs",
     "test": "node --test test/unit/*.test.js",
     "test:e2e": "node --test test/e2e/*.test.js",
-    "test:host": "node --test test/host/*.test.js"
+    "test:host": "node --test test/host/*.test.js",
+    "test:media": "node --test --test-concurrency=1 test/media/*.test.js"
   },
   "devDependencies": {
     "playwright": "1.56.1",

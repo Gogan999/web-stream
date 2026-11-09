@@ -10,6 +10,12 @@
 //! `--split` (Unix) runs it as the Windows service does: the network side
 //! (signaling, the transport) in a child process, linked to the media side
 //! in this one (see `ws_host::split`).
+//!
+//! `--synthetic[=N]` (built with `--features synthetic`) streams N fake
+//! displays (default 2) of stamped, software-encoded frames instead of
+//! capturing the screen, and on Linux and macOS a beep for game audio and a
+//! level meter for the mic: the media path end to end without a GPU or sound
+//! devices. `web/test/media` measures it from the browser.
 
 use std::io::{BufRead, IsTerminal};
 
@@ -39,6 +45,15 @@ fn main() -> anyhow::Result<()> {
     if network_half {
         args.remove(0);
     }
+    if let Some(i) = args.iter().position(|a| a.starts_with("--synthetic")) {
+        let flag = args.remove(i);
+        let displays = match flag.strip_prefix("--synthetic=") {
+            Some(n) => n.parse()?,
+            None if flag == "--synthetic" => 2,
+            None => anyhow::bail!("unknown option {flag}"),
+        };
+        enable_synthetic(displays)?;
+    }
     let split = args.iter().any(|a| a == "--split");
     args.retain(|a| a != "--split");
     let opts = ServeOptions::parse(&args)?;
@@ -49,6 +64,19 @@ fn main() -> anyhow::Result<()> {
         return runtime.block_on(split::network_half(opts));
     }
     runtime.block_on(run(opts, split.then_some(args)))
+}
+
+#[cfg(feature = "synthetic")]
+fn enable_synthetic(displays: usize) -> anyhow::Result<()> {
+    ws_capture::synthetic::enable(displays);
+    #[cfg(not(windows))]
+    ws_host::use_synthetic_audio();
+    Ok(())
+}
+
+#[cfg(not(feature = "synthetic"))]
+fn enable_synthetic(_: usize) -> anyhow::Result<()> {
+    anyhow::bail!("--synthetic needs a test host built with --features synthetic")
 }
 
 /// The child's first argument under `--split`.

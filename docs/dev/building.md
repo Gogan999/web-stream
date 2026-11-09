@@ -110,7 +110,9 @@ The file lives inside `.git`, so nothing pulled from GitHub can change it.
 Two examples in `crates/host`:
 
 - **test-host**, a headless host that takes `pair`, `drop`, `unpair-all`,
-  `send <path>` and `quit` on stdin. The browser tests use it.
+  `send <path>` and `quit` on stdin. The browser tests use it. With
+  `--features synthetic` and `--synthetic` it streams fake displays and a beep
+  instead of capturing (see [Testing the media path](media-testing.md)).
 
   ```
   cargo run -p ws-host --example test-host -- --pair

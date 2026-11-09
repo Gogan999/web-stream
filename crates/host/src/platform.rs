@@ -1,6 +1,8 @@
 //! The OS-specific pieces: input injection, game audio capture and the
 //! virtual mic. Off Windows they are stand-ins so the rest of the host (and
-//! its signaling and transport) still runs and can be tested.
+//! its signaling and transport) still runs and can be tested; after
+//! [`use_synthetic_audio`] the audio ones are a beep and a mic level meter
+//! (`ws_audio::synthetic`), for tests of the media path.
 
 use tokio::sync::mpsc;
 use ws_audio::{LoopbackConfig, MicConfig, MicReceiver};
@@ -95,8 +97,23 @@ mod imp {
         }
     }
 
-    pub enum Loopback {}
-    pub enum Mic {}
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use ws_audio::synthetic::{BeepSource, MicMeter};
+
+    static SYNTHETIC: AtomicBool = AtomicBool::new(false);
+
+    /// From now on game audio is a beep every second and the browser's mic
+    /// plays into a level meter (see `ws_audio::synthetic`).
+    pub fn use_synthetic_audio() {
+        SYNTHETIC.store(true, Ordering::Relaxed);
+    }
+
+    fn synthetic() -> bool {
+        SYNTHETIC.load(Ordering::Relaxed)
+    }
+
+    pub struct Loopback(BeepSource);
+    pub struct Mic(#[allow(dead_code)] MicMeter);
 
     pub fn input_sink(_rumble: impl Fn(HostControl) + Send + Sync + 'static) -> Sink {
         Sink
@@ -105,14 +122,21 @@ mod imp {
     pub fn set_display_rect(_: &mut Sink, _: DisplayRect) {}
 
     pub fn start_loopback(
-        _: LoopbackConfig,
-        _: mpsc::Sender<AudioPacket>,
+        config: LoopbackConfig,
+        packets: mpsc::Sender<AudioPacket>,
     ) -> ws_audio::Result<Loopback> {
-        Err(unsupported())
+        if !synthetic() {
+            return Err(unsupported());
+        }
+        Ok(Loopback(BeepSource::start(config, packets)?))
     }
 
-    pub fn start_mic(_: MicConfig) -> ws_audio::Result<(Mic, MicReceiver)> {
-        Err(unsupported())
+    pub fn start_mic(config: MicConfig) -> ws_audio::Result<(Mic, MicReceiver)> {
+        if !synthetic() {
+            return Err(unsupported());
+        }
+        let (meter, receiver) = MicMeter::start(config)?;
+        Ok((Mic(meter), receiver))
     }
 
     pub fn cursor_reader() -> Option<impl FnMut() -> Option<CursorState>> {
@@ -120,11 +144,15 @@ mod imp {
     }
 
     pub fn audio_devices() -> ws_audio::Result<Vec<String>> {
+        if synthetic() {
+            return Ok(vec!["Synthetic beep".into()]);
+        }
         Err(unsupported())
     }
 
-    pub fn set_audio(capture: &Loopback, _: u32, _: u32) {
-        match *capture {}
+    pub fn set_audio(capture: &Loopback, bitrate: u32, frame_ms: u32) {
+        capture.0.set_bitrate(bitrate);
+        capture.0.set_frame_ms(frame_ms);
     }
 
     fn unsupported() -> ws_audio::AudioError {

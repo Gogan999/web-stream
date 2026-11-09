@@ -13,6 +13,14 @@ bytes.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+# The synthetic source (feature "synthetic"): software H.264 for tests.
+openh264 = { version = "0.9.9", optional = true }
+openh264-sys2 = { version = "0.9", optional = true }
+
+[features]
+# A stand-in for display capture on any OS, for tests: fake displays whose
+# frames carry a machine-readable stamp, encoded in software (OpenH264).
+synthetic = ["dep:openh264", "dep:openh264-sys2"]
 
 [target.'cfg(windows)'.dependencies]
 ws-nvenc-sys.workspace = true

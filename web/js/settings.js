@@ -1,7 +1,7 @@
 // Stream settings chosen in the browser: codec, bitrate, resolution, frame rate, encoder quality and keyframe
 // handling, turned into the host's VideoConfig. Pure functions so they can be tested; main.js owns the UI.
 
-export const QUALITIES = Object.freeze(['speed', 'balanced', 'clarity']);
+export const QUALITIES = Object.freeze(['speed', 'balanced', 'clarity', 'text']);
 // Video codecs the host encodes, as VideoConfig names them, with the browser's MIME type for each.
 export const CODECS = Object.freeze({ h264: 'video/H264', h265: 'video/H265', av1: 'video/AV1' });
 export const MOUSE_MODES = Object.freeze(['relative', 'absolute']);
@@ -30,6 +30,9 @@ export const DEFAULTS = Object.freeze({
   matchHost: false, mic: false,
   audioKbps: 'host', audioFrame: 'host', statsLevel: 'essential',
 });
+
+// What choosing the Text quality sets: see the handler in main.js.
+export const TEXT_PRESET = Object.freeze({ resolution: 'native', fps: 30, minScale: 100, bitrate: 'auto' });
 
 const STORAGE_KEY = 'ws-stream-settings';
 const even = (v) => Math.max(2, Math.floor(v / 2) * 2);

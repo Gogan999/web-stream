@@ -301,7 +301,11 @@ showSettings();
 for (const [el, key] of [[ui.resolution, 'resolution'], [ui.codec, 'codec'], [ui.bitrate, 'bitrate'], [ui.fps, 'fps'], [ui.quality, 'quality'], [ui.keyframeScale, 'keyframeScale'], [ui.minScale, 'minScale']]) {
   el.addEventListener('change', () => {
     settings[key] = ['fps', 'keyframeScale', 'minScale'].includes(key) ? Number(el.value) : el.value;
+    // Text is a bundle for reading and working: host-native pixels (no scaling blur), at most 30 fps so
+    // the encoder can use its slowest presets, no automatic shrinking, and a bitrate with room for it.
+    if (key === 'quality' && settings.quality === 'text') Object.assign(settings, settingsStore.TEXT_PRESET);
     settingsStore.save(settings);
+    showSettings();
     applySettings();
   });
 }

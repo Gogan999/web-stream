@@ -38,6 +38,9 @@ pub enum VideoQuality {
     /// Slowest encode the frame rate allows, and a little room for large
     /// frames (fast motion, keyframes) to take longer than one frame time.
     Clarity,
+    /// For reading text and working: the slowest encode, aimed at 30 fps
+    /// or less. Sharpness first, motion second.
+    Text,
 }
 
 /// How long the oldest video packet has waited in the transport's send

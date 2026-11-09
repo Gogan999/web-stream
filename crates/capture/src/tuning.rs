@@ -72,6 +72,22 @@ fn effort(config: &VideoConfig) -> (u8, f64) {
             by_rate(6, 4, 2),
             (MAX_BURST_SECS * f64::from(config.fps.max(1))).clamp(1.0, 2.0),
         ),
+        // Text is meant for desktop work at 30 fps or less, where the
+        // encoder has time for the slowest presets: one step slower than
+        // Clarity at the same pixel rate, and a frame may take as long as
+        // Clarity's to send.
+        VideoQuality::Text => (
+            if rate <= P1440_60 / 2 {
+                7
+            } else if rate <= P2160_60 / 2 {
+                6
+            } else if rate <= P2160_60 {
+                4
+            } else {
+                2
+            },
+            (MAX_BURST_SECS * f64::from(config.fps.max(1))).clamp(1.0, 2.0),
+        ),
     }
 }
 
@@ -105,6 +121,20 @@ mod tests {
         assert_eq!(tuning(&cfg(1920, 1080, 60, Clarity)).preset, 6);
         assert_eq!(tuning(&cfg(3840, 2160, 60, Clarity)).preset, 4);
         assert_eq!(tuning(&cfg(3840, 2160, 144, Clarity)).preset, 2);
+    }
+
+    #[test]
+    fn text_uses_the_slowest_presets_at_desktop_frame_rates() {
+        use VideoQuality::*;
+        assert_eq!(tuning(&cfg(1920, 1080, 30, Text)).preset, 7);
+        assert_eq!(tuning(&cfg(2560, 1440, 30, Text)).preset, 7);
+        assert_eq!(tuning(&cfg(3840, 2160, 30, Text)).preset, 6);
+        // Never slower than Clarity would allow once the rate is high.
+        assert!(
+            tuning(&cfg(3840, 2160, 60, Text)).preset
+                <= tuning(&cfg(3840, 2160, 60, Clarity)).preset
+        );
+        assert_eq!(tuning(&cfg(1920, 1080, 30, Text)).vbv_frames, 1.0);
     }
 
     #[test]

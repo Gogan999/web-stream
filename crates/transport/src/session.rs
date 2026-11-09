@@ -644,11 +644,18 @@ pub fn candidates(
     };
     let mut out: Vec<Candidate> = udp.iter().filter_map(|a| udp_host(*a)).collect();
     out.extend(tcp.iter().filter_map(|a| tcp_host(*a)));
-    if let Some(base) = udp.first() {
+    // The router forwards each media port to the same port on the host.
+    let mut ports: Vec<u16> = Vec::new();
+    for a in udp {
+        if !ports.contains(&a.port()) {
+            ports.push(a.port());
+        }
+    }
+    for port in ports {
         out.extend(
             public
                 .iter()
-                .filter_map(|ip| udp_host(SocketAddr::new(*ip, base.port()))),
+                .filter_map(|ip| udp_host(SocketAddr::new(*ip, port))),
         );
     }
     if let Some(base) = tcp.first() {

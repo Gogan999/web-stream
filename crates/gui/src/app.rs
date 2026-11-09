@@ -898,6 +898,15 @@ impl App {
                     }
                 });
                 ui.end_row();
+                ui.label("Extra UDP ports").on_hover_text(
+                    "More ports for media, for clients on networks that block the \
+                         main one. UDP 443 is often open. Forward them on the router too",
+                );
+                ui.add(
+                    egui::TextEdit::singleline(&mut d.extra_udp_ports)
+                        .hint_text("e.g. 443 (optional)"),
+                );
+                ui.end_row();
                 ui.label("Public addresses");
                 ui.add(
                     egui::TextEdit::singleline(&mut d.public_ips)
@@ -1316,6 +1325,13 @@ fn forward_ports(s: &Settings) -> String {
     if s.ice_tcp {
         let tcp = s.ice_tcp_port.unwrap_or(s.port.saturating_add(1));
         out.push_str(&format!(", TCP {tcp}"));
+    }
+    for p in s
+        .extra_udp_ports
+        .split([' ', ',', ';'])
+        .filter(|p| !p.is_empty())
+    {
+        out.push_str(&format!(", UDP {p}"));
     }
     out
 }

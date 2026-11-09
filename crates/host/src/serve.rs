@@ -204,6 +204,7 @@ impl Network {
             ips: opts.ips.clone(),
             public_ips: opts.public_ips.clone(),
             udp_port: opts.port,
+            extra_udp_ports: opts.extra_udp_ports.clone(),
             tcp_port: opts.ice_tcp_port,
             ..Default::default()
         })

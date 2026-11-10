@@ -876,113 +876,10 @@ impl App {
 
     fn settings_ui(&mut self, ui: &mut egui::Ui) {
         let d = &mut self.draft;
-        egui::Grid::new("settings")
+        egui::Grid::new("settings-video")
             .num_columns(2)
             .spacing([12.0, 6.0])
             .show(ui, |ui| {
-                ui.label("Port (TCP and UDP)");
-                ui.add(egui::DragValue::new(&mut d.port).range(1..=65534));
-                ui.end_row();
-                ui.label("ICE-TCP fallback")
-                    .on_hover_text("Media over TCP for networks that block UDP");
-                ui.horizontal(|ui| {
-                    ui.checkbox(&mut d.ice_tcp, "on TCP");
-                    let next = d.port.saturating_add(1);
-                    let mut port = d.ice_tcp_port.unwrap_or(next);
-                    if ui
-                        .add_enabled(d.ice_tcp, egui::DragValue::new(&mut port).range(1..=65535))
-                        .changed()
-                    {
-                        // The port after the main one follows it.
-                        d.ice_tcp_port = (port != next).then_some(port);
-                    }
-                });
-                ui.end_row();
-                ui.label("Extra UDP ports").on_hover_text(
-                    "More ports for media, for clients on networks that block the \
-                         main one. UDP 443 is often open. Forward them on the router too",
-                );
-                ui.add(
-                    egui::TextEdit::singleline(&mut d.extra_udp_ports)
-                        .hint_text("e.g. 443 (optional)"),
-                );
-                ui.end_row();
-                ui.label("Public addresses");
-                ui.add(
-                    egui::TextEdit::singleline(&mut d.public_ips)
-                        .hint_text("WAN IPs that forward here (optional)"),
-                );
-                ui.end_row();
-                ui.label("Host names").on_hover_text(
-                    "Names or IPs browsers use to reach this PC, put in its \
-                         self-signed certificate. Changing them makes a new certificate, \
-                         which browsers warn about once",
-                );
-                ui.add(
-                    egui::TextEdit::singleline(&mut d.hostnames)
-                        .hint_text("e.g. a DDNS name (optional)"),
-                );
-                ui.end_row();
-                ui.label("Cloudflare Tunnel").on_hover_text(
-                    "Serves the web page through Cloudflare, with Cloudflare's certificate: no \
-                     warning in the browser, and no HTTPS port to forward. Video, audio and \
-                     input still come straight to this PC. Named: a tunnel made in the \
-                     Cloudflare dashboard, with a name that stays. Quick: no account, but a new \
-                     trycloudflare.com address (and pairing again) every time the host starts",
-                );
-                let label = TUNNELS
-                    .iter()
-                    .find(|(v, _)| *v == d.tunnel)
-                    .map_or("Off", |(_, l)| *l);
-                egui::ComboBox::from_id_salt("tunnel")
-                    .selected_text(label)
-                    .show_ui(ui, |ui| {
-                        for (value, label) in TUNNELS {
-                            ui.selectable_value(&mut d.tunnel, value.to_string(), *label);
-                        }
-                    });
-                ui.end_row();
-                if d.tunnel == "named" {
-                    let saved = self
-                        .data_dir
-                        .join(ws_host::options::TUNNEL_TOKEN_FILE)
-                        .exists();
-                    ui.label("Tunnel token");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut d.tunnel_token)
-                            .password(true)
-                            .hint_text(if saved {
-                                "saved (paste to replace)"
-                            } else {
-                                "from the Cloudflare dashboard"
-                            }),
-                    );
-                    ui.end_row();
-                    ui.label("Tunnel address").on_hover_text(
-                        "The public hostname set for the tunnel in the dashboard. Empty: the \
-                         one cloudflared reports",
-                    );
-                    ui.add(
-                        egui::TextEdit::singleline(&mut d.tunnel_hostname)
-                            .hint_text("e.g. pc.example.com (optional)"),
-                    );
-                    ui.end_row();
-                }
-                ui.label("Forget browsers");
-                ui.add(
-                    egui::DragValue::new(&mut d.forget_after_days)
-                        .range(1..=3650)
-                        .prefix("unused for ")
-                        .suffix(" days"),
-                );
-                ui.end_row();
-                ui.label("Web client folder");
-                ui.add(
-                    egui::TextEdit::singleline(&mut d.web_root)
-                        .hint_text("empty: the one built into the host"),
-                );
-                ui.end_row();
-
                 ui.label("Display");
                 let selected = match d.display {
                     None => "Primary".to_string(),
@@ -1031,7 +928,11 @@ impl App {
                 ui.label("Quality");
                 combo(ui, "quality", &mut d.quality, QUALITIES);
                 ui.end_row();
-
+            });
+        egui::Grid::new("settings-audio")
+            .num_columns(2)
+            .spacing([12.0, 6.0])
+            .show(ui, |ui| {
                 ui.label("Game audio");
                 ui.horizontal(|ui| {
                     ui.checkbox(&mut d.game_audio, "send, from");
@@ -1043,32 +944,6 @@ impl App {
                             ("", "Default output"),
                             &self.audio_devices,
                         );
-                    });
-                });
-                ui.end_row();
-                ui.label("Audio quality");
-                ui.add_enabled_ui(d.game_audio, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.add(
-                            egui::DragValue::new(&mut d.audio_kbps)
-                                .range(32..=510)
-                                .suffix(" kbps"),
-                        )
-                        .on_hover_text("192 kbps and up is hard to tell from the original");
-                        egui::ComboBox::from_id_salt("audio-frame")
-                            .selected_text(format!("{} ms frames", d.audio_frame_ms))
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(
-                                    &mut d.audio_frame_ms,
-                                    10,
-                                    "10 ms (lowest delay)",
-                                );
-                                ui.selectable_value(
-                                    &mut d.audio_frame_ms,
-                                    20,
-                                    "20 ms (better sound)",
-                                );
-                            });
                     });
                 });
                 ui.end_row();
@@ -1103,6 +978,11 @@ impl App {
                         "The virtual controller each browser gamepad becomes (ViGEmBus)",
                     );
                 ui.end_row();
+            });
+        egui::Grid::new("settings-access")
+            .num_columns(2)
+            .spacing([12.0, 6.0])
+            .show(ui, |ui| {
                 ui.label("Resolution");
                 ui.checkbox(
                     &mut d.allow_resolution_change,
@@ -1134,15 +1014,186 @@ impl App {
                      the new build. Only paired browsers can use it",
                 );
                 ui.end_row();
-                ui.label("More options");
-                ui.add(
-                    egui::TextEdit::singleline(&mut d.extra_args)
-                        .hint_text("host flags, e.g. --cert a.pem --key b.pem"),
-                );
-                ui.end_row();
                 ui.label("On launch");
                 ui.checkbox(&mut d.start_hosting, "start hosting when the app opens");
                 ui.end_row();
+            });
+        egui::CollapsingHeader::new("Network")
+            .id_salt("settings-net")
+            .default_open(false)
+            .show(ui, |ui| {
+                egui::Grid::new("settings-net")
+                    .num_columns(2)
+                    .spacing([12.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.label("Port (TCP and UDP)");
+                        ui.add(egui::DragValue::new(&mut d.port).range(1..=65534));
+                        ui.end_row();
+                        ui.label("ICE-TCP fallback")
+                            .on_hover_text("Media over TCP for networks that block UDP");
+                        ui.horizontal(|ui| {
+                            ui.checkbox(&mut d.ice_tcp, "on TCP");
+                            let next = d.port.saturating_add(1);
+                            let mut port = d.ice_tcp_port.unwrap_or(next);
+                            if ui
+                                .add_enabled(
+                                    d.ice_tcp,
+                                    egui::DragValue::new(&mut port).range(1..=65535),
+                                )
+                                .changed()
+                            {
+                                // The port after the main one follows it.
+                                d.ice_tcp_port = (port != next).then_some(port);
+                            }
+                        });
+                        ui.end_row();
+                        ui.label("Extra UDP ports").on_hover_text(
+                            "More ports for media, for clients on networks that block the \
+                             main one. UDP 443 is often open. Forward them on the router too",
+                        );
+                        ui.add(
+                            egui::TextEdit::singleline(&mut d.extra_udp_ports)
+                                .hint_text("e.g. 443 (optional)"),
+                        );
+                        ui.end_row();
+                        ui.label("Public addresses");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut d.public_ips)
+                                .hint_text("WAN IPs that forward here (optional)"),
+                        );
+                        ui.end_row();
+                        ui.label("Host names").on_hover_text(
+                            "Names or IPs browsers use to reach this PC, put in its \
+                             self-signed certificate. Changing them makes a new certificate, \
+                             which browsers warn about once",
+                        );
+                        ui.add(
+                            egui::TextEdit::singleline(&mut d.hostnames)
+                                .hint_text("e.g. a DDNS name (optional)"),
+                        );
+                        ui.end_row();
+                        ui.label("Forget browsers");
+                        ui.add(
+                            egui::DragValue::new(&mut d.forget_after_days)
+                                .range(1..=3650)
+                                .prefix("unused for ")
+                                .suffix(" days"),
+                        );
+                        ui.end_row();
+                    });
+            });
+        egui::CollapsingHeader::new("Cloudflare Tunnel")
+            .id_salt("settings-tunnel")
+            .default_open(false)
+            .show(ui, |ui| {
+            egui::Grid::new("settings-tunnel")
+                .num_columns(2)
+                .spacing([12.0, 6.0])
+                .show(ui, |ui| {
+                    ui.label("Cloudflare Tunnel").on_hover_text(
+                        "Serves the web page through Cloudflare, with Cloudflare's certificate: no \
+                         warning in the browser, and no HTTPS port to forward. Video, audio and \
+                         input still come straight to this PC. Named: a tunnel made in the \
+                         Cloudflare dashboard, with a name that stays. Quick: no account, but a new \
+                         trycloudflare.com address (and pairing again) every time the host starts",
+                    );
+                    let label = TUNNELS
+                        .iter()
+                        .find(|(v, _)| *v == d.tunnel)
+                        .map_or("Off", |(_, l)| *l);
+                    egui::ComboBox::from_id_salt("tunnel")
+                        .selected_text(label)
+                        .show_ui(ui, |ui| {
+                            for (value, label) in TUNNELS {
+                                ui.selectable_value(&mut d.tunnel, value.to_string(), *label);
+                            }
+                        });
+                    ui.end_row();
+                    if d.tunnel == "named" {
+                        let saved = self
+                            .data_dir
+                            .join(ws_host::options::TUNNEL_TOKEN_FILE)
+                            .exists();
+                        ui.label("Tunnel token");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut d.tunnel_token)
+                                .password(true)
+                                .hint_text(if saved {
+                                    "saved (paste to replace)"
+                                } else {
+                                    "from the Cloudflare dashboard"
+                                }),
+                        );
+                        ui.end_row();
+                        ui.label("Tunnel address").on_hover_text(
+                            "The public hostname set for the tunnel in the dashboard. Empty: the \
+                             one cloudflared reports",
+                        );
+                        ui.add(
+                            egui::TextEdit::singleline(&mut d.tunnel_hostname)
+                                .hint_text("e.g. pc.example.com (optional)"),
+                        );
+                        ui.end_row();
+                    }
+                });
+            });
+        egui::CollapsingHeader::new("Advanced")
+            .id_salt("settings-adv")
+            .default_open(false)
+            .show(ui, |ui| {
+                egui::Grid::new("settings-adv")
+                    .num_columns(2)
+                    .spacing([12.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.label("Audio quality");
+                        ui.add_enabled_ui(d.game_audio, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.add(
+                                    egui::DragValue::new(&mut d.audio_kbps)
+                                        .range(32..=510)
+                                        .suffix(" kbps"),
+                                )
+                                .on_hover_text("192 kbps and up is hard to tell from the original");
+                                egui::ComboBox::from_id_salt("audio-frame")
+                                    .selected_text(format!("{} ms frames", d.audio_frame_ms))
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(
+                                            &mut d.audio_frame_ms,
+                                            10,
+                                            "10 ms (lowest delay)",
+                                        );
+                                        ui.selectable_value(
+                                            &mut d.audio_frame_ms,
+                                            20,
+                                            "20 ms (better sound)",
+                                        );
+                                    });
+                            });
+                        });
+                        ui.end_row();
+                        ui.label("Allowed origins").on_hover_text(
+                    "Other addresses (https://name) a browser may open the web client from, \
+                     for a reverse proxy in front of this PC. The built-in addresses and the \
+                     tunnel's are always allowed",
+                );
+                        ui.add(
+                            egui::TextEdit::singleline(&mut d.allow_origins)
+                                .hint_text("e.g. https://pc.example.com (optional)"),
+                        );
+                        ui.end_row();
+                        ui.label("Web client folder");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut d.web_root)
+                                .hint_text("empty: the one built into the host"),
+                        );
+                        ui.end_row();
+                        ui.label("More options");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut d.extra_args)
+                                .hint_text("host flags, e.g. --cert a.pem --key b.pem"),
+                        );
+                        ui.end_row();
+                    });
             });
 
         #[cfg(windows)]

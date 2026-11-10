@@ -47,6 +47,9 @@ pub struct Settings {
     pub tunnel_hostname: String,
     /// A paired browser unused for this many days is unpaired.
     pub forget_after_days: u32,
+    /// Other origins (`https://name`) allowed to open the web client, for a
+    /// reverse proxy or another front door; separated like `public_ips`.
+    pub allow_origins: String,
     /// Empty: the web client built into the host.
     pub web_root: String,
     /// `None`: the primary display.
@@ -101,6 +104,7 @@ impl Default for Settings {
             tunnel_token: String::new(),
             tunnel_hostname: String::new(),
             forget_after_days: 30,
+            allow_origins: String::new(),
             web_root: String::new(),
             display: None,
             codec: "h264".into(),
@@ -177,6 +181,9 @@ impl Settings {
                     args.extend(["--tunnel-hostname".into(), name.into()]);
                 }
             }
+        }
+        for origin in list(&self.allow_origins) {
+            args.extend(["--allow-origin".into(), origin.into()]);
         }
         args.extend(["--forget-after".into(), self.forget_after_days.to_string()]);
         let web_root = self.web_root.trim();
@@ -343,6 +350,7 @@ mod tests {
             ice_tcp_port: Some(9500),
             hostnames: "home.example.net".into(),
             forget_after_days: 7,
+            allow_origins: "https://pc.example.com".into(),
             audio_device: "Speakers (Realtek)".into(),
             gamepad: "ds4".into(),
             extra_args: r#"--hostname 192.168.1.20 --data-dir "C:\some dir""#.into(),
@@ -369,6 +377,7 @@ mod tests {
             None
         );
         assert_eq!(o.hostnames, vec!["home.example.net", "192.168.1.20"]);
+        assert_eq!(o.extra_origins.len(), 1);
         assert_eq!(
             o.device_idle_expiry,
             std::time::Duration::from_secs(7 * 24 * 3600)

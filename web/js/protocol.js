@@ -11,6 +11,7 @@ export const MSG = Object.freeze({
   GAMEPAD_DISCONNECT: 0x07,
   RELEASE_ALL: 0x08,
   GAMEPAD_BUTTONS: 0x09,
+  MOUSE_ABS_ON: 0x0a, // MOUSE_ABS for a display other than the main one
 });
 
 const clampI16 = (v) => Math.max(-32768, Math.min(32767, Math.round(v)));
@@ -28,13 +29,17 @@ export function mouseRel(dx, dy) {
 
 // x, y in 0..1 over the active display. `seq` (optional, u16) numbers positions sent on the
 // unordered channel so the host can ignore one overtaken by a newer one.
-export function mouseAbs(x, y, seq) {
-  const b = new ArrayBuffer(seq === undefined ? 5 : 7);
+// `lane` says which video stream's display the point is over: 0 the main one, 1 the second monitor
+// (which takes the longer MOUSE_ABS_ON form, with the lane after the type).
+export function mouseAbs(x, y, seq, lane = 0) {
+  const head = lane ? 2 : 1;
+  const b = new ArrayBuffer(head + 4 + (seq === undefined ? 0 : 2));
   const v = new DataView(b);
-  v.setUint8(0, MSG.MOUSE_ABS);
-  v.setUint16(1, clampU16(x * 65535), true);
-  v.setUint16(3, clampU16(y * 65535), true);
-  if (seq !== undefined) v.setUint16(5, seq & 0xffff, true);
+  v.setUint8(0, lane ? MSG.MOUSE_ABS_ON : MSG.MOUSE_ABS);
+  if (lane) v.setUint8(1, lane);
+  v.setUint16(head, clampU16(x * 65535), true);
+  v.setUint16(head + 2, clampU16(y * 65535), true);
+  if (seq !== undefined) v.setUint16(head + 4, seq & 0xffff, true);
   return b;
 }
 
@@ -109,6 +114,11 @@ export function decode(buf) {
       return {
         type: 'mouse-abs', x: v.getUint16(1, true), y: v.getUint16(3, true),
         ...(v.byteLength >= 7 ? { seq: v.getUint16(5, true) } : {}),
+      };
+    case MSG.MOUSE_ABS_ON:
+      return {
+        type: 'mouse-abs', lane: v.getUint8(1), x: v.getUint16(2, true), y: v.getUint16(4, true),
+        ...(v.byteLength >= 8 ? { seq: v.getUint16(6, true) } : {}),
       };
     case MSG.MOUSE_BUTTON:
       return { type: 'mouse-button', button: v.getUint8(1), down: v.getUint8(2) === 1 };

@@ -185,6 +185,52 @@ test('client streams from mock host, sends input and switches display', { timeou
   await mouseMode('absolute');
   await client.waitForFunction(() => document.getElementById('video').style.cursor === 'none');
 
+  // Second monitor: choosing one plays a second video beside the first, and a click on it says which
+  // monitor it was on. Off again puts the layout back.
+  await client.click('#more-toggle');
+  await client.selectOption('#display2', '1');
+  await client.keyboard.press('Escape');
+  await host.waitForFunction(() => window.mockLog.some((e) => e.type === 'selectSecondDisplay' && e.id === 1));
+  await client.waitForFunction(() => document.getElementById('video2').videoWidth === 1920, null, { timeout: 15000 });
+  assert.ok(await client.evaluate(() => document.body.classList.contains('dual')));
+  assert.equal(await client.evaluate(() => document.getElementById('video').videoWidth), 1280, 'the first video keeps its own stream');
+  const box2 = await client.locator('#video2').boundingBox();
+  const box1 = await client.locator('#video').boundingBox();
+  assert.ok(box2.x >= box1.x + box1.width - 2, 'side by side');
+  await client.mouse.move(box2.x + box2.width / 4, box2.y + box2.height / 2);
+  await client.mouse.down();
+  await client.mouse.up();
+  await host.waitForFunction(() => window.mockLog.some((e) => e.ev === 'input' && e.type === 'mouse-abs' && e.lane === 1));
+  const onSecond = (await hostLog()).filter((e) => e.type === 'mouse-abs' && e.lane === 1).at(-1);
+  assert.ok(Math.abs(onSecond.x - 16384) < 1500 && Math.abs(onSecond.y - 32768) < 1500, JSON.stringify(onSecond));
+  // Back across to the first monitor: positions there carry no lane.
+  await client.mouse.move(box1.x + box1.width / 2, box1.y + box1.height / 2);
+  await host.waitForFunction(() => window.mockLog.filter((e) => e.type === 'mouse-abs').at(-1)?.lane === undefined);
+  // In a window of its own: the page goes back to one video, the window plays the second, and a click
+  // in it is still on the second monitor.
+  await client.click('#more-toggle');
+  const [popup] = await Promise.all([client.waitForEvent('popup'), client.click('#popout')]);
+  await client.keyboard.press('Escape');
+  await popup.waitForFunction(() => document.querySelector('video')?.videoWidth === 1920, null, { timeout: 15000 });
+  assert.equal(await client.evaluate(() => document.body.classList.contains('dual')), false);
+  assert.equal(await client.evaluate(() => document.getElementById('video2').hidden), true);
+  const loggedBefore = (await hostLog()).length;
+  await popup.mouse.move(300, 300);
+  await popup.mouse.down();
+  await popup.mouse.up();
+  await popup.keyboard.press('KeyW');
+  await host.waitForFunction((n) => window.mockLog.slice(n).some((e) => e.type === 'mouse-abs' && e.lane === 1)
+    && window.mockLog.slice(n).some((e) => e.type === 'key' && e.usage === 0x1a), loggedBefore);
+  assert.ok((await hostLog()).slice(loggedBefore).some((e) => e.type === 'mouse-button' && e.button === 0 && e.down));
+  // Closing the window puts the video back beside the first.
+  await popup.close();
+  await client.waitForFunction(() => document.body.classList.contains('dual') && !document.getElementById('video2').hidden);
+  await client.waitForFunction(() => document.getElementById('video2').videoWidth === 1920);
+  await client.click('#more-toggle');
+  await client.selectOption('#display2', 'off');
+  await client.keyboard.press('Escape');
+  await client.waitForFunction(() => !document.body.classList.contains('dual') && document.getElementById('video2').hidden);
+
   // Tab never lands in the hidden on-screen keyboard textarea.
   await client.mouse.move(1, 1); // off the stream, so Tab moves focus instead of going to the host
   await client.focus('#connect');

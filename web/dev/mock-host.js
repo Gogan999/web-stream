@@ -44,6 +44,27 @@ function setDisplay(id) {
 }
 
 const videoTrack = canvas.captureStream(60).getVideoTracks()[0];
+
+// The second video track, like the real host's: always offered, with frames while a second monitor
+// is chosen. It shows the other display than the first track's.
+let second = null; // id of the display on the second track
+const canvas2 = document.createElement('canvas');
+const ctx2 = canvas2.getContext('2d');
+canvas2.width = 640;
+canvas2.height = 360;
+const videoTrack2 = canvas2.captureStream(30).getVideoTracks()[0];
+let frame2 = 0;
+setInterval(() => {
+  const d = DISPLAYS.find((x) => x.id === second);
+  if (!d) return;
+  if (canvas2.width !== d.width) { canvas2.width = d.width; canvas2.height = d.height; }
+  frame2++;
+  ctx2.fillStyle = d.color;
+  ctx2.fillRect(0, 0, canvas2.width, canvas2.height);
+  ctx2.fillStyle = '#fff';
+  ctx2.font = '48px monospace';
+  ctx2.fillText(`${d.name}  frame ${frame2}`, 40, 80);
+}, 33);
 const audioCtx = new AudioContext();
 const osc = audioCtx.createOscillator();
 const gain = audioCtx.createGain();
@@ -103,6 +124,7 @@ async function offer() {
   pc = new RTCPeerConnection();
   pc.onconnectionstatechange = () => write({ ev: 'pc', state: pc.connectionState });
   pc.addTransceiver(videoTrack, { direction: 'sendonly' });
+  pc.addTransceiver(videoTrack2, { direction: 'sendonly' });
   pc.addTransceiver(audioTrack, { direction: 'sendrecv' });
   window.__hostPc = pc;
   // Keep the "display" resolution fixed, as the real host's encoder does, so the client sees it change on a switch.
@@ -136,6 +158,10 @@ async function offer() {
         if (c.type === 'selectDisplay') {
           setDisplay(c.id);
           sendConfig(channel);
+        }
+        if (c.type === 'selectSecondDisplay') {
+          second = c.id === active.id ? null : c.id;
+          channel.send(JSON.stringify({ type: 'secondDisplay', id: second }));
         }
         if (c.type === 'setVideoConfig') {
           config = { ...config, ...c.config };
@@ -195,6 +221,7 @@ function sendDisplays(channel) {
     type: 'displays',
     displays: DISPLAYS.map(({ color, ...d }) => d),
     active: active.id,
+    second,
   }));
 }
 

@@ -43,12 +43,14 @@ export function withStereoOpus(sdp) {
 }
 
 export class Session extends EventTarget {
-  constructor({ signalUrl, video }) {
+  // `video2` shows the host's second video track, the second monitor, when it has one.
+  constructor({ signalUrl, video, video2 = null }) {
     super();
     this.signalUrl = signalUrl;
     this.signal = null;
     this.handedOff = false; // the WebSocket is closed and the session runs on the peer connection
     this.video = video;
+    this.video2 = video2;
     this.pc = null;
     this.iceServers = [];
     this.channels = {};
@@ -116,12 +118,20 @@ export class Session extends EventTarget {
     const pc = new RTCPeerConnection({ iceServers: this.iceServers, bundlePolicy: 'max-bundle', rtcpMuxPolicy: 'require' });
     this.pc = pc;
 
+    // One stream and video element per video track: a video element plays only one video track of
+    // its stream. The audio goes with the first.
     const stream = new MediaStream();
+    const stream2 = new MediaStream();
     pc.ontrack = (e) => {
       minimizePlayout(e.receiver);
-      stream.addTrack(e.track);
-      if (this.video.srcObject !== stream) this.video.srcObject = stream;
-      this.video.play().catch(() => {});
+      const lane = e.track.kind === 'video'
+        ? pc.getTransceivers().filter((t) => t.receiver.track.kind === 'video').indexOf(e.transceiver)
+        : 0;
+      const [s, video] = lane === 1 && this.video2 ? [stream2, this.video2] : [stream, this.video];
+      if (lane > 1) return;
+      s.addTrack(e.track);
+      if (video.srcObject !== s) video.srcObject = s;
+      video.play().catch(() => {});
     };
     pc.ondatachannel = ({ channel }) => this.onChannel(channel);
     pc.onicecandidate = (e) => {
@@ -261,9 +271,11 @@ export class Session extends EventTarget {
     if (this.pc) this.pc.close();
     this.pc = null;
     this.channels = {};
-    if (this.video.srcObject) {
-      for (const t of this.video.srcObject.getTracks()) t.stop();
-      this.video.srcObject = null;
+    for (const video of [this.video, this.video2]) {
+      if (video?.srcObject) {
+        for (const t of video.srcObject.getTracks()) t.stop();
+        video.srcObject = null;
+      }
     }
   }
 

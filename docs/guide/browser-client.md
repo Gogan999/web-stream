@@ -57,8 +57,18 @@ Settings are remembered in this browser.
   1080p60). It is a ceiling: the host follows the network's measured
   bandwidth below it.
 - **FPS** and **Quality:** *Speed* (fastest encode, softest picture),
-  *Balanced*, or *Clarity* (slowest encode the frame rate allows, more
-  detail in fast motion).
+  *Balanced*, *Clarity* (slowest encode the frame rate allows, more
+  detail in fast motion), or *Text* (for reading and working: it also sets
+  host-native resolution, 30 fps and automatic shrinking off, and uses the
+  slowest encoder presets).
+- **Second monitor** (Display group) streams another host display next to
+  the first, each at its own full detail, as a second video. It needs about
+  as much bandwidth again. *Pop out* moves it to a window of its own, which
+  you can put on another screen of yours (double-click it for fullscreen;
+  the browser may ask you to allow pop-ups first). Mouse, wheel and keys
+  work in both. With *Mouse: Absolute (desktop)*, moving across from one
+  video to the other crosses between the host's monitors; in Relative mode
+  the host pointer simply moves across them.
 - **Codec:** overrides the host's codec for this browser. The host falls
   back to H.264 if either side can't handle the choice.
 - **Match host resolution** switches the host display to the largest

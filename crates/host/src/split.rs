@@ -35,7 +35,7 @@ use ws_proto::{
     AudioDirection, AudioPacket, DisplayId, EncodedFrame, VideoCodec, channels, mono_now,
 };
 use ws_signaling::Notice;
-use ws_transport::{RemoteCmd, Transport, TransportEvent, TransportStats, Trouble};
+use ws_transport::{LANES, RemoteCmd, Transport, TransportEvent, TransportStats, Trouble};
 
 use crate::files::FileCommand;
 use crate::media;
@@ -77,6 +77,7 @@ enum Up {
     /// The payload is the bitstream. Times are ages, since each process's
     /// monotonic clock has its own zero.
     Video {
+        lane: u8,
         display: DisplayId,
         codec: VideoCodec,
         frame_index: u64,
@@ -101,7 +102,7 @@ enum Up {
         binary: bool,
     },
     MaxBitrate(u64),
-    VideoSink(bool),
+    VideoSink(u8, bool),
     Pairing(PairingCommand),
 }
 
@@ -119,7 +120,7 @@ enum Down {
     Transport(Report),
     State {
         connected: bool,
-        backlog_us: u64,
+        backlog_us: [u64; LANES],
     },
     DataSent {
         id: u64,
@@ -154,8 +155,8 @@ enum Down {
 enum Report {
     Connected,
     Disconnected,
-    KeyframeNeeded,
-    FramesLost(u64),
+    KeyframeNeeded(u8),
+    FramesLost(u8, u64),
     TargetBitrate(u64),
     ChannelOpen(String),
     ChannelClosed(String),
@@ -370,19 +371,30 @@ fn ago(age: u64) -> u64 {
 /// connection changed, or the backlog moved by at least [`BACKLOG_STEP`].
 /// Anything less, including a steady backlog, sends nothing.
 fn state_change(
-    sent: (bool, Duration),
+    sent: (bool, Backlog),
     connected: bool,
-    backlog: Duration,
-) -> Option<(bool, Duration)> {
-    let backlog = if connected { backlog } else { Duration::ZERO };
-    (connected != sent.0 || backlog.abs_diff(sent.1) >= BACKLOG_STEP)
-        .then_some((connected, backlog))
+    backlog: Backlog,
+) -> Option<(bool, Backlog)> {
+    let backlog = if connected {
+        backlog
+    } else {
+        [Duration::ZERO; LANES]
+    };
+    (connected != sent.0
+        || backlog
+            .iter()
+            .zip(sent.1)
+            .any(|(now, before)| now.abs_diff(before) >= BACKLOG_STEP))
+    .then_some((connected, backlog))
 }
+
+/// How far behind each video stream's send queue is.
+type Backlog = [Duration; LANES];
 
 /// What the network side last told the media side, and when, so backlog
 /// changes can be sent promptly without exceeding [`BACKLOG_SPACING`].
 struct StateReporter {
-    sent: (bool, Duration),
+    sent: (bool, Backlog),
     last_send: Option<tokio::time::Instant>,
     /// A step-sized backlog change arrived inside the spacing and has not
     /// been sent. Nothing is stored of its value: it is read again when the
@@ -394,7 +406,7 @@ struct StateReporter {
 impl StateReporter {
     fn new() -> Self {
         Self {
-            sent: (false, Duration::ZERO),
+            sent: (false, [Duration::ZERO; LANES]),
             last_send: None,
             held: false,
         }
@@ -415,9 +427,9 @@ impl StateReporter {
         &mut self,
         now: tokio::time::Instant,
         connected: bool,
-        backlog: Duration,
+        backlog: Backlog,
         paced: bool,
-    ) -> Option<(bool, Duration)> {
+    ) -> Option<(bool, Backlog)> {
         let Some(next) = state_change(self.sent, connected, backlog) else {
             self.held = false;
             return None;
@@ -505,12 +517,15 @@ pub async fn serve_network(
     // Read the live state and send it if it is worth a message.
     let report_state = |reporter: &mut StateReporter, paced: bool| {
         let connected = transport.is_connected();
-        let backlog = transport.send_backlog().get();
+        let backlog = [
+            transport.send_backlog(0).get(),
+            transport.send_backlog(1).get(),
+        ];
         let now = tokio::time::Instant::now();
         if let Some((connected, backlog)) = reporter.check(now, connected, backlog, paced) {
             send(&Down::State {
                 connected,
-                backlog_us: micros(backlog),
+                backlog_us: backlog.map(micros),
             });
         }
     };
@@ -526,8 +541,9 @@ pub async fn serve_network(
                     break Ok(());
                 };
                 match msg {
-                    Up::Video { display, codec, frame_index, keyframe, recovers_from, capture_age_us, encode_age_us, width, height } => {
+                    Up::Video { lane, display, codec, frame_index, keyframe, recovers_from, capture_age_us, encode_age_us, width, height } => {
                         transport.send_video(EncodedFrame {
+                            lane,
                             display,
                             codec,
                             frame_index,
@@ -554,17 +570,17 @@ pub async fn serve_network(
                         let _ = data_tx.send((id, channel, binary, payload));
                     }
                     Up::MaxBitrate(bps) => transport.set_max_bitrate(bps),
-                    Up::VideoSink(true) => {
+                    Up::VideoSink(lane, true) => {
                         let out = out.clone();
-                        transport.set_video_sink(Box::new(move |signal| {
+                        transport.set_video_sink(lane, Box::new(move |signal| {
                             let report = match signal {
-                                ws_transport::VideoSignal::Keyframe => Report::KeyframeNeeded,
-                                ws_transport::VideoSignal::FramesLost(from) => Report::FramesLost(from),
+                                ws_transport::VideoSignal::Keyframe => Report::KeyframeNeeded(lane),
+                                ws_transport::VideoSignal::FramesLost(from) => Report::FramesLost(lane, from),
                             };
                             out.send(frame(&Down::Transport(report), []));
                         }));
                     }
-                    Up::VideoSink(false) => transport.clear_video_sink(),
+                    Up::VideoSink(lane, false) => transport.clear_video_sink(lane),
                     Up::Pairing(cmd) => pairing(&net, cmd, &send).await,
                 }
             }
@@ -632,8 +648,8 @@ fn report(ev: TransportEvent) -> (Report, Vec<u8>) {
     let report = match ev {
         TransportEvent::Connected => Report::Connected,
         TransportEvent::Disconnected => Report::Disconnected,
-        TransportEvent::KeyframeNeeded => Report::KeyframeNeeded,
-        TransportEvent::FramesLost(from) => Report::FramesLost(from),
+        TransportEvent::KeyframeNeeded(lane) => Report::KeyframeNeeded(lane),
+        TransportEvent::FramesLost(lane, from) => Report::FramesLost(lane, from),
         TransportEvent::TargetBitrate(bps) => Report::TargetBitrate(bps),
         TransportEvent::ChannelOpen(c) => Report::ChannelOpen(c.into()),
         TransportEvent::ChannelClosed(c) => Report::ChannelClosed(c.into()),
@@ -685,8 +701,8 @@ fn event(report: Report, payload: Vec<u8>) -> Option<TransportEvent> {
     Some(match report {
         Report::Connected => TransportEvent::Connected,
         Report::Disconnected => TransportEvent::Disconnected,
-        Report::KeyframeNeeded => TransportEvent::KeyframeNeeded,
-        Report::FramesLost(from) => TransportEvent::FramesLost(from),
+        Report::KeyframeNeeded(lane) => TransportEvent::KeyframeNeeded(lane),
+        Report::FramesLost(lane, from) => TransportEvent::FramesLost(lane, from),
         Report::TargetBitrate(bps) => TransportEvent::TargetBitrate(bps),
         Report::ChannelOpen(c) => TransportEvent::ChannelOpen(channels::known(&c)?),
         Report::ChannelClosed(c) => TransportEvent::ChannelClosed(channels::known(&c)?),
@@ -783,7 +799,7 @@ pub async fn serve_media(
                         }
                     }
                     Down::State { connected, backlog_us } => {
-                        remote.set_state(connected, Duration::from_micros(backlog_us));
+                        remote.set_state(connected, backlog_us.map(Duration::from_micros));
                     }
                     Down::DataSent { id, result } => {
                         if let Some(reply) = replies.remove(&id) {
@@ -818,6 +834,7 @@ pub async fn serve_media(
                 }
                 Some(RemoteCmd::Video(f)) => out.send(frame(
                     &Up::Video {
+                        lane: f.lane,
                         display: f.display,
                         codec: f.codec,
                         frame_index: f.frame_index,
@@ -845,7 +862,7 @@ pub async fn serve_media(
                     out.send(frame(&Up::Data { id: next_id, channel, binary }, data));
                 }
                 Some(RemoteCmd::MaxBitrate(bps)) => send(&Up::MaxBitrate(bps)),
-                Some(RemoteCmd::VideoSink(set)) => send(&Up::VideoSink(set)),
+                Some(RemoteCmd::VideoSink(lane, set)) => send(&Up::VideoSink(lane, set)),
                 None => break Ok(()),
             },
             cmd = commands.recv() => match cmd {
@@ -951,59 +968,76 @@ mod tests {
         use tokio::time::Instant;
         let t0 = Instant::now();
         let ms = Duration::from_millis;
+        // Backlog of the first stream, the second idle.
+        let b = |d: Duration| [d, Duration::ZERO];
         let mut r = StateReporter::new();
         // Connect: sent at once.
-        assert_eq!(r.check(t0, true, ms(0), true), Some((true, ms(0))));
+        assert_eq!(r.check(t0, true, b(ms(0)), true), Some((true, b(ms(0)))));
         // A change after a quiet spell: at once.
         let t1 = t0 + ms(100);
-        assert_eq!(r.check(t1, true, ms(10), true), Some((true, ms(10))));
+        assert_eq!(r.check(t1, true, b(ms(10)), true), Some((true, b(ms(10)))));
         // Another inside the spacing is held, not sent, and due at the end.
-        assert_eq!(r.check(t1 + ms(1), true, ms(20), true), None);
+        assert_eq!(r.check(t1 + ms(1), true, b(ms(20)), true), None);
         assert_eq!(r.due(), Some(t1 + BACKLOG_SPACING));
         // Rapid oscillation stays held; the send carries the current value.
-        assert_eq!(r.check(t1 + ms(2), true, ms(30), true), None);
+        assert_eq!(r.check(t1 + ms(2), true, b(ms(30)), true), None);
         assert_eq!(
-            r.check(t1 + BACKLOG_SPACING, true, ms(40), true),
-            Some((true, ms(40)))
+            r.check(t1 + BACKLOG_SPACING, true, b(ms(40)), true),
+            Some((true, b(ms(40))))
         );
         assert_eq!(r.due(), None);
         // A held change that reversed sends nothing and clears the hold.
         let t2 = t1 + ms(50);
-        assert_eq!(r.check(t2, true, ms(60), true), Some((true, ms(60))));
-        assert_eq!(r.check(t2 + ms(1), true, ms(70), true), None);
-        assert_eq!(r.check(t2 + BACKLOG_SPACING, true, ms(60), true), None);
+        assert_eq!(r.check(t2, true, b(ms(60)), true), Some((true, b(ms(60)))));
+        assert_eq!(r.check(t2 + ms(1), true, b(ms(70)), true), None);
+        assert_eq!(r.check(t2 + BACKLOG_SPACING, true, b(ms(60)), true), None);
         assert_eq!(r.due(), None);
         // A connection change inside the spacing is not held.
         assert_eq!(
-            r.check(t2 + BACKLOG_SPACING + ms(1), true, ms(70), true),
-            Some((true, ms(70)))
+            r.check(t2 + BACKLOG_SPACING + ms(1), true, b(ms(70)), true),
+            Some((true, b(ms(70))))
         );
         assert_eq!(
-            r.check(t2 + BACKLOG_SPACING + ms(2), false, ms(70), true),
-            Some((false, Duration::ZERO))
+            r.check(t2 + BACKLOG_SPACING + ms(2), false, b(ms(70)), true),
+            Some((false, [Duration::ZERO; LANES]))
         );
     }
 
     #[test]
     fn only_a_connection_change_or_a_full_step_is_sent() {
         let base = Duration::from_millis(10);
-        let live = (true, base);
+        let b = |d: Duration| [d, Duration::ZERO];
+        let live = (true, b(base));
         // Steady, and moves smaller than the step: nothing.
-        assert_eq!(state_change(live, true, base), None);
-        assert_eq!(state_change(live, true, base + BACKLOG_STEP / 2), None);
-        assert_eq!(state_change(live, true, base - BACKLOG_STEP / 2), None);
+        assert_eq!(state_change(live, true, b(base)), None);
+        assert_eq!(state_change(live, true, b(base + BACKLOG_STEP / 2)), None);
+        assert_eq!(state_change(live, true, b(base - BACKLOG_STEP / 2)), None);
         // A full step either way is sent, carrying the new value.
         let up = base + BACKLOG_STEP;
-        assert_eq!(state_change(live, true, up), Some((true, up)));
+        assert_eq!(state_change(live, true, b(up)), Some((true, b(up))));
         let down = base - BACKLOG_STEP;
-        assert_eq!(state_change(live, true, down), Some((true, down)));
+        assert_eq!(state_change(live, true, b(down)), Some((true, b(down))));
         // A connection change is sent even at the same backlog, and a
         // disconnected link reports no backlog.
         assert_eq!(
-            state_change(live, false, base),
-            Some((false, Duration::ZERO))
+            state_change(live, false, b(base)),
+            Some((false, [Duration::ZERO; LANES]))
         );
-        assert_eq!(state_change((false, Duration::ZERO), false, base), None);
+        assert_eq!(
+            state_change((false, [Duration::ZERO; LANES]), false, b(base)),
+            None
+        );
+    }
+
+    #[test]
+    fn the_second_streams_backlog_is_sent_too() {
+        let ms = Duration::from_millis;
+        let live = (true, [ms(1), ms(1)]);
+        assert_eq!(state_change(live, true, [ms(1), ms(1)]), None);
+        assert_eq!(
+            state_change(live, true, [ms(1), ms(30)]),
+            Some((true, [ms(1), ms(30)]))
+        );
     }
 
     /// A frame as `spawn_writer` puts it on the wire.
@@ -1115,7 +1149,9 @@ mod tests {
         };
         let events = [
             TransportEvent::Connected,
-            TransportEvent::FramesLost(9),
+            TransportEvent::FramesLost(0, 9),
+            TransportEvent::FramesLost(1, 4),
+            TransportEvent::KeyframeNeeded(1),
             TransportEvent::ChannelOpen(channels::FILE),
             TransportEvent::Data {
                 channel: channels::CONTROL,

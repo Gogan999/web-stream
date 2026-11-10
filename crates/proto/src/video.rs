@@ -150,6 +150,9 @@ impl Default for VideoConfig {
 /// it skips to the newest frame and asks for one of those.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncodedFrame {
+    /// Which video stream carries it: 0 is the main one, 1 the second
+    /// monitor's. Each stream has its own `frame_index` count.
+    pub lane: u8,
     pub display: DisplayId,
     pub codec: VideoCodec,
     /// Monotonic, gap-free per encoder session; a gap on the receive side

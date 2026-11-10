@@ -20,7 +20,7 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use ws_proto::{AudioPacket, EncodedFrame, channels};
 
-use crate::{Cmd, Ends, Error, Events, Shared, Transport, TransportEvent, VideoSignal};
+use crate::{Cmd, Ends, Error, Events, LANES, Shared, Transport, TransportEvent, VideoSignal};
 
 /// What the SYSTEM side asked its [`Transport`] to do, for the real one.
 #[derive(Debug)]
@@ -35,8 +35,8 @@ pub enum RemoteCmd {
     },
     MaxBitrate(u64),
     /// [`Transport::set_video_sink`] (true) or
-    /// [`Transport::clear_video_sink`] was called.
-    VideoSink(bool),
+    /// [`Transport::clear_video_sink`] was called, for this video lane.
+    VideoSink(u8, bool),
 }
 
 /// The run loop end of a [`Transport::remote`] handle.
@@ -94,14 +94,16 @@ impl Remote {
                     // Signaling's, in the other process.
                     Cmd::Candidate(_) | Cmd::Close => {}
                     Cmd::MaxBitrate(bps) => return Some(RemoteCmd::MaxBitrate(bps)),
-                    Cmd::VideoSink(set) => return Some(RemoteCmd::VideoSink(set)),
+                    Cmd::VideoSink(lane, set) => return Some(RemoteCmd::VideoSink(lane, set)),
                     Cmd::Data { channel, binary, data, reply } => {
                         return Some(RemoteCmd::Data { channel, binary, data, reply });
                     }
                 },
                 Some(packet) = self.audio.recv() => return Some(RemoteCmd::Audio(packet)),
                 _ = self.shared.notify.notified() => {
-                    self.frames = std::mem::take(&mut *self.shared.frames.lock().expect("video queue lock"));
+                    for lane in &self.shared.lanes {
+                        self.frames.extend(std::mem::take(&mut *lane.frames.lock().expect("video queue lock")));
+                    }
                 }
             }
         }
@@ -119,11 +121,18 @@ impl Remote {
             }
             TransportEvent::Disconnected => {
                 shared.connected.store(false, Ordering::Relaxed);
-                shared.backlog.set(Duration::ZERO);
+                for lane in &shared.lanes {
+                    lane.backlog.set(Duration::ZERO);
+                }
                 shared.emit(TransportEvent::Disconnected);
             }
-            TransportEvent::KeyframeNeeded => shared.signal_video(VideoSignal::Keyframe),
-            TransportEvent::FramesLost(from) => shared.signal_video(VideoSignal::FramesLost(from)),
+            TransportEvent::KeyframeNeeded(lane) => {
+                shared.signal_video(usize::from(lane).min(LANES - 1), VideoSignal::Keyframe)
+            }
+            TransportEvent::FramesLost(lane, from) => shared.signal_video(
+                usize::from(lane).min(LANES - 1),
+                VideoSignal::FramesLost(from),
+            ),
             TransportEvent::Data { channel, data, .. }
                 if channel == channels::INPUT || channel == channels::INPUT_MOTION =>
             {
@@ -133,13 +142,14 @@ impl Remote {
         }
     }
 
-    /// Whether the peer connection is up, and how far behind its video send
-    /// queue is, as the real transport last said.
-    pub fn set_state(&self, connected: bool, backlog: Duration) {
+    /// Whether the peer connection is up, and how far behind each video
+    /// stream's send queue is, as the real transport last said.
+    pub fn set_state(&self, connected: bool, backlog: [Duration; LANES]) {
         self.shared.connected.store(connected, Ordering::Relaxed);
-        self.shared
-            .backlog
-            .set(if connected { backlog } else { Duration::ZERO });
+        for (lane, age) in self.shared.lanes.iter().zip(backlog) {
+            lane.backlog
+                .set(if connected { age } else { Duration::ZERO });
+        }
     }
 }
 
@@ -155,6 +165,7 @@ mod tests {
         let (transport, mut events, mut remote) = Transport::remote();
         transport.set_max_bitrate(5_000_000);
         let frame = |i| EncodedFrame {
+            lane: 0,
             display: ws_proto::DisplayId(0),
             codec: ws_proto::VideoCodec::H264,
             frame_index: i,
@@ -217,18 +228,20 @@ mod tests {
         assert_eq!(*got.lock().unwrap(), [7, 8]);
         let signals = Arc::new(Mutex::new(Vec::new()));
         let sink = signals.clone();
-        transport.set_video_sink(Box::new(move |s| sink.lock().unwrap().push(s)));
+        transport.set_video_sink(0, Box::new(move |s| sink.lock().unwrap().push(s)));
         assert!(matches!(
             remote.next().await,
-            Some(RemoteCmd::VideoSink(true))
+            Some(RemoteCmd::VideoSink(0, true))
         ));
-        remote.event(TransportEvent::FramesLost(4));
+        remote.event(TransportEvent::FramesLost(0, 4));
         assert_eq!(*signals.lock().unwrap(), [VideoSignal::FramesLost(4)]);
-        remote.set_state(true, Duration::from_millis(30));
-        assert_eq!(transport.send_backlog().get(), Duration::from_millis(30));
+        remote.set_state(true, [Duration::from_millis(30), Duration::from_millis(7)]);
+        assert_eq!(transport.send_backlog(0).get(), Duration::from_millis(30));
+        assert_eq!(transport.send_backlog(1).get(), Duration::from_millis(7));
         remote.event(TransportEvent::Disconnected);
         assert!(!transport.is_connected());
-        assert_eq!(transport.send_backlog().get(), Duration::ZERO);
+        assert_eq!(transport.send_backlog(0).get(), Duration::ZERO);
+        assert_eq!(transport.send_backlog(1).get(), Duration::ZERO);
         assert!(matches!(
             events.recv().await,
             Some(TransportEvent::Connected)

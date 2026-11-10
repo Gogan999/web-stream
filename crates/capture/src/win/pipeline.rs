@@ -717,6 +717,8 @@ fn deliver(
         let keyframe = encoded.keyframe;
         let bytes = encoded.data.len();
         let frame = EncodedFrame {
+            // The host numbers the stream this pipeline feeds.
+            lane: 0,
             display: meta.display,
             codec: meta.codec,
             frame_index: meta.index,

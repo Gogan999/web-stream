@@ -75,6 +75,26 @@ pub(crate) fn size(width: u32, height: u32, step: usize) -> (u32, u32) {
     }
 }
 
+/// The size to encode a second monitor at, so both streams look alike: the
+/// scale the main stream runs at (`main_encoded` of `main_native`) applied to
+/// `other_native`. Never above the monitor's own size, and in the multiples of
+/// 8 [`size`] uses once it is scaled.
+pub(crate) fn follow_size(
+    main_encoded: (u32, u32),
+    main_native: (u32, u32),
+    other_native: (u32, u32),
+) -> (u32, u32) {
+    let ratio = |enc: u32, native: u32| f64::from(enc) / f64::from(native.max(1));
+    let f = ratio(main_encoded.0, main_native.0)
+        .min(ratio(main_encoded.1, main_native.1))
+        .min(1.0);
+    if f >= 0.999 {
+        return (other_native.0 & !1, other_native.1 & !1);
+    }
+    let round = |v: u32| (((f64::from(v) * f) as u32) / 8 * 8).max(8);
+    (round(other_native.0), round(other_native.1))
+}
+
 /// The least bitrate, in kb/s, that `width` x `height` at `fps` holds up at.
 pub(crate) fn min_kbps(width: u32, height: u32, fps: u32) -> f64 {
     f64::from(width) * f64::from(height) * f64::from(fps) * MIN_BITS_PER_PIXEL / 1000.0
@@ -303,6 +323,30 @@ mod tests {
         assert_eq!(size(2560, 1440, 3), (960, 536));
         assert_eq!(size(1366, 768, 1), (1024, 576));
         assert_eq!(size(1366, 768, 0), (1366, 768));
+    }
+
+    #[test]
+    fn the_second_monitor_follows_the_main_streams_scale() {
+        // Native stays native, whatever the second monitor's size.
+        assert_eq!(
+            follow_size((2560, 1440), (2560, 1440), (1920, 1080)),
+            (1920, 1080)
+        );
+        // Scaled down by a step: the same fraction of the other monitor.
+        assert_eq!(
+            follow_size((1920, 1080), (2560, 1440), (1920, 1080)),
+            (1440, 808)
+        );
+        // Never upscaled: a main stream larger than its monitor.
+        assert_eq!(
+            follow_size((3840, 2160), (2560, 1440), (1366, 768)),
+            (1366, 768)
+        );
+        // A letterboxed main stream follows its tighter side.
+        assert_eq!(
+            follow_size((1280, 720), (2560, 1080), (1920, 1080)),
+            (960, 536)
+        );
     }
 
     #[test]

@@ -185,9 +185,16 @@ test('client streams from mock host, sends input and switches display', { timeou
   await mouseMode('absolute');
   await client.waitForFunction(() => document.getElementById('video').style.cursor === 'none');
 
+  // Open the settings dropdown unless it already is (a window opening or closing can leave it either way).
+  const openSettings = async () => {
+    for (let i = 0; i < 3 && !(await client.isVisible('#more')); i++) {
+      await client.click('#more-toggle');
+      await client.waitForTimeout(100);
+    }
+  };
   // Second monitor: choosing one plays a second video beside the first, and a click on it says which
   // monitor it was on. Off again puts the layout back.
-  await client.click('#more-toggle');
+  await openSettings();
   await client.selectOption('#display2', '1');
   await client.keyboard.press('Escape');
   await host.waitForFunction(() => window.mockLog.some((e) => e.type === 'selectSecondDisplay' && e.id === 1));
@@ -208,7 +215,7 @@ test('client streams from mock host, sends input and switches display', { timeou
   await host.waitForFunction(() => window.mockLog.filter((e) => e.type === 'mouse-abs').at(-1)?.lane === undefined);
   // In a window of its own: the page goes back to one video, the window plays the second, and a click
   // in it is still on the second monitor.
-  await client.click('#more-toggle');
+  await openSettings();
   const [popup] = await Promise.all([client.waitForEvent('popup'), client.click('#popout')]);
   await client.keyboard.press('Escape');
   await popup.waitForFunction(() => document.querySelector('video')?.videoWidth === 1920, null, { timeout: 15000 });
@@ -226,7 +233,7 @@ test('client streams from mock host, sends input and switches display', { timeou
   await popup.close();
   await client.waitForFunction(() => document.body.classList.contains('dual') && !document.getElementById('video2').hidden);
   await client.waitForFunction(() => document.getElementById('video2').videoWidth === 1920);
-  await client.click('#more-toggle');
+  await openSettings();
   await client.selectOption('#display2', 'off');
   await client.keyboard.press('Escape');
   await client.waitForFunction(() => !document.body.classList.contains('dual') && document.getElementById('video2').hidden);

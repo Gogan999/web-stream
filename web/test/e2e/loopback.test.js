@@ -237,6 +237,7 @@ test('client streams from mock host, sends input and switches display', { timeou
   await client.selectOption('#display2', 'off');
   await client.keyboard.press('Escape');
   await client.waitForFunction(() => !document.body.classList.contains('dual') && document.getElementById('video2').hidden);
+  await client.waitForSelector('#more', { state: 'hidden' });
 
   // Tab never lands in the hidden on-screen keyboard textarea.
   await client.mouse.move(1, 1); // off the stream, so Tab moves focus instead of going to the host
@@ -282,8 +283,8 @@ test('client streams from mock host, sends input and switches display', { timeou
   assert.equal(held.size, 0, `modifiers up before Esc: ${JSON.stringify(keys)}`);
   assert.deepEqual(keys[at + 1], [0x29, false]);
 
-  // Clicking the stream closed the dropdown. Stats overlay fills in.
-  assert.equal(await client.isVisible('#more'), false);
+  // Stats overlay fills in.
+  await client.waitForSelector('#more', { state: 'hidden' });
   await client.click('#more-toggle');
   // Advanced stays unfolded from the audio step.
   await client.selectOption('#stats-level', 'detailed');

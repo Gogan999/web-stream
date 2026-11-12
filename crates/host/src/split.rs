@@ -550,6 +550,7 @@ pub async fn serve_network(
                             keyframe,
                             recovers_from,
                             capture_time: ago(capture_age_us),
+                            encode_start_time: ago(capture_age_us),
                             encode_done_time: ago(encode_age_us),
                             width,
                             height,

@@ -367,6 +367,21 @@ struct SentFrames {
     bytes: u64,
     /// Sum of capture-to-encoded times.
     encode_micros: u64,
+    /// Sum of times from entering the encoder to encoded (no pacing hold).
+    encoder_micros: u64,
+}
+
+impl SentFrames {
+    fn add(&mut self, frame: &EncodedFrame) {
+        self.frames += 1;
+        self.bytes += frame.data.len() as u64;
+        self.encode_micros += frame.encode_done_time.saturating_sub(frame.capture_time);
+        // From going into the encoder: Source quality holds an image up to
+        // ~200 ms first, which says nothing about how fast the encoder is.
+        self.encoder_micros += frame
+            .encode_done_time
+            .saturating_sub(frame.encode_start_time);
+    }
 }
 
 /// What runs while a browser is connected. Fields drop in order: input is
@@ -987,7 +1002,7 @@ impl Media {
             encode_ms: if sent.frames == 0 {
                 0.0
             } else {
-                sent.encode_micros as f32 / sent.frames as f32 / 1000.0
+                sent.encoder_micros as f32 / sent.frames as f32 / 1000.0
             },
             dropped: s.trouble.late_frames + s.trouble.lost_frames + s.trouble.send_drops,
             loss: s.egress_loss,
@@ -1880,9 +1895,7 @@ async fn forward_video(
         );
         if let Some(sent) = &sent {
             let mut sent = sent.lock().expect("sent stats lock");
-            sent.frames += 1;
-            sent.bytes += frame.data.len() as u64;
-            sent.encode_micros += frame.encode_done_time.saturating_sub(frame.capture_time);
+            sent.add(&frame);
         }
         frame.lane = lane;
         transport.send_video(frame);
@@ -1955,6 +1968,43 @@ fn target_kbps(bwe_bps: u64, max_kbps: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_frame_held_by_the_pacer_does_not_count_against_the_encoder() {
+        // Held 200 ms (Source quality), then encoded in 4 ms.
+        let frame = EncodedFrame {
+            lane: 0,
+            display: DisplayId(0),
+            codec: VideoCodec::H264,
+            frame_index: 0,
+            keyframe: false,
+            recovers_from: None,
+            capture_time: 1_000_000,
+            encode_start_time: 1_200_000,
+            encode_done_time: 1_204_000,
+            width: 1920,
+            height: 1080,
+            data: Default::default(),
+        };
+        let mut sent = SentFrames::default();
+        sent.add(&frame);
+        // The overlay's figure still runs from capture.
+        assert_eq!(sent.encode_micros, 204_000);
+        assert_eq!(sent.encoder_micros, 4_000);
+        let host = bottleneck::HostSample {
+            fps_target: 60,
+            fps: 5.0,
+            encode_ms: sent.encoder_micros as f32 / 1000.0,
+            dropped: 0,
+            loss: None,
+        };
+        let mut b = Bottleneck::default();
+        let t = Instant::now();
+        for i in 1..=10 {
+            let out = b.update(t + Duration::from_secs(i), host, None, 2560, 1440, 0, 0);
+            assert_eq!(out.step, None);
+        }
+    }
 
     fn display(id: u32, primary: bool) -> DisplayInfo {
         DisplayInfo {

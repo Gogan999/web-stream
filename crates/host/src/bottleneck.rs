@@ -14,6 +14,13 @@
 //!   or skips frames while the network is clean. A smaller picture is cheaper
 //!   to decode too, so the picture is shrunk.
 //!
+//! Limits: with two monitors only the main stream's figures are counted (the
+//! browser's report comes from the first video, whose decode load is doubled
+//! by the second, so decode time is underestimated). A tab that is visible but
+//! occluded or on another screen reports `hidden: false` while throttled; the
+//! "showing too few frames" test could misfire there, which the 3-of-5 rule
+//! only limits.
+//!
 //! Each second is judged on its own, then a limiter has to show in 3 of the
 //! last 5 seconds before anything changes, so a single hitch does nothing.
 //! Every change restarts the wait, so a step has time to show its effect.
@@ -61,7 +68,8 @@ pub(crate) struct HostSample {
     pub fps_target: u32,
     /// Frames handed to the network per second.
     pub fps: f32,
-    /// Capture to encoded, averaged.
+    /// Into the encoder to encoded, averaged: not the time the pacer held the
+    /// image first (Source quality holds one up to ~200 ms).
     pub encode_ms: f32,
     /// Frames dropped for lateness or the queue, or packets the socket refused.
     pub dropped: u32,

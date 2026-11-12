@@ -2,10 +2,15 @@
 // handling, turned into the host's VideoConfig. Pure functions so they can be tested; main.js owns the UI.
 
 // Priority is what the user picks (Smooth / Balanced / Sharp); the host's encoder preset is its
-// `quality` field. 'source' is no longer offered: see sanitize() for how an old saved one is read.
-export const PRIORITIES = Object.freeze(['smooth', 'balanced', 'sharp']);
-export const PRIORITY_QUALITY = Object.freeze({ smooth: 'speed', balanced: 'balanced', sharp: 'clarity' });
-export const QUALITY_PRIORITY = Object.freeze({ speed: 'smooth', balanced: 'balanced', clarity: 'sharp', source: 'sharp' });
+// `quality` field. Source (for reading and working) is a bundle: see SOURCE_PRESET.
+export const PRIORITIES = Object.freeze(['smooth', 'balanced', 'sharp', 'source']);
+export const PRIORITY_QUALITY = Object.freeze({ smooth: 'speed', balanced: 'balanced', sharp: 'clarity', source: 'source' });
+export const QUALITY_PRIORITY = Object.freeze({ speed: 'smooth', balanced: 'balanced', clarity: 'sharp', source: 'source' });
+
+// What choosing Source sets besides the preset: host-native pixels (no scaling blur), no automatic
+// shrinking, and a bitrate with room for it; the host keeps each frame sharp and lowers the frame rate,
+// up to the one chosen, to fit the bitrate.
+export const SOURCE_PRESET = Object.freeze({ resolution: 'native', fps: 60, minScale: 100, bitrate: 'auto' });
 // Video codecs the host encodes, as VideoConfig names them, with the browser's MIME type for each.
 export const CODECS = Object.freeze({ h264: 'video/H264', h265: 'video/H265', av1: 'video/AV1' });
 export const MOUSE_MODES = Object.freeze(['relative', 'absolute']);
@@ -128,7 +133,7 @@ export function sanitize(saved) {
   let priority = v.priority;
   if (!PRIORITIES.includes(priority)) {
     // Settings saved before Priority existed: `quality` becomes the matching priority. Source (once
-    // called text) was a bundle: sharp pictures at host-native pixels and no automatic shrinking.
+    // called text) was a bundle: host-native pixels and no automatic shrinking.
     const quality = v.quality === 'text' ? 'source' : v.quality;
     priority = QUALITY_PRIORITY[quality] ?? DEFAULTS.priority;
     if (quality === 'source') {

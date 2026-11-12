@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { PRIORITIES, PRIORITY_QUALITY, QUALITY_PRIORITY, autoKbps, fitToDisplay, streamSize, videoConfig, sameConfig, audioConfig, load, save, sanitize, decodableCodecs, DEFAULTS } from '../../js/settings.js';
+import { SOURCE_PRESET, PRIORITIES, PRIORITY_QUALITY, QUALITY_PRIORITY, autoKbps, fitToDisplay, streamSize, videoConfig, sameConfig, audioConfig, load, save, sanitize, decodableCodecs, DEFAULTS } from '../../js/settings.js';
 
 test('auto bitrate is 20 Mb/s at 1080p60 and grows with pixel rate', () => {
   assert.equal(autoKbps(1920, 1080, 60), 20000);
@@ -119,9 +119,9 @@ test('only codecs the browser decodes are offered', () => {
 });
 
 test('priority maps to the host encoder preset', () => {
-  assert.deepEqual(PRIORITIES, ['smooth', 'balanced', 'sharp']);
+  assert.deepEqual(PRIORITIES, ['smooth', 'balanced', 'sharp', 'source']);
   const opts = { screen: { width: 1920, height: 1080 }, display: null };
-  for (const [priority, quality] of [['smooth', 'speed'], ['balanced', 'balanced'], ['sharp', 'clarity']]) {
+  for (const [priority, quality] of [['smooth', 'speed'], ['balanced', 'balanced'], ['sharp', 'clarity'], ['source', 'source']]) {
     assert.equal(PRIORITY_QUALITY[priority], quality);
     assert.equal(videoConfig({ ...DEFAULTS, priority }, opts).quality, quality);
   }
@@ -135,12 +135,12 @@ test('settings saved before Priority are migrated', () => {
     assert.deepEqual([m.priority, m.bitrate, m.fps, m.resolution, m.minScale], [priority, '42500', 90, '1080', 75]);
     assert.equal(m.quality, undefined);
   }
-  // Source (and its older name, text): Sharp, host-native pixels, automatic shrinking off.
+  // Source (and its older name, text): stays Source, host-native pixels, automatic shrinking off.
   for (const quality of ['source', 'text']) {
     const m = sanitize({ quality, resolution: '720', minScale: 50, bitrate: 'auto' });
-    assert.deepEqual([m.priority, m.resolution, m.minScale], ['sharp', 'native', 100]);
+    assert.deepEqual([m.priority, m.resolution, m.minScale], ['source', 'native', 100]);
     const cfg = videoConfig(m, { screen: { width: 1280, height: 720 }, display: { width: 2560, height: 1440 } });
-    assert.deepEqual([cfg.width, cfg.height, cfg.minScalePercent, cfg.quality], [2560, 1440, 100, 'clarity']);
+    assert.deepEqual([cfg.width, cfg.height, cfg.minScalePercent, cfg.quality], [2560, 1440, 100, 'source']);
   }
   // A saved 2160 setting (no longer in the menu) and fixed bitrates still load.
   assert.equal(sanitize({ resolution: '2160', bitrate: '80000' }).resolution, '2160');
@@ -150,5 +150,12 @@ test('settings saved before Priority are migrated', () => {
   assert.deepEqual(sanitize(once), once);
   assert.equal(sanitize({ priority: 'smooth', quality: 'source' }).priority, 'smooth');
   assert.equal(sanitize({ priority: 'smooth', quality: 'source' }).resolution, 'screen');
-  assert.equal(QUALITY_PRIORITY.source, 'sharp');
+  assert.equal(QUALITY_PRIORITY.source, 'source');
+});
+
+test('the Source priority bundle asks for host-native pixels at up to 60 fps with automatic shrinking off', () => {
+  const settings = { ...DEFAULTS, priority: 'source', ...SOURCE_PRESET };
+  const cfg = videoConfig(settings, { screen: { width: 1280, height: 720 }, display: { width: 2560, height: 1440 } });
+  assert.equal(cfg.quality, 'source');
+  assert.deepEqual([cfg.width, cfg.height, cfg.fps, cfg.minScalePercent], [2560, 1440, 60, 100]);
 });

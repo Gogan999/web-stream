@@ -60,11 +60,15 @@ choices are the limits and the preference it works within.
 In Settings:
 
 - **Priority:** *Smooth* (fast encode, lowest delay, softest picture),
-  *Balanced* (default) or *Sharp* (slowest encode the frame rate allows,
-  more detail in fast motion). Replaces the old *Quality*; a saved Speed,
+  *Balanced* (default), *Sharp* (slowest encode the frame rate allows,
+  more detail in fast motion) or *Source* (for reading and working: every
+  frame is coded as close to the desktop as the encoder allows, and the
+  frame rate, up to Max FPS, drops to stay within the bitrate, so a still
+  screen stays sharp and fast motion drops frames instead of going soft.
+  Choosing it also sets host-native resolution, 60 fps, Auto resolution
+  floor Off and Auto bitrate). Replaces the old *Quality*; a saved Speed,
   Balanced or Clarity becomes Smooth, Balanced or Sharp, and a saved
-  *Source* becomes Sharp with host-native resolution and Auto resolution
-  floor Off.
+  *Source* stays Source.
 - **Max resolution:** *Match this screen* (default) streams at this
   screen's size in device pixels, fitted to the host display's shape and
   never larger than it. *Host native* is the display's own size; the others

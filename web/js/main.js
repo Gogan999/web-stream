@@ -388,6 +388,7 @@ showSettings();
 for (const [el, key] of [[ui.resolution, 'resolution'], [ui.codec, 'codec'], [ui.bitrate, 'bitrate'], [ui.fps, 'fps'], [ui.priority, 'priority'], [ui.keyframeScale, 'keyframeScale'], [ui.minScale, 'minScale']]) {
   el.addEventListener('change', () => {
     settings[key] = ['fps', 'keyframeScale', 'minScale'].includes(key) ? Number(el.value) : el.value;
+    if (key === 'priority' && settings.priority === 'source') Object.assign(settings, settingsStore.SOURCE_PRESET);
     clearTuned(); // a choice made now replaces what auto-tune picked
     settingsStore.save(settings);
     showSettings();

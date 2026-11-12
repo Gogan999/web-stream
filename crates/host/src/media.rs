@@ -1867,6 +1867,16 @@ fn target_kbps(bwe_bps: u64, max_kbps: u32) -> u32 {
     (kbps.min(u64::from(max_kbps)) as u32).max(MIN_KBPS)
 }
 
+/// The PC's name for the page, `web-stream host` when the environment has none.
+fn computer_name() -> String {
+    ["COMPUTERNAME", "HOSTNAME"]
+        .iter()
+        .filter_map(|k| std::env::var(k).ok())
+        .map(|n| n.trim().chars().take(64).collect::<String>())
+        .find(|n| !n.is_empty())
+        .unwrap_or_else(|| "web-stream host".into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1928,14 +1938,4 @@ mod tests {
         assert!(!worth_changing(10_000, 9_900));
         assert!(worth_changing(10_000, 9_800));
     }
-}
-
-/// The PC's name for the page, `web-stream host` when the environment has none.
-fn computer_name() -> String {
-    ["COMPUTERNAME", "HOSTNAME"]
-        .iter()
-        .filter_map(|k| std::env::var(k).ok())
-        .map(|n| n.trim().chars().take(64).collect::<String>())
-        .find(|n| !n.is_empty())
-        .unwrap_or_else(|| "web-stream host".into())
 }

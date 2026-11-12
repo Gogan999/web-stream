@@ -92,6 +92,33 @@ Settings are remembered in this browser.
 - **Update host** (under Other) appears when the host allows updates from
   the browser. See [Building from source](../dev/building.md#updating-from-the-browser).
 
+## Clipboard
+
+Text you copy on the host appears on this device's clipboard, and text you
+copy here is sent to the host, while connected. It is on by default, shown
+as **Clipboard** in the bar and **Share clipboard** in Settings; it
+disappears if the host turned it off (`--no-clipboard`) or its clipboard
+can't be opened (see [Windows service](windows-service.md#clipboard)).
+Text only, up to 256 KiB; files go through **Files**.
+
+- **Chrome, Edge (computer):** press Ctrl+V as usual. The first time, the
+  browser asks to let the page read the clipboard; allow it. This device's
+  clipboard goes to the host first and then Ctrl+V is pressed there, so the
+  paste matches what you copied here. Copy on the host and it is on this
+  device's clipboard straight away (the page must be focused).
+- **iPhone, iPad (Safari), and when a browser refuses a write:** the bar
+  button reads **Copy from PC** when the host has copied something this
+  device could not store yet. Tap it, or just tap the stream, to store it.
+  To send the other way, tap **Clipboard** (iOS shows its own **Paste**
+  bubble), or use **Paste** over the stream on a touch screen: it sends
+  this device's clipboard and presses Ctrl+V on the host. If the clipboard
+  can't be shared, Paste types the text instead.
+- Long-press **Paste** in the on-screen keyboard also works: the text goes
+  to the host's clipboard and is typed.
+
+Characters that have no key on a US keyboard (accents, symbols, other
+scripts) typed on the phone are sent as Unicode text and appear as typed.
+
 ## Files
 
 **Files (n)** appears next to Settings when the host shares files. Each row

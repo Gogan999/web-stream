@@ -15,6 +15,7 @@
   <button id="connect" type="button">Connect</button>
   <span id="status" data-state="idle">Not connected</span>
   <span class="spacer"></span>
+  <button id="clipboard" type="button" hidden title="Send this device's clipboard to the host. When the host has copied something new that this browser could not store yet, it reads Copy from PC: press it to store it here.">Clipboard</button>
   <button id="sas" type="button" title="Sends Ctrl+Alt+Del to the host, for its sign-in and lock screen. Needs the host to run as the web-stream service.">Ctrl+Alt+Del</button>
   <button id="fullscreen" type="button">Fullscreen</button>
   <button id="files-toggle" type="button" aria-expanded="false" aria-controls="files" aria-haspopup="true" hidden>Files</button>
@@ -56,6 +57,7 @@
             <option value="absolute">Absolute (desktop)</option>
           </select>
         </label>
+        <label title="Share copied text with the host, both ways, while connected. Off here, or off on the host (--no-clipboard), and nothing is shared."><input type="checkbox" id="clip-enabled"> Share clipboard</label>
         <div class="row">
           <label title="Send this browser's microphone to the host, which plays it into its virtual cable (CABLE Input unless started with --mic-device). Games pick CABLE Output as their mic."><input type="checkbox" id="mic"> Mic</label>
           <button id="stats-toggle" type="button" aria-pressed="false">Stats</button>
@@ -117,6 +119,7 @@
     <button id="zoom-reset" type="button" title="Zoom back out to the whole screen" hidden>Fit</button>
     <button id="kbd-toggle" type="button" aria-pressed="false" title="On-screen keyboard">Keyboard</button>
     <button id="keys-toggle" type="button" aria-pressed="false" title="Esc, Tab, Ctrl, Alt, Win, arrows">Keys</button>
+    <button id="touch-paste" type="button" title="Paste this device's clipboard on the host" hidden>Paste</button>
     <button id="touch-fullscreen" type="button">Fullscreen</button>
   </div>
   <div id="keys" hidden>

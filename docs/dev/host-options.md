@@ -84,12 +84,17 @@ bitrate. `clarity` gives the most detail per bit.
 
 | Flag | Meaning |
 |---|---|
+| `--no-clipboard` | Don't share the clipboard. By default text (up to 256 KiB) is shared both ways while a browser is connected |
 | `--allow-upload` | Let the browser send files to this PC |
 | `--upload-dir DIR` | Where received files go. Default `Downloads\web-stream` |
 | `--allow-remote-update` | Let the browser run `scripts\update.ps1` (source installs; see [Building from source](building.md#updating-from-the-browser)) |
 
 The Windows service refuses `--web-root`, `--data-dir`, `--allow-upload` and
 `--allow-remote-update`; see [Security](../guide/windows-service.md#security).
+`--no-clipboard` is passed through to the service; the service shares its
+clipboard only if its session host can open the Windows clipboard, and tells
+the browser honestly when it can't
+(see [Clipboard](../guide/windows-service.md#clipboard)).
 
 ## Session lifetime
 

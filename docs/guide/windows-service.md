@@ -64,6 +64,18 @@ The service refuses a few settings: serving the web client from a folder,
 receiving files from the browser, and updates from the browser. Sending
 files from the host still works from the tray app, attached to the service.
 
+## Clipboard
+
+The clipboard is shared by the host process that runs on your desktop (the
+one that streams the screen), which the service starts in your session. It
+checks at start that it can open the Windows clipboard there, and tells the
+browser; if it can't, the browser hides its clipboard controls instead of
+pretending. On the sign-in and lock screens there is no user clipboard, so
+nothing is shared there. Whether the service's session host can do this on
+a given PC has to be confirmed by trying it with the service running (copy
+on the PC and paste in the browser, then back); if it can't, the host log
+says "clipboard sharing is unavailable in this session".
+
 ## Ctrl+Alt+Del
 
 A browser can't send Ctrl+Alt+Del as keys, so use the **Ctrl+Alt+Del**

@@ -139,7 +139,19 @@ pub enum ClientControl {
     /// nothing about what is built. Answered with
     /// [`HostControl::UpdateStatus`] or [`HostControl::Error`].
     UpdateHost,
+    /// Put this text on the host's clipboard (the browser's clipboard
+    /// changed, or the user pressed Paste). Honoured only when the host
+    /// shares its clipboard ([`HostControl::ClipboardCapability`]); text
+    /// over [`CLIPBOARD_MAX`] bytes is refused. Always answered with
+    /// [`HostControl::ClipboardSet`], so a browser can send Ctrl+V after it.
+    SetClipboard {
+        text: String,
+    },
 }
+
+/// Most bytes of UTF-8 text the clipboard sync carries in one message.
+/// Larger clipboards are not synced (the sender is told, not truncated).
+pub const CLIPBOARD_MAX: usize = 256 * 1024;
 
 /// Messages on the reliable `control` data channel, host -> browser.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -224,6 +236,31 @@ pub enum HostControl {
     UpdateStatus {
         state: UpdateState,
         message: String,
+    },
+    /// Whether this host shares its clipboard (text) with the browser, and
+    /// the largest text it takes. Sent when the `control` channel opens.
+    /// `available` is false when the host user turned it off
+    /// (`--no-clipboard`) or the host cannot open the Windows clipboard in
+    /// its session (probed at start); the browser then hides its clipboard
+    /// controls.
+    ///
+    /// Merge point: when the host's general `Capabilities` message lands,
+    /// this becomes its `clipboard` field.
+    ClipboardCapability {
+        available: bool,
+        max_size: u64,
+    },
+    /// The host's clipboard text changed (someone copied on the PC), sent
+    /// only while a browser is connected and sharing is on.
+    Clipboard {
+        text: String,
+    },
+    /// Answer to [`ClientControl::SetClipboard`]: the host has written the
+    /// text (`ok`), or could not (too large, off, or the clipboard was
+    /// locked by another program), after which it is safe to send the
+    /// paste keys.
+    ClipboardSet {
+        ok: bool,
     },
     /// Gamepad rumble, motor strengths 0.0..=1.0.
     Rumble {
@@ -339,6 +376,34 @@ mod tests {
             })
             .unwrap(),
             r#"{"type":"updateStatus","state":"started","message":"m"}"#
+        );
+    }
+
+    #[test]
+    fn clipboard_messages_shape() {
+        let msg: ClientControl =
+            serde_json::from_str(r#"{"type":"setClipboard","text":"h\u00e9"}"#).unwrap();
+        assert_eq!(
+            msg,
+            ClientControl::SetClipboard {
+                text: "h\u{e9}".into()
+            }
+        );
+        assert_eq!(
+            serde_json::to_string(&HostControl::ClipboardCapability {
+                available: true,
+                max_size: 5
+            })
+            .unwrap(),
+            r#"{"type":"clipboardCapability","available":true,"maxSize":5}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&HostControl::Clipboard { text: "x".into() }).unwrap(),
+            r#"{"type":"clipboard","text":"x"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&HostControl::ClipboardSet { ok: false }).unwrap(),
+            r#"{"type":"clipboardSet","ok":false}"#
         );
     }
 

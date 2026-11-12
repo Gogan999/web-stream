@@ -14,11 +14,11 @@ use windows::Win32::UI::HiDpi::{
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBD_EVENT_FLAGS, KEYBDINPUT,
-    KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, MAPVK_VK_TO_VSC, MOUSE_EVENT_FLAGS,
-    MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
-    MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN,
-    MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN,
-    MOUSEEVENTF_XUP, MOUSEINPUT, MapVirtualKeyW, SendInput, VIRTUAL_KEY,
+    KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, KEYEVENTF_UNICODE, MAPVK_VK_TO_VSC,
+    MOUSE_EVENT_FLAGS, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN,
+    MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE,
+    MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL,
+    MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT, MapVirtualKeyW, SendInput, VIRTUAL_KEY,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GetSystemMetrics, SM_CXSCREEN, SM_CXVIRTUALSCREEN, SM_CYSCREEN, SM_CYVIRTUALSCREEN,
@@ -273,6 +273,41 @@ fn update_pad(pad: &mut Pad, index: u8, s: &GamepadState) -> Result<(), SinkErro
 }
 
 impl InputSink for WindowsInput {
+    fn text(&mut self, text: &str) -> Result<(), SinkError> {
+        use crate::text::{TextKey, text_keys};
+        const VK_RETURN: u16 = 0x0d;
+        const VK_TAB: u16 = 0x09;
+        let mut inputs = Vec::new();
+        for key in text_keys(text) {
+            let (down, up) = match key {
+                TextKey::Unit(unit) => (
+                    keyboard(0, unit, KEYEVENTF_UNICODE),
+                    keyboard(0, unit, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP),
+                ),
+                TextKey::Enter | TextKey::Tab => {
+                    let vk = if key == TextKey::Enter {
+                        VK_RETURN
+                    } else {
+                        VK_TAB
+                    };
+                    // SAFETY: MapVirtualKeyW has no preconditions.
+                    let scan = unsafe { MapVirtualKeyW(vk as u32, MAPVK_VK_TO_VSC) } as u16;
+                    (
+                        keyboard(vk, scan, KEYBD_EVENT_FLAGS(0)),
+                        keyboard(vk, scan, KEYEVENTF_KEYUP),
+                    )
+                }
+            };
+            inputs.push(down);
+            inputs.push(up);
+        }
+        // Chunked so one call stays small; each chunk holds whole pairs.
+        for chunk in inputs.chunks(512) {
+            send(chunk)?;
+        }
+        Ok(())
+    }
+
     fn key(&mut self, key: KeyTarget, down: bool) -> Result<(), SinkError> {
         let up = if down {
             KEYBD_EVENT_FLAGS(0)

@@ -32,6 +32,8 @@ pub trait InputSink {
     fn mouse_button(&mut self, button: MouseButton, down: bool) -> Result<(), SinkError>;
     /// WHEEL_DELTA units; positive `dy` scrolls away from the user.
     fn mouse_wheel(&mut self, dx: i32, dy: i32) -> Result<(), SinkError>;
+    /// Types `text` as Unicode characters (see [`crate::text::text_keys`]).
+    fn text(&mut self, text: &str) -> Result<(), SinkError>;
     fn gamepad_connect(&mut self, index: u8, kind: GamepadKind) -> Result<(), SinkError>;
     fn gamepad_update(&mut self, index: u8, state: &GamepadState) -> Result<(), SinkError>;
     fn gamepad_disconnect(&mut self, index: u8) -> Result<(), SinkError>;
@@ -179,6 +181,7 @@ impl<S: InputSink> InputHandler<S> {
                 }
             }
             InputEvent::ReleaseAll => self.release_all(),
+            InputEvent::Text { text } => self.sink.text(&text)?,
         }
         Ok(())
     }
@@ -306,12 +309,17 @@ mod tests {
         Connect(u8, GamepadKind),
         Update(u8, GamepadState),
         Disconnect(u8),
+        Text(String),
     }
 
     #[derive(Default)]
     struct Recorder(Vec<Call>);
 
     impl InputSink for Recorder {
+        fn text(&mut self, text: &str) -> Result<(), SinkError> {
+            self.0.push(Call::Text(text.into()));
+            Ok(())
+        }
         fn key(&mut self, key: KeyTarget, down: bool) -> Result<(), SinkError> {
             self.0.push(Call::Key(key, down));
             Ok(())
@@ -365,6 +373,17 @@ mod tests {
             buttons,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn text_event_reaches_the_sink() {
+        let mut h = InputHandler::new(Recorder::default());
+        let msg = InputEvent::Text {
+            text: "h\u{e9}llo".into(),
+        }
+        .encode();
+        h.handle(&msg).unwrap();
+        assert_eq!(h.sink().0, [Call::Text("h\u{e9}llo".into())]);
     }
 
     #[test]
@@ -498,6 +517,9 @@ mod tests {
     struct NoVigem(u32);
 
     impl InputSink for NoVigem {
+        fn text(&mut self, _: &str) -> Result<(), SinkError> {
+            Ok(())
+        }
         fn key(&mut self, _: KeyTarget, _: bool) -> Result<(), SinkError> {
             Ok(())
         }

@@ -16,10 +16,11 @@ export function parseCapabilities(msg) {
 
 /**
  * Applies what the host said through the page's hooks: Ctrl+Alt+Del is shown only when the host
- * can send it (the service), and the host name and version are shown. Missing text clears them.
+ * can send it (the service), clipboard controls only when it shares its clipboard, and the host name and version are shown. Missing text clears them.
  */
-export function applyCapabilities(caps, { setSasVisible, setHostName, setHostVersion }) {
+export function applyCapabilities(caps, { setSasVisible, setHostName, setHostVersion, setClipboardAvailable = () => {} }) {
   setSasVisible(caps.sas);
+  setClipboardAvailable(caps.clipboard);
   setHostName(caps.hostName);
   setHostVersion(caps.version);
 }

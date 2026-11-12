@@ -28,7 +28,9 @@ service**.
   the phone's certificate warning means and the first and last 8 hex digits
   of the fingerprint to compare. A browser can instead ask for a code, which
   appears here in large digits; the window comes forward by itself when that
-  happens. The first time the app opens it starts pairing for you.
+  happens. The first time the app opens it starts pairing for you. The QR
+  code is shown whenever pairing is open (120 seconds, single use), so don't
+  screen-share or let anyone photograph this window while pairing is open.
   **Forget paired browsers** removes every paired browser.
 - **Send file...:** offers files to the connected browser (or drop files
   onto the window). See [Sharing files](#sharing-files).
@@ -122,6 +124,18 @@ and **Stop sharing**, and are forgotten when the browser disconnects.
 With **let the browser send files to this PC** turned on in Settings, the
 browser can send files the other way. They are saved in
 `Downloads\web-stream` (or the folder set there), linked from the window.
+
+## Clipboard
+
+**share copied text with the connected browser** (Settings, under
+Resolution; on by default) shares the clipboard's text both ways while a
+browser is connected: what you copy here appears on the browser's
+clipboard, and what the browser copies is put on this PC's, up to 256 KiB.
+Only text is shared, not files or images (use **Send file...** for files).
+Nothing is read from the clipboard while no browser is connected, and
+text that a password manager marks as private (excluded from monitoring, clipboard history or the cloud clipboard) is never read. Any paired
+browser can read what you copy here while it is connected, so turn the box
+off if you don't want that (the flag is `--no-clipboard`).
 
 ## Where things are kept
 

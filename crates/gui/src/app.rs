@@ -618,7 +618,18 @@ impl App {
     /// own UAC prompt) and exits; setup relaunches the app when it is done.
     /// If the installer does not start (UAC declined), hosting goes on.
     #[cfg(windows)]
-    fn install_update(&mut self, setup: &std::path::Path) {
+    fn install_update(&mut self, release: &update_check::Release, setup: &std::path::Path) {
+        // The file is in a folder this user can write to: check it again
+        // now, and hold it write-locked until setup has started.
+        let _locked = match update_check::open_verified(release, setup) {
+            Ok(f) => f,
+            Err(e) => {
+                self.host.log(format!("update: {e:#}"));
+                self.updater
+                    .set(update_check::State::Failed(format!("{e:#}")));
+                return;
+            }
+        };
         self.host.log("update: handing over to the installer");
         let was_hosting = self.host.is_active();
         self.host.stop_and_wait(Duration::from_secs(15));
@@ -1499,7 +1510,7 @@ impl App {
                     )
                     .clicked();
                 if install {
-                    self.install_update(&path);
+                    self.install_update(&r, &path);
                 }
             }
             #[cfg(not(windows))]

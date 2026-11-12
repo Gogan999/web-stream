@@ -108,14 +108,16 @@ pub fn parse_manifest(json: &str, current: &str) -> anyhow::Result<Option<Releas
     }))
 }
 
-fn agent() -> ureq::Agent {
+/// The HTTP client. Production agents are HTTPS-only; tests serve plain
+/// HTTP from localhost with `agent(false)`.
+fn agent(https_only: bool) -> ureq::Agent {
     // Windows' own certificate store (and so a company's proxy root).
     let tls = ureq::tls::TlsConfig::builder()
         .root_certs(ureq::tls::RootCerts::PlatformVerifier)
         .build();
     ureq::Agent::config_builder()
         .tls_config(tls)
-        .https_only(false)
+        .https_only(https_only)
         .user_agent(format!("web-stream-host/{VERSION}"))
         // Per request: the connection and the response headers. The body
         // of a download is limited by its own stall check below.
@@ -128,11 +130,11 @@ fn agent() -> ureq::Agent {
 
 /// Asks GitHub for the latest release; `Some` if it is newer than this app.
 pub fn check_latest() -> anyhow::Result<Option<Release>> {
-    check_url(MANIFEST_URL, VERSION)
+    check_url(&agent(true), MANIFEST_URL, VERSION)
 }
 
-fn check_url(url: &str, current: &str) -> anyhow::Result<Option<Release>> {
-    let mut resp = agent()
+fn check_url(agent: &ureq::Agent, url: &str, current: &str) -> anyhow::Result<Option<Release>> {
+    let mut resp = agent
         .get(url)
         .call()
         .map_err(|e| anyhow::anyhow!("could not reach GitHub: {e}"))?;
@@ -153,10 +155,11 @@ pub fn download(
     dir: &Path,
     progress: &mut dyn FnMut(u64),
 ) -> anyhow::Result<PathBuf> {
-    download_from(&release.url(), release, dir, progress)
+    download_from(&agent(true), &release.url(), release, dir, progress)
 }
 
 fn download_from(
+    agent: &ureq::Agent,
     url: &str,
     release: &Release,
     dir: &Path,
@@ -166,7 +169,7 @@ fn download_from(
     clean_dir(dir);
     let target = dir.join(&release.name);
     let part = dir.join(format!("{}.part", release.name));
-    let result = fetch_to(url, release, &part, progress)
+    let result = fetch_to(agent, url, release, &part, progress)
         .and_then(|()| std::fs::rename(&part, &target).context("could not save the download"));
     if let Err(e) = result {
         let _ = std::fs::remove_file(&part);
@@ -177,12 +180,13 @@ fn download_from(
 }
 
 fn fetch_to(
+    agent: &ureq::Agent,
     url: &str,
     release: &Release,
     part: &Path,
     progress: &mut dyn FnMut(u64),
 ) -> anyhow::Result<()> {
-    let resp = agent()
+    let resp = agent
         .get(url)
         .call()
         .map_err(|e| anyhow::anyhow!("could not download the update: {e}"))?;
@@ -231,6 +235,50 @@ fn fetch_to(
         bail!("the download does not match the release's SHA-256 and was deleted; try again");
     }
     Ok(())
+}
+
+/// Opens the downloaded installer and checks its size and SHA-256 again,
+/// right before it is run: it sits in a folder the user can write to, so
+/// the check at download time is not enough. On Windows the returned handle
+/// denies others write and delete access; keep it until setup has started.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn open_verified(release: &Release, path: &Path) -> anyhow::Result<std::fs::File> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // FILE_SHARE_READ only: no writing, renaming or deleting while held.
+        opts.share_mode(1);
+    }
+    let mut file = opts
+        .open(path)
+        .with_context(|| format!("could not open the downloaded installer {}", path.display()))?;
+    let size = file
+        .metadata()
+        .context("could not read the installer's size")?
+        .len();
+    if size != release.size {
+        bail!(
+            "the downloaded installer changed ({size} bytes, expected {}): not running it",
+            release.size
+        );
+    }
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = file
+            .read(&mut buf)
+            .context("could not read the downloaded installer")?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    if hex(&hasher.finalize()) != release.sha256 {
+        bail!("the downloaded installer no longer matches the release's SHA-256: not running it");
+    }
+    Ok(file)
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -497,7 +545,14 @@ mod tests {
         let url = serve_once(body.clone());
         let dir = tempfile::tempdir().unwrap();
         let mut last = 0;
-        let path = download_from(&url, &release_for(&body), dir.path(), &mut |n| last = n).unwrap();
+        let path = download_from(
+            &agent(false),
+            &url,
+            &release_for(&body),
+            dir.path(),
+            &mut |n| last = n,
+        )
+        .unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), body);
         assert_eq!(last, body.len() as u64);
         assert!(!dir.path().join("web-stream-setup-0.3.0.exe.part").exists());
@@ -508,7 +563,14 @@ mod tests {
         let body = vec![7u8; 1000];
         let url = serve_once(vec![8u8; 1000]);
         let dir = tempfile::tempdir().unwrap();
-        let err = download_from(&url, &release_for(&body), dir.path(), &mut |_| {}).unwrap_err();
+        let err = download_from(
+            &agent(false),
+            &url,
+            &release_for(&body),
+            dir.path(),
+            &mut |_| {},
+        )
+        .unwrap_err();
         assert!(format!("{err:#}").contains("SHA-256"), "{err:#}");
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
@@ -518,10 +580,63 @@ mod tests {
         let body = vec![7u8; 1000];
         let short = serve_once(vec![7u8; 500]);
         let dir = tempfile::tempdir().unwrap();
-        assert!(download_from(&short, &release_for(&body), dir.path(), &mut |_| {}).is_err());
+        assert!(
+            download_from(
+                &agent(false),
+                &short,
+                &release_for(&body),
+                dir.path(),
+                &mut |_| {}
+            )
+            .is_err()
+        );
         let long = serve_once(vec![7u8; 2000]);
-        assert!(download_from(&long, &release_for(&body), dir.path(), &mut |_| {}).is_err());
+        assert!(
+            download_from(
+                &agent(false),
+                &long,
+                &release_for(&body),
+                dir.path(),
+                &mut |_| {}
+            )
+            .is_err()
+        );
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn open_verified_accepts_the_download_and_rejects_changes() {
+        let body = vec![5u8; 200_000];
+        let release = release_for(&body);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(&release.name);
+        std::fs::write(&path, &body).unwrap();
+        let held = open_verified(&release, &path).unwrap();
+        #[cfg(windows)]
+        assert!(
+            std::fs::OpenOptions::new().write(true).open(&path).is_err(),
+            "the verified file must be write-locked while held"
+        );
+        drop(held);
+        // Same size, one byte changed.
+        let mut bad = body.clone();
+        bad[100] ^= 1;
+        std::fs::write(&path, &bad).unwrap();
+        let err = open_verified(&release, &path).unwrap_err();
+        assert!(format!("{err:#}").contains("SHA-256"), "{err:#}");
+        // Different size.
+        std::fs::write(&path, &body[..10]).unwrap();
+        assert!(open_verified(&release, &path).is_err());
+        // Gone.
+        std::fs::remove_file(&path).unwrap();
+        assert!(open_verified(&release, &path).is_err());
+    }
+
+    #[test]
+    fn the_production_agent_refuses_plain_http() {
+        let url = serve_once(vec![1u8; 10]);
+        let err = agent(true).get(&url).call();
+        assert!(err.is_err());
     }
 
     #[test]
@@ -553,7 +668,9 @@ mod tests {
     #[test]
     #[ignore = "needs the internet"]
     fn live_manifest_parses() {
-        let r = check_url(MANIFEST_URL, "0.0.1").unwrap().unwrap();
+        let r = check_url(&agent(true), MANIFEST_URL, "0.0.1")
+            .unwrap()
+            .unwrap();
         println!("{r:?}");
         assert!(r.name.starts_with("web-stream-setup-"));
     }

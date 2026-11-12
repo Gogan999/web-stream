@@ -463,7 +463,15 @@ impl Media {
                         max_size: uploads::MAX_SIZE,
                     });
                     self.reply(HostControl::RemoteUpdate {
-                        enabled: self.opts.update_log.is_some() && update::available(),
+                        enabled: self.opts.update_log.is_some()
+                            && update::available()
+                            && update::can_update_from_source(),
+                    });
+                    self.reply(HostControl::Capabilities {
+                        clipboard: false,
+                        sas: crate::sas::available(),
+                        host_name: computer_name(),
+                        version: env!("CARGO_PKG_VERSION").into(),
                     });
                     for msg in std::mem::take(&mut self.unsent) {
                         self.reply(msg);
@@ -1857,6 +1865,16 @@ fn worth_changing(current: u32, target: u32) -> bool {
 fn target_kbps(bwe_bps: u64, max_kbps: u32) -> u32 {
     let kbps = (bwe_bps as f64 * BWE_HEADROOM / 1000.0) as u64;
     (kbps.min(u64::from(max_kbps)) as u32).max(MIN_KBPS)
+}
+
+/// The PC's name for the page, `web-stream host` when the environment has none.
+fn computer_name() -> String {
+    ["COMPUTERNAME", "HOSTNAME"]
+        .iter()
+        .filter_map(|k| std::env::var(k).ok())
+        .map(|n| n.trim().chars().take(64).collect::<String>())
+        .find(|n| !n.is_empty())
+        .unwrap_or_else(|| "web-stream host".into())
 }
 
 #[cfg(test)]

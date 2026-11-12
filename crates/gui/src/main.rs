@@ -16,7 +16,8 @@
 //!     steps the installer and uninstaller run (see setup.rs)
 //! ```
 //!
-//! Closing the window keeps the host running in the tray; Quit stops it.
+//! Closing the window keeps the host running in the tray; Quit stops it (with the
+//! Windows service installed it only closes the tray: the service keeps hosting).
 //! Settings are saved in the data dir and started as the equivalent host
 //! options (`ws_host::options`).
 //!

@@ -11,6 +11,7 @@ import { AutoTune, Cancelled } from './autotune.js';
 import { SoftKeyboard } from './softkeys.js';
 import * as P from './protocol.js';
 import { Files, Uploads, formatSize } from './files.js';
+import { applyCapabilities, parseCapabilities } from './capabilities.js';
 import { DiagLog, diagEnabled } from './diag.js';
 import { ZoomView } from './zoom.js';
 
@@ -29,7 +30,7 @@ const ui = {
   pairCode: $('pair-code'), pairConfirm: $('pair-confirm'), pairMsg: $('pair-msg'),
   resolution: $('resolution'), codec: $('codec'), bitrate: $('bitrate'), fps: $('fps'),
   keyframeScale: $('keyframe-scale'), recoverDrops: $('recover-drops'), minScale: $('min-scale'),
-  matchHost: $('match-host'), autotune: $('autotune'), mic: $('mic'),
+  matchHost: $('match-host'), autoconnect: $('autoconnect'), autotune: $('autotune'), mic: $('mic'),
   audioKbps: $('audio-kbps'), audioFrame: $('audio-frame'),
   moreToggle: $('more-toggle'), more: $('more'), kbdToggle: $('kbd-toggle'), keysToggle: $('keys-toggle'), keys: $('keys'),
   kbdInput: $('kbd-input'), touchFullscreen: $('touch-fullscreen'), view: $('view'), zoomReset: $('zoom-reset'), zoomPan: $('zoom-pan'),
@@ -92,10 +93,11 @@ function showConnected(on) {
   document.body.classList.toggle('connected', on);
 }
 
-// HOOKS for the host's Capabilities message (added separately; these are the only places it touches).
-// Ctrl+Alt+Del works only when the host runs as the service. Until the host says so, it stays visible.
+// Hooks for the host's capabilities message (see capabilities.js).
+// Ctrl+Alt+Del works only when the host runs as the service; hidden until the host says so.
 function setSasVisible(visible) {
   ui.sas.hidden = !visible;
+  $('keys-sas').hidden = !visible;
 }
 // Shown on the not-connected screen and in the title, so two hosts are told apart.
 function setHostName(name) {
@@ -108,7 +110,6 @@ function setHostVersion(version) {
   ui.version.textContent = version ? `Host version ${version}` : '';
   ui.version.hidden = !version;
 }
-void setSasVisible; void setHostName; void setHostVersion;
 
 async function connect() {
   disconnect();
@@ -129,6 +130,7 @@ async function connect() {
   });
   session.addEventListener('closed', () => {
     setRemoteUpdate(false);
+    setSasVisible(false);
     showConnected(false);
     ui.display.disabled = true;
     syncQuickDisplay();
@@ -188,6 +190,7 @@ function disconnect() {
   files.clear();
   uploads.clear();
   setRemoteUpdate(false);
+  setSasVisible(false);
   host = null;
   clearTuned();
   ui.display.replaceChildren();
@@ -241,6 +244,8 @@ function onControl(msg) {
     host.stats = msg;
     diag?.add('host_stats', msg);
     if (tuneWindow) tuneWindow.push(msg);
+  } else if (msg.type === 'capabilities') {
+    applyCapabilities(parseCapabilities(msg), { setSasVisible, setHostName, setHostVersion });
   } else if (msg.type === 'remoteUpdate') {
     setRemoteUpdate(msg.enabled === true);
   } else if (msg.type === 'updateStatus' && typeof msg.message === 'string') {
@@ -351,6 +356,7 @@ function showSettings() {
   ui.minScale.value = String(settings.minScale);
   ui.recoverDrops.checked = !!settings.recoverDrops;
   ui.matchHost.checked = !!settings.matchHost;
+  ui.autoconnect.checked = settings.autoconnect !== false;
   showMic();
   showMouseLabel();
   ui.audioKbps.value = settings.audioKbps;
@@ -400,6 +406,11 @@ ui.recoverDrops.addEventListener('change', () => {
   settings.recoverDrops = ui.recoverDrops.checked;
   settingsStore.save(settings);
   applySettings();
+});
+
+ui.autoconnect.addEventListener('change', () => {
+  settings.autoconnect = ui.autoconnect.checked;
+  settingsStore.save(settings);
 });
 
 ui.matchHost.addEventListener('change', () => {
@@ -1116,5 +1127,7 @@ checkPairing().then(async (paired) => {
     ui.pairMsg.textContent = 'That pairing link was damaged. Scan the QR code on the host again.';
   }
   if (!paired && pairingLink) paired = await pairFromLink(pairingLink);
-  if (paired && (pairingLink || params.has('autoconnect'))) connect();
+  // A paired page connects by itself unless "Connect automatically" is off (a pairing link always does).
+  // `?autoconnect` stays in the manifest for home-screen icons saved before the setting existed.
+  if (paired && (pairingLink || settings.autoconnect)) connect();
 });

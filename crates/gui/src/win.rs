@@ -51,6 +51,8 @@ thread_local! {
     static TRAY: RefCell<Option<TrayIcon>> = const { RefCell::new(None) };
     /// The tray's update item, whose text says when a newer version is known.
     static UPDATE_ITEM: RefCell<Option<MenuItem>> = const { RefCell::new(None) };
+    /// The tray's Quit item, whose text depends on whether the service hosts.
+    static QUIT_ITEM: RefCell<Option<MenuItem>> = const { RefCell::new(None) };
 }
 
 /// True once per click on the tray's "Check for updates".
@@ -280,7 +282,7 @@ pub fn hide_window() {
 /// while the window is hidden (and eframe isn't running frames).
 pub fn create_tray(host: Host, ctx: eframe::egui::Context) -> anyhow::Result<()> {
     let open = MenuItem::with_id("open", "Open web-stream host", true, None);
-    let pair = MenuItem::with_id("pair", "Pair a browser", true, None);
+    let pair = MenuItem::with_id("pair", "Pair a device", true, None);
     let drop = MenuItem::with_id("drop", "Disconnect the browser", true, None);
     let update = MenuItem::with_id("update", "Check for updates", true, None);
     let quit_item = MenuItem::with_id("quit", "Quit", true, None);
@@ -303,6 +305,7 @@ pub fn create_tray(host: Host, ctx: eframe::egui::Context) -> anyhow::Result<()>
         .build()?;
     TRAY.with(|t| *t.borrow_mut() = Some(tray));
     UPDATE_ITEM.with(|i| *i.borrow_mut() = Some(update));
+    QUIT_ITEM.with(|q| *q.borrow_mut() = Some(quit_item));
 
     let show = {
         let ctx = ctx.clone();
@@ -345,6 +348,22 @@ pub fn create_tray(host: Host, ctx: eframe::egui::Context) -> anyhow::Result<()>
         _ => {}
     }));
     Ok(())
+}
+
+/// Quit only closes this app while the Windows service hosts, so the menu
+/// says so.
+/// False if there is no tray menu yet (try again later).
+pub fn set_service_mode(service: bool) -> bool {
+    QUIT_ITEM.with(|q| {
+        q.borrow().as_ref().is_some_and(|item| {
+            item.set_text(if service {
+                "Close tray (service keeps running)"
+            } else {
+                "Quit"
+            });
+            true
+        })
+    })
 }
 
 /// Stops the host (putting back a changed resolution) and exits. Runs on

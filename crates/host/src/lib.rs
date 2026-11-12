@@ -18,6 +18,14 @@ mod tunnel;
 pub mod update;
 mod uploads;
 
+/// For test hosts: game audio becomes a beep every second and the browser
+/// mic plays into a level meter (`ws_audio::synthetic`), where there are no
+/// Windows audio devices to use.
+#[cfg(not(windows))]
+pub fn use_synthetic_audio() {
+    platform::use_synthetic_audio();
+}
+
 pub use platform::audio_devices;
 
 /// The web client this host was built with, as (path, contents).

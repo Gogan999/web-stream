@@ -27,6 +27,8 @@ mod layout;
 mod modes;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod pacing;
+#[cfg(feature = "synthetic")]
+pub mod synthetic;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod tuning;
 #[cfg(windows)]
@@ -69,6 +71,10 @@ pub type Result<T> = std::result::Result<T, CaptureError>;
 
 /// Lists every display the host can capture.
 pub fn list_displays() -> Result<Vec<DisplayInfo>> {
+    #[cfg(feature = "synthetic")]
+    if synthetic::enabled() {
+        return synthetic::list_displays();
+    }
     #[cfg(windows)]
     {
         win::list_displays()
@@ -89,6 +95,10 @@ pub fn list_displays() -> Result<Vec<DisplayInfo>> {
 /// This changes the host user's own screen, so callers only do it when the
 /// host user has opted in.
 pub fn set_display_mode(display: DisplayId, width: u32, height: u32) -> Result<ModeChange> {
+    #[cfg(feature = "synthetic")]
+    if synthetic::enabled() {
+        return synthetic::set_display_mode(display, width, height);
+    }
     #[cfg(windows)]
     {
         win::set_display_mode(display, width, height)
@@ -102,6 +112,10 @@ pub fn set_display_mode(display: DisplayId, width: u32, height: u32) -> Result<M
 
 /// Puts `display` back to its saved resolution.
 pub fn restore_display_mode(display: DisplayId) -> Result<()> {
+    #[cfg(feature = "synthetic")]
+    if synthetic::enabled() {
+        return synthetic::restore_display_mode(display);
+    }
     #[cfg(windows)]
     {
         win::restore_display_mode(display)
@@ -139,16 +153,36 @@ fn validate(config: &VideoConfig) -> Result<()> {
     Ok(())
 }
 
+/// The running pipeline: the platform's, or the synthetic source's. With
+/// neither (another OS, without the feature) it can't be built.
+enum Pipeline {
+    #[cfg(windows)]
+    Win(win::PipelineHandle),
+    #[cfg(feature = "synthetic")]
+    Synthetic(synthetic::PipelineHandle),
+}
+
+#[derive(Clone)]
+enum Control {
+    #[cfg(windows)]
+    Win(win::Control),
+    #[cfg(feature = "synthetic")]
+    Synthetic(synthetic::Control),
+}
+
 /// Handle to a running capture + encode pipeline.
 ///
 /// The pipeline runs on its own thread. It ends when the handle is dropped
 /// or on an unrecoverable error; either way the frame channel's sender is
 /// dropped, so the receiver sees the stream close.
 pub struct VideoPipeline {
-    #[cfg(windows)]
-    inner: win::PipelineHandle,
+    inner: Pipeline,
 }
 
+#[cfg_attr(
+    not(any(windows, feature = "synthetic")),
+    allow(unused_variables, unreachable_code)
+)]
 impl VideoPipeline {
     /// Starts capturing `display` and encoding at `config`'s size, rate and
     /// bitrate. Returns once the encoder is initialized. The output size
@@ -166,10 +200,21 @@ impl VideoPipeline {
         backlog: SendBacklog,
     ) -> Result<Self> {
         validate(&config)?;
+        #[cfg(feature = "synthetic")]
+        if synthetic::enabled() {
+            let _ = max;
+            return Ok(Self {
+                inner: Pipeline::Synthetic(synthetic::PipelineHandle::start(
+                    display, config, frames, backlog,
+                )?),
+            });
+        }
         #[cfg(windows)]
         {
             Ok(Self {
-                inner: win::PipelineHandle::start(display, config, max, frames, backlog)?,
+                inner: Pipeline::Win(win::PipelineHandle::start(
+                    display, config, max, frames, backlog,
+                )?),
             })
         }
         #[cfg(not(windows))]
@@ -189,13 +234,11 @@ impl VideoPipeline {
             height,
             ..Default::default()
         })?;
-        #[cfg(windows)]
-        {
-            self.inner.resize(width, height)
-        }
-        #[cfg(not(windows))]
-        {
-            Err(CaptureError::Unsupported)
+        match self.inner {
+            #[cfg(windows)]
+            Pipeline::Win(ref p) => p.resize(width, height),
+            #[cfg(feature = "synthetic")]
+            Pipeline::Synthetic(ref p) => p.resize(width, height),
         }
     }
 
@@ -204,8 +247,12 @@ impl VideoPipeline {
     /// once the pipeline is dropped, requests are ignored.
     pub fn control(&self) -> VideoControl {
         VideoControl {
-            #[cfg(windows)]
-            inner: self.inner.control(),
+            inner: match self.inner {
+                #[cfg(windows)]
+                Pipeline::Win(ref p) => Control::Win(p.control()),
+                #[cfg(feature = "synthetic")]
+                Pipeline::Synthetic(ref p) => Control::Synthetic(p.control()),
+            },
         }
     }
 
@@ -213,21 +260,22 @@ impl VideoPipeline {
     /// size or codec, so the browser keeps decoding the same track. The
     /// next frame is a keyframe.
     pub fn select_display(&self, display: DisplayId) -> Result<()> {
-        #[cfg(windows)]
-        {
-            self.inner.select_display(display)
-        }
-        #[cfg(not(windows))]
-        {
-            let _ = display;
-            Err(CaptureError::Unsupported)
+        match self.inner {
+            #[cfg(windows)]
+            Pipeline::Win(ref p) => p.select_display(display),
+            #[cfg(feature = "synthetic")]
+            Pipeline::Synthetic(ref p) => p.select_display(display),
         }
     }
 
     /// Forces the next frame to be an IDR.
     pub fn request_keyframe(&self) {
-        #[cfg(windows)]
-        self.inner.request_keyframe();
+        match self.inner {
+            #[cfg(windows)]
+            Pipeline::Win(ref p) => p.request_keyframe(),
+            #[cfg(feature = "synthetic")]
+            Pipeline::Synthetic(ref p) => p.request_keyframe(),
+        }
     }
 
     /// Frames from `index` on never reached the browser: the next frame
@@ -235,41 +283,55 @@ impl VideoPipeline {
     /// where it can ([`ws_proto::VideoConfig::recover_drops`]), and sends a
     /// keyframe otherwise.
     pub fn recover_from(&self, index: u64) {
-        #[cfg(windows)]
-        self.inner.recover_from(index);
-        #[cfg(not(windows))]
-        let _ = index;
+        match self.inner {
+            #[cfg(windows)]
+            Pipeline::Win(ref p) => p.recover_from(index),
+            #[cfg(feature = "synthetic")]
+            Pipeline::Synthetic(ref p) => p.recover_from(index),
+        }
     }
 
     /// Changes the target bitrate without restarting the encoder.
     pub fn set_bitrate(&self, kbps: u32) {
-        #[cfg(windows)]
-        self.inner.set_bitrate(kbps.clamp(100, 500_000));
-        #[cfg(not(windows))]
-        let _ = kbps;
+        let kbps = kbps.clamp(100, 500_000);
+        match self.inner {
+            #[cfg(windows)]
+            Pipeline::Win(ref p) => p.set_bitrate(kbps),
+            #[cfg(feature = "synthetic")]
+            Pipeline::Synthetic(ref p) => p.set_bitrate(kbps),
+        }
     }
 }
 
 /// See [`VideoPipeline::control`].
 #[derive(Clone)]
 pub struct VideoControl {
-    #[cfg(windows)]
-    inner: win::Control,
+    inner: Control,
 }
 
+#[cfg_attr(
+    not(any(windows, feature = "synthetic")),
+    allow(unused_variables, unreachable_code)
+)]
 impl VideoControl {
     /// Forces the next frame to be an IDR.
     pub fn request_keyframe(&self) {
-        #[cfg(windows)]
-        self.inner.request_keyframe();
+        match self.inner {
+            #[cfg(windows)]
+            Control::Win(ref c) => c.request_keyframe(),
+            #[cfg(feature = "synthetic")]
+            Control::Synthetic(ref c) => c.request_keyframe(),
+        }
     }
 
     /// See [`VideoPipeline::recover_from`].
     pub fn recover_from(&self, index: u64) {
-        #[cfg(windows)]
-        self.inner.recover_from(index);
-        #[cfg(not(windows))]
-        let _ = index;
+        match self.inner {
+            #[cfg(windows)]
+            Control::Win(ref c) => c.recover_from(index),
+            #[cfg(feature = "synthetic")]
+            Control::Synthetic(ref c) => c.recover_from(index),
+        }
     }
 }
 

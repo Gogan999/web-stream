@@ -31,6 +31,13 @@ jobs:
         run: cargo fmt --all --check
       - name: clippy
         run: cargo clippy --workspace --all-targets
+      # The synthetic capture source (test host's --synthetic) is behind a feature.
+      - name: clippy (synthetic source)
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo clippy -p ws-capture -p ws-host --all-targets --features ws-capture/synthetic,ws-host/synthetic
+      - name: test (synthetic source)
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo test -p ws-capture --features synthetic
       - name: test
         run: cargo test --workspace
       # The browser client against the real host: shared files reach the browser's downloads.
@@ -81,3 +88,39 @@ jobs:
           TEST_BLOCK_UDP: '1'
           TEST_PATTERN_BIN: ${{ github.workspace }}/target/debug/examples/test_pattern
           PLAYWRIGHT_PATH: ${{ github.workspace }}/web/node_modules/playwright
+
+  # The media path measured from Google Chrome: the test host streams fake displays (stamped
+  # frames, software H.264) and a beep for game audio; the browser reads the stamps. Checks frame
+  # rate, latency, lost frames, freezes, audio, mic and display switching, then the same on a bad
+  # network (loss, a slow link, an outage) through a userspace proxy. Figures are in the job
+  # summary and the media-report artifact.
+  media-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: sudo apt-get install -y --no-install-recommends nasm
+      - run: cargo build -p ws-host --example test-host --features synthetic
+      - run: npm ci --no-audit --no-fund
+        working-directory: web
+      - name: media tests
+        working-directory: web
+        run: npm run test:media
+        env:
+          WS_HOST_BIN: ${{ github.workspace }}/target/debug/examples/test-host
+          MEDIA_REPORT: ${{ github.workspace }}/media-report/report.json
+      - name: figures
+        if: always()
+        run: |
+          mkdir -p media-report
+          for f in media-report/*.json; do [ -f "$f" ] && { echo "### $f"; echo '```json'; cat "$f"; echo; echo '```'; } >> "$GITHUB_STEP_SUMMARY"; done || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: media-report
+          path: media-report
+          if-no-files-found: ignore

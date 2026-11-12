@@ -1,0 +1,73 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>web-stream test source</title>
+<style>html,body{margin:0;background:#000;overflow:hidden;cursor:crosshair}canvas{display:block}</style>
+<canvas id="c"></canvas>
+<script src="../lib/stamp.js"></script>
+<script>
+// The picture a hardware test streams: fill a display with this page (kiosk). Every frame it
+// draws the stamp (lib/stamp.js: capture time, display, frame index) in the top two cell rows,
+// moving noise under it so the encoder has real work, and at the top of every Unix second a
+// 100 ms 1 kHz beep. It also records the input the host injects (mouse, keys) in window.__events.
+// ?display=N is what the stamp says, so a client can tell which display it is showing.
+const display = Number(new URLSearchParams(location.search).get('display') || 0);
+const c = document.getElementById('c');
+const g = c.getContext('2d', { alpha: false });
+let frame = 0;
+window.__events = [];
+window.__frames = 0;
+const log = (e) => window.__events.push({ t: Date.now(), ...e });
+for (const type of ['mousedown', 'mouseup', 'wheel']) window.addEventListener(type, (e) => log({ type, button: e.button, x: e.clientX, y: e.clientY, dy: e.deltaY }), true);
+let moves = 0;
+window.addEventListener('mousemove', (e) => { moves++; window.__lastMove = { x: e.clientX, y: e.clientY, t: Date.now(), moves }; if (moves % 10 === 1) log({ type: 'mousemove', x: e.clientX, y: e.clientY }); }, true);
+for (const type of ['keydown', 'keyup']) window.addEventListener(type, (e) => log({ type, code: e.code, key: e.key }), true);
+
+function draw() {
+  const w = (c.width = innerWidth), h = (c.height = innerHeight);
+  const cell = Math.floor(w / wsStamp.COLS);
+  const now = Date.now();
+  // Noise bars: many small moving rectangles.
+  g.fillStyle = '#202830'; g.fillRect(0, 0, w, h);
+  for (let i = 0; i < 400; i++) {
+    const x = (i * 97 + frame * (3 + (i % 7))) % w, y = ((i * 53) % (h - 2 * cell)) + 2 * cell;
+    g.fillStyle = `hsl(${(i * 37 + frame * 5) % 360} 70% ${30 + (i % 5) * 10}%)`;
+    g.fillRect(x, y, 40 + (i % 60), 12 + (i % 30));
+  }
+  // The stamp, one square cell per bit, over a black band.
+  g.fillStyle = '#000'; g.fillRect(0, 0, w, 2 * cell);
+  const words = wsStamp.words({ time: now % 2 ** 32, display, frame });
+  words.forEach((word, r) => {
+    for (let col = 0; col < wsStamp.COLS; col++) {
+      g.fillStyle = (word >>> (31 - col)) & 1 ? '#ebebeb' : '#101010';
+      g.fillRect(col * cell, r * cell, cell, cell);
+    }
+  });
+  frame++; window.__frames = frame;
+  requestAnimationFrame(draw);
+}
+requestAnimationFrame(draw);
+
+// The beep, scheduled against the Unix clock: start it when the next whole second arrives.
+let ac;
+async function startAudio() {
+  ac = new AudioContext();
+  await ac.resume();
+  const schedule = () => {
+    const ms = 1000 - (Date.now() % 1000);
+    // Aim for the moment the sound leaves the speaker, not the moment it enters the audio graph:
+    // getOutputTimestamp pairs a context time with the performance.now() it is being played at, so
+    // the measured lateness is the stream's, without this page's own output buffer (about 50 ms).
+    const ts = ac.getOutputTimestamp();
+    const unixAtTs = performance.timeOrigin + ts.performanceTime;
+    const at = ts.contextTime + (Date.now() + ms - unixAtTs) / 1000;
+    const osc = ac.createOscillator(), gain = ac.createGain();
+    osc.frequency.value = 1000; gain.gain.value = 0.3;
+    osc.connect(gain).connect(ac.destination);
+    osc.start(at); osc.stop(at + 0.1);
+    setTimeout(schedule, ms + 900);
+  };
+  schedule();
+}
+window.__startAudio = startAudio;
+addEventListener('click', () => ac || startAudio(), { once: true });
+</script>

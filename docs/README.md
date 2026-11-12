@@ -23,5 +23,6 @@
 | [Signaling, pairing and transport](dev/signaling.md) | Ports, TLS, pairing API, `/ws` signaling, data channels |
 | [Client and host wire protocol](dev/protocol.md) | Input messages, control JSON, file transfer |
 | [Browser client development](../web/README.md) | Client files, dev server, mock host, tests |
+| [Testing the media path](dev/media-testing.md) | Synthetic source, browser measurements, network impairment |
 | [Diagnostic logging](dev/diagnostics.md) | Tracing freezes and keyframes on both sides |
 | [Releasing](dev/releasing.md) | Release pipeline and how to cut a release |

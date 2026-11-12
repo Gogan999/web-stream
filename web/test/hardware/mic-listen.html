@@ -1,0 +1,25 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>web-stream mic listener</title>
+<script>
+// Listens on the device whose name contains ?device= (default "CABLE Output": where the host's
+// virtual mic comes out) and records its level once a second in window.__mic.
+window.__mic = { state: 'starting', levels: [] };
+(async () => {
+  try {
+    const want = (new URLSearchParams(location.search).get('device') || 'CABLE Output').toLowerCase();
+    await navigator.mediaDevices.getUserMedia({ audio: true }).then((s) => s.getTracks().forEach((t) => t.stop()));
+    const dev = (await navigator.mediaDevices.enumerateDevices()).find((d) => d.kind === 'audioinput' && d.label.toLowerCase().includes(want));
+    if (!dev) { window.__mic.state = 'no-device'; return; }
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: { deviceId: { exact: dev.deviceId }, echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+    const ac = new AudioContext();
+    const an = ac.createAnalyser(); an.fftSize = 2048;
+    ac.createMediaStreamSource(stream).connect(an);
+    const buf = new Float32Array(an.fftSize);
+    let peak = 0;
+    setInterval(() => { an.getFloatTimeDomainData(buf); for (const v of buf) peak = Math.max(peak, Math.abs(v)); }, 20);
+    setInterval(() => { window.__mic.levels.push(+peak.toFixed(4)); peak = 0; }, 1000);
+    window.__mic.state = 'listening'; window.__mic.device = dev.label;
+  } catch (e) { window.__mic.state = 'error: ' + e; }
+})();
+</script>

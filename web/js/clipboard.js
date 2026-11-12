@@ -1,5 +1,5 @@
 // Clipboard sync with the host: text only, both ways, while connected. See docs/dev/protocol.md
-// (clipboardCapability, clipboard, setClipboard, clipboardSet).
+// (capabilities.clipboard, clipboard, setClipboard, clipboardSet).
 //
 // What a browser lets a page do decides the shape of this:
 //  - Writing the browser clipboard (host -> here) needs the page focused and, on iOS Safari, a user
@@ -73,13 +73,15 @@ export class ClipboardSync {
     this.onChange();
   }
 
+  // The host's `capabilities` message (capabilities.js) says whether it shares its clipboard.
+  setAvailable(on) {
+    this.available = on === true;
+    this.onChange();
+  }
+
   // A control message for this module; true if it was one.
   onControl(msg) {
     switch (msg.type) {
-      case 'clipboardCapability':
-        this.available = msg.available === true;
-        this.onChange();
-        return true;
       case 'clipboard':
         if (typeof msg.text === 'string') this.onHostText(msg.text);
         return true;

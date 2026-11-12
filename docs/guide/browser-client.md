@@ -8,11 +8,14 @@ limits noted under [Phones and tablets](#phones-and-tablets).
 ## Connecting
 
 - **First visit:** scan the host app's QR code (see
-  [Getting started](getting-started.md)), or request a pairing code on the
-  page and type the 6-digit code the host app shows. The browser then stays
-  paired until you click **Unpair**.
-- Click **Connect**. Add `?autoconnect` to the address to connect as soon
-  as the page loads.
+  [Getting started](getting-started.md)), or press **Pair a device** on the
+  host, request a pairing code on the page and type the 6-digit code the
+  host app shows. The browser then stays paired until you click **Unpair**.
+- A paired browser **connects by itself** when the page opens (**Settings >
+  Host > Connect automatically**, on by default), so the home-screen icon
+  opens straight into the stream. With it off, click **Connect**.
+  The browser may warn about the certificate the first time; that is
+  expected and explained in Getting started.
 
 Not connected, a large **Connect** button sits in the middle of the page.
 Connected, the toolbar holds **Connect/Disconnect** and the status, then:
@@ -34,8 +37,8 @@ to close it.
   keyboard.
 - In a window the browser keeps Esc for itself (to free the mouse), so it
   never reaches the host. Use **Ctrl+Alt+Shift+E** to send Esc.
-- **Ctrl+Alt+Del** on the toolbar sends it to the host when the host runs as
-  a [Windows service](windows-service.md#ctrlaltdel).
+- **Ctrl+Alt+Del** in the toolbar (shown only when the host runs as
+  a [Windows service](windows-service.md#ctrlaltdel)) sends it to the host.
 
 ### Hotkeys
 

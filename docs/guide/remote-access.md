@@ -20,8 +20,8 @@ From anywhere else, two things are needed:
 
 ## Forward the ports
 
-The first-run setup in the host app (also under **Setup** at the bottom of
-the window) does this for you where it can.
+**Remote access (away from home)** in the host app's window does this for
+you where it can.
 
 - **Automatically (UPnP):** tick **Let the router forward them (UPnP)**. If
   it says the router forwards the ports, you're done. Only these ports go

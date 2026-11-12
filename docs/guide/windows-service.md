@@ -45,8 +45,8 @@ and types into programs running as administrator.
   them, which restarts it. Once attached, that takes no further prompt.
   **Start the service** and **Stop the service** do what they say.
 - **Pair again.** The service has its own certificate (the browser warns
-  about a new one) and its own paired browsers. Click **Pair a browser
-  (administrator)**, or **Pair a browser** once attached, request a code in
+  about a new one) and its own paired browsers. Click **Pair a device
+  (administrator)**, or **Pair a device** once attached, request a code in
   the browser, and type the code the app shows.
 - **Updating:** a newer installer updates the service in place. From
   source, `scripts\update.ps1` updates it too (one UAC prompt), or build and

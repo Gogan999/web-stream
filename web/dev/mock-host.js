@@ -146,8 +146,8 @@ async function offer() {
     if (channel.label === 'file') window.__file = channel;
     channel.onopen = () => {
       write({ ev: 'channel', label: channel.label, ordered: channel.ordered, maxRetransmits: channel.maxRetransmits });
-      // Like the real host: whether the clipboard is shared, when the control channel opens.
-      if (channel.label === 'control') channel.send(JSON.stringify({ type: 'clipboardCapability', available: !window.mockNoClipboard, maxSize: 262144 }));
+      // Like the real host: what it can do, when the control channel opens.
+      if (channel.label === 'control') channel.send(JSON.stringify({ type: 'capabilities', clipboard: !window.mockNoClipboard, sas: false, hostName: 'MOCK-PC', version: '0.0.0' }));
     };
     channel.onmessage = (m) => {
       if (channel.label === 'control') {

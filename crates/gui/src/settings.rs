@@ -90,7 +90,7 @@ pub struct Settings {
     /// Ask the router to forward the ports (UPnP). Off unless the user
     /// turns it on.
     pub upnp: bool,
-    /// The first-run setup was finished or dismissed.
+    /// First-run pairing was opened (the window opens on a QR code once).
     pub setup_done: bool,
 }
 

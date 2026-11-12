@@ -141,7 +141,7 @@ pub enum ClientControl {
     UpdateHost,
     /// Put this text on the host's clipboard (the browser's clipboard
     /// changed, or the user pressed Paste). Honoured only when the host
-    /// shares its clipboard ([`HostControl::ClipboardCapability`]); text
+    /// shares its clipboard ([`HostControl::Capabilities`] `clipboard`); text
     /// over [`CLIPBOARD_MAX`] bytes is refused. Always answered with
     /// [`HostControl::ClipboardSet`], so a browser can send Ctrl+V after it.
     SetClipboard {
@@ -229,6 +229,21 @@ pub enum HostControl {
     RemoteUpdate {
         enabled: bool,
     },
+    /// What this host can do, so the page shows only buttons that work. Sent
+    /// when the `control` channel opens, after [`HostControl::Uploads`].
+    Capabilities {
+        /// The host shares its clipboard (text) with the browser: false when the
+        /// host user turned it off (`--no-clipboard`) or the host cannot open
+        /// the Windows clipboard in its session (probed at start).
+        clipboard: bool,
+        /// Ctrl+Alt+Del works ([`ClientControl::SecureAttention`]): the host
+        /// runs as the web-stream service.
+        sas: bool,
+        /// The PC's name, for the page title and the not-connected screen.
+        host_name: String,
+        /// The host program's version.
+        version: String,
+    },
     /// How an update this browser started is going. `Started` is followed
     /// by the host restarting (the session drops and the browser reconnects
     /// to the new build) unless `Finished` (nothing to update) or `Failed`
@@ -236,19 +251,6 @@ pub enum HostControl {
     UpdateStatus {
         state: UpdateState,
         message: String,
-    },
-    /// Whether this host shares its clipboard (text) with the browser, and
-    /// the largest text it takes. Sent when the `control` channel opens.
-    /// `available` is false when the host user turned it off
-    /// (`--no-clipboard`) or the host cannot open the Windows clipboard in
-    /// its session (probed at start); the browser then hides its clipboard
-    /// controls.
-    ///
-    /// Merge point: when the host's general `Capabilities` message lands,
-    /// this becomes its `clipboard` field.
-    ClipboardCapability {
-        available: bool,
-        max_size: u64,
     },
     /// The host's clipboard text changed (someone copied on the PC), sent
     /// only while a browser is connected and sharing is on.
@@ -366,6 +368,16 @@ mod tests {
         let msg: ClientControl = serde_json::from_str(r#"{"type":"updateHost"}"#).unwrap();
         assert_eq!(msg, ClientControl::UpdateHost);
         assert_eq!(
+            serde_json::to_string(&HostControl::Capabilities {
+                clipboard: false,
+                sas: true,
+                host_name: "PC".into(),
+                version: "1.0.0".into(),
+            })
+            .unwrap(),
+            r#"{"type":"capabilities","clipboard":false,"sas":true,"hostName":"PC","version":"1.0.0"}"#
+        );
+        assert_eq!(
             serde_json::to_string(&HostControl::RemoteUpdate { enabled: true }).unwrap(),
             r#"{"type":"remoteUpdate","enabled":true}"#
         );
@@ -388,14 +400,6 @@ mod tests {
             ClientControl::SetClipboard {
                 text: "h\u{e9}".into()
             }
-        );
-        assert_eq!(
-            serde_json::to_string(&HostControl::ClipboardCapability {
-                available: true,
-                max_size: 5
-            })
-            .unwrap(),
-            r#"{"type":"clipboardCapability","available":true,"maxSize":5}"#
         );
         assert_eq!(
             serde_json::to_string(&HostControl::Clipboard { text: "x".into() }).unwrap(),

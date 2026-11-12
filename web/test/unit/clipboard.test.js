@@ -44,15 +44,15 @@ test('unavailable until the host says it shares its clipboard', async () => {
   assert.equal(await clip.toHost(), false);
   assert.equal(clip.beforePaste(), null);
   assert.deepEqual(sent, []);
-  clip.onControl({ type: 'clipboardCapability', available: true, maxSize: MAX_BYTES });
+  clip.setAvailable(true);
   assert.equal(clip.usable, true);
-  clip.onControl({ type: 'clipboardCapability', available: false, maxSize: 0 });
+  clip.setAvailable(false);
   assert.equal(clip.usable, false);
 });
 
 test('host text is written to the browser clipboard, and not sent back', async () => {
   const { clip, sent, board } = setup({ text: 'old' });
-  clip.onControl({ type: 'clipboardCapability', available: true, maxSize: 1 });
+  clip.setAvailable(true);
   assert.equal(clip.onControl({ type: 'clipboard', text: 'from pc' }), true);
   await settle();
   assert.equal(board.text, 'from pc');
@@ -64,7 +64,7 @@ test('host text is written to the browser clipboard, and not sent back', async (
 
 test('a refused write waits for a gesture and lights the button', async () => {
   const { clip, board, notes } = setup({ writes: false, permission: null });
-  clip.onControl({ type: 'clipboardCapability', available: true, maxSize: 1 });
+  clip.setAvailable(true);
   clip.onControl({ type: 'clipboard', text: 'later' });
   await settle();
   assert.equal(clip.pending, 'later');
@@ -78,7 +78,7 @@ test('a refused write waits for a gesture and lights the button', async () => {
 
 test('this clipboard goes to the host and the paste waits for the answer', async () => {
   const { clip, sent } = setup({ text: 'héllo' });
-  clip.onControl({ type: 'clipboardCapability', available: true, maxSize: 1 });
+  clip.setAvailable(true);
   await settle(); // permission query
   assert.equal(clip.autoRead, true);
   const wait = clip.beforePaste();
@@ -97,14 +97,14 @@ test('this clipboard goes to the host and the paste waits for the answer', async
 
 test('the paste goes ahead after the timeout if the host never answers', async () => {
   const { clip } = setup({ text: 'x' });
-  clip.onControl({ type: 'clipboardCapability', available: true, maxSize: 1 });
+  clip.setAvailable(true);
   await settle();
   assert.equal(await clip.beforePaste(), false);
 });
 
 test('without a readable permission (iOS) Ctrl+V is not held back, buttons still read', async () => {
   const { clip, sent } = setup({ permission: null, text: 'tap' });
-  clip.onControl({ type: 'clipboardCapability', available: true, maxSize: 1 });
+  clip.setAvailable(true);
   await settle();
   assert.equal(clip.beforePaste(), null);
   const pressed = clip.button();
@@ -116,13 +116,13 @@ test('without a readable permission (iOS) Ctrl+V is not held back, buttons still
 
 test('denied reads and oversize text are reported, not sent', async () => {
   const denied = setup({ reads: false });
-  denied.clip.onControl({ type: 'clipboardCapability', available: true, maxSize: 1 });
+  denied.clip.setAvailable(true);
   await settle();
   assert.equal(await denied.clip.toHost(), false);
   assert.deepEqual(denied.sent, []);
 
   const big = setup({ text: 'x'.repeat(MAX_BYTES + 1) });
-  big.clip.onControl({ type: 'clipboardCapability', available: true, maxSize: 1 });
+  big.clip.setAvailable(true);
   await settle();
   assert.equal(await big.clip.toHost(), false);
   assert.deepEqual(big.sent, []);
@@ -137,7 +137,7 @@ test('denied reads and oversize text are reported, not sent', async () => {
 
 test('turning it off stops everything and is remembered', async () => {
   const { clip, sent, storage } = setup({ text: 'a' });
-  clip.onControl({ type: 'clipboardCapability', available: true, maxSize: 1 });
+  clip.setAvailable(true);
   clip.setEnabled(false);
   assert.equal(storage.get('ws-clipboard-sync'), 'off');
   clip.onControl({ type: 'clipboard', text: 'ignored' });

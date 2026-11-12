@@ -1,5 +1,5 @@
 //! The first-run setup: reach the host from outside (a Cloudflare Tunnel,
-//! opt-in UPnP, the port test), then pair a phone with a QR code. Shown when the app
+//! opt-in UPnP, the port test), then pair a device with a QR code. Shown when the app
 //! opens until the user finishes or hides it; "Setup" in the footer brings
 //! it back.
 

@@ -19,8 +19,8 @@
   <select id="display-quick" aria-label="Display" title="Switch the host display (Ctrl+Alt+Shift+1-9)" hidden></select>
   <button id="mouse-toggle" type="button" title="Mouse mode (Ctrl+Alt+Shift+M)"><span class="lead">Mouse: </span><span id="mouse-label">Game</span></button>
   <button id="mic-toggle" type="button" aria-pressed="false" title="Send this browser's microphone to the host">Mic</button>
-  <!-- HOOK (Capabilities message): the host says whether Ctrl+Alt+Del works (service mode); main.js setSasVisible(). -->
-  <button id="sas" type="button" title="Sends Ctrl+Alt+Del to the host, for its sign-in and lock screen. Needs the host to run as the web-stream service.">Ctrl+Alt+Del</button>
+  <!-- Hidden until the host's capabilities message says Ctrl+Alt+Del works (service mode). -->
+  <button id="sas" type="button" hidden title="Sends Ctrl+Alt+Del to the host, for its sign-in and lock screen. Needs the host to run as the web-stream service.">Ctrl+Alt+Del</button>
   <button id="fullscreen" type="button">Fullscreen</button>
   <button id="files-toggle" type="button" aria-expanded="false" aria-controls="files" aria-haspopup="true" hidden>Files</button>
   <div id="files" class="panel" role="group" aria-label="Files from the host">
@@ -137,7 +137,7 @@
     <button type="button" data-chord="ctrl+c">Ctrl+C</button>
     <button type="button" data-chord="ctrl+v">Ctrl+V</button>
     <button type="button" data-chord="ctrl+z">Ctrl+Z</button>
-    <button type="button" id="keys-sas">Ctrl+Alt+Del</button>
+    <button type="button" id="keys-sas" hidden>Ctrl+Alt+Del</button>
     <span class="fkeys" role="group" aria-label="Function keys">
       <button type="button" data-key="F1">F1</button><button type="button" data-key="F2">F2</button><button type="button" data-key="F3">F3</button><button type="button" data-key="F4">F4</button><button type="button" data-key="F5">F5</button><button type="button" data-key="F6">F6</button><button type="button" data-key="F7">F7</button><button type="button" data-key="F8">F8</button><button type="button" data-key="F9">F9</button><button type="button" data-key="F10">F10</button><button type="button" data-key="F11">F11</button><button type="button" data-key="F12">F12</button>
     </span>

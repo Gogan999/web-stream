@@ -35,7 +35,7 @@ export async function pairWithLink(link, deviceName) {
   const { status, data } = await call('POST', '/api/pair/link', { link, device_name: deviceName });
   if (status === 200) return true;
   if (status === 403 && data.error === 'pairing_closed') {
-    throw new Error('This pairing QR code has expired or was used. Press "Pair a browser" on the host for a new one.');
+    throw new Error('This pairing QR code has expired or was used. Press "Pair a device" on the host for a new one.');
   }
   throw new Error(pairingError(status, data));
 }

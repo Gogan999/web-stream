@@ -44,9 +44,9 @@ keeps it running there.
   [Connecting from outside your home](remote-access.md) for the stream's
   ports, and come back.
 
-## 3. Pair your phone
+## 3. Pair a device
 
-1. Press **Pair a phone**. A QR code appears.
+1. Press **Pair a device**. A QR code appears.
 2. Scan it with the phone's camera and open the link.
 3. The first time, the browser warns about the certificate (not through a
    [Cloudflare Tunnel](cloudflare-tunnel.md)).
@@ -56,7 +56,7 @@ keeps it running there.
 
 On iPhone, **Share > Add to Home Screen** keeps it one tap away.
 
-The QR code works once, for two minutes. Press **Pair a phone** again for
+The QR code works once, for two minutes. Press **Pair a device** again for
 each extra device. **Forget paired browsers** in the window unpairs all of
 them.
 

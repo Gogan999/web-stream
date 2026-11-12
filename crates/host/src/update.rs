@@ -38,6 +38,14 @@ pub fn available() -> bool {
     RESTART.get().is_some()
 }
 
+/// Whether the running program was built in a git clone that has
+/// `scripts\update.ps1`: the only kind of install that can update from the
+/// browser. An installed build (Program Files) can't, so the browser's
+/// "Update host" and the host window's tick box stay hidden for it.
+pub fn can_update_from_source() -> bool {
+    std::env::current_exe().is_ok_and(|exe| script_for(&exe).is_ok())
+}
+
 /// Starts update.ps1 with its output in `log`. `done` gets how it ended;
 /// after a build, the host restarts right after. The error and the
 /// returned message are for the browser.
@@ -261,6 +269,8 @@ mod tests {
         // Anywhere else (a copy in Program Files, a debug build) is refused.
         assert!(script_for(&root.join("target").join("debug").join("x.exe")).is_err());
         assert!(script_for(&root.join("x.exe")).is_err());
+        // An installed build.
+        assert!(script_for(Path::new(r"C:\Program Files\web-stream\ws-host-gui.exe")).is_err());
         std::fs::remove_dir_all(&root).unwrap();
     }
 

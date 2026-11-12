@@ -20,12 +20,14 @@ const $ = (id) => document.getElementById(id);
 const pairingLink = pairing.takePairingLink();
 
 const ui = {
-  connect: $('connect'), status: $('status'), display: $('display'), mouseMode: $('mouse-mode'),
+  connect: $('connect'), connectBig: $('connect-big'), stageHost: $('stage-host'), status: $('status'), display: $('display'), displayQuick: $('display-quick'),
+  mouseMode: $('mouse-mode'), mouseToggle: $('mouse-toggle'), mouseLabel: $('mouse-label'), micToggle: $('mic-toggle'), sas: $('sas'),
+  priority: $('priority'), autotuneKeep: $('autotune-keep'), resetSettings: $('reset-settings'), version: $('version'),
   fullscreen: $('fullscreen'), statsToggle: $('stats-toggle'), statsLevel: $('stats-level'), stage: $('stage'), video: $('video'), stats: $('stats'),
   cursor: $('cursor'), video2: $('video2'), cursor2: $('cursor2'), display2: $('display2'), popout: $('popout'),
   unpair: $('unpair'), updateHost: $('update-host'), pair: $('pair'), deviceName: $('device-name'), pairStart: $('pair-start'),
   pairCode: $('pair-code'), pairConfirm: $('pair-confirm'), pairMsg: $('pair-msg'),
-  resolution: $('resolution'), codec: $('codec'), bitrate: $('bitrate'), fps: $('fps'), quality: $('quality'),
+  resolution: $('resolution'), codec: $('codec'), bitrate: $('bitrate'), fps: $('fps'),
   keyframeScale: $('keyframe-scale'), recoverDrops: $('recover-drops'), minScale: $('min-scale'),
   matchHost: $('match-host'), autoconnect: $('autoconnect'), autotune: $('autotune'), mic: $('mic'),
   audioKbps: $('audio-kbps'), audioFrame: $('audio-frame'),
@@ -74,6 +76,7 @@ const settings = settingsStore.load();
 let host = null; // { displays, active, config, stats } for the current session
 let lastSent = null;
 let tuning = null; // running AutoTune
+let tuned = null; // what the last auto-tune picked: { bitrateKbps, quality }, for this connection only until kept
 let tuneWindow = null; // host stats gathered while auto-tune measures
 let micTrack = null; // this browser's microphone while the Mic setting is on and a session runs
 let remoteUpdate = false; // the host lets this browser update and restart it
@@ -82,6 +85,30 @@ function setStatus(text, state) {
   ui.status.textContent = text;
   ui.status.dataset.state = state;
 }
+
+// Connected (or connecting): the toolbar button disconnects, and the big one on the stage goes away.
+function showConnected(on) {
+  ui.connect.textContent = on ? 'Disconnect' : 'Connect';
+  document.body.classList.toggle('connected', on);
+}
+
+// HOOKS for the host's Capabilities message (added separately; these are the only places it touches).
+// Ctrl+Alt+Del works only when the host runs as the service. Until the host says so, it stays visible.
+function setSasVisible(visible) {
+  ui.sas.hidden = !visible;
+}
+// Shown on the not-connected screen and in the title, so two hosts are told apart.
+function setHostName(name) {
+  ui.stageHost.textContent = name ?? '';
+  ui.stageHost.hidden = !name;
+  document.title = name ? `${name} - web-stream` : 'web-stream';
+}
+// The "page vX, host vY" line in Settings > Advanced.
+function setHostVersion(version) {
+  ui.version.textContent = version ? `Host version ${version}` : '';
+  ui.version.hidden = !version;
+}
+void setSasVisible; void setHostName; void setHostVersion;
 
 async function connect() {
   disconnect();
@@ -102,12 +129,14 @@ async function connect() {
   });
   session.addEventListener('closed', () => {
     setRemoteUpdate(false);
-    ui.connect.textContent = 'Connect';
+    showConnected(false);
     ui.display.disabled = true;
+    syncQuickDisplay();
     tuning?.cancel();
     files.clear();
     uploads.clear();
   });
+  clearTuned();
   host = { displays: [], active: null, second: null, config: null, stats: null, matched: false, awaitingMatch: false };
   lastSent = null;
   // The host sends "bye" with reason "revoked" when this browser is unpaired.
@@ -128,7 +157,7 @@ async function connect() {
   });
   cursor.setMode(ui.mouseMode.value);
   makeCursor2(ui.video2, ui.cursor2);
-  ui.connect.textContent = 'Disconnect';
+  showConnected(true);
   if (!ui.stats.hidden) startStats();
   if (settings.mic) setMic(true);
   try {
@@ -160,7 +189,10 @@ function disconnect() {
   uploads.clear();
   setRemoteUpdate(false);
   host = null;
+  clearTuned();
   ui.display.replaceChildren();
+  syncQuickDisplay();
+  showConnected(false);
   setStatus('Not connected', 'idle');
 }
 
@@ -181,6 +213,7 @@ function onControl(msg) {
     }));
     if (msg.active != null) ui.display.value = String(msg.active);
     ui.display.disabled = msg.displays.length < 2;
+    syncQuickDisplay();
     fillSecond(msg.displays, msg.second ?? null);
     if (host) {
       host.displays = msg.displays;
@@ -197,6 +230,7 @@ function onControl(msg) {
     applySettings();
   } else if (msg.type === 'displayChanged' && msg.id != null) {
     ui.display.value = String(msg.id);
+    syncQuickDisplay();
     if (host) {
       host.active = msg.id;
       if (msg.config) host.config = msg.config;
@@ -217,7 +251,7 @@ function onControl(msg) {
     // The host can't play the mic: stop sending it.
     setStatus(`Host: ${msg.message}`, ui.status.dataset.state);
     settings.mic = false;
-    ui.mic.checked = false;
+    showMic();
     settingsStore.save(settings);
     setMic(false);
   } else if (msg.type === 'error' && typeof msg.message === 'string') {
@@ -252,7 +286,14 @@ function applySettings() {
 
 function currentConfig() {
   const display = host.displays.find((d) => d.id === host.active) ?? null;
-  return settingsStore.videoConfig(settings, { screen: settingsStore.screenPixels(), display, codec: host.config.codec, rotate: isTouch() });
+  const config = settingsStore.videoConfig(settings, { screen: settingsStore.screenPixels(), display, codec: host.config.codec, rotate: isTouch() });
+  // An auto-tune result applies to this connection only (it never rewrites the saved settings).
+  return tuned ? { ...config, ...tuned } : config;
+}
+
+function clearTuned() {
+  tuned = null;
+  ui.autotuneKeep.hidden = true;
 }
 
 function sendConfig(config) {
@@ -271,7 +312,7 @@ function fillSelect(select, values, label) {
 }
 
 const RES_LABELS = { screen: 'Match this screen', native: 'Host native', 2160: '2160p', 1440: '1440p', 1080: '1080p', 720: '720p' };
-fillSelect(ui.resolution, settingsStore.RESOLUTIONS, (v) => RES_LABELS[v]);
+fillSelect(ui.resolution, settingsStore.MENU_RESOLUTIONS, (v) => RES_LABELS[v]);
 fillSelect(ui.bitrate, ['auto', ...settingsStore.BITRATES_KBPS], (v) => (v === 'auto' ? 'Auto' : `${v / 1000} Mb/s`));
 fillSelect(ui.fps, settingsStore.FRAME_RATES, (v) => String(v));
 const CODEC_LABELS = { h264: 'H.264', h265: 'H.265 (HEVC)', av1: 'AV1' };
@@ -279,34 +320,40 @@ const decodable = settingsStore.decodableCodecs();
 fillSelect(ui.codec, decodable, (v) => CODEC_LABELS[v]);
 // A codec picked in another browser (settings are per origin) may not play in this one.
 if (settings.codec && !decodable.includes(settings.codec)) settings.codec = null;
-fillSelect(ui.quality, settingsStore.QUALITIES, (v) => v[0].toUpperCase() + v.slice(1));
+fillSelect(ui.priority, settingsStore.PRIORITIES, (v) => v[0].toUpperCase() + v.slice(1));
 fillSelect(ui.keyframeScale, settingsStore.KEYFRAME_SCALES, (v) => (v === 1 ? '1x (fastest)' : v === 4 ? '4x (sharpest)' : `${v}x`));
-const MIN_SCALE_LABELS = { 0: 'On', 50: 'On, down to half', 75: 'On, down to 3/4', 100: 'Off (always full size)' };
-fillSelect(ui.minScale, settingsStore.MIN_SCALES, (v) => MIN_SCALE_LABELS[v]);
+const MIN_SCALE_LABELS = { 0: 'On', 75: '75%', 50: '50%', 100: 'Off' };
+fillSelect(ui.minScale, [0, 75, 50, 100], (v) => MIN_SCALE_LABELS[v]);
 fillSelect(ui.audioKbps, settingsStore.AUDIO_KBPS, (v) => (v === 'host' ? 'Host setting' : `${v} kb/s`));
 fillSelect(ui.statsLevel, settingsStore.STATS_LEVELS, (v) => v[0].toUpperCase() + v.slice(1));
 fillSelect(ui.audioFrame, settingsStore.AUDIO_FRAMES, (v) => (v === 'host' ? 'Host setting' : v === '10' ? '10 ms (lowest delay)' : '20 ms (better sound)'));
 
-// Shows the settings; a bitrate auto-tune picked that isn't in the list gets its own entry.
+function ensureOption(select, value, label) {
+  if ([...select.options].some((o) => o.value === String(value))) return;
+  const o = document.createElement('option');
+  o.value = String(value);
+  o.textContent = label();
+  select.append(o);
+}
+
+// Shows the settings.
 function showSettings() {
-  if (![...ui.bitrate.options].some((o) => o.value === String(settings.bitrate))) {
-    const o = document.createElement('option');
-    o.value = String(settings.bitrate);
-    o.textContent = `${Number(settings.bitrate) / 1000} Mb/s`;
-    ui.bitrate.append(o);
-  }
+  // A bitrate that isn't in the list (kept from auto-tune), or a resolution no longer listed, gets its own entry.
+  ensureOption(ui.bitrate, settings.bitrate, () => `${Number(settings.bitrate) / 1000} Mb/s`);
+  ensureOption(ui.resolution, settings.resolution, () => RES_LABELS[settings.resolution]);
   ui.resolution.value = settings.resolution;
   showCodec();
   ui.mouseMode.value = settings.mouseMode;
   ui.bitrate.value = String(settings.bitrate);
   ui.fps.value = String(settings.fps);
-  ui.quality.value = settings.quality;
+  ui.priority.value = settings.priority;
   ui.keyframeScale.value = String(settings.keyframeScale);
   ui.minScale.value = String(settings.minScale);
   ui.recoverDrops.checked = !!settings.recoverDrops;
   ui.matchHost.checked = !!settings.matchHost;
   ui.autoconnect.checked = settings.autoconnect !== false;
-  ui.mic.checked = !!settings.mic;
+  showMic();
+  showMouseLabel();
   ui.audioKbps.value = settings.audioKbps;
   ui.audioFrame.value = settings.audioFrame;
   ui.statsLevel.value = settings.statsLevel;
@@ -315,15 +362,35 @@ function showSettings() {
 function showCodec() {
   ui.codec.value = settings.codec ?? host?.config?.codec ?? '';
 }
+
+// The Mic checkbox in Settings and the toolbar's Mic toggle show one setting.
+function showMic() {
+  ui.mic.checked = !!settings.mic;
+  ui.micToggle.setAttribute('aria-pressed', String(!!settings.mic));
+}
+// Mouse button: Game / Desktop, or Trackpad / Direct on a touch screen (the same two modes).
+function showMouseLabel() {
+  const touch = document.body.classList.contains('touch');
+  const relative = settings.mouseMode === 'relative';
+  ui.mouseLabel.textContent = touch ? (relative ? 'Trackpad' : 'Direct') : (relative ? 'Game' : 'Desktop');
+  ui.mouseToggle.title = touch
+    ? 'Trackpad: drag moves the pointer. Direct: the pointer goes where you touch.'
+    : 'Game: the mouse is captured and moves relatively. Desktop: the pointer follows yours. Ctrl+Alt+Shift+M';
+}
+// The toolbar's display switch lists what Settings > Display lists, and shows only for 2+ displays.
+function syncQuickDisplay() {
+  ui.displayQuick.replaceChildren(...[...ui.display.options].map((o) => o.cloneNode(true)));
+  ui.displayQuick.value = ui.display.value;
+  ui.displayQuick.disabled = ui.display.disabled;
+  ui.displayQuick.hidden = ui.display.options.length < 2;
+}
 showSettings();
 
-for (const [el, key] of [[ui.resolution, 'resolution'], [ui.codec, 'codec'], [ui.bitrate, 'bitrate'], [ui.fps, 'fps'], [ui.quality, 'quality'], [ui.keyframeScale, 'keyframeScale'], [ui.minScale, 'minScale']]) {
+for (const [el, key] of [[ui.resolution, 'resolution'], [ui.codec, 'codec'], [ui.bitrate, 'bitrate'], [ui.fps, 'fps'], [ui.priority, 'priority'], [ui.keyframeScale, 'keyframeScale'], [ui.minScale, 'minScale']]) {
   el.addEventListener('change', () => {
     settings[key] = ['fps', 'keyframeScale', 'minScale'].includes(key) ? Number(el.value) : el.value;
-    // Source is a bundle for reading and working: host-native pixels (no scaling blur), no automatic
-    // shrinking, and a bitrate with room for it; the host keeps each frame sharp and lowers the frame
-    // rate, up to the one chosen here, to fit the bitrate.
-    if (key === 'quality' && settings.quality === 'source') Object.assign(settings, settingsStore.SOURCE_PRESET);
+    if (key === 'priority' && settings.priority === 'source') Object.assign(settings, settingsStore.SOURCE_PRESET);
+    clearTuned(); // a choice made now replaces what auto-tune picked
     settingsStore.save(settings);
     showSettings();
     applySettings();
@@ -374,7 +441,7 @@ async function setMic(on) {
       setStatus(`Mic unavailable: ${err.message}`, ui.status.dataset.state);
       on = false;
       settings.mic = false;
-      ui.mic.checked = false;
+      showMic();
       settingsStore.save(settings);
     }
     // Disconnected, or toggled again, while the browser asked for permission.
@@ -396,11 +463,14 @@ for (const [el, key] of [[ui.audioKbps, 'audioKbps'], [ui.audioFrame, 'audioFram
   });
 }
 
-ui.mic.addEventListener('change', () => {
-  settings.mic = ui.mic.checked;
+function changeMic(on) {
+  settings.mic = on;
+  showMic();
   settingsStore.save(settings);
   setMic(settings.mic);
-});
+}
+ui.mic.addEventListener('change', () => changeMic(ui.mic.checked));
+ui.micToggle.addEventListener('click', () => changeMic(!settings.mic));
 
 // Health of the stream over `ms`, from the browser's stats and the host's videoStats.
 async function measureWindow(ms) {
@@ -451,13 +521,13 @@ async function autoTune() {
     onProgress: (text) => setStatus(text, 'connecting'),
   });
   ui.autotune.textContent = 'Stop auto-tune';
-  for (const el of [ui.resolution, ui.codec, ui.bitrate, ui.fps, ui.quality, ui.keyframeScale, ui.minScale, ui.recoverDrops, ui.display, ui.matchHost]) el.disabled = true;
+  for (const el of [ui.resolution, ui.codec, ui.bitrate, ui.fps, ui.priority, ui.keyframeScale, ui.minScale, ui.recoverDrops, ui.display, ui.displayQuick, ui.matchHost]) el.disabled = true;
   try {
     const { config, summary } = await tuning.run();
-    settings.bitrate = String(config.bitrateKbps);
-    settings.quality = config.quality;
-    settingsStore.save(settings);
-    setStatus(summary, 'connected');
+    // This connection only: nothing is saved unless the user presses Keep these.
+    tuned = { bitrateKbps: config.bitrateKbps, quality: config.quality };
+    ui.autotuneKeep.hidden = false;
+    setStatus(`${summary} (this connection only; Settings > Advanced > Keep these)`, 'connected');
   } catch (err) {
     if (err instanceof Cancelled) setStatus('Auto-tune stopped', session ? 'connected' : 'idle');
     else setStatus(`Auto-tune failed: ${err.message}`, session ? 'connected' : 'idle');
@@ -465,14 +535,41 @@ async function autoTune() {
     tuning = null;
     tuneWindow = null;
     ui.autotune.textContent = 'Auto-tune (test)';
-    for (const el of [ui.resolution, ui.codec, ui.bitrate, ui.fps, ui.quality, ui.keyframeScale, ui.minScale, ui.recoverDrops, ui.matchHost]) el.disabled = false;
+    for (const el of [ui.resolution, ui.codec, ui.bitrate, ui.fps, ui.priority, ui.keyframeScale, ui.minScale, ui.recoverDrops, ui.matchHost]) el.disabled = false;
     ui.display.disabled = ui.display.options.length < 2;
+    syncQuickDisplay();
     showSettings();
     if (session) applySettings();
   }
 }
 
 ui.autotune.addEventListener('click', autoTune);
+ui.autotuneKeep.addEventListener('click', () => {
+  if (!tuned) return;
+  settings.bitrate = String(tuned.bitrateKbps);
+  settings.priority = settingsStore.QUALITY_PRIORITY[tuned.quality] ?? settings.priority;
+  settingsStore.save(settings);
+  clearTuned();
+  showSettings();
+  setStatus('Saved auto-tune result as Max bitrate and Priority', ui.status.dataset.state);
+});
+
+// Back to the defaults, for everything this page keeps. The host and the pairing are untouched.
+ui.resetSettings.addEventListener('click', () => {
+  if (!confirm('Put all settings on this page back to their defaults?')) return;
+  const matched = settings.matchHost;
+  const mic = settings.mic;
+  Object.assign(settings, settingsStore.DEFAULTS);
+  settingsStore.save(settings);
+  clearTuned();
+  showSettings();
+  setMouseMode(settings.mouseMode);
+  if (mic) setMic(false);
+  if (matched) ui.matchHost.dispatchEvent(new Event('change'));
+  session?.sendControl(settingsStore.audioConfig(settings));
+  if (session) applySettings();
+  setStatus('Settings reset to defaults', ui.status.dataset.state);
+});
 
 // The host pointer's view on the second monitor's video: in the page, or in its window.
 function makeCursor2(video, overlay) {
@@ -562,6 +659,7 @@ ui.display2.addEventListener('change', () => {
 function selectDisplay(id) {
   if (!session) return;
   ui.display.value = id;
+  ui.displayQuick.value = id;
   zoom.reset(); // a different screen: start from the whole of it
   session.sendControl({ type: 'selectDisplay', id: Number(id) });
 }
@@ -670,6 +768,7 @@ function setStatsLevel(level) {
 function setMouseMode(mode) {
   ui.mouseMode.value = mode;
   settings.mouseMode = mode;
+  showMouseLabel();
   settingsStore.save(settings);
   input?.setMode(mode);
   cursor?.setMode(mode);
@@ -721,8 +820,11 @@ function onHotkey(code) {
 }
 
 ui.connect.addEventListener('click', () => (session && !session.closed ? disconnect() : connect()));
+ui.connectBig.addEventListener('click', () => connect());
 ui.display.addEventListener('change', () => selectDisplay(ui.display.value));
+ui.displayQuick.addEventListener('change', () => selectDisplay(ui.displayQuick.value));
 ui.mouseMode.addEventListener('change', () => setMouseMode(ui.mouseMode.value));
+ui.mouseToggle.addEventListener('click', () => setMouseMode(ui.mouseMode.value === 'relative' ? 'absolute' : 'relative'));
 ui.fullscreen.addEventListener('click', toggleFullscreen);
 // Ctrl+Alt+Del never reaches the page as keys; the host asks Windows for it.
 for (const el of [$('sas'), $('keys-sas')]) {
@@ -732,7 +834,7 @@ ui.touchFullscreen.addEventListener('click', toggleFullscreen);
 ui.statsToggle.addEventListener('click', toggleStats);
 ui.statsLevel.addEventListener('change', () => setStatsLevel(ui.statsLevel.value));
 // Toolbar controls keep focus otherwise, and Space/Enter would re-trigger them.
-for (const el of [ui.connect, ui.fullscreen, $('sas'), ui.statsToggle, ui.autotune]) el.addEventListener('mouseup', () => el.blur());
+for (const el of [ui.connect, ui.connectBig, ui.fullscreen, ui.sas, ui.mouseToggle, ui.micToggle, ui.statsToggle, ui.autotune]) el.addEventListener('mouseup', () => el.blur());
 
 // Update host: only when the host allows it, and only after a confirm, since it restarts the host.
 function setRemoteUpdate(enabled, running = false) {
@@ -762,7 +864,7 @@ function setFilesOpen(open) {
   document.body.classList.toggle('files-open', open);
   ui.filesToggle.setAttribute('aria-expanded', String(open));
 }
-// Which settings groups are unfolded is remembered per browser; storage may be unavailable.
+// Whether Advanced is unfolded is remembered per browser; storage may be unavailable.
 const FOLDS_KEY = 'ws-settings-open';
 try {
   const open = JSON.parse(localStorage.getItem(FOLDS_KEY) ?? 'null');
@@ -913,7 +1015,7 @@ const softKeys = new SoftKeyboard({
   keys: ui.keys,
   send: (usage, down) => input?.rel(P.key(usage, down)),
 });
-const markTouch = () => document.body.classList.add('touch');
+const markTouch = () => { document.body.classList.add('touch'); showMouseLabel(); };
 if (matchMedia('(pointer: coarse)').matches) markTouch();
 document.addEventListener('pointerdown', (e) => { if (e.pointerType === 'touch') markTouch(); }, { capture: true });
 

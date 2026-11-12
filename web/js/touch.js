@@ -5,6 +5,7 @@
 // (or hold then drag) drags with the left button, two-finger tap right-clicks, two-finger drag scrolls.
 // Direct (absolute mouse mode): the cursor goes where the finger is; tap clicks there, drag drags
 // with the left button, hold right-clicks, two-finger tap right-clicks, two-finger drag scrolls.
+// Both: a three-finger tap (all three down and up within TWO_TAP_MS, none moved) middle-clicks.
 // Both: pinching zooms the view (the stream, not the host) and moving the pinch pans it; while
 // with Pan on (zoomed in only), any two-finger drag pans instead of scrolling. Lifting one finger of a pinch and putting
 // it back carries on pinching.
@@ -30,6 +31,7 @@ export const WHEEL_PER_PX = 2;
 
 const LEFT = 0;
 const RIGHT = 2;
+const MIDDLE = 1;
 
 export class TouchGestures {
   // Times are ms on one clock (performance.now() in input.js); move's `t` may be left out, which
@@ -53,6 +55,7 @@ export class TouchGestures {
     this.two = null; // two fingers: null (undecided), 'scroll' or 'pinch'
     this.spread = null; // two fingers: { d, x, y } distance and midpoint at the start and last sent
     this.tapDrag = false;
+    this.three = null; // three fingers down: { t0 } while it may still be a tap
     this.slid = false; // pending: moved past the slop, but waiting to see if a second finger lands
     this.lastTap ??= -Infinity; // kept across reset() so cancel doesn't forget it
     this.leftDown = false;
@@ -85,6 +88,9 @@ export class TouchGestures {
       this.spread0 = this.spread;
     } else if (n >= 3) {
       this.releaseLeft();
+      // Three fingers that haven't scrolled or pinched yet may be a middle click.
+      if (n === 3 && this.state === 'two' && !this.two) this.three = { t0: this.t0 };
+      else this.three = null;
       this.state = 'done';
     }
   }
@@ -96,6 +102,7 @@ export class TouchGestures {
     const dy = y - p.y;
     p.x = x;
     p.y = y;
+    if (this.three && Math.hypot(x - p.sx, y - p.sy) >= SLOP_PX) this.three = null;
     // A second finger that lands mid-drag is ignored rather than moving the cursor too.
     if (this.state !== 'two' && id !== this.primary) return;
     switch (this.state) {
@@ -173,6 +180,13 @@ export class TouchGestures {
     // A quick flick that was still waiting on a second finger is a drag after all.
     if (this.state === 'pending' && this.slid) this.startMove(p);
     this.points.delete(id);
+    if (this.three && !this.points.size) {
+      const tap = t - this.three.t0 < TWO_TAP_MS;
+      this.three = null;
+      this.state = 'idle';
+      if (tap) this.click(MIDDLE);
+      return;
+    }
     switch (this.state) {
       case 'pending':
         this.click(LEFT);

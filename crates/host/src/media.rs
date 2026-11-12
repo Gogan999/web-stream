@@ -463,7 +463,15 @@ impl Media {
                         max_size: uploads::MAX_SIZE,
                     });
                     self.reply(HostControl::RemoteUpdate {
-                        enabled: self.opts.update_log.is_some() && update::available(),
+                        enabled: self.opts.update_log.is_some()
+                            && update::available()
+                            && update::can_update_from_source(),
+                    });
+                    self.reply(HostControl::Capabilities {
+                        clipboard: false,
+                        sas: crate::sas::available(),
+                        host_name: computer_name(),
+                        version: env!("CARGO_PKG_VERSION").into(),
                     });
                     for msg in std::mem::take(&mut self.unsent) {
                         self.reply(msg);
@@ -1920,4 +1928,14 @@ mod tests {
         assert!(!worth_changing(10_000, 9_900));
         assert!(worth_changing(10_000, 9_800));
     }
+}
+
+/// The PC's name for the page, `web-stream host` when the environment has none.
+fn computer_name() -> String {
+    ["COMPUTERNAME", "HOSTNAME"]
+        .iter()
+        .filter_map(|k| std::env::var(k).ok())
+        .map(|n| n.trim().chars().take(64).collect::<String>())
+        .find(|n| !n.is_empty())
+        .unwrap_or_else(|| "web-stream host".into())
 }

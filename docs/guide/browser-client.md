@@ -28,8 +28,8 @@ Input, Audio and Other; click outside it or press Esc to close it.
   keyboard.
 - In a window the browser keeps Esc for itself (to free the mouse), so it
   never reaches the host. Use **Ctrl+Alt+Shift+E** to send Esc.
-- **Ctrl+Alt+Del** in the toolbar sends it to the host when the host runs as
-  a [Windows service](windows-service.md#ctrlaltdel).
+- **Ctrl+Alt+Del** in the toolbar (shown only when the host runs as
+  a [Windows service](windows-service.md#ctrlaltdel)) sends it to the host.
 
 ### Hotkeys
 

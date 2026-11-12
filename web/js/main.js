@@ -11,6 +11,7 @@ import { AutoTune, Cancelled } from './autotune.js';
 import { SoftKeyboard } from './softkeys.js';
 import * as P from './protocol.js';
 import { Files, Uploads, formatSize } from './files.js';
+import { NO_CAPABILITIES, applyCapabilities, parseCapabilities } from './capabilities.js';
 import { DiagLog, diagEnabled } from './diag.js';
 import { ZoomView } from './zoom.js';
 
@@ -102,6 +103,7 @@ async function connect() {
   });
   session.addEventListener('closed', () => {
     setRemoteUpdate(false);
+    setCapabilities(NO_CAPABILITIES);
     ui.connect.textContent = 'Connect';
     ui.display.disabled = true;
     tuning?.cancel();
@@ -159,6 +161,7 @@ function disconnect() {
   files.clear();
   uploads.clear();
   setRemoteUpdate(false);
+  setCapabilities(NO_CAPABILITIES);
   host = null;
   ui.display.replaceChildren();
   setStatus('Not connected', 'idle');
@@ -207,6 +210,8 @@ function onControl(msg) {
     host.stats = msg;
     diag?.add('host_stats', msg);
     if (tuneWindow) tuneWindow.push(msg);
+  } else if (msg.type === 'capabilities') {
+    setCapabilities(parseCapabilities(msg));
   } else if (msg.type === 'remoteUpdate') {
     setRemoteUpdate(msg.enabled === true);
   } else if (msg.type === 'updateStatus' && typeof msg.message === 'string') {
@@ -719,6 +724,11 @@ ui.display.addEventListener('change', () => selectDisplay(ui.display.value));
 ui.mouseMode.addEventListener('change', () => setMouseMode(ui.mouseMode.value));
 ui.fullscreen.addEventListener('click', toggleFullscreen);
 // Ctrl+Alt+Del never reaches the page as keys; the host asks Windows for it.
+// Ctrl+Alt+Del needs the host to run as the service; the host says so in `capabilities`.
+function setCapabilities(caps) {
+  applyCapabilities(caps, { sasButtons: [$('sas'), $('keys-sas')], doc: document });
+}
+setCapabilities(NO_CAPABILITIES);
 for (const el of [$('sas'), $('keys-sas')]) {
   el.addEventListener('click', () => session?.sendControl({ type: 'secureAttention' }));
 }

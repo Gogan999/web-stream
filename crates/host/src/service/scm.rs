@@ -91,6 +91,21 @@ fn prepare_network_dir() -> anyhow::Result<PathBuf> {
     // can change: making it can't be redirected.
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     launch::secure_dir(&dir, launch::NETWORK_DIR_SDDL)?;
+    // The network host runs at low integrity (see `launch::network_token`):
+    // the folder, and what it already holds from before the label, is the one
+    // place it can write.
+    launch::label_dir(&dir, launch::NETWORK_DIR_LABEL_SDDL)?;
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            if entry.file_type().is_ok_and(|t| t.is_file()) {
+                // One that can't be labelled (a link) stays out of the
+                // network host's reach, which is the safe failure.
+                if let Err(e) = launch::label_file(&entry.path(), launch::NETWORK_FILE_LABEL_SDDL) {
+                    tracing::warn!("{e:#}");
+                }
+            }
+        }
+    }
     let old = data_dir()?;
     for name in super::NETWORK_FILES {
         let from = old.join(name);

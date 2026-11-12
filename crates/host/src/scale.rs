@@ -110,6 +110,11 @@ fn last_step(width: u32, height: u32, min_percent: u8) -> usize {
         .unwrap_or(0)
 }
 
+/// `step`, held to the smallest the browser's floor allows.
+pub(crate) fn clamp_step(step: usize, width: u32, height: u32, min_percent: u8) -> usize {
+    step.min(last_step(width, height, min_percent))
+}
+
 /// What the stream did over the last second.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Load {

@@ -17,13 +17,14 @@ use ws_audio::{LoopbackConfig, MicConfig, MicReceiver};
 use ws_capture::VideoPipeline;
 use ws_input::DisplayRect;
 use ws_proto::{
-    ClientControl, DisplayId, DisplayInfo, EncodedFrame, HostControl, UpdateState, VideoCodec,
-    VideoConfig, VideoStats, channels,
+    ClientControl, ClientStats, DisplayId, DisplayInfo, EncodedFrame, HostControl, UpdateState,
+    VideoCodec, VideoConfig, VideoStats, channels,
 };
 use ws_transport::{
     Events, Transport, TransportConfig, TransportEvent, TransportStats, VideoSignal,
 };
 
+use crate::bottleneck::{self, Bottleneck};
 use crate::cursor::{CursorSession, CursorTarget};
 use crate::files::{FileCommand, FileMsg, FileSession};
 use crate::input::InputThread;
@@ -123,6 +124,8 @@ pub async fn run(
         previous_bwe: None,
         last_restart: None,
         autoscale: AutoScale::default(),
+        bottleneck: Bottleneck::default(),
+        client_stats: None,
         codecs,
         refused_codecs: Vec::new(),
         live: None,
@@ -318,6 +321,11 @@ struct Media {
     last_restart: Option<Instant>,
     /// Encodes below the configured size while the bitrate is too low.
     autoscale: AutoScale,
+    /// Shrinks the picture further when the host's encoder or the browser's
+    /// decoder is what limits the stream.
+    bottleneck: Bottleneck,
+    /// The browser's latest report and when it came.
+    client_stats: Option<(ClientStats, Instant)>,
     codecs: AcceptedCodecs,
     /// Codecs this PC's encoder failed to start while H.264 then worked
     /// (no AV1 or HEVC on the GPU): never tried again while the host runs.
@@ -438,6 +446,7 @@ impl Media {
                 tracing::debug!(?s, "transport stats");
                 let sent = std::mem::take(&mut *self.sent.lock().expect("sent stats lock"));
                 self.check_scale(&s, &sent);
+                self.check_bottleneck(&s, &sent);
                 self.report_stats(&s, sent);
             }
             TransportEvent::ChannelOpen(c) => {
@@ -610,8 +619,7 @@ impl Media {
         let Some(video) = self.live.as_ref().and_then(|l| l.video.as_ref()) else {
             return false;
         };
-        let (width, height) =
-            scale::size(self.config.width, self.config.height, self.autoscale.step());
+        let (width, height) = scale::size(self.config.width, self.config.height, self.scale_step());
         let wanted = VideoConfig {
             codec: self.streaming_codec().unwrap_or(self.config.codec),
             width,
@@ -649,6 +657,8 @@ impl Media {
         }
         self.rebuild_pending = false;
         self.autoscale.reset();
+        self.bottleneck.reset();
+        self.client_stats = None;
         self.session += 1;
         self.keyframe_requests.store(0, Ordering::Relaxed);
         self.transport.clear_video_sink(0);
@@ -798,8 +808,7 @@ impl Media {
             self.error(msg);
         }
         let start_kbps = self.start_kbps();
-        let (width, height) =
-            scale::size(self.config.width, self.config.height, self.autoscale.step());
+        let (width, height) = scale::size(self.config.width, self.config.height, self.scale_step());
         let mut config = VideoConfig {
             codec,
             bitrate_kbps: start_kbps,
@@ -949,6 +958,71 @@ impl Media {
         let streams = if self.second.is_some() { 2.0 } else { 1.0 };
         let video = (f64::from(self.config.bitrate_kbps) * streams * 1000.0 / BWE_HEADROOM) as u64;
         self.transport.set_max_bitrate(video + NON_VIDEO_BPS);
+    }
+
+    /// The scale step to encode at: the larger of the bitrate's and the
+    /// bottleneck's, held to the browser's floor.
+    fn scale_step(&self) -> usize {
+        let c = &self.config;
+        scale::clamp_step(
+            self.autoscale.step().max(self.bottleneck.step()),
+            c.width,
+            c.height,
+            c.min_scale_percent,
+        )
+    }
+
+    /// Judges which end limits the stream (see [`crate::bottleneck`]) and
+    /// shrinks the picture if the host's encoder or the browser's decoder
+    /// does. Runs on the transport's stats, once a second.
+    fn check_bottleneck(&mut self, s: &TransportStats, sent: &SentFrames) {
+        let Some(live) = &self.live else { return };
+        if live.video.is_none() {
+            return;
+        }
+        let c = &self.config;
+        let host = bottleneck::HostSample {
+            fps_target: c.fps,
+            fps: sent.frames as f32,
+            encode_ms: if sent.frames == 0 {
+                0.0
+            } else {
+                sent.encode_micros as f32 / sent.frames as f32 / 1000.0
+            },
+            dropped: s.trouble.late_frames + s.trouble.lost_frames + s.trouble.send_drops,
+            loss: s.egress_loss,
+        };
+        let client = self
+            .client_stats
+            .as_ref()
+            .filter(|(_, at)| at.elapsed() < bottleneck::CLIENT_STATS_TTL)
+            .map(|(c, _)| c.clone());
+        let out = self.bottleneck.update(
+            Instant::now(),
+            host,
+            client.as_ref(),
+            c.width,
+            c.height,
+            c.min_scale_percent,
+            self.autoscale.step(),
+        );
+        if let Some(report) = out.report {
+            ws_diag::diag!(
+                "bottleneck",
+                "limiter={:?} scale={} step={} detail={}",
+                report.limiter,
+                report.scale_percent,
+                self.bottleneck.step(),
+                report.detail
+            );
+            if self.control_open {
+                self.reply(HostControl::Bottleneck(report));
+            }
+        }
+        if let Some(step) = out.step {
+            tracing::info!(step, "bottleneck: encoding at a new size");
+            self.request_rebuild();
+        }
     }
 
     /// Tells the browser how the host side of the stream is doing.
@@ -1118,6 +1192,25 @@ impl Media {
                     t.positions = enabled;
                     changed
                 });
+            }
+            ClientControl::ClientStats(c) => {
+                let finite = |v: f32, max: f32| {
+                    if v.is_finite() {
+                        v.clamp(0.0, max)
+                    } else {
+                        0.0
+                    }
+                };
+                self.client_stats = Some((
+                    ClientStats {
+                        fps: finite(c.fps, 1000.0),
+                        decode_ms: c.decode_ms.map(|d| finite(d, 10_000.0)),
+                        dropped: c.dropped.min(10_000),
+                        freezes: c.freezes.min(10_000),
+                        hidden: c.hidden,
+                    },
+                    Instant::now(),
+                ));
             }
             ClientControl::Ping { client_time_ms } => {
                 self.reply(HostControl::Pong { client_time_ms });
@@ -1388,6 +1481,7 @@ impl Media {
         // The browser picked a size: start from it again.
         if (config.width, config.height) != (self.config.width, self.config.height) {
             self.autoscale.reset();
+            self.bottleneck.reset();
         }
         let same_but_bitrate = VideoConfig {
             bitrate_kbps: self.config.bitrate_kbps,
@@ -1467,8 +1561,7 @@ impl Media {
     /// pipeline couldn't resize; the caller restarts it.
     fn resize_in_place(&mut self) -> bool {
         let codec = self.streaming_codec();
-        let (width, height) =
-            scale::size(self.config.width, self.config.height, self.autoscale.step());
+        let (width, height) = scale::size(self.config.width, self.config.height, self.scale_step());
         let Some(live) = &mut self.live else {
             return false;
         };

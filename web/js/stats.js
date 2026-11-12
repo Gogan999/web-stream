@@ -140,10 +140,17 @@ export const LEVELS = Object.freeze(['essential', 'detailed', 'debug']);
 // What is wrong with the stream right now, worst first. `s` is from compute(); `host` the host's last
 // videoStats; `config` the VideoConfig the host runs. Each has a key (to hold it on screen), a
 // severity ('warn' or 'bad') and the text.
-export function assess(s, host, config) {
+export function assess(s, host, config, bottleneck = null) {
   const out = [];
   const add = (key, sev, text) => out.push({ key, sev, text });
   const mb = (k) => (k / 1000).toFixed(1);
+  // What the host found limiting the stream, and what it did (shrank the picture for the encoder or
+  // this decoder; the network is handled by the bitrate and resolution warnings below).
+  if (bottleneck && bottleneck.limiter !== 'none') {
+    const who = { network: 'network', hostEncode: 'host encoder', clientDecode: 'this device (decode)' }[bottleneck.limiter];
+    const act = bottleneck.relieving ? `, picture at ${bottleneck.scalePercent}% to keep up` : '';
+    add('limiter', 'warn', `Limited by the ${who ?? bottleneck.limiter}: ${bottleneck.detail}${act}`);
+  }
   if (s.width && s.height && config?.width && config?.height && s.width * s.height < 0.9 * config.width * config.height) {
     add('resolution', 'warn', `Reduced resolution ${s.width}x${s.height} (asked ${config.width}x${config.height}): host scaled down for the network`);
   }

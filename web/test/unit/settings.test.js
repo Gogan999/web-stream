@@ -117,3 +117,11 @@ test('only codecs the browser decodes are offered', () => {
   assert.deepEqual(decodableCodecs(receiver(['video/h265', 'video/H264'])), ['h264', 'h265']);
   assert.deepEqual(decodableCodecs(undefined), ['h264', 'h265', 'av1']);
 });
+
+test('the source quality bundle asks for host-native pixels at up to 60 fps with automatic shrinking off', async () => {
+  const s = await import('../../js/settings.js');
+  const settings = { ...s.DEFAULTS, quality: 'source', ...s.SOURCE_PRESET };
+  const cfg = s.videoConfig(settings, { screen: { width: 1280, height: 720 }, display: { width: 2560, height: 1440 } });
+  assert.equal(cfg.quality, 'source');
+  assert.deepEqual([cfg.width, cfg.height, cfg.fps, cfg.minScalePercent], [2560, 1440, 60, 100]);
+});

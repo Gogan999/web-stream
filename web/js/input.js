@@ -53,15 +53,17 @@ export function videoPoint(clientX, clientY, rect, videoW, videoH, clamp = false
 }
 
 export class InputCapture {
-  constructor({ session, video, stage, onHotkey, keyTarget = null, onKeySent = null, onReleaseAll = null, displaySize = null, zoom = null }) {
+  constructor({ session, video, video2 = null, stage, onHotkey, keyTarget = null, onKeySent = null, onReleaseAll = null, displaySize = null, displaySize2 = null, zoom = null }) {
     this.session = session;
     this.video = video;
+    this.video2 = video2; // the second monitor's stream, when one is shown (mouse and wheel only)
     this.stage = stage;
     this.onHotkey = onHotkey;
     this.keyTarget = keyTarget; // the on-screen keyboard's textarea (softkeys.js)
     this.onKeySent = onKeySent;
     this.onReleaseAll = onReleaseAll; // softkeys: forget sticky modifiers the host just let go
     this.displaySize = displaySize; // () => { width, height } of the host display, for trackpad scaling
+    this.displaySize2 = displaySize2; // the same for the second monitor's display
     this.zoom = zoom; // ZoomView: pinches zoom and pan the stream in the page
     this.touchActive = false; // the stream was touched last, so keys from a paired keyboard go to it
     this.touchRest = { x: 0, y: 0 }; // sub-pixel trackpad motion not yet sent
@@ -104,7 +106,14 @@ export class InputCapture {
   }
 
   get locked() {
-    return document.pointerLockElement === this.video;
+    // The second monitor's video may be in a window of its own, with a document of its own.
+    return document.pointerLockElement === this.video ||
+      (!!this.video2 && this.video2.ownerDocument.pointerLockElement === this.video2);
+  }
+
+  // The video stream under a mouse event: 1 for the second monitor's, else 0.
+  laneOf(e) {
+    return this.video2 && e.target === this.video2 ? 1 : 0;
   }
 
   // Input reaches the host only while the user has clearly handed it to the stream.
@@ -127,7 +136,7 @@ export class InputCapture {
     // pointer is locked; ours() keeps toolbar clicks out of the stream.
     // Mouse events a touch screen synthesizes are skipped; touch goes through the pointer handlers below.
     const fromTouch = (e) => e.sourceCapabilities?.firesTouchEvents === true;
-    const ours = (e) => (this.locked || e.target === v) && !fromTouch(e);
+    const ours = (e) => (this.locked || e.target === v || (!!this.video2 && e.target === this.video2)) && !fromTouch(e);
     document.addEventListener('mousedown', (e) => { if (ours(e)) this.onMouseDown(e); }, opt);
     document.addEventListener('mouseup', (e) => { if (ours(e)) this.onMouseUp(e); }, opt);
     // Chrome holds mousemove back to the next animation frame, up to a display frame late;
@@ -141,8 +150,10 @@ export class InputCapture {
     document.addEventListener('mousemove', (e) => { if (!raw && ours(e)) this.onMouseMove(e); }, opt);
     document.addEventListener('wheel', (e) => { if (ours(e)) this.onWheel(e); }, { ...opt, passive: false });
     v.addEventListener('contextmenu', (e) => e.preventDefault(), opt);
-    v.addEventListener('mouseenter', (e) => { if (!fromTouch(e)) this.stageFocused = true; }, opt);
-    v.addEventListener('mouseleave', (e) => {
+    // The stage, not a video: with two monitors side by side, crossing from one to the other must not
+    // let go of a held button (a drag between them) or the keys.
+    this.stage.addEventListener('mouseenter', (e) => { if (!fromTouch(e)) this.stageFocused = true; }, opt);
+    this.stage.addEventListener('mouseleave', (e) => {
       if (fromTouch(e)) return;
       if (this.mode === 'absolute') this.releaseAll();
       this.stageFocused = false;
@@ -231,12 +242,12 @@ export class InputCapture {
     if (mode === 'absolute' && this.locked) document.exitPointerLock();
   }
 
-  async lockPointer() {
+  async lockPointer(video = this.video) {
     try {
-      await this.video.requestPointerLock({ unadjustedMovement: true });
+      await video.requestPointerLock({ unadjustedMovement: true });
     } catch {
       // Raw input unsupported on this platform; fall back to OS-accelerated movement.
-      try { await this.video.requestPointerLock(); } catch { /* user gesture missing */ }
+      try { await video.requestPointerLock(); } catch { /* user gesture missing */ }
     }
   }
 
@@ -244,7 +255,7 @@ export class InputCapture {
     if (this.mode === 'relative' && !this.locked) {
       // First click only grabs the pointer; it is not forwarded.
       e.preventDefault();
-      this.lockPointer();
+      this.lockPointer(this.laneOf(e) ? this.video2 : this.video);
       return;
     }
     if (!this.active) return;
@@ -264,9 +275,11 @@ export class InputCapture {
       this.motion.dx += e.movementX;
       this.motion.dy += e.movementY;
     } else if (this.mode === 'absolute') {
-      const p = videoPoint(e.clientX, e.clientY, this.video.getBoundingClientRect(),
-        this.video.videoWidth, this.video.videoHeight, false, this.displaySize?.());
-      if (p) this.motion.abs = p;
+      const lane = this.laneOf(e);
+      const video = lane ? this.video2 : this.video;
+      const p = videoPoint(e.clientX, e.clientY, video.getBoundingClientRect(),
+        video.videoWidth, video.videoHeight, false, (lane ? this.displaySize2 : this.displaySize)?.());
+      if (p) this.motion.abs = { ...p, lane };
     }
     const wait = this.motionSentAt + MOTION_GAP_MS - performance.now();
     if (wait <= 0) this.flushMotion();
@@ -284,7 +297,7 @@ export class InputCapture {
     this.motionSentAt = performance.now();
     if (m.abs) {
       const seq = this.absSeq = (this.absSeq + 1) & 0xffff;
-      if (this.session.sendInput(CHANNELS.INPUT_RT, P.mouseAbs(m.abs.x, m.abs.y, seq))) {
+      if (this.session.sendInput(CHANNELS.INPUT_RT, P.mouseAbs(m.abs.x, m.abs.y, seq, m.abs.lane ?? 0))) {
         this.absLast = m.abs;
         m.abs = null;
         this.settleAbs();
@@ -310,7 +323,7 @@ export class InputCapture {
       if (!p || this.motion.abs) return;
       this.absLast = null;
       this.absSeq = (this.absSeq + 1) & 0xffff;
-      this.session.sendInput(CHANNELS.INPUT, P.mouseAbs(p.x, p.y, this.absSeq));
+      this.session.sendInput(CHANNELS.INPUT, P.mouseAbs(p.x, p.y, this.absSeq, p.lane ?? 0));
     }, ABS_SETTLE_MS);
   }
 

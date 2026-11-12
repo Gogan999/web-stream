@@ -111,7 +111,7 @@ impl<S: InputSink> InputHandler<S> {
     pub fn apply(&mut self, event: InputEvent, now: Instant) -> Result<(), HandleError> {
         match event {
             InputEvent::MouseMove { dx, dy } => self.sink.mouse_move(dx.into(), dy.into())?,
-            InputEvent::MouseAbs { x, y, seq } => {
+            InputEvent::MouseAbs { x, y, seq, .. } => {
                 // One overtaken by a newer position is stale. The browser
                 // numbers its reliable positions (ahead of a touch click)
                 // too, so a lossy one still in flight can't follow them.
@@ -398,6 +398,7 @@ mod tests {
                 x: 10,
                 y: 20,
                 seq: None,
+                lane: 0,
             },
         );
         send(&mut h, InputEvent::Wheel { dx: 0, dy: 120 });
@@ -666,7 +667,12 @@ mod tests {
     #[test]
     fn overtaken_motion_is_ignored() {
         let mut h = InputHandler::new(Recorder::default());
-        let abs = |x, seq| InputEvent::MouseAbs { x, y: 0, seq };
+        let abs = |x, seq| InputEvent::MouseAbs {
+            x,
+            y: 0,
+            seq,
+            lane: 0,
+        };
         send(&mut h, abs(1, Some(10)));
         send(&mut h, abs(2, Some(9)));
         send(&mut h, abs(3, Some(11)));

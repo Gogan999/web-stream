@@ -54,10 +54,28 @@ pub enum VideoWrite {
     Skipped,
 }
 
+/// How many video streams a session carries: the main display, and a second
+/// monitor.
+pub const LANES: usize = 2;
+
+/// What a session tracks for one video stream.
+#[derive(Default)]
+struct LaneState {
+    /// When the last keyframe went into the send queue, while the queue
+    /// has not emptied since.
+    keyframe_draining: Option<Instant>,
+    /// `frame_index` a non-keyframe must have to be sent: the one right
+    /// after the last frame sent. `None` until a keyframe goes out.
+    next_index: Option<u64>,
+    /// Codec of the last frame we could not send, to log once.
+    unsupported_codec: Option<VideoCodec>,
+}
+
 pub struct Session {
     rtc: Rtc,
     pending: Option<SdpPendingOffer>,
-    video: Mid,
+    video: [Mid; LANES],
+    lanes: [LaneState; LANES],
     audio: Mid,
     channels: HashMap<ChannelId, &'static str>,
     /// Media can flow: DTLS is up and ICE is not disconnected.
@@ -68,14 +86,6 @@ pub struct Session {
     max_resend_age: Duration,
     max_send_delay: Duration,
     max_bitrate_bps: u64,
-    /// When the last keyframe went into the send queue, while the queue
-    /// has not emptied since.
-    keyframe_draining: Option<Instant>,
-    /// `frame_index` a non-keyframe must have to be sent: the one right
-    /// after the last frame sent. `None` until a keyframe goes out.
-    next_index: Option<u64>,
-    /// Codec of the last frame we could not send, to log once.
-    unsupported_codec: Option<VideoCodec>,
 }
 
 /// One thing str0m produced, handed to the sink given to [`Session::poll`] as
@@ -114,7 +124,8 @@ impl Session {
         }
 
         let mut change = rtc.sdp_api();
-        let video = change.add_media(MediaKind::Video, Direction::SendOnly, None, None, None);
+        let video = [(); LANES]
+            .map(|()| change.add_media(MediaKind::Video, Direction::SendOnly, None, None, None));
         let audio = change.add_media(MediaKind::Audio, Direction::SendRecv, None, None, None);
         let mut chans = HashMap::new();
         for (label, ordered, reliability) in [
@@ -151,9 +162,7 @@ impl Session {
             max_resend_age: config.max_resend_age,
             max_send_delay: config.max_send_delay,
             max_bitrate_bps: config.max_bitrate_bps,
-            keyframe_draining: None,
-            next_index: None,
-            unsupported_codec: None,
+            lanes: Default::default(),
         };
         Ok((session, offer.to_sdp_string()))
     }
@@ -171,8 +180,10 @@ impl Session {
             .map_err(|e| Error::Negotiation(e.to_string()))?;
         // Answer a NACK only while the packet is fresh enough for the resend
         // to still be useful; older losses are repaired by a keyframe.
-        if let Some(tx) = self.rtc.direct_api().stream_tx_by_mid(self.video, None) {
-            tx.set_rtx_cache(RTX_CACHE_PACKETS, self.max_resend_age, Some(0.15));
+        for mid in self.video {
+            if let Some(tx) = self.rtc.direct_api().stream_tx_by_mid(mid, None) {
+                tx.set_rtx_cache(RTX_CACHE_PACKETS, self.max_resend_age, Some(0.15));
+            }
         }
         // Probe up towards what the encoder can use, not just the start rate.
         self.set_max_bitrate(self.max_bitrate_bps);
@@ -273,31 +284,31 @@ impl Session {
     /// soft keyframe and sharper frames a few times a second). The pass
     /// ends when the queue empties, or after [`KEYFRAME_DRAIN_MAX`] so real
     /// congestion still drops frames.
-    fn video_backlog(&mut self, now: Instant) -> Duration {
-        let draining_since = self.keyframe_draining;
+    fn video_backlog(&mut self, lane: usize, now: Instant) -> Duration {
+        let draining_since = self.lanes[lane].keyframe_draining;
         let mut api = self.rtc.direct_api();
-        let Some(tx) = api.stream_tx_by_mid(self.video, None) else {
+        let Some(tx) = api.stream_tx_by_mid(self.video[lane], None) else {
             return Duration::ZERO;
         };
         let Some(first_unsent) = tx.queue_info().and_then(|q| q.first_unsent()) else {
-            self.keyframe_draining = None;
+            self.lanes[lane].keyframe_draining = None;
             return Duration::ZERO;
         };
         if let Some(k) = draining_since {
             if now.saturating_duration_since(k) < KEYFRAME_DRAIN_MAX {
                 return Duration::ZERO;
             }
-            self.keyframe_draining = None;
+            self.lanes[lane].keyframe_draining = None;
         }
         now.saturating_duration_since(first_unsent)
     }
 
     /// The video pacer queue: age of the oldest unsent packet, and bytes and
     /// packets waiting (the last two for diagnostics).
-    pub fn queue_diag(&mut self, now: Instant) -> (Duration, usize, usize) {
+    pub fn queue_diag(&mut self, lane: usize, now: Instant) -> (Duration, usize, usize) {
         let mut api = self.rtc.direct_api();
         let Some(q) = api
-            .stream_tx_by_mid(self.video, None)
+            .stream_tx_by_mid(self.video[lane], None)
             .and_then(|tx| tx.queue_info())
         else {
             return (Duration::ZERO, 0, 0);
@@ -309,19 +320,20 @@ impl Session {
     }
 
     pub fn write_video(&mut self, frame: &EncodedFrame, now: Instant) -> VideoWrite {
-        if !self.connected {
+        let lane = usize::from(frame.lane);
+        if !self.connected || lane >= LANES {
             return VideoWrite::Skipped;
         }
         // Every frame references the one before it, and the browser can't
         // tell one went missing (RTP sequence numbers stay continuous), so
         // after any gap only a keyframe, or a frame the encoder built
         // without the missing ones, may go out.
-        if !follows(self.next_index, frame) {
+        if !follows(self.lanes[lane].next_index, frame) {
             ws_diag::diag!(
                 "broken_drop",
-                "idx={} next={:?} recovers_from={:?}",
+                "lane={lane} idx={} next={:?} recovers_from={:?}",
                 frame.frame_index,
-                self.next_index,
+                self.lanes[lane].next_index,
                 frame.recovers_from
             );
             tracing::debug!(
@@ -337,11 +349,11 @@ impl Session {
         // late drop led to late repairs and then a keyframe several times
         // a second).
         if !frame.keyframe && frame.recovers_from.is_none() {
-            let backlog = self.video_backlog(now);
+            let backlog = self.video_backlog(lane, now);
             if backlog > self.max_send_delay {
                 ws_diag::diag!(
                     "late_drop",
-                    "idx={} backlog_ms={:.2}",
+                    "lane={lane} idx={} backlog_ms={:.2}",
                     frame.frame_index,
                     backlog.as_secs_f64() * 1000.0
                 );
@@ -349,13 +361,13 @@ impl Session {
                 return VideoWrite::Late;
             }
         }
-        let Some(writer) = self.rtc.writer(self.video) else {
+        let Some(writer) = self.rtc.writer(self.video[lane]) else {
             return VideoWrite::Skipped;
         };
         let Some(pt) = video_pt(writer.payload_params(), frame.codec) else {
-            if self.unsupported_codec != Some(frame.codec) {
+            if self.lanes[lane].unsupported_codec != Some(frame.codec) {
                 tracing::warn!(codec = ?frame.codec, "browser did not negotiate this codec; dropping video");
-                self.unsupported_codec = Some(frame.codec);
+                self.lanes[lane].unsupported_codec = Some(frame.codec);
             }
             return VideoWrite::Skipped;
         };
@@ -374,9 +386,9 @@ impl Session {
                 // A repair is several frames' worth too: let the frames
                 // right behind it wait for it, as for a keyframe.
                 if frame.keyframe || frame.recovers_from.is_some() {
-                    self.keyframe_draining = Some(now);
+                    self.lanes[lane].keyframe_draining = Some(now);
                 }
-                self.next_index = Some(frame.frame_index + 1);
+                self.lanes[lane].next_index = Some(frame.frame_index + 1);
                 VideoWrite::Sent
             }
             Err(e) => {
@@ -388,8 +400,8 @@ impl Session {
 
     /// The first frame the browser has not been sent, once a keyframe has
     /// gone out: a frame after a gap must not build on it or anything later.
-    pub fn next_index(&self) -> Option<u64> {
-        self.next_index
+    pub fn next_index(&self, lane: usize) -> Option<u64> {
+        self.lanes[lane].next_index
     }
 
     pub fn write_audio(&mut self, packet: &AudioPacket, now: Instant) {
@@ -519,17 +531,22 @@ impl Session {
                 }
                 TransportEvent::Disconnected
             }
-            Event::KeyframeRequest(req) if req.mid == self.video => {
-                ws_diag::diag!("browser_keyframe_request", "kind={:?}", req.kind);
-                tracing::debug!(kind = ?req.kind, "browser asked for a keyframe");
-                TransportEvent::KeyframeNeeded
+            Event::KeyframeRequest(req) if self.video.contains(&req.mid) => {
+                let lane = self.video.iter().position(|m| *m == req.mid).unwrap_or(0);
+                ws_diag::diag!(
+                    "browser_keyframe_request",
+                    "lane={lane} kind={:?}",
+                    req.kind
+                );
+                tracing::debug!(lane, kind = ?req.kind, "browser asked for a keyframe");
+                TransportEvent::KeyframeNeeded(lane as u8)
             }
             Event::EgressBitrateEstimate(BweKind::Twcc { estimate, .. })
             | Event::EgressBitrateEstimate(BweKind::Remb { estimate, .. }) => {
                 ws_diag::diag!("bwe", "bps={}", estimate.as_u64());
                 TransportEvent::TargetBitrate(estimate.as_u64())
             }
-            Event::MediaEgressStats(s) if s.mid == self.video => {
+            Event::MediaEgressStats(s) if self.video.contains(&s.mid) => {
                 // Totals since the stream started.
                 ws_diag::diag!(
                     "video_egress",
@@ -675,6 +692,7 @@ mod tests {
 
     fn frame(frame_index: u64, keyframe: bool) -> EncodedFrame {
         EncodedFrame {
+            lane: 0,
             display: DisplayId(0),
             codec: VideoCodec::H264,
             frame_index,

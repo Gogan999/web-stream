@@ -38,6 +38,14 @@ pub enum VideoQuality {
     /// Slowest encode the frame rate allows, and a little room for large
     /// frames (fast motion, keyframes) to take longer than one frame time.
     Clarity,
+    /// For reading and working: every frame is coded as close to the
+    /// desktop as the encoder allows (a low quantizer ceiling, slowest
+    /// presets), and the frame rate falls as needed to stay within the
+    /// bitrate: a still or slowly changing screen stays sharp at a high
+    /// frame rate, fast motion drops frames instead of going soft.
+    /// Older clients and hosts called this `text`.
+    #[serde(alias = "text")]
+    Source,
 }
 
 /// How long the oldest video packet has waited in the transport's send
@@ -147,6 +155,9 @@ impl Default for VideoConfig {
 /// it skips to the newest frame and asks for one of those.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncodedFrame {
+    /// Which video stream carries it: 0 is the main one, 1 the second
+    /// monitor's. Each stream has its own `frame_index` count.
+    pub lane: u8,
     pub display: DisplayId,
     pub codec: VideoCodec,
     /// Monotonic, gap-free per encoder session; a gap on the receive side
@@ -170,6 +181,17 @@ pub struct EncodedFrame {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_quality_answers_to_its_old_name() {
+        let q = |s: &str| serde_json::from_str::<VideoQuality>(s).unwrap();
+        assert_eq!(q("\"source\""), VideoQuality::Source);
+        assert_eq!(q("\"text\""), VideoQuality::Source);
+        assert_eq!(
+            serde_json::to_string(&VideoQuality::Source).unwrap(),
+            "\"source\""
+        );
+    }
 
     #[test]
     fn clamps_hostile_config() {

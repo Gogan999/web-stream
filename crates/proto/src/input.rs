@@ -73,6 +73,9 @@ pub enum InputEvent {
         x: u16,
         y: u16,
         seq: Option<u16>,
+        /// Which video stream's display `x` and `y` are across: 0 is the
+        /// main one, 1 the second monitor.
+        lane: u8,
     },
     MouseButton {
         button: MouseButton,
@@ -115,6 +118,9 @@ pub enum InputEvent {
     ReleaseAll,
 }
 
+/// How many video streams (and so displays input can address) there are.
+pub const MAX_LANES: u8 = 2;
+
 pub mod wire {
     pub const MOUSE_MOVE: u8 = 0x01;
     pub const MOUSE_ABS: u8 = 0x02;
@@ -125,6 +131,9 @@ pub mod wire {
     pub const GAMEPAD_DISCONNECT: u8 = 0x07;
     pub const RELEASE_ALL: u8 = 0x08;
     pub const GAMEPAD_BUTTONS: u8 = 0x09;
+    /// [`MOUSE_ABS`] for a display other than the main one: a lane byte
+    /// follows the type.
+    pub const MOUSE_ABS_ON: u8 = 0x0a;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -225,6 +234,7 @@ impl InputEvent {
         let (expected, with_seq) = match kind {
             wire::MOUSE_MOVE | wire::WHEEL => (5, None),
             wire::MOUSE_ABS => (5, Some(7)),
+            wire::MOUSE_ABS_ON => (6, Some(8)),
             wire::MOUSE_BUTTON => (3, None),
             wire::KEY => (4, None),
             wire::GAMEPAD => (14, Some(16)),
@@ -251,6 +261,16 @@ impl InputEvent {
                 x: u16_at(b, 1),
                 y: u16_at(b, 3),
                 seq,
+                lane: 0,
+            },
+            wire::MOUSE_ABS_ON => Self::MouseAbs {
+                x: u16_at(b, 2),
+                y: u16_at(b, 4),
+                seq,
+                lane: match b[1] {
+                    n if n < MAX_LANES => n,
+                    _ => return Err(InputDecodeError::Invalid("lane out of range")),
+                },
             },
             wire::MOUSE_BUTTON => Self::MouseButton {
                 button: MouseButton::from_wire(b[1])
@@ -296,8 +316,14 @@ impl InputEvent {
                 dx.to_le_bytes(),
                 dy.to_le_bytes(),
             ),
-            Self::MouseAbs { x, y, seq } => {
-                pair(&mut out, wire::MOUSE_ABS, x.to_le_bytes(), y.to_le_bytes());
+            Self::MouseAbs { x, y, seq, lane } => {
+                if lane == 0 {
+                    pair(&mut out, wire::MOUSE_ABS, x.to_le_bytes(), y.to_le_bytes());
+                } else {
+                    out.extend_from_slice(&[wire::MOUSE_ABS_ON, lane]);
+                    out.extend_from_slice(&x.to_le_bytes());
+                    out.extend_from_slice(&y.to_le_bytes());
+                }
                 if let Some(seq) = seq {
                     out.extend_from_slice(&seq.to_le_bytes());
                 }
@@ -358,13 +384,14 @@ mod tests {
             lt: 255,
             rt: 7,
         };
-        let cases: [(InputEvent, &[u8]); 11] = [
+        let cases: [(InputEvent, &[u8]); 13] = [
             (MouseMove { dx: 1, dy: -1 }, &[0x01, 1, 0, 0xff, 0xff]),
             (
                 MouseAbs {
                     x: 0,
                     y: 65535,
                     seq: None,
+                    lane: 0,
                 },
                 &[0x02, 0, 0, 0xff, 0xff],
             ),
@@ -373,8 +400,27 @@ mod tests {
                     x: 0,
                     y: 65535,
                     seq: Some(258),
+                    lane: 0,
                 },
                 &[0x02, 0, 0, 0xff, 0xff, 2, 1],
+            ),
+            (
+                MouseAbs {
+                    x: 0,
+                    y: 65535,
+                    seq: None,
+                    lane: 1,
+                },
+                &[0x0a, 1, 0, 0, 0xff, 0xff],
+            ),
+            (
+                MouseAbs {
+                    x: 0,
+                    y: 65535,
+                    seq: Some(258),
+                    lane: 1,
+                },
+                &[0x0a, 1, 0, 0, 0xff, 0xff, 2, 1],
             ),
             (
                 MouseButton {
@@ -430,7 +476,7 @@ mod tests {
 
     #[test]
     fn every_type_and_length_decodes_or_errors_without_panicking() {
-        let sizes: [(u8, &[usize]); 9] = [
+        let sizes: [(u8, &[usize]); 10] = [
             (0x01, &[5]),
             (0x02, &[5, 7]),
             (0x03, &[3]),
@@ -440,6 +486,7 @@ mod tests {
             (0x07, &[2]),
             (0x08, &[1]),
             (0x09, &[16]),
+            (0x0a, &[6, 8]),
         ];
         for kind in 0..=255u8 {
             for len in 1..=20usize {
@@ -475,6 +522,11 @@ mod tests {
             Err(Invalid(_))
         ));
         assert!(matches!(InputEvent::decode(&[0x07, 4]), Err(Invalid(_))));
+        // Only the lanes there are.
+        assert!(matches!(
+            InputEvent::decode(&[0x0a, 2, 0, 0, 0, 0]),
+            Err(Invalid(_))
+        ));
     }
 
     #[test]

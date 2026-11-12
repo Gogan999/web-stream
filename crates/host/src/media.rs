@@ -104,6 +104,7 @@ pub async fn run(
         transport,
         config: opts.video.clone(),
         display: opts.display,
+        second: None,
         // Off until the browser turns it on.
         mic_enabled: false,
         audio: (opts.audio_kbps, opts.audio_frame_ms),
@@ -283,6 +284,8 @@ struct Media {
     /// What the browser chose; kept across reconnects.
     config: VideoConfig,
     display: Option<DisplayId>,
+    /// The display on the second video track, as the browser chose it.
+    second: Option<DisplayId>,
     mic_enabled: bool,
     /// Game audio bitrate (kb/s) and Opus frame length (ms).
     audio: (u32, u32),
@@ -364,9 +367,18 @@ struct Live {
     input: Option<InputThread>,
     _cursor: CursorSession,
     video: Option<Video>,
+    /// The second monitor's stream, while one is chosen and running.
+    second: Option<Second>,
     /// Held only to keep game audio capture running.
     audio: Option<platform::Loopback>,
     mic: Option<(platform::Mic, MicReceiver)>,
+    bitrate_kbps: u32,
+}
+
+/// The second video track's capture.
+struct Second {
+    video: Video,
+    display: DisplayId,
     bitrate_kbps: u32,
 }
 
@@ -388,16 +400,16 @@ impl Media {
                 self.transitions += 1;
                 self.stop()
             }
-            TransportEvent::KeyframeNeeded => {
-                ws_diag::diag!("media_event", "keyframe_needed");
-                if let Some(v) = self.live.as_ref().and_then(|l| l.video.as_ref()) {
+            TransportEvent::KeyframeNeeded(lane) => {
+                ws_diag::diag!("media_event", "keyframe_needed lane={lane}");
+                if let Some(v) = self.lane_video(lane) {
                     self.keyframe_requests.fetch_add(1, Ordering::Relaxed);
                     v.pipeline.request_keyframe();
                 }
             }
-            TransportEvent::FramesLost(from) => {
-                ws_diag::diag!("media_event", "frames_lost from={from}");
-                if let Some(v) = self.live.as_ref().and_then(|l| l.video.as_ref()) {
+            TransportEvent::FramesLost(lane, from) => {
+                ws_diag::diag!("media_event", "frames_lost lane={lane} from={from}");
+                if let Some(v) = self.lane_video(lane) {
                     v.pipeline.recover_from(from);
                 }
             }
@@ -553,6 +565,7 @@ impl Media {
             input,
             _cursor: cursor,
             video: None,
+            second: None,
             audio,
             mic: None,
             bitrate_kbps: self.start_kbps(),
@@ -562,7 +575,7 @@ impl Media {
         }
         if let Some((video, bitrate_kbps)) = parked_video {
             tracing::info!("picking up the running capture");
-            self.attach_video(&video.pipeline);
+            self.attach_video(0, &video.pipeline);
             video.pipeline.request_keyframe();
             let live = self.live.as_mut().expect("just set");
             live.bitrate_kbps = bitrate_kbps;
@@ -572,6 +585,7 @@ impl Media {
             if self.video_outdated() {
                 self.request_rebuild();
             }
+            self.sync_second();
             return;
         }
         if let Err(e) = self.start_video() {
@@ -582,6 +596,16 @@ impl Media {
 
     /// Whether the running pipeline differs from what the current config
     /// asks for (bitrate aside, which changes in place).
+    /// The capture feeding video stream `lane`.
+    fn lane_video(&self, lane: u8) -> Option<&Video> {
+        let live = self.live.as_ref()?;
+        match lane {
+            0 => live.video.as_ref(),
+            1 => live.second.as_ref().map(|s| &s.video),
+            _ => None,
+        }
+    }
+
     fn video_outdated(&self) -> bool {
         let Some(video) = self.live.as_ref().and_then(|l| l.video.as_ref()) else {
             return false;
@@ -602,17 +626,19 @@ impl Media {
     /// straight to `pipeline`'s capture thread, never waiting behind this
     /// loop (which may be busy rebuilding a pipeline). Set before its first
     /// frame reaches the transport.
-    fn attach_video(&self, pipeline: &VideoPipeline) {
+    fn attach_video(&self, lane: u8, pipeline: &VideoPipeline) {
         let control = pipeline.control();
         let requests = self.keyframe_requests.clone();
-        self.transport
-            .set_video_sink(Box::new(move |signal| match signal {
+        self.transport.set_video_sink(
+            lane,
+            Box::new(move |signal| match signal {
                 VideoSignal::Keyframe => {
                     requests.fetch_add(1, Ordering::Relaxed);
                     control.request_keyframe();
                 }
                 VideoSignal::FramesLost(from) => control.recover_from(from),
-            }));
+            }),
+        );
     }
 
     fn stop(&mut self) {
@@ -625,7 +651,8 @@ impl Media {
         self.autoscale.reset();
         self.session += 1;
         self.keyframe_requests.store(0, Ordering::Relaxed);
-        self.transport.clear_video_sink();
+        self.transport.clear_video_sink(0);
+        self.transport.clear_video_sink(1);
         self.cursor_target.send_replace(CursorTarget::default());
         // The next browser turns the mic on if it wants it, and sets its
         // own audio quality.
@@ -749,9 +776,12 @@ impl Media {
             return Ok(());
         };
         if let Some(video) = live.video.take() {
-            self.transport.clear_video_sink();
+            self.transport.clear_video_sink(0);
             drop_blocking(video);
         }
+        // The second stream is sized from this one and shares its codec:
+        // it starts again below.
+        self.stop_second();
         let displays = ws_capture::list_displays()?;
         let info = pick_display(&displays, self.display)
             .ok_or_else(|| anyhow::anyhow!("no display to capture"))?
@@ -778,7 +808,7 @@ impl Media {
             ..self.config.clone()
         };
         let (tx, rx) = mpsc::channel(FRAME_QUEUE);
-        let backlog = self.transport.send_backlog();
+        let backlog = self.transport.send_backlog(0);
         // Room to grow back to the browser's size without a new encoder.
         let max = (self.config.width, self.config.height);
         let pipeline = match block_in_place(|| {
@@ -813,7 +843,7 @@ impl Media {
         if self.live.is_none() {
             return Ok(());
         }
-        self.attach_video(&pipeline);
+        self.attach_video(0, &pipeline);
         let Some(live) = &mut self.live else {
             return Ok(());
         };
@@ -821,9 +851,10 @@ impl Media {
         tokio::spawn(forward_video(
             rx,
             self.transport.clone(),
-            self.sent.clone(),
+            Some(self.sent.clone()),
             self.stopped_tx.clone(),
             self.generation,
+            0,
         ));
         live.video = Some(Video {
             pipeline,
@@ -833,16 +864,28 @@ impl Media {
         live.bitrate_kbps = start_kbps;
         self.last_restart = Some(Instant::now());
         if let Some(input) = &live.input {
-            input.set_display(rect(&info));
+            input.set_display(0, rect(&info));
         }
         self.display = Some(info.id);
         self.set_display_origin(&info);
         tracing::info!(display = info.id.0, ?config, "streaming");
         ws_diag::diag!("streaming", "display={} config={config:?}", info.id.0);
+        self.sync_second();
         Ok(())
     }
 
     fn video_stopped(&mut self, generation: u64) {
+        let second_current = self
+            .live
+            .as_ref()
+            .and_then(|l| l.second.as_ref())
+            .is_some_and(|s| s.video.generation == generation);
+        if second_current {
+            tracing::warn!("second capture pipeline stopped; restarting it");
+            self.stop_second();
+            self.sync_second();
+            return;
+        }
         let current = self
             .live
             .as_ref()
@@ -861,19 +904,50 @@ impl Media {
     /// Where the encoder starts: under the current estimate (or the
     /// transport's starting estimate), never above the configured rate.
     fn start_kbps(&self) -> u32 {
-        let bwe = self.last_bwe.unwrap_or_else(|| match self.previous_bwe {
+        self.split_kbps()[0]
+    }
+
+    /// The current bandwidth estimate, or what a new connection starts from.
+    fn estimate_bps(&self) -> u64 {
+        self.last_bwe.unwrap_or_else(|| match self.previous_bwe {
             Some((bps, at)) if at.elapsed() < ws_transport::ESTIMATE_KEPT_FOR => {
                 (bps as f64 * ws_transport::KEPT_ESTIMATE_SHARE) as u64
             }
             _ => TransportConfig::default().initial_bitrate_bps,
-        });
-        target_kbps(bwe, self.config.bitrate_kbps)
+        })
+    }
+
+    /// The encoder target of each stream (the second is 0 while it isn't
+    /// running). The estimate covers the whole connection, so with two
+    /// streams each gets a share of it by pixels; the browser's bitrate
+    /// setting caps the main one, and the second's cap grows with its size
+    /// the way the automatic bitrate does.
+    fn split_kbps(&self) -> [u32; 2] {
+        let bwe = self.estimate_bps();
+        let cap = self.config.bitrate_kbps;
+        let live = self.live.as_ref();
+        let pixels = |v: &Video| f64::from(v.config.width) * f64::from(v.config.height);
+        let (Some(main), Some(second)) = (
+            live.and_then(|l| l.video.as_ref()),
+            live.and_then(|l| l.second.as_ref()),
+        ) else {
+            return [target_kbps(bwe, cap), 0];
+        };
+        let (p0, p1) = (pixels(main).max(1.0), pixels(&second.video).max(1.0));
+        let share = p0 / (p0 + p1);
+        let cap1 = (f64::from(cap) * (p1 / p0).powf(0.9)) as u32;
+        [
+            target_kbps((bwe as f64 * share) as u64, cap),
+            target_kbps((bwe as f64 * (1.0 - share)) as u64, cap1),
+        ]
     }
 
     /// Lets the bandwidth estimate probe up to the browser's bitrate
-    /// setting (plus room for audio), and no further.
+    /// setting (plus room for audio), and no further. A second stream gets
+    /// room for its own.
     fn set_ceiling(&self) {
-        let video = (f64::from(self.config.bitrate_kbps) * 1000.0 / BWE_HEADROOM) as u64;
+        let streams = if self.second.is_some() { 2.0 } else { 1.0 };
+        let video = (f64::from(self.config.bitrate_kbps) * streams * 1000.0 / BWE_HEADROOM) as u64;
         self.transport.set_max_bitrate(video + NON_VIDEO_BPS);
     }
 
@@ -961,8 +1035,14 @@ impl Media {
     /// Moves the encoder to the target for the latest estimate, unless the
     /// change is too small to matter.
     fn apply_bitrate(&mut self, force: bool) {
-        let kbps = self.start_kbps();
+        let [kbps, kbps2] = self.split_kbps();
         let Some(live) = &mut self.live else { return };
+        if let Some(second) = &mut live.second {
+            if force || worth_changing(second.bitrate_kbps, kbps2) {
+                second.video.pipeline.set_bitrate(kbps2);
+                second.bitrate_kbps = kbps2;
+            }
+        }
         let Some(video) = &live.video else { return };
         if force || worth_changing(live.bitrate_kbps, kbps) {
             ws_diag::diag!(
@@ -998,6 +1078,7 @@ impl Media {
             }
             ClientControl::RestoreHostResolution => self.restore_host_resolution(),
             ClientControl::SelectDisplay { id } => self.select_display(id),
+            ClientControl::SelectSecondDisplay { id } => self.select_second_display(id),
             ClientControl::RequestKeyframe => {
                 ws_diag::diag!("media_event", "browser_control_keyframe_request");
                 if let Some(v) = self.live.as_ref().and_then(|l| l.video.as_ref()) {
@@ -1130,7 +1211,12 @@ impl Media {
             Vec::new()
         });
         let active = pick_display(&displays, self.display).map(|d| d.id);
-        self.reply(HostControl::Displays { displays, active });
+        let second = self.second.filter(|id| Some(*id) != active);
+        self.reply(HostControl::Displays {
+            displays,
+            active,
+            second,
+        });
     }
 
     /// Points input (and pointer positions) at the streamed display's
@@ -1140,7 +1226,10 @@ impl Media {
             return;
         };
         if let Some(input) = self.live.as_ref().and_then(|l| l.input.as_ref()) {
-            input.set_display(rect(&info));
+            input.set_display(0, rect(&info));
+            if let Some(second) = self.second_display() {
+                input.set_display(1, rect(&second));
+            }
         }
         self.set_display_origin(&info);
     }
@@ -1359,6 +1448,7 @@ impl Media {
     /// Restarts the pipeline with the current config.
     fn rebuild(&mut self) {
         if self.resize_in_place() {
+            self.sync_second();
             self.display_changed();
             return;
         }
@@ -1425,14 +1515,183 @@ impl Media {
                 }
             }
             if let Some(input) = &live.input {
-                input.set_display(rect(info));
+                input.set_display(0, rect(info));
             }
         }
         let info = info.clone();
         self.set_display_origin(&info);
+        // Picking the display the second stream shows swaps them.
+        if self.second == Some(id) {
+            self.second = self.display.filter(|old| *old != id);
+            self.second_changed();
+        }
         self.display = Some(id);
         tracing::info!(display = id.0, "display selected");
         self.display_changed();
+        self.sync_second();
+    }
+
+    /// The display the second stream shows, if one is chosen, exists and is
+    /// not the one the first stream shows (two captures of one output fail).
+    fn second_display(&self) -> Option<DisplayInfo> {
+        let wanted = self.second?;
+        let displays = ws_capture::list_displays().ok()?;
+        let main = pick_display(&displays, self.display)?.id;
+        displays
+            .into_iter()
+            .find(|d| d.id == wanted && d.id != main)
+    }
+
+    fn second_changed(&self) {
+        self.set_ceiling();
+        self.reply(HostControl::SecondDisplay { id: self.second });
+    }
+
+    fn select_second_display(&mut self, id: Option<DisplayId>) {
+        if let Some(id) = id {
+            let displays = ws_capture::list_displays().unwrap_or_default();
+            if !displays.iter().any(|d| d.id == id) {
+                self.error(format!("display {} not found", id.0));
+                return;
+            }
+            if self.display.is_some_and(|main| main == id)
+                || pick_display(&displays, self.display).is_some_and(|d| d.id == id)
+            {
+                self.error("the second monitor must be a different display".into());
+                return;
+            }
+        }
+        self.second = id;
+        self.second_changed();
+        if id.is_none() {
+            self.stop_second();
+        }
+        self.sync_second();
+        self.apply_bitrate(true);
+    }
+
+    /// Stops the second stream's capture, leaving the choice of display.
+    fn stop_second(&mut self) {
+        let Some(live) = &mut self.live else { return };
+        if let Some(second) = live.second.take() {
+            self.transport.clear_video_sink(1);
+            drop_blocking(second.video);
+        }
+    }
+
+    /// Makes the second stream match the choice and the first stream: off
+    /// when none is chosen, resized in place when only the scale changed,
+    /// and started afresh when its display or the codec changed.
+    fn sync_second(&mut self) {
+        let Some(second) = self.second_display() else {
+            self.stop_second();
+            return;
+        };
+        let Some(main_info) = self.chosen_display() else {
+            return;
+        };
+        let Some(live) = &self.live else { return };
+        let Some(main) = &live.video else { return };
+        let main_config = main.config.clone();
+        let follow = |width, height| {
+            scale::follow_size(
+                (width, height),
+                (main_info.width, main_info.height),
+                (second.width, second.height),
+            )
+        };
+        let (width, height) = follow(main_config.width, main_config.height);
+        if let Some(running) = &live.second {
+            let alike = running.display == second.id
+                && running.video.config.codec == main_config.codec
+                && VideoConfig {
+                    width: 0,
+                    height: 0,
+                    bitrate_kbps: 0,
+                    ..running.video.config.clone()
+                } == VideoConfig {
+                    width: 0,
+                    height: 0,
+                    bitrate_kbps: 0,
+                    ..main_config.clone()
+                };
+            if alike {
+                if (running.video.config.width, running.video.config.height) == (width, height) {
+                    return;
+                }
+                if block_in_place(|| running.video.pipeline.resize(width, height)).is_ok() {
+                    if let Some(live) = &mut self.live {
+                        if let Some(s) = &mut live.second {
+                            s.video.config.width = width;
+                            s.video.config.height = height;
+                        }
+                    }
+                    self.apply_bitrate(true);
+                    return;
+                }
+            }
+        }
+        self.stop_second();
+        // Room to grow back to the browser's full size without a new encoder.
+        let max = follow(self.config.width, self.config.height);
+        let config = VideoConfig {
+            width,
+            height,
+            ..main_config
+        };
+        let (tx, rx) = mpsc::channel(FRAME_QUEUE);
+        let backlog = self.transport.send_backlog(1);
+        let started =
+            block_in_place(|| VideoPipeline::start(second.id, config.clone(), max, tx, backlog));
+        let pipeline = match started {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::error!("second display {}: {e}", second.id.0);
+                self.error(format!("could not stream the second monitor: {e}"));
+                self.second = None;
+                self.second_changed();
+                return;
+            }
+        };
+        if self.live.is_none() {
+            return;
+        }
+        self.attach_video(1, &pipeline);
+        self.generation += 1;
+        let generation = self.generation;
+        tokio::spawn(forward_video(
+            rx,
+            self.transport.clone(),
+            None,
+            self.stopped_tx.clone(),
+            generation,
+            1,
+        ));
+        if let Some(live) = &mut self.live {
+            if let Some(input) = &live.input {
+                input.set_display(1, rect(&second));
+            }
+            live.second = Some(Second {
+                video: Video {
+                    pipeline,
+                    generation,
+                    config: config.clone(),
+                },
+                display: second.id,
+                bitrate_kbps: 0,
+            });
+        }
+        tracing::info!(
+            display = second.id.0,
+            ?config,
+            "streaming the second monitor"
+        );
+        ws_diag::diag!(
+            "streaming",
+            "second display={} config={config:?}",
+            second.id.0
+        );
+        self.apply_bitrate(true);
     }
 
     fn display_changed(&self) {
@@ -1496,8 +1755,8 @@ fn event_name(ev: &TransportEvent) -> &'static str {
     match ev {
         TransportEvent::Connected => "connected",
         TransportEvent::Disconnected => "disconnected",
-        TransportEvent::KeyframeNeeded => "keyframe_needed",
-        TransportEvent::FramesLost(_) => "frames_lost",
+        TransportEvent::KeyframeNeeded(_) => "keyframe_needed",
+        TransportEvent::FramesLost(..) => "frames_lost",
         TransportEvent::TargetBitrate(_) => "target_bitrate",
         TransportEvent::Data { .. } => "data",
         TransportEvent::MicAudio(_) => "mic_audio",
@@ -1508,26 +1767,31 @@ fn event_name(ev: &TransportEvent) -> &'static str {
     }
 }
 
+/// Takes frames from a capture pipeline to the transport as video stream
+/// `lane`. Only the main stream (`sent` is `Some`) counts toward the stats
+/// the browser shows and the auto-resolution decides on.
 async fn forward_video(
     mut frames: mpsc::Receiver<EncodedFrame>,
     transport: Transport,
-    sent: Arc<Mutex<SentFrames>>,
+    sent: Option<Arc<Mutex<SentFrames>>>,
     stopped: mpsc::Sender<u64>,
     generation: u64,
+    lane: u8,
 ) {
-    while let Some(frame) = frames.recv().await {
+    while let Some(mut frame) = frames.recv().await {
         ws_diag::diag!(
             "handoff",
-            "idx={} since_enc_ms={:.2}",
+            "lane={lane} idx={} since_enc_ms={:.2}",
             frame.frame_index,
             ws_proto::mono_now().saturating_sub(frame.encode_done_time) as f64 / 1000.0
         );
-        {
+        if let Some(sent) = &sent {
             let mut sent = sent.lock().expect("sent stats lock");
             sent.frames += 1;
             sent.bytes += frame.data.len() as u64;
             sent.encode_micros += frame.encode_done_time.saturating_sub(frame.capture_time);
         }
+        frame.lane = lane;
         transport.send_video(frame);
     }
     // The pipeline is gone: dropped on purpose (the generation is then stale)

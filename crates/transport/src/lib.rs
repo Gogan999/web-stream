@@ -40,6 +40,7 @@ use ws_diag::diag;
 use ws_proto::{AudioPacket, EncodedFrame, SendBacklog, channels, mono_now};
 
 use crate::net::{Net, Packet, SharedFilter};
+pub use crate::session::LANES;
 use crate::session::{Session, Step, VideoWrite};
 
 /// Frames the encoder may get ahead of the send loop (about 50 ms at 60 fps)
@@ -124,7 +125,7 @@ pub enum TransportEvent {
     /// send an IDR or intra refresh now. Not repeated until a keyframe has
     /// been sent (or a short retry interval passes). Goes to the
     /// [`VideoSink`] instead while one is set.
-    KeyframeNeeded,
+    KeyframeNeeded(u8),
     /// The transport dropped frames from this `frame_index` on (sent too
     /// late, or built on a dropped frame); the browser never saw them. The
     /// next frame must build only on earlier ones
@@ -132,7 +133,7 @@ pub enum TransportEvent {
     /// Raised again if that frame is dropped too; if none has gone out a
     /// short while later, [`TransportEvent::KeyframeNeeded`] follows. Goes
     /// to the [`VideoSink`] instead while one is set.
-    FramesLost(u64),
+    FramesLost(u8, u64),
     /// Bandwidth estimate, in bits per second; drive the encoder bitrate.
     TargetBitrate(u64),
     ChannelOpen(&'static str),
@@ -192,6 +193,24 @@ pub type InputSink = Box<dyn Fn(&[u8]) + Send + Sync>;
 pub enum VideoSignal {
     Keyframe,
     FramesLost(u64),
+}
+
+/// The state of one video stream shared by the handle and the run loop.
+#[derive(Default)]
+struct Lane {
+    /// Frames from the encoder not yet taken by the send loop (at most
+    /// [`VIDEO_QUEUE`]).
+    frames: Mutex<VecDeque<EncodedFrame>>,
+    /// When the outstanding keyframe request was made.
+    keyframe_asked: Mutex<Option<Instant>>,
+    /// The first frame index the browser is missing after a drop, and when
+    /// it went missing, until a frame skipping the gap or a keyframe goes
+    /// out.
+    recovering: Mutex<Option<(u64, Instant)>>,
+    /// Where keyframe requests and repairs go, if not to `events`.
+    video: Mutex<Option<VideoSink>>,
+    /// Age of the oldest unsent video packet, for the encoder.
+    backlog: SendBacklog,
 }
 
 /// Takes [`VideoSignal`]s, called straight from the transport's run loop.
@@ -340,9 +359,10 @@ enum Cmd {
     /// End the run loop and the thread, whatever handles remain.
     Shutdown,
     MaxBitrate(u64),
-    /// A video sink was set (true) or cleared. Only a [`Remote`] run loop
-    /// needs telling: the real one reads the sink from [`Shared`].
-    VideoSink(bool),
+    /// A video sink was set (true) or cleared, for the stream `lane`. Only
+    /// a [`Remote`] run loop needs telling: the real one reads the sink from
+    /// [`Shared`].
+    VideoSink(u8, bool),
     Data {
         channel: String,
         binary: bool,
@@ -353,27 +373,15 @@ enum Cmd {
 
 /// State shared by the handle and the run loop.
 struct Shared {
-    /// Frames from the encoder not yet taken by the send loop (at most
-    /// [`VIDEO_QUEUE`]).
-    frames: Mutex<VecDeque<EncodedFrame>>,
+    lanes: [Lane; LANES],
     notify: Notify,
     connected: AtomicBool,
-    /// When the outstanding keyframe request was made.
-    keyframe_asked: Mutex<Option<Instant>>,
-    /// The first frame index the browser is missing after a drop, and when
-    /// it went missing, until a frame skipping the gap or a keyframe goes
-    /// out.
-    recovering: Mutex<Option<(u64, Instant)>>,
     trouble: TroubleCounts,
     events: mpsc::UnboundedSender<TransportEvent>,
     /// Data events sent and not yet taken by [`Events`].
     queued_data: Arc<AtomicUsize>,
     input: Mutex<InputRoute>,
-    /// Where keyframe requests and repairs go, if not to `events`.
-    video: Mutex<Option<VideoSink>>,
-    /// Age of the oldest unsent video packet, for the encoder.
-    backlog: SendBacklog,
-    /// Woken when `backlog` changes, so a watcher need not poll it.
+    /// Woken when a lane's backlog changes, so a watcher need not poll it.
     backlog_changed: Notify,
     /// The next offer starts from the configured estimate.
     forget_estimate: AtomicBool,
@@ -387,9 +395,10 @@ impl Shared {
     /// keeps a permit when nobody is waiting, so a change between the
     /// watcher's awaits still wakes its next one. Unchanged values (the
     /// usual case while idle or steady) wake nothing.
-    fn set_backlog(&self, age: Duration) {
-        if self.backlog.get() != age {
-            self.backlog.set(age);
+    fn set_backlog(&self, lane: usize, age: Duration) {
+        let backlog = &self.lanes[lane].backlog;
+        if backlog.get() != age {
+            backlog.set(age);
             self.backlog_changed.notify_one();
         }
     }
@@ -422,18 +431,29 @@ impl Shared {
 
     /// Hands a keyframe request or repair to the encoder: straight to the
     /// video sink if one is set, else as an event.
-    fn signal_video(&self, signal: VideoSignal) {
-        let video = self.video.lock().unwrap_or_else(|e| e.into_inner());
+    fn signal_video(&self, lane: usize, signal: VideoSignal) {
+        let video = self.lanes[lane]
+            .video
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         match &*video {
             Some(sink) => sink(signal),
             None => {
                 drop(video);
                 self.emit(match signal {
-                    VideoSignal::Keyframe => TransportEvent::KeyframeNeeded,
-                    VideoSignal::FramesLost(from) => TransportEvent::FramesLost(from),
+                    VideoSignal::Keyframe => TransportEvent::KeyframeNeeded(lane as u8),
+                    VideoSignal::FramesLost(from) => TransportEvent::FramesLost(lane as u8, from),
                 });
             }
         }
+    }
+
+    fn has_sink(&self, lane: usize) -> bool {
+        self.lanes[lane]
+            .video
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
     }
 
     fn input_route(&self) -> std::sync::MutexGuard<'_, InputRoute> {
@@ -441,43 +461,55 @@ impl Shared {
         self.input.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn keyframe_needed(&self, cause: &str) {
+    fn keyframe_needed(&self, lane: usize, cause: &str) {
         let now = Instant::now();
-        let mut asked = self.keyframe_asked.lock().expect("keyframe lock");
+        let mut asked = self.lanes[lane]
+            .keyframe_asked
+            .lock()
+            .expect("keyframe lock");
         if asked.is_some_and(|t| now.duration_since(t) < KEYFRAME_RETRY) {
-            diag!("keyframe_needed", "cause={cause} suppressed=true");
+            diag!(
+                "keyframe_needed",
+                "lane={lane} cause={cause} suppressed=true"
+            );
             return;
         }
         *asked = Some(now);
         drop(asked);
-        diag!("keyframe_needed", "cause={cause} suppressed=false");
-        self.signal_video(VideoSignal::Keyframe);
+        diag!(
+            "keyframe_needed",
+            "lane={lane} cause={cause} suppressed=false"
+        );
+        self.signal_video(lane, VideoSignal::Keyframe);
     }
 
-    fn keyframe_sent(&self) {
-        *self.keyframe_asked.lock().expect("keyframe lock") = None;
-        self.recovered();
+    fn keyframe_sent(&self, lane: usize) {
+        *self.lanes[lane]
+            .keyframe_asked
+            .lock()
+            .expect("keyframe lock") = None;
+        self.recovered(lane);
     }
 
     /// `dropped` did not go out, and the browser has every frame before
     /// `next`. Asks the encoder to skip the gap, or for a keyframe once
     /// that has taken too long (or before anything was sent).
-    fn frame_dropped(&self, next: Option<u64>, dropped: &EncodedFrame) {
+    fn frame_dropped(&self, lane: usize, next: Option<u64>, dropped: &EncodedFrame) {
         let Some(from) = next else {
-            return self.keyframe_needed("drop_before_first_keyframe");
+            return self.keyframe_needed(lane, "drop_before_first_keyframe");
         };
         let now = Instant::now();
-        let mut recovering = self.recovering.lock().expect("recovery lock");
+        let mut recovering = self.lanes[lane].recovering.lock().expect("recovery lock");
         match *recovering {
             Some((f, since)) if f == from => {
                 if now.duration_since(since) >= RECOVERY_WAIT {
                     drop(recovering);
-                    self.keyframe_needed("repair_timed_out");
+                    self.keyframe_needed(lane, "repair_timed_out");
                 } else if dropped.recovers_from.is_some() {
                     // The repair itself was dropped: skip it too.
                     drop(recovering);
-                    diag!("frames_lost", "from={from} why=repair_dropped");
-                    self.signal_video(VideoSignal::FramesLost(from));
+                    diag!("frames_lost", "lane={lane} from={from} why=repair_dropped");
+                    self.signal_video(lane, VideoSignal::FramesLost(from));
                 }
             }
             _ => {
@@ -485,35 +517,42 @@ impl Shared {
                 drop(recovering);
                 diag!(
                     "frames_lost",
-                    "from={from} why=first_drop idx={}",
+                    "lane={lane} from={from} why=first_drop idx={}",
                     dropped.frame_index
                 );
-                self.signal_video(VideoSignal::FramesLost(from));
+                self.signal_video(lane, VideoSignal::FramesLost(from));
             }
         }
     }
 
     /// A frame skipping the gap was discarded before it reached the send
     /// loop: ask for another, since the frames after it build on it.
-    fn repair_lost(&self) {
-        let recovering = *self.recovering.lock().expect("recovery lock");
+    fn repair_lost(&self, lane: usize) {
+        let recovering = *self.lanes[lane].recovering.lock().expect("recovery lock");
         if let Some((from, _)) = recovering {
-            diag!("frames_lost", "from={from} why=repair_lost_in_queue");
-            self.signal_video(VideoSignal::FramesLost(from));
+            diag!(
+                "frames_lost",
+                "lane={lane} from={from} why=repair_lost_in_queue"
+            );
+            self.signal_video(lane, VideoSignal::FramesLost(from));
         }
     }
 
     /// A frame went out after a gap without a keyframe, or a keyframe did.
-    fn recovered(&self) {
-        self.recovering.lock().expect("recovery lock").take();
+    fn recovered(&self, lane: usize) {
+        self.lanes[lane]
+            .recovering
+            .lock()
+            .expect("recovery lock")
+            .take();
     }
 
     /// The keyframe answering a request never went out: ask again now
     /// rather than after [`KEYFRAME_RETRY`], since every frame until the
     /// next keyframe is held back.
-    fn keyframe_lost(&self) {
-        self.keyframe_sent();
-        self.keyframe_needed("keyframe_lost");
+    fn keyframe_lost(&self, lane: usize) {
+        self.keyframe_sent(lane);
+        self.keyframe_needed(lane, "keyframe_lost");
     }
 }
 
@@ -632,17 +671,13 @@ impl Transport {
         let (audio, audio_rx) = mpsc::channel(8);
         let (exit_tx, exit_rx) = oneshot::channel();
         let shared = Arc::new(Shared {
-            frames: Mutex::new(VecDeque::new()),
+            lanes: Default::default(),
             notify: Notify::new(),
             connected: AtomicBool::new(false),
-            keyframe_asked: Mutex::new(None),
-            recovering: Mutex::new(None),
             trouble: TroubleCounts::default(),
             events: events_tx,
             queued_data: queued_data.clone(),
             input: Mutex::default(),
-            video: Mutex::default(),
-            backlog: SendBacklog::default(),
             backlog_changed: Notify::new(),
             forget_estimate: AtomicBool::new(false),
             exited: Mutex::new(Some(exit_rx)),
@@ -744,9 +779,16 @@ impl Transport {
     /// [`VIDEO_QUEUE`] frames the oldest is discarded; the frame after it
     /// then can't go out, which raises [`TransportEvent::FramesLost`].
     pub fn send_video(&self, frame: EncodedFrame) {
+        let lane = usize::from(frame.lane);
+        if lane >= LANES {
+            return;
+        }
         let keyframe = frame.keyframe;
         let dropped = {
-            let mut frames = self.shared.frames.lock().expect("video queue lock");
+            let mut frames = self.shared.lanes[lane]
+                .frames
+                .lock()
+                .expect("video queue lock");
             if keyframe {
                 frames.clear();
             }
@@ -769,9 +811,9 @@ impl Transport {
             if self.shared.connected.load(Ordering::Relaxed) {
                 bump(&self.shared.trouble.lost_frames);
                 if old.keyframe {
-                    self.shared.keyframe_lost();
+                    self.shared.keyframe_lost(lane);
                 } else if old.recovers_from.is_some() {
-                    self.shared.repair_lost();
+                    self.shared.repair_lost(lane);
                 }
             }
         }
@@ -809,13 +851,16 @@ impl Transport {
     /// queued from the last one are discarded, and any repair in progress
     /// is forgotten, since the new encoder starts with a keyframe and its
     /// frame numbers start again.
-    pub fn set_video_sink(&self, sink: VideoSink) {
-        let mut video = self.shared.video.lock().unwrap_or_else(|e| e.into_inner());
-        self.shared.frames.lock().expect("video queue lock").clear();
-        self.shared.recovering.lock().expect("recovery lock").take();
+    pub fn set_video_sink(&self, lane: u8, sink: VideoSink) {
+        let Some(state) = self.shared.lanes.get(usize::from(lane)) else {
+            return;
+        };
+        let mut video = state.video.lock().unwrap_or_else(|e| e.into_inner());
+        state.frames.lock().expect("video queue lock").clear();
+        state.recovering.lock().expect("recovery lock").take();
         *video = Some(sink);
         drop(video);
-        self.send_cmd(Cmd::VideoSink(true));
+        self.send_cmd(Cmd::VideoSink(lane, true));
     }
 
     /// The next offer is for another device: its estimate starts from
@@ -827,13 +872,12 @@ impl Transport {
     }
 
     /// Keyframe requests and repairs go back to being events.
-    pub fn clear_video_sink(&self) {
-        self.shared
-            .video
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take();
-        self.send_cmd(Cmd::VideoSink(false));
+    pub fn clear_video_sink(&self, lane: u8) {
+        let Some(state) = self.shared.lanes.get(usize::from(lane)) else {
+            return;
+        };
+        state.video.lock().unwrap_or_else(|e| e.into_inner()).take();
+        self.send_cmd(Cmd::VideoSink(lane, false));
     }
 
     /// Stop handing input to the sink; it waits for the next one.
@@ -844,8 +888,10 @@ impl Transport {
     /// How far behind the video send queue is, updated as it sends. The
     /// encoder skips frames while it is behind rather than send frames that
     /// would only be dropped as late.
-    pub fn send_backlog(&self) -> SendBacklog {
-        self.shared.backlog.clone()
+    pub fn send_backlog(&self, lane: u8) -> SendBacklog {
+        self.shared.lanes[usize::from(lane).min(LANES - 1)]
+            .backlog
+            .clone()
     }
 
     /// Resolve when the send backlog has changed since the last time this
@@ -936,20 +982,21 @@ impl Driver {
                     }
                 }
                 _ = shared.notify.notified() => {
-                    let frames = std::mem::take(&mut *shared.frames.lock().expect("video queue lock"));
+                    for lane in 0..LANES {
+                    let frames = std::mem::take(&mut *shared.lanes[lane].frames.lock().expect("video queue lock"));
                     let batch = frames.len();
                     for frame in frames {
                         let Some(s) = &mut self.session else { break };
-                        let next = s.next_index();
+                        let next = s.next_index(lane);
                         let now = Instant::now();
-                        let queue = ws_diag::enabled().then(|| s.queue_diag(now));
+                        let queue = ws_diag::enabled().then(|| s.queue_diag(lane, now));
                         let result = s.write_video(&frame, now);
                         if let Some((age, bytes, packets)) = queue {
                             // since_enc: encode done -> here, the hop through
                             // the host's tasks and this loop.
                             diag!(
                                 "send",
-                                "idx={} key={} repair={} bytes={} result={result:?} since_enc_ms={:.2} batch={batch} pacer_age_ms={:.2} pacer_bytes={bytes} pacer_pkts={packets}",
+                                "lane={lane} idx={} key={} repair={} bytes={} result={result:?} since_enc_ms={:.2} batch={batch} pacer_age_ms={:.2} pacer_bytes={bytes} pacer_pkts={packets}",
                                 frame.frame_index,
                                 frame.keyframe,
                                 frame.recovers_from.is_some(),
@@ -959,27 +1006,28 @@ impl Driver {
                             );
                         }
                         match result {
-                            VideoWrite::Sent if frame.keyframe => shared.keyframe_sent(),
+                            VideoWrite::Sent if frame.keyframe => shared.keyframe_sent(lane),
                             VideoWrite::Sent => {
                                 if next != Some(frame.frame_index) {
                                     bump(&shared.trouble.recovered);
-                                    shared.recovered();
+                                    shared.recovered(lane);
                                 }
                             }
                             VideoWrite::Skipped if frame.keyframe && s.is_connected() => {
                                 bump(&shared.trouble.lost_frames);
-                                shared.keyframe_lost()
+                                shared.keyframe_lost(lane)
                             }
                             VideoWrite::Late => {
                                 bump(&shared.trouble.late_frames);
-                                shared.frame_dropped(next, &frame)
+                                shared.frame_dropped(lane, next, &frame)
                             }
                             VideoWrite::Broken => {
                                 bump(&shared.trouble.lost_frames);
-                                shared.frame_dropped(next, &frame)
+                                shared.frame_dropped(lane, next, &frame)
                             }
                             VideoWrite::Skipped => {}
                         }
+                    }
                     }
                 }
                 Some(pkt) = audio.recv() => {
@@ -1039,12 +1087,19 @@ impl Driver {
                         self.shared.connected.store(true, Ordering::Relaxed);
                         self.shared.emit(TransportEvent::Connected);
                         // The first frame the browser sees must be decodable.
-                        self.shared.keyframe_sent();
-                        self.shared.keyframe_needed("connected");
+                        // The second stream only when something encodes it;
+                        // otherwise its first frame asks.
+                        for lane in 0..LANES {
+                            self.shared.keyframe_sent(lane);
+                            if lane == 0 || self.shared.has_sink(lane) {
+                                self.shared.keyframe_needed(lane, "connected");
+                            }
+                        }
                     }
-                    TransportEvent::KeyframeNeeded => {
+                    TransportEvent::KeyframeNeeded(lane) => {
                         bump(&self.shared.trouble.browser_keyframe_requests);
-                        self.shared.keyframe_needed("browser")
+                        self.shared
+                            .keyframe_needed(usize::from(lane).min(LANES - 1), "browser")
                     }
                     TransportEvent::Stats(mut stats) => {
                         stats.trouble = self.shared.trouble.take();
@@ -1078,12 +1133,14 @@ impl Driver {
         } else if let Some(s) = &mut self.session {
             let connected = s.is_connected();
             self.shared.connected.store(connected, Ordering::Relaxed);
-            let age = if connected {
-                s.queue_diag(Instant::now()).0
-            } else {
-                Duration::ZERO
-            };
-            self.shared.set_backlog(age);
+            for lane in 0..LANES {
+                let age = if connected {
+                    s.queue_diag(lane, Instant::now()).0
+                } else {
+                    Duration::ZERO
+                };
+                self.shared.set_backlog(lane, age);
+            }
         }
         deadline
     }
@@ -1125,7 +1182,9 @@ impl Driver {
             }
         }
         self.shared.connected.store(false, Ordering::Relaxed);
-        self.shared.set_backlog(Duration::ZERO);
+        for lane in 0..LANES {
+            self.shared.set_backlog(lane, Duration::ZERO);
+        }
         self.shared.input_route().reset();
         self.filter.lock().expect("filter lock").reset(None);
         self.confirmed.clear();
@@ -1166,7 +1225,7 @@ impl Driver {
             }
             Cmd::Close => self.end_session(),
             Cmd::Shutdown => unreachable!("handled by the run loop"),
-            Cmd::VideoSink(_) => {}
+            Cmd::VideoSink(..) => {}
             Cmd::MaxBitrate(bps) => {
                 self.config.max_bitrate_bps = bps;
                 if let Some(s) = &mut self.session {
@@ -1196,13 +1255,13 @@ mod tests {
     #[tokio::test]
     async fn a_backlog_change_between_waits_is_not_lost() {
         let (transport, _events, _ends) = Transport::new();
-        transport.shared.set_backlog(Duration::from_millis(5));
+        transport.shared.set_backlog(0, Duration::from_millis(5));
         tokio::time::timeout(Duration::from_secs(1), transport.backlog_changed())
             .await
             .expect("the change made before waiting wakes the wait");
         // Several changes before one wait coalesce into a single wakeup.
         for ms in [6, 7, 8] {
-            transport.shared.set_backlog(Duration::from_millis(ms));
+            transport.shared.set_backlog(0, Duration::from_millis(ms));
         }
         tokio::time::timeout(Duration::from_secs(1), transport.backlog_changed())
             .await
@@ -1213,7 +1272,7 @@ mod tests {
                 .is_err()
         );
         // Setting the same value again is no change, so nothing wakes.
-        transport.shared.set_backlog(Duration::from_millis(8));
+        transport.shared.set_backlog(0, Duration::from_millis(8));
         assert!(
             tokio::time::timeout(Duration::from_millis(50), transport.backlog_changed())
                 .await
@@ -1347,17 +1406,29 @@ mod tests {
         .unwrap();
         let got = Arc::new(Mutex::new(Vec::new()));
         let sink_got = got.clone();
-        transport.set_video_sink(Box::new(move |s| sink_got.lock().unwrap().push(s)));
-        transport.shared.keyframe_needed("test");
-        transport.shared.signal_video(VideoSignal::FramesLost(7));
+        transport.set_video_sink(0, Box::new(move |s| sink_got.lock().unwrap().push(s)));
+        transport.shared.keyframe_needed(0, "test");
+        transport.shared.signal_video(0, VideoSignal::FramesLost(7));
         assert_eq!(
             *got.lock().unwrap(),
             [VideoSignal::Keyframe, VideoSignal::FramesLost(7)]
         );
         assert!(events.try_recv().is_err());
 
-        transport.clear_video_sink();
-        transport.shared.signal_video(VideoSignal::FramesLost(9));
-        assert_eq!(events.try_recv().ok(), Some(TransportEvent::FramesLost(9)));
+        // The second stream has its own sink: with none set, its signals are
+        // events that name it, and the first stream's sink hears nothing.
+        transport.shared.signal_video(1, VideoSignal::FramesLost(3));
+        assert_eq!(
+            events.try_recv().ok(),
+            Some(TransportEvent::FramesLost(1, 3))
+        );
+        assert_eq!(got.lock().unwrap().len(), 2);
+
+        transport.clear_video_sink(0);
+        transport.shared.signal_video(0, VideoSignal::FramesLost(9));
+        assert_eq!(
+            events.try_recv().ok(),
+            Some(TransportEvent::FramesLost(0, 9))
+        );
     }
 }

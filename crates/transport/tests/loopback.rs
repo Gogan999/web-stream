@@ -22,6 +22,7 @@ fn frame(index: u64, keyframe: bool) -> EncodedFrame {
     data.extend_from_slice(&[0, 0, 0, 1, if keyframe { 0x65 } else { 0x41 }]);
     data.extend(std::iter::repeat_n(index as u8, 3000));
     EncodedFrame {
+        lane: 0,
         display: DisplayId(0),
         codec: VideoCodec::H264,
         frame_index: index,
@@ -94,7 +95,9 @@ async fn browser_peer_gets_video_and_data() {
                     sock.send_to(&t.contents, t.destination).await.unwrap();
                 }
                 Output::Event(e) => match e {
-                    Event::MediaAdded(m) if m.kind == MediaKind::Video => video_mid = Some(m.mid),
+                    Event::MediaAdded(m) if m.kind == MediaKind::Video => {
+                        video_mid.get_or_insert(m.mid);
+                    }
                     Event::MediaData(d) if Some(d.mid) == video_mid => got_video += 1,
                     Event::ChannelOpen(id, label) => open.push((id, label)),
                     _ => {}
@@ -111,7 +114,7 @@ async fn browser_peer_gets_video_and_data() {
                     assert!(transport.set_input_sink(sink(sunk.clone()), 1));
                 }
                 TransportEvent::Data { channel, data, .. } => host_data.push((channel, data)),
-                TransportEvent::KeyframeNeeded => keyframe_requests += 1,
+                TransportEvent::KeyframeNeeded(_) => keyframe_requests += 1,
                 _ => {}
             }
         }
@@ -449,7 +452,7 @@ async fn full_frames_at_the_target_bitrate_need_almost_no_keyframes() {
         while let Ok(ev) = events.try_recv() {
             match ev {
                 TransportEvent::Connected => connected_at = Some(Instant::now()),
-                TransportEvent::KeyframeNeeded => {
+                TransportEvent::KeyframeNeeded(_) => {
                     keyframe_due = true;
                     // The one that starts the stream doesn't count.
                     if connected_at.is_some_and(|t| t.elapsed() > Duration::from_millis(500)) {
@@ -585,7 +588,7 @@ async fn lost_packets_are_resent_not_keyframed() {
         while let Ok(ev) = events.try_recv() {
             match ev {
                 TransportEvent::Connected => connected_at = Some(Instant::now()),
-                TransportEvent::KeyframeNeeded => {
+                TransportEvent::KeyframeNeeded(_) => {
                     keyframe_due = true;
                     // The one that starts the stream doesn't count.
                     if connected_at.is_some_and(|t| t.elapsed() > Duration::from_millis(500)) {
@@ -718,8 +721,8 @@ async fn a_dropped_frame_is_skipped_over_without_a_keyframe() {
         while let Ok(ev) = events.try_recv() {
             match ev {
                 TransportEvent::Connected => connected = true,
-                TransportEvent::KeyframeNeeded => keyframe_requests += 1,
-                TransportEvent::FramesLost(from) => {
+                TransportEvent::KeyframeNeeded(_) => keyframe_requests += 1,
+                TransportEvent::FramesLost(_, from) => {
                     if lost.is_empty() {
                         repair_due = Some(from);
                     }
@@ -867,4 +870,77 @@ async fn bandwidth_estimate_climbs_past_the_timer_tick() {
         best > WANT_BPS,
         "bandwidth estimate peaked at {best} b/s on localhost"
     );
+}
+
+/// The second video stream is its own track: its frames reach the peer on
+/// the second video mid and never on the first, and each stream keeps its
+/// own frame numbers (both start at 0 with a keyframe).
+#[tokio::test]
+async fn the_second_stream_is_its_own_track() {
+    let _shared = REAL_TIME.read().await;
+    let (transport, mut events) = Transport::start(TransportConfig {
+        ips: vec![[127, 0, 0, 1].into()],
+        udp_port: 0,
+        tcp_port: None,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let offer = transport.offer().await.unwrap();
+    assert_eq!(offer.matches("m=video").count(), ws_transport::LANES);
+    let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let local = sock.local_addr().unwrap();
+    let mut rtc = Rtc::builder().build(Instant::now());
+    rtc.add_local_candidate(Candidate::host(local, "udp").unwrap());
+    let answer = rtc
+        .sdp_api()
+        .accept_offer(SdpOffer::from_sdp_string(&offer).unwrap())
+        .unwrap();
+    transport
+        .accept_answer(answer.to_sdp_string())
+        .await
+        .unwrap();
+
+    let mut buf = vec![0u8; 2048];
+    let mut mids = Vec::new();
+    let mut got = [0usize; 2];
+    let mut connected = false;
+    let mut next = [0u64; 2];
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline && got[1] < 3 {
+        let timeout = loop {
+            match rtc.poll_output().unwrap() {
+                Output::Timeout(t) => break t,
+                Output::Transmit(t) => {
+                    sock.send_to(&t.contents, t.destination).await.unwrap();
+                }
+                Output::Event(Event::MediaAdded(m)) if m.kind == MediaKind::Video => {
+                    mids.push(m.mid)
+                }
+                Output::Event(Event::MediaData(d)) => {
+                    if let Some(i) = mids.iter().position(|m| *m == d.mid) {
+                        got[i] += 1;
+                    }
+                }
+                Output::Event(_) => {}
+            }
+        };
+        while let Ok(ev) = events.try_recv() {
+            if matches!(ev, TransportEvent::Connected) {
+                connected = true;
+            }
+        }
+        // Only the second stream has frames.
+        if connected && next[1] < 10 {
+            let mut f = frame(next[1], next[1] == 0);
+            f.lane = 1;
+            transport.send_video(f);
+            next[1] += 1;
+        }
+        let got_packet = recv_until(&sock, &mut buf, timeout).await;
+        rtc.handle_input(input(got_packet, &buf, local)).unwrap();
+    }
+    assert_eq!(mids.len(), 2, "two video tracks offered");
+    assert!(got[1] >= 3, "second stream delivered {} frames", got[1]);
+    assert_eq!(got[0], 0, "the first stream carried the second's frames");
 }

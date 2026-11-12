@@ -37,6 +37,8 @@
       <summary>Display</summary>
       <div class="group">
         <label>Display <select id="display" disabled></select></label>
+        <label title="Show a second host display next to the first, each at its own full detail. It is another video stream, so it uses more bandwidth.">Second monitor <select id="display2" disabled></select></label>
+        <button id="popout" type="button" hidden title="Show the second monitor in a window of its own, to put on another screen. Double-click it for fullscreen. Needs pop-ups allowed.">Pop out</button>
         <label>Resolution <select id="resolution"></select></label>
         <label title="Lets the host lower the stream's resolution while the connection is too slow for it, and raise it again once there is room. Only when something moves on screen: a still desktop never lowers it.">Auto resolution <select id="min-scale"></select></label>
         <label title="Change the host display's resolution to fit this screen. The host must be started with --allow-resolution-change; undone on disconnect."><input type="checkbox" id="match-host"> Match host resolution</label>
@@ -105,7 +107,9 @@
 <main id="stage" tabindex="-1">
   <div id="view">
     <video id="video" autoplay playsinline disablepictureinpicture disableremoteplayback></video>
+    <video id="video2" autoplay playsinline disablepictureinpicture disableremoteplayback hidden></video>
     <img id="cursor" alt="" hidden>
+    <img id="cursor2" alt="" hidden>
   </div>
   <pre id="stats" hidden></pre>
   <div id="touchbar">

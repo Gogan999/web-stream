@@ -282,6 +282,9 @@ pub(crate) struct NvEncoder<M: Send + 'static> {
     fps: u32,
     vbv_frames: f64,
     keyframe_scale: u8,
+    /// Fixed quantizer for this codec instead of a constant bitrate (the
+    /// Source quality); the pacer holds the bitrate.
+    fixed_qp: Option<u32>,
     /// The GPU can invalidate reference frames, and the config asks for it.
     can_invalidate: bool,
     /// Completion events (NVENC's async mode); otherwise the output thread
@@ -340,6 +343,7 @@ impl<M: Send + 'static> NvEncoder<M> {
             fps: cfg.fps,
             vbv_frames: 1.0,
             keyframe_scale: 1,
+            fixed_qp: None,
             can_invalidate: false,
             async_mode: false,
             slots: Vec::new(),
@@ -383,6 +387,7 @@ impl<M: Send + 'static> NvEncoder<M> {
         let effort = crate::tuning::tuning(cfg);
         self.vbv_frames = effort.vbv_frames;
         self.keyframe_scale = effort.keyframe_scale;
+        self.fixed_qp = effort.source.then(|| source_qp(cfg.codec));
         let preset_guid = match effort.preset {
             1 => nv::NV_ENC_PRESET_P1_GUID,
             2 => nv::NV_ENC_PRESET_P2_GUID,
@@ -447,7 +452,13 @@ impl<M: Send + 'static> NvEncoder<M> {
             VideoCodec::H265 => nv::NV_ENC_HEVC_PROFILE_MAIN_GUID,
             VideoCodec::Av1 => nv::NV_ENC_AV1_PROFILE_MAIN_GUID,
         };
-        apply_rate(&mut config, cfg.bitrate_kbps, cfg.fps, self.vbv_frames);
+        apply_rate(
+            &mut config,
+            cfg.bitrate_kbps,
+            cfg.fps,
+            self.vbv_frames,
+            self.fixed_qp,
+        );
         // The preset already implies these for ultra-low latency; set them
         // so a driver default change can't add frames of delay.
         config.rcParams.set_enableLookahead(0);
@@ -459,7 +470,12 @@ impl<M: Send + 'static> NvEncoder<M> {
         // send queue up for hundreds of milliseconds. NVIDIA recommends it
         // for low-latency CBR with a one-frame VBV; it adds no frames of
         // delay, only a little encode time.
-        config.rcParams.multiPass = nv::NV_ENC_MULTI_PASS::NV_ENC_TWO_PASS_QUARTER_RESOLUTION;
+        config.rcParams.multiPass = if self.fixed_qp.is_some() {
+            // A fixed quantizer needs no estimate of what a frame will cost.
+            nv::NV_ENC_MULTI_PASS::NV_ENC_MULTI_PASS_DISABLED
+        } else {
+            nv::NV_ENC_MULTI_PASS::NV_ENC_TWO_PASS_QUARTER_RESOLUTION
+        };
         // SAFETY: the union member matches the codec GUID chosen above.
         unsafe {
             let codec = &mut config.encodeCodecConfig;
@@ -882,7 +898,7 @@ impl<M: Send + 'static> NvEncoder<M> {
 
     fn reconfigure_rate(&mut self, kbps: u32, vbv_frames: f64, keyframe_scale: u8) -> Result<()> {
         let previous = self.config.rcParams;
-        apply_rate(&mut self.config, kbps, self.fps, vbv_frames);
+        apply_rate(&mut self.config, kbps, self.fps, vbv_frames, self.fixed_qp);
         // The ratio of keyframe to ordinary frame bits rate control aims for
         // (ultra-low latency defaults to 1).
         self.config.rcParams.lowDelayKeyFrameScale = keyframe_scale;
@@ -1154,14 +1170,45 @@ pub(crate) const DPB_FRAMES: u32 = 4;
 /// CBR at `kbps` with a VBV of `vbv_frames` frames: every frame fits in
 /// about one frame time on the wire, so the network never has to buffer a
 /// long burst.
-fn apply_rate(config: &mut nv::NV_ENC_CONFIG, kbps: u32, fps: u32, vbv_frames: f64) {
+///
+/// With `fixed_qp` (the Source quality) the encoder instead codes every
+/// frame at that quantizer, whatever it costs; the bitrate is still stored
+/// (it is what [`NvEncoder::bitrate_kbps`] reports) but only the capture
+/// thread's pacer enforces it, by delaying frames.
+fn apply_rate(
+    config: &mut nv::NV_ENC_CONFIG,
+    kbps: u32,
+    fps: u32,
+    vbv_frames: f64,
+    fixed_qp: Option<u32>,
+) {
     let bps = kbps.saturating_mul(1000);
     let rc = &mut config.rcParams;
-    rc.rateControlMode = nv::NV_ENC_PARAMS_RC_MODE::NV_ENC_PARAMS_RC_CBR;
+    rc.rateControlMode = match fixed_qp {
+        Some(qp) => {
+            rc.constQP = nv::NV_ENC_QP {
+                qpInterP: qp,
+                qpInterB: qp,
+                qpIntra: qp,
+            };
+            nv::NV_ENC_PARAMS_RC_MODE::NV_ENC_PARAMS_RC_CONSTQP
+        }
+        None => nv::NV_ENC_PARAMS_RC_MODE::NV_ENC_PARAMS_RC_CBR,
+    };
     rc.averageBitRate = bps;
     rc.maxBitRate = bps;
     rc.vbvBufferSize = (f64::from(bps) / f64::from(fps.max(1)) * vbv_frames) as u32;
     rc.vbvInitialDelay = rc.vbvBufferSize;
+}
+
+/// The fixed quantizer for the Source quality: low enough that text and
+/// thin lines come out as sharp as 4:2:0 allows. AV1's scale runs to 255
+/// where H.264's and HEVC's run to 51.
+fn source_qp(codec: VideoCodec) -> u32 {
+    match codec {
+        VideoCodec::H264 | VideoCodec::H265 => 18,
+        VideoCodec::Av1 => 72,
+    }
 }
 
 /// BT.709 limited range, matching what the video processor writes.

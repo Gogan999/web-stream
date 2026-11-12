@@ -115,7 +115,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             match ev {
                 // rav1e can't skip a dropped frame; restart from a keyframe.
-                TransportEvent::KeyframeNeeded | TransportEvent::FramesLost(_) => {
+                TransportEvent::KeyframeNeeded(_) | TransportEvent::FramesLost(..) => {
                     want_keyframe.store(true, Ordering::Relaxed)
                 }
                 TransportEvent::Data {
@@ -228,6 +228,7 @@ fn encode_loop(transport: Transport, want_keyframe: Arc<AtomicBool>) {
         }
         while let Ok(pkt) = ctx.receive_packet() {
             transport.send_video(EncodedFrame {
+                lane: 0,
                 display: DisplayId(0),
                 codec: VideoCodec::Av1,
                 frame_index: pkt.input_frameno,

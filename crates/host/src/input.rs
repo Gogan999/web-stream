@@ -34,7 +34,8 @@ const ERROR_LOG_EVERY: Duration = Duration::from_secs(5);
 #[derive(Debug, PartialEq)]
 enum Msg {
     Event(InputEvent),
-    Display(DisplayRect),
+    /// The display of video stream `lane` is at this position and size.
+    Display(u8, DisplayRect),
 }
 
 /// Motion not yet injected.
@@ -42,7 +43,7 @@ enum Msg {
 struct Motion {
     dx: i32,
     dy: i32,
-    abs: Option<(u16, u16, Option<u16>)>,
+    abs: Option<(u16, u16, Option<u16>, u8)>,
     pads: [Option<(GamepadState, Option<u16>)>; MAX_GAMEPADS as usize],
 }
 
@@ -64,9 +65,9 @@ impl Motion {
                 self.dx = self.dx.saturating_add(dx.into());
                 self.dy = self.dy.saturating_add(dy.into());
             }
-            InputEvent::MouseAbs { x, y, seq } => {
+            InputEvent::MouseAbs { x, y, seq, lane } => {
                 if replaces(seq, self.abs.and_then(|a| a.2)) {
-                    self.abs = Some((x, y, seq));
+                    self.abs = Some((x, y, seq, lane));
                 }
             }
             InputEvent::Gamepad { index, state, seq } if index < MAX_GAMEPADS => {
@@ -84,8 +85,8 @@ impl Motion {
     fn drain(&mut self) -> Vec<InputEvent> {
         let m = std::mem::take(self);
         let mut out = Vec::new();
-        if let Some((x, y, seq)) = m.abs {
-            out.push(InputEvent::MouseAbs { x, y, seq });
+        if let Some((x, y, seq, lane)) = m.abs {
+            out.push(InputEvent::MouseAbs { x, y, seq, lane });
         }
         let (mut dx, mut dy) = (m.dx, m.dy);
         while dx != 0 || dy != 0 {
@@ -190,9 +191,10 @@ impl InputThread {
         }
     }
 
-    /// The streamed display moved; absolute mouse positions follow it.
-    pub fn set_display(&self, rect: DisplayRect) {
-        self.push(Msg::Display(rect));
+    /// The display streamed on video stream `lane` (0 is the main one)
+    /// moved; absolute mouse positions on it follow.
+    pub fn set_display(&self, lane: u8, rect: DisplayRect) {
+        self.push(Msg::Display(lane, rect));
     }
 
     fn push(&self, msg: Msg) {
@@ -222,6 +224,10 @@ fn run(
 ) {
     let mut handler = InputHandler::new(platform::input_sink(rumble));
     handler.set_gamepad_kind(gamepad);
+    // Where each stream's display is, and which one the handler's rectangle
+    // is for now.
+    let mut rects: [Option<DisplayRect>; ws_proto::MAX_LANES as usize] = [display, None];
+    let mut active = 0u8;
     if let Some(rect) = display {
         platform::set_display_rect(handler.sink_mut(), rect);
     }
@@ -255,8 +261,26 @@ fn run(
         let now = Instant::now();
         for msg in coalesce(batch) {
             match msg {
-                Msg::Event(event) => errors.check(handler.apply(event, now)),
-                Msg::Display(rect) => platform::set_display_rect(handler.sink_mut(), rect),
+                Msg::Event(event) => {
+                    if let InputEvent::MouseAbs { lane, .. } = event {
+                        // A position on the other stream's display.
+                        if lane != active {
+                            if let Some(rect) = rects.get(usize::from(lane)).copied().flatten() {
+                                platform::set_display_rect(handler.sink_mut(), rect);
+                                active = lane;
+                            }
+                        }
+                    }
+                    errors.check(handler.apply(event, now))
+                }
+                Msg::Display(lane, rect) => {
+                    if let Some(slot) = rects.get_mut(usize::from(lane)) {
+                        *slot = Some(rect);
+                    }
+                    if lane == active {
+                        platform::set_display_rect(handler.sink_mut(), rect);
+                    }
+                }
             }
         }
         let now = Instant::now();
@@ -324,7 +348,8 @@ mod tests {
             m.merge(InputEvent::MouseAbs {
                 x: 1,
                 y: 2,
-                seq: None
+                seq: None,
+                lane: 0
             })
             .is_none()
         );
@@ -332,7 +357,8 @@ mod tests {
             m.merge(InputEvent::MouseAbs {
                 x: 3,
                 y: 4,
-                seq: None
+                seq: None,
+                lane: 0
             })
             .is_none()
         );
@@ -358,7 +384,8 @@ mod tests {
                 InputEvent::MouseAbs {
                     x: 3,
                     y: 4,
-                    seq: None
+                    seq: None,
+                    lane: 0
                 },
                 InputEvent::MouseMove {
                     dx: i16::MAX,
@@ -417,21 +444,37 @@ mod tests {
 
     #[test]
     fn numbered_positions_merge_by_seq() {
-        let abs = |x, seq| InputEvent::MouseAbs { x, y: 0, seq };
+        let abs = |x, seq| InputEvent::MouseAbs {
+            x,
+            y: 0,
+            seq,
+            lane: 0,
+        };
         let mut m = Motion::default();
         m.merge(abs(1, None));
         m.merge(abs(2, Some(7)));
-        assert_eq!(m.abs, Some((2, 0, Some(7))), "numbered after unnumbered");
+        assert_eq!(m.abs, Some((2, 0, Some(7), 0)), "numbered after unnumbered");
         m.merge(abs(3, Some(6)));
-        assert_eq!(m.abs, Some((2, 0, Some(7))), "an overtaken one is dropped");
+        assert_eq!(
+            m.abs,
+            Some((2, 0, Some(7), 0)),
+            "an overtaken one is dropped"
+        );
         m.merge(abs(4, Some(8)));
-        assert_eq!(m.abs, Some((4, 0, Some(8))));
+        assert_eq!(m.abs, Some((4, 0, Some(8), 0)));
     }
 
     #[test]
     fn motion_stays_on_its_side_of_a_press() {
         use ws_proto::MouseButton;
-        let abs = |x| Msg::Event(InputEvent::MouseAbs { x, y: 0, seq: None });
+        let abs = |x| {
+            Msg::Event(InputEvent::MouseAbs {
+                x,
+                y: 0,
+                seq: None,
+                lane: 0,
+            })
+        };
         let button = |down| {
             Msg::Event(InputEvent::MouseButton {
                 button: MouseButton::Left,
@@ -452,6 +495,7 @@ mod tests {
             x,
             y: 0,
             seq: Some(seq),
+            lane: 0,
         };
         assert!(m.merge(abs(1, 7)).is_none());
         // Overtaken: arrived later but older.

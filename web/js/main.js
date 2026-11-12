@@ -3,6 +3,7 @@ import { defaultSignalUrl } from './signaling.js';
 import { InputCapture } from './input.js';
 import { hidUsage } from './keymap.js';
 import { CursorView } from './cursor.js';
+import { openPopout } from './popout.js';
 import { snapshot, compute, assess, render, Alerts, FrameTimer } from './stats.js';
 import * as pairing from './pairing.js';
 import * as settingsStore from './settings.js';
@@ -21,7 +22,7 @@ const pairingLink = pairing.takePairingLink();
 const ui = {
   connect: $('connect'), status: $('status'), display: $('display'), mouseMode: $('mouse-mode'),
   fullscreen: $('fullscreen'), statsToggle: $('stats-toggle'), statsLevel: $('stats-level'), stage: $('stage'), video: $('video'), stats: $('stats'),
-  cursor: $('cursor'),
+  cursor: $('cursor'), video2: $('video2'), cursor2: $('cursor2'), display2: $('display2'), popout: $('popout'),
   unpair: $('unpair'), updateHost: $('update-host'), pair: $('pair'), deviceName: $('device-name'), pairStart: $('pair-start'),
   pairCode: $('pair-code'), pairConfirm: $('pair-confirm'), pairMsg: $('pair-msg'),
   resolution: $('resolution'), codec: $('codec'), bitrate: $('bitrate'), fps: $('fps'), quality: $('quality'),
@@ -61,6 +62,8 @@ ui.zoomPan.addEventListener('click', () => {
 let session = null;
 let input = null;
 let cursor = null;
+let cursor2 = null; // the pointer on the second monitor's video
+let popout = null; // the second monitor's window, while it has one
 let statsTimer = 0;
 let prevSnap = null;
 const frameTimer = new FrameTimer(ui.video);
@@ -82,7 +85,7 @@ function setStatus(text, state) {
 
 async function connect() {
   disconnect();
-  session = new Session({ signalUrl, video: ui.video });
+  session = new Session({ signalUrl, video: ui.video, video2: ui.video2 });
   session.addEventListener('status', (e) => setStatus(e.detail.text, e.detail.state));
   session.addEventListener('control', (e) => onControl(e.detail));
   session.addEventListener('file-chunk', (e) => files.onChunk(e.detail));
@@ -105,15 +108,16 @@ async function connect() {
     files.clear();
     uploads.clear();
   });
-  host = { displays: [], active: null, config: null, stats: null, matched: false, awaitingMatch: false };
+  host = { displays: [], active: null, second: null, config: null, stats: null, matched: false, awaitingMatch: false };
   lastSent = null;
   // The host sends "bye" with reason "revoked" when this browser is unpaired.
   session.addEventListener('status', (e) => { if (/unpaired/.test(e.detail.text)) checkPairing(); });
   input = new InputCapture({
-    session, video: ui.video, stage: ui.stage, onHotkey,
+    session, video: ui.video, video2: ui.video2, stage: ui.stage, onHotkey,
     keyTarget: ui.kbdInput, onKeySent: (usage, down) => softKeys.keySent(usage, down),
     onReleaseAll: () => softKeys.forget(),
     displaySize: () => host?.displays.find((d) => d.id === host.active) ?? null,
+    displaySize2: () => displayById(host?.second),
     zoom,
   });
   input.setMode(ui.mouseMode.value);
@@ -123,6 +127,7 @@ async function connect() {
     onPlace: (x, y) => zoom.follow(x, y), // zoomed in, the view keeps the trackpad's pointer in sight
   });
   cursor.setMode(ui.mouseMode.value);
+  makeCursor2(ui.video2, ui.cursor2);
   ui.connect.textContent = 'Disconnect';
   if (!ui.stats.hidden) startStats();
   if (settings.mic) setMic(true);
@@ -139,12 +144,15 @@ function disconnect() {
   diag?.stop();
   if (input) input.stop();
   if (session) session.close();
+  showDual(false);
   cursor?.stop();
+  cursor2?.stop();
   zoom.reset();
   micTrack?.stop();
   micTrack = null;
   input = null;
   cursor = null;
+  cursor2 = null;
   session = null;
   stopStats();
   tuning?.cancel();
@@ -157,7 +165,9 @@ function disconnect() {
 }
 
 function onControl(msg) {
-  if (cursor?.onControl(msg)) return;
+  // The pointer's shape goes to both videos; its position is told apart by where it falls.
+  const pointer = [cursor?.onControl(msg), cursor2?.onControl(msg)];
+  if (pointer.some(Boolean)) return;
   if (files.onControl(msg)) return;
   if (uploads.onControl(msg)) return;
   if (msg.type === 'displays' && Array.isArray(msg.displays)) {
@@ -171,12 +181,20 @@ function onControl(msg) {
     }));
     if (msg.active != null) ui.display.value = String(msg.active);
     ui.display.disabled = msg.displays.length < 2;
+    fillSecond(msg.displays, msg.second ?? null);
     if (host) {
       host.displays = msg.displays;
+      host.second = msg.second ?? null;
+      showDual(host.second != null);
       if (msg.active != null) host.active = msg.active;
       host.awaitingMatch = false;
       applySettings();
     }
+  } else if (msg.type === 'secondDisplay' && host) {
+    host.second = msg.id ?? null;
+    ui.display2.value = host.second == null ? 'off' : String(host.second);
+    showDual(host.second != null);
+    applySettings();
   } else if (msg.type === 'displayChanged' && msg.id != null) {
     ui.display.value = String(msg.id);
     if (host) {
@@ -301,7 +319,12 @@ showSettings();
 for (const [el, key] of [[ui.resolution, 'resolution'], [ui.codec, 'codec'], [ui.bitrate, 'bitrate'], [ui.fps, 'fps'], [ui.quality, 'quality'], [ui.keyframeScale, 'keyframeScale'], [ui.minScale, 'minScale']]) {
   el.addEventListener('change', () => {
     settings[key] = ['fps', 'keyframeScale', 'minScale'].includes(key) ? Number(el.value) : el.value;
+    // Source is a bundle for reading and working: host-native pixels (no scaling blur), no automatic
+    // shrinking, and a bitrate with room for it; the host keeps each frame sharp and lowers the frame
+    // rate, up to the one chosen here, to fit the bitrate.
+    if (key === 'quality' && settings.quality === 'source') Object.assign(settings, settingsStore.SOURCE_PRESET);
     settingsStore.save(settings);
+    showSettings();
     applySettings();
   });
 }
@@ -445,6 +468,91 @@ async function autoTune() {
 
 ui.autotune.addEventListener('click', autoTune);
 
+// The host pointer's view on the second monitor's video: in the page, or in its window.
+function makeCursor2(video, overlay) {
+  cursor2?.stop();
+  cursor2 = new CursorView({
+    video, overlay, displaySize: () => displayById(host?.second),
+    // The host reports the pointer from the main display's corner; this video starts at the other's.
+    shift: () => {
+      const main = displayById(host?.active);
+      const other = displayById(host?.second);
+      return main && other ? { x: main.x - other.x, y: main.y - other.y } : { x: 0, y: 0 };
+    },
+  });
+  cursor2.setMode(ui.mouseMode.value);
+}
+
+const displayById = (id) => (id == null ? null : host?.displays.find((d) => d.id === id) ?? null);
+
+// The second monitor's choices: off, or any display (the host refuses the one already shown, and
+// swaps if the main one is switched to it).
+function fillSecond(displays, second) {
+  ui.display2.replaceChildren(...[{ id: 'off', label: 'Off' }, ...displays.map((d, i) => ({ id: String(d.id), label: `${i + 1}: ${d.name || d.id}` }))]
+    .map(({ id, label }) => {
+      const o = document.createElement('option');
+      o.value = id;
+      o.textContent = label;
+      return o;
+    }));
+  ui.display2.value = second == null ? 'off' : String(second);
+  ui.display2.disabled = displays.length < 2;
+}
+
+// Two monitors side by side, or one.
+function showDual(on) {
+  if (!on) popIn();
+  // In a window of its own, the second monitor leaves the page's layout.
+  document.body.classList.toggle('dual', on && !popout);
+  ui.video2.hidden = !on || !!popout;
+  ui.popout.hidden = !on;
+  cursor?.schedule();
+  cursor2?.schedule();
+}
+
+// Moves the second monitor's video to a window of its own, or back.
+function popOut() {
+  if (popout || !session || !input) return;
+  const p = openPopout({ input, onClose: () => { if (popout === p) popIn(); } });
+  if (!p) {
+    setStatus('The browser blocked the pop-up window: allow pop-ups for this page', ui.status.dataset.state);
+    return;
+  }
+  popout = p;
+  // The stream follows the video element, also after a reconnect gives it a new one.
+  p.video.srcObject = ui.video2.srcObject;
+  ui.video2.srcObject = null;
+  session.video2 = input.video2 = p.video;
+  p.video.play().catch(() => {});
+  makeCursor2(p.video, p.overlay);
+  ui.popout.textContent = 'Pop in';
+  showDual(true);
+  p.window.focus();
+}
+
+function popIn() {
+  const p = popout;
+  if (!p) return;
+  popout = null;
+  ui.video2.srcObject = p.video.srcObject;
+  p.video.srcObject = null;
+  if (session) session.video2 = ui.video2;
+  if (input) input.video2 = ui.video2;
+  ui.video2.play().catch(() => {});
+  if (cursor2) makeCursor2(ui.video2, ui.cursor2);
+  ui.popout.textContent = 'Pop out';
+  p.close();
+  showDual(host?.second != null);
+}
+
+ui.popout.addEventListener('click', () => (popout ? popIn() : popOut()));
+
+ui.display2.addEventListener('change', () => {
+  if (!session) return;
+  const id = ui.display2.value === 'off' ? null : Number(ui.display2.value);
+  session.sendControl({ type: 'selectSecondDisplay', id });
+});
+
 function selectDisplay(id) {
   if (!session) return;
   ui.display.value = id;
@@ -559,6 +667,7 @@ function setMouseMode(mode) {
   settingsStore.save(settings);
   input?.setMode(mode);
   cursor?.setMode(mode);
+  cursor2?.setMode(mode);
   sendCursorMode();
 }
 

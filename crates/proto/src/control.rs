@@ -55,6 +55,12 @@ pub enum ClientControl {
     SelectDisplay {
         id: DisplayId,
     },
+    /// Also stream this display, as a second video track (`None` stops
+    /// it). It must not be the display already streamed; the host answers
+    /// with [`HostControl::SecondDisplay`].
+    SelectSecondDisplay {
+        id: Option<DisplayId>,
+    },
     /// Ask for an IDR, e.g. after the decoder saw a gap.
     RequestKeyframe,
     SetVideoConfig {
@@ -146,6 +152,13 @@ pub enum HostControl {
     Displays {
         displays: Vec<DisplayInfo>,
         active: Option<DisplayId>,
+        /// The display on the second video track, if any.
+        #[serde(default)]
+        second: Option<DisplayId>,
+    },
+    /// The second video track now shows this display, or is off.
+    SecondDisplay {
+        id: Option<DisplayId>,
     },
     DisplayChanged {
         id: DisplayId,

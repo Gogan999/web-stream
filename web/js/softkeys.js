@@ -84,7 +84,7 @@ export function typeDiff({ backspaces, text }, send, shiftHeld = false, sendText
 
 const MODIFIERS = new Set([HID.ControlLeft, HID.AltLeft, HID.ShiftLeft, HID.MetaLeft]);
 
-// The hidden textarea plus the row of extra keys (Esc, Tab, Ctrl, Alt, Win, arrows...).
+// The hidden textarea plus the row of extra keys (Esc, Tab, Ctrl, Alt, Win, arrows, F1-F12, Ctrl+C/V/Z...).
 // Ctrl, Alt, Shift and Win are sticky: one tap holds them until the next other key.
 export class SoftKeyboard {
   // sendText(text) types Unicode text on the host; onPaste(text) gets text pasted into the field
@@ -112,10 +112,11 @@ export class SoftKeyboard {
     // Keep the caret at the end, where diffText expects edits.
     this.ta.addEventListener('select', () => this.caretToEnd(), opt);
     this.keys?.addEventListener('pointerdown', (e) => {
-      const b = e.target.closest('button[data-key]');
+      const b = e.target.closest('button[data-key], button[data-chord]');
       if (!b) return;
       e.preventDefault(); // keeps focus (and the phone keyboard) where it is
-      this.press(b);
+      if (b.dataset.chord) this.chord(b.dataset.chord);
+      else this.press(b);
     }, opt);
   }
 
@@ -172,6 +173,22 @@ export class SoftKeyboard {
     }
     this.send(usage, true);
     this.send(usage, false);
+    this.releaseSticky();
+  }
+
+  // A shortcut such as 'ctrl+c': modifiers down, the key pressed, modifiers up. A sticky modifier
+  // that is already held is left to the usual release afterwards.
+  chord(spec) {
+    const names = spec.split('+');
+    const code = names.pop();
+    const mods = names.map((m) => HID[{ ctrl: 'ControlLeft', alt: 'AltLeft', shift: 'ShiftLeft', win: 'MetaLeft' }[m]]);
+    const key = HID['Key' + code.toUpperCase()] ?? HID[code];
+    if (!key || mods.some((m) => !m)) return;
+    const held = mods.filter((m) => this.sticky.has(m));
+    for (const m of mods) if (!held.includes(m)) this.send(m, true);
+    this.send(key, true);
+    this.send(key, false);
+    for (const m of mods) if (!held.includes(m)) this.send(m, false);
     this.releaseSticky();
   }
 

@@ -8,7 +8,7 @@ Pairing and signaling: [`docs/dev/signaling.md`](../docs/dev/signaling.md). Data
 
 | File | What it does |
 |---|---|
-| `index.html`, `style.css` | Toolbar with a Settings dropdown, plus a full-size `<video>`, stats overlay and touch overlay |
+| `index.html`, `style.css` | Toolbar (display, mouse, mic toggles) with a Settings dropdown, plus a full-size `<video>`, stats overlay and touch overlay |
 | `manifest.webmanifest` | Lets a phone add the client to its home screen, opening fullscreen and landscape |
 | `js/main.js` | UI wiring, hotkeys, fullscreen + Keyboard Lock, stats polling |
 | `js/session.js` | Signaling + `RTCPeerConnection`, data channels, low playout delay |
@@ -23,9 +23,10 @@ Pairing and signaling: [`docs/dev/signaling.md`](../docs/dev/signaling.md). Data
 | `js/keymap.js` | `KeyboardEvent.code` → USB HID usage |
 | `js/gamepad.js` | Gamepad API standard mapping → XInput state |
 | `js/files.js` | Files the host shares (saving to disk or to downloads) and files sent to the host: acks, cancel |
+| `js/health.js` | The one definition of a healthy stream (loss, round trip, decode and encode time, bandwidth), used by the stats overlay and auto-tune |
 | `js/stats.js` | Stats overlay numbers from `getStats()`, `requestVideoFrameCallback` and the host's `videoStats` |
-| `js/settings.js` | Resolution, bitrate, fps and quality settings → the host's `VideoConfig`; kept in `localStorage` |
-| `js/autotune.js` | Auto-tune (test): bitrate ladder, then encoder quality, keeping the best that streams cleanly |
+| `js/settings.js` | Priority, max resolution, max fps, max bitrate and the rest of the settings → the host's `VideoConfig`; kept in `localStorage` |
+| `js/autotune.js` | Auto-tune (test): bitrate ladder, then encoder quality; the result applies to the session and is saved only by Keep these |
 | `dev/` | Dev server (pairing API + `/ws` relay) and a mock host page (canvas + tone over real WebRTC) |
 
 ## Using it

@@ -86,8 +86,22 @@ test('client streams from mock host, sends input and switches display', { timeou
   assert.equal(channels.input.ordered, true);
   assert.equal(channels.input.maxRetransmits, null);
 
-  // Display list arrives and populates the picker.
+  // Display list arrives and populates the picker, and the toolbar's quick switch (2+ displays).
   await client.waitForFunction(() => document.getElementById('display').options.length === 2);
+  assert.equal(await client.isVisible('#display-quick'), true);
+  assert.equal(await client.locator('#display-quick option').count(), 2);
+  // Connected: the big Connect button is gone and the toolbar one says Disconnect.
+  assert.equal(await client.isVisible('#connect-big'), false);
+  assert.equal(await client.textContent('#connect'), 'Disconnect');
+
+  // Toolbar toggles: Mouse switches Game/Desktop (the same setting as in Settings), Mic mirrors the checkbox.
+  assert.equal(await client.textContent('#mouse-label'), 'Game');
+  await client.click('#mouse-toggle');
+  assert.equal(await client.textContent('#mouse-label'), 'Desktop');
+  assert.equal(await client.inputValue('#mouse-mode'), 'absolute');
+  await client.click('#mouse-toggle');
+  assert.equal(await client.inputValue('#mouse-mode'), 'relative');
+  assert.equal(await client.getAttribute('#mic-toggle', 'aria-pressed'), 'false');
 
   // Once the host says what it streams, the client asks for its settings: the screen size fitted
   // to the 1280x720 display, at the matching auto bitrate.
@@ -101,6 +115,10 @@ test('client streams from mock host, sends input and switches display', { timeou
   // Settings live in one dropdown; a bitrate pick goes straight to the host.
   assert.equal(await client.isVisible('#bitrate'), false);
   await client.click('#more-toggle');
+  // Max bitrate is under Advanced, folded by default; Priority and the caps are one level up.
+  assert.equal(await client.isVisible('#priority'), true);
+  assert.equal(await client.isVisible('#resolution'), true);
+  await client.click('#set-advanced > summary');
   await client.selectOption('#bitrate', '30000');
   await host.waitForFunction(() => window.mockLog.some((e) => e.type === 'setVideoConfig' && e.config.bitrateKbps === 30000));
   // Matching the host resolution asks the host, which refuses unless allowed; the refusal shows.
@@ -115,14 +133,15 @@ test('client streams from mock host, sends input and switches display', { timeou
   await client.check('#mic');
   await host.waitForFunction(() => window.mockLog.some((e) => e.type === 'setMicEnabled' && e.enabled === true));
   await host.waitForFunction(async () => (await window.mockMicPackets()) > 10, null, { timeout: 10000, polling: 250 });
+  assert.equal(await client.getAttribute('#mic-toggle', 'aria-pressed'), 'true');
   await client.uncheck('#mic');
   await host.waitForFunction(() => window.mockLog.filter((e) => e.type === 'setMicEnabled' && e.enabled === false).length === 2);
+  assert.equal(await client.getAttribute('#mic-toggle', 'aria-pressed'), 'false');
   assert.equal(await client.evaluate(() => window.__pcs.at(-1).getSenders().find((x) => x.track)?.track ?? null), null);
   // Audio quality: the host's own setting at first, then what is picked.
   assert.ok((await hostLog()).some((e) => e.type === 'setAudioConfig' && e.bitrateKbps === null && e.frameMs === null));
-  // Audio quality is under Advanced, folded by default.
-  assert.equal(await client.isVisible('#audio-kbps'), false);
-  await client.click('#set-advanced > summary');
+  // Audio quality is under Advanced (opened above).
+  assert.equal(await client.isVisible('#audio-kbps'), true);
   await client.selectOption('#audio-kbps', '256');
   await client.selectOption('#audio-frame', '20');
   await host.waitForFunction(() => window.mockLog.some((e) => e.type === 'setAudioConfig' && e.bitrateKbps === 256 && e.frameMs === 20));
@@ -364,7 +383,6 @@ test('client streams from mock host, sends input and switches display', { timeou
 
   // Update host: off until the host allows it, asks first, then waits for the restart.
   await client.click('#more-toggle');
-  await client.click('#set-host > summary');
   assert.equal(await client.isDisabled('#update-host'), true);
   await sendHost({ type: 'remoteUpdate', enabled: true });
   await client.waitForSelector('#update-host:not([disabled])');

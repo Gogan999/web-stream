@@ -209,3 +209,31 @@ test('lifting one finger of a pinch and putting it back keeps pinching', () => {
   g.up(2, 510);
   assert.deepEqual(log.map((e) => e[0]), ['pinch']);
 });
+
+test('a three-finger tap middle-clicks in both modes; moving or holding does not', () => {
+  for (const mode of ['trackpad', 'direct']) {
+    const { g, log } = rig(mode);
+    g.down(1, 100, 100, 0);
+    g.down(2, 200, 100, 20);
+    g.down(3, 300, 100, 40);
+    g.up(1, 100);
+    g.up(2, 110);
+    g.up(3, 120);
+    assert.deepEqual(log.filter((e) => e[0] === 'down' || e[0] === 'up'), [['down', 1], ['up', 1]], mode);
+    // Slow: not a tap.
+    log.length = 0;
+    g.down(1, 100, 100, 1000);
+    g.down(2, 200, 100, 1020);
+    g.down(3, 300, 100, 1040);
+    g.up(1, 1500); g.up(2, 1510); g.up(3, 1520);
+    assert.ok(!log.some((e) => e[0] === 'down' || e[0] === 'up'), mode);
+    // Moved: not a tap.
+    log.length = 0;
+    g.down(1, 100, 100, 2000);
+    g.down(2, 200, 100, 2020);
+    g.down(3, 300, 100, 2040);
+    g.move(3, 300, 160);
+    g.up(1, 2100); g.up(2, 2110); g.up(3, 2120);
+    assert.ok(!log.some((e) => e[0] === 'down' || e[0] === 'up'), mode);
+  }
+});

@@ -7,13 +7,14 @@ body { display: flex; flex-direction: column; height: 100dvh; overscroll-behavio
 
 #bar { position: relative; z-index: 2; display: flex; align-items: center; gap: 8px; padding: 4px 8px; background: #1b1b1b; border-bottom: 1px solid #333; }
 #bar button, #bar select { font: inherit; color: #eee; background: #2b2b2b; border: 1px solid #444; padding: 2px 8px; }
+#bar select { max-width: 160px; text-overflow: ellipsis; }
 #bar button:hover:not(:disabled) { background: #383838; }
 #bar button[aria-pressed="true"] { background: #3d4f6b; }
 #bar input[type="checkbox"] { margin: 0 2px 0 0; vertical-align: middle; }
 #status[data-state="connected"] { color: #7c7; }
 #status[data-state="connecting"] { color: #cc7; }
 #status[data-state="failed"] { color: #e77; }
-#status { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#status { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .spacer { flex: 1; }
 #more-toggle[aria-expanded="true"], #files-toggle[aria-expanded="true"] { background: #3d4f6b; }
 #clipboard[data-pending="true"] { background: #2f6f3e; }
@@ -27,6 +28,7 @@ body.more-open #more, body.files-open #files { display: block; }
 /* Settings: foldable groups; the summary is the group's heading. */
 #more details { padding: 2px 0; border-bottom: 1px solid #2c2c2c; }
 #more details:last-child { border-bottom: 0; }
+#more > .group { padding-top: 8px; }
 #more .group { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding-bottom: 8px; }
 #more summary { align-self: stretch; padding: 6px 0; cursor: pointer; list-style: none; user-select: none; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: #888; }
 #more summary::-webkit-details-marker { display: none; }
@@ -36,11 +38,19 @@ body.more-open #more, body.files-open #files { display: block; }
 #more h3 { margin: 4px 0 0; font-size: 11px; font-weight: 600; color: #777; }
 #more .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; align-self: stretch; }
 #more .row > label { margin-right: auto; }
-#more .hint p { margin: 0 0 8px; }
+#more .note { margin: 0; color: #777; font-size: 12px; }
+#more .row > button { flex: 0 0 auto; }
 #more label:has(select) { display: flex; align-self: stretch; justify-content: space-between; align-items: center; gap: 8px; }
 #more select { min-width: 150px; }
 .hint { color: #777; margin: 0; }
 #files { width: 360px; }
+
+/* Not connected: one large Connect button in the middle of the stage. */
+#stage-connect { position: absolute; inset: 0; z-index: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 16px; }
+#connect-big { font: 600 20px system-ui, sans-serif; color: #fff; background: #3d4f6b; border: 1px solid #5d7399; border-radius: 8px; padding: 14px 40px; min-height: 52px; }
+#connect-big:hover { background: #4a5e80; }
+#stage-host { margin: 0; color: #aaa; font-size: 15px; text-align: center; overflow-wrap: anywhere; }
+body.connected #stage-connect, body.fake-fs #stage-connect { display: none; }
 .file-list { list-style: none; margin: 0; padding: 0; align-self: stretch; display: flex; flex-direction: column; gap: 8px; }
 .file-list li { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; align-items: center; }
 .file-list .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -83,6 +93,8 @@ body.unpaired #stage, body.unpaired #bar > :not(#status) { display: none; }
 #kbd-input { position: absolute; left: 0; bottom: 0; width: 1px; height: 1px; opacity: 0; border: 0; padding: 0; resize: none; font-size: 16px; pointer-events: none; }
 #touchbar { display: none; }
 body.touch #touchbar, body.fake-fs #touchbar { display: flex; }
+#keys .fkeys { flex: 1 0 100%; display: flex; gap: 4px; overflow-x: auto; justify-content: flex-start; -webkit-overflow-scrolling: touch; touch-action: pan-x; }
+#keys .fkeys button { flex: 0 0 auto; }
 body.touch #fullscreen { display: none; } /* the overlay has it, and it stays reachable in fullscreen */
 
 /* Fullscreen fallback where the page can't go fullscreen (iPhone): the stream fills the window. */
@@ -91,10 +103,15 @@ body.fake-fs #bar { display: none; }
 /* Touch screens: controls get finger-sized, the panel spans a narrow screen, no hotkey hint. */
 @media (max-width: 480px) {
   .panel { left: 8px; width: auto !important; }
+  /* A phone's toolbar: shorter buttons, and the status takes a line of its own if it must. */
+  #bar { flex-wrap: wrap; gap: 4px; }
+  #status { flex: 1 1 80px; }
+  #bar .spacer { display: none; }
+  #mouse-toggle .lead { display: none; }
+  #bar select { max-width: 110px; }
 }
 @media (pointer: coarse) {
   .hint { display: none; }
-  #set-host { border-bottom: 0; } /* Shortcuts, below it, is hidden */
   #bar { gap: 6px; padding: 6px max(8px, env(safe-area-inset-right)) 6px max(8px, env(safe-area-inset-left)); }
   #bar button, #bar select { font-size: 15px; min-height: 36px; padding: 4px 10px; }
   #bar input[type="checkbox"] { width: 20px; height: 20px; }

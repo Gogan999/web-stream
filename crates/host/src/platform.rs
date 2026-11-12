@@ -61,6 +61,10 @@ mod imp {
     pub struct Sink;
 
     impl InputSink for Sink {
+        fn text(&mut self, text: &str) -> Result<(), SinkError> {
+            tracing::debug!(chars = text.chars().count(), "input: text");
+            Ok(())
+        }
         fn key(&mut self, key: KeyTarget, down: bool) -> Result<(), SinkError> {
             tracing::debug!(?key, down, "input: key");
             Ok(())

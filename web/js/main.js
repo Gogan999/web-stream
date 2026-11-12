@@ -9,6 +9,7 @@ import * as pairing from './pairing.js';
 import * as settingsStore from './settings.js';
 import { AutoTune, Cancelled } from './autotune.js';
 import { SoftKeyboard } from './softkeys.js';
+import { ClipboardSync } from './clipboard.js';
 import * as P from './protocol.js';
 import { Files, Uploads, formatSize } from './files.js';
 import { applyCapabilities, parseCapabilities } from './capabilities.js';
@@ -36,7 +37,7 @@ const ui = {
   kbdInput: $('kbd-input'), touchFullscreen: $('touch-fullscreen'), view: $('view'), zoomReset: $('zoom-reset'), zoomPan: $('zoom-pan'),
   filesToggle: $('files-toggle'), files: $('files'), fileList: $('file-list'), fromHost: $('from-host'),
   toHost: $('to-host'), uploadPick: $('upload-pick'), uploadInput: $('upload-input'), uploadList: $('upload-list'),
-  diagSave: $('diag-save'),
+  diagSave: $('diag-save'), clipboard: $('clipboard'), clipEnabled: $('clip-enabled'), touchPaste: $('touch-paste'),
 };
 
 const params = new URLSearchParams(location.search);
@@ -130,6 +131,7 @@ async function connect() {
   });
   session.addEventListener('closed', () => {
     setRemoteUpdate(false);
+    clip.reset();
     setSasVisible(false);
     showConnected(false);
     ui.display.disabled = true;
@@ -149,7 +151,7 @@ async function connect() {
     onReleaseAll: () => softKeys.forget(),
     displaySize: () => host?.displays.find((d) => d.id === host.active) ?? null,
     displaySize2: () => displayById(host?.second),
-    zoom,
+    zoom, onBeforePaste: () => clip.beforePaste(),
   });
   input.setMode(ui.mouseMode.value);
   input.start();
@@ -205,6 +207,7 @@ function onControl(msg) {
   if (pointer.some(Boolean)) return;
   if (files.onControl(msg)) return;
   if (uploads.onControl(msg)) return;
+  if (clip.onControl(msg)) return;
   if (msg.type === 'displays' && Array.isArray(msg.displays)) {
     ui.display.replaceChildren(...msg.displays.map((d, i) => {
       const o = document.createElement('option');
@@ -245,7 +248,7 @@ function onControl(msg) {
     diag?.add('host_stats', msg);
     if (tuneWindow) tuneWindow.push(msg);
   } else if (msg.type === 'capabilities') {
-    applyCapabilities(parseCapabilities(msg), { setSasVisible, setHostName, setHostVersion });
+    applyCapabilities(parseCapabilities(msg), { setSasVisible, setHostName, setHostVersion, setClipboardAvailable: (on) => clip.setAvailable(on) });
   } else if (msg.type === 'remoteUpdate') {
     setRemoteUpdate(msg.enabled === true);
   } else if (msg.type === 'updateStatus' && typeof msg.message === 'string') {
@@ -839,7 +842,7 @@ ui.touchFullscreen.addEventListener('click', toggleFullscreen);
 ui.statsToggle.addEventListener('click', toggleStats);
 ui.statsLevel.addEventListener('change', () => setStatsLevel(ui.statsLevel.value));
 // Toolbar controls keep focus otherwise, and Space/Enter would re-trigger them.
-for (const el of [ui.connect, ui.connectBig, ui.fullscreen, ui.sas, ui.mouseToggle, ui.micToggle, ui.statsToggle, ui.autotune]) el.addEventListener('mouseup', () => el.blur());
+for (const el of [ui.connect, ui.connectBig, ui.fullscreen, ui.sas, ui.mouseToggle, ui.micToggle, ui.statsToggle, ui.autotune, ui.clipboard]) el.addEventListener('mouseup', () => el.blur());
 
 // Update host: only when the host allows it, and only after a confirm, since it restarts the host.
 function setRemoteUpdate(enabled, running = false) {
@@ -904,6 +907,47 @@ const uploads = new Uploads({
   sendFile: (buf) => session?.sendFile(buf) ?? false,
   fileBuffered: () => session?.fileBuffered() ?? null,
 });
+
+// Clipboard text, both ways (clipboard.js). The toolbar button and the touch Paste button show only
+// while the host shares its clipboard and the Share clipboard setting is on.
+const clip = new ClipboardSync({
+  sendControl: (msg) => session?.sendControl(msg),
+  notify: (text) => setStatus(text, ui.status.dataset.state),
+  onChange: () => {
+    ui.clipboard.hidden = !clip.usable;
+    ui.touchPaste.hidden = !clip.usable;
+    ui.clipboard.dataset.pending = String(clip.pending != null);
+    ui.clipboard.textContent = clip.pending != null ? 'Copy from PC' : 'Clipboard';
+    ui.clipEnabled.checked = clip.enabled;
+    ui.clipEnabled.disabled = !clip.available;
+  },
+});
+ui.clipEnabled.checked = clip.enabled;
+ui.clipEnabled.disabled = true; // until the host says it shares its clipboard
+ui.clipEnabled.addEventListener('change', () => clip.setEnabled(ui.clipEnabled.checked));
+ui.clipboard.addEventListener('click', () => clip.button());
+window.addEventListener('focus', () => clip.onFocus());
+ui.stage.addEventListener('focus', () => clip.onFocus());
+ui.stage.addEventListener('pointerdown', () => clip.onGesture());
+// Type text on the host as Unicode, whatever its keyboard layout.
+function typeText(text) {
+  for (const buf of P.text(text)) input?.rel(buf);
+}
+// Paste on a touch screen: the host gets this device's clipboard, then Ctrl+V. Where the clipboard
+// can't be shared (or the browser refuses to read it), the text is typed instead if it can be read.
+async function touchPaste() {
+  if (await clip.toHost()) {
+    const ctrl = hidUsage('ControlLeft');
+    const v = hidUsage('KeyV');
+    for (const [usage, down] of [[ctrl, true], [v, true], [v, false], [ctrl, false]]) input?.rel(P.key(usage, down));
+    return;
+  }
+  const text = await clip.readLocal();
+  if (text) typeText(text);
+  else setStatus('Allow clipboard access to paste', ui.status.dataset.state);
+}
+ui.touchPaste.addEventListener('click', touchPaste);
+
 let filesQueued = false;
 const queueFiles = () => {
   if (filesQueued) return;
@@ -1019,6 +1063,9 @@ const softKeys = new SoftKeyboard({
   textarea: ui.kbdInput,
   keys: ui.keys,
   send: (usage, down) => input?.rel(P.key(usage, down)),
+  sendText: typeText,
+  // The keyboard's own Paste (long press): the host's clipboard gets the text and it is typed.
+  onPaste: (text) => { clip.pushText(text); typeText(text); },
 });
 const markTouch = () => { document.body.classList.add('touch'); showMouseLabel(); };
 if (matchMedia('(pointer: coarse)').matches) markTouch();

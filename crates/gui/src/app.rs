@@ -1029,6 +1029,19 @@ impl App {
                     "let the browser change this PC's resolution",
                 );
                 ui.end_row();
+                ui.label("Clipboard");
+                ui.checkbox(
+                    &mut d.clipboard,
+                    "share copied text with the connected browser",
+                )
+                .on_hover_text(
+                    "Text you copy here appears on the browser's clipboard and the other \
+                     way round, up to 256 KiB, only while a browser is connected. Any \
+                     paired browser can read what you copy on this PC while connected: \
+                     turn this off if that is not what you want. In the Windows service \
+                     the browser's page shows whether it works",
+                );
+                ui.end_row();
                 ui.label("Files");
                 ui.vertical(|ui| {
                     ui.add_enabled(

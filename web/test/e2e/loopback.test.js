@@ -172,6 +172,36 @@ test('client streams from mock host, sends input and switches display', { timeou
   assert.ok(inputs.some((e) => e.type === 'key' && e.usage === 0x1a && !e.down));
   assert.ok(inputs.some((e) => e.type === 'wheel' && e.dy === -120));
 
+  // Clipboard: the host offers it when the control channel opens, so the button shows. Text from the
+  // host lands on this browser's clipboard; Ctrl+V sends this browser's clipboard first and presses
+  // the keys only once the host has answered.
+  await ctx.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: base });
+  await client.bringToFront();
+  await client.waitForSelector('#clipboard', { state: 'visible' });
+  await host.evaluate(() => window.__control.send(JSON.stringify({ type: 'clipboard', text: 'h\u00e9llo from the PC' })));
+  await client.waitForFunction(async () => (await navigator.clipboard.readText()) === 'h\u00e9llo from the PC');
+  await client.evaluate(() => navigator.clipboard.writeText('typed on the client \u4e16'));
+  await client.waitForFunction(() => navigator.permissions.query({ name: 'clipboard-read' }).then((p) => p.state === 'granted'));
+  await client.click('#video');
+  const keyEvents = () => host.evaluate(() => window.mockLog.length);
+  const clipFrom = await keyEvents();
+  await client.keyboard.down('Control');
+  await client.keyboard.press('KeyV');
+  await client.keyboard.up('Control');
+  await host.waitForFunction((n) => window.mockLog.slice(n).some((e) => e.ev === 'input' && e.type === 'key' && e.usage === 0x19 && e.down), clipFrom);
+  const clipLog = (await hostLog()).slice(clipFrom);
+  const setAt = clipLog.findIndex((e) => e.type === 'setClipboard');
+  const vAt = clipLog.findIndex((e) => e.type === 'key' && e.usage === 0x19 && e.down);
+  assert.ok(setAt >= 0 && setAt < vAt, 'the clipboard is set before V goes down: ' + JSON.stringify(clipLog.map((e) => e.type)));
+  assert.equal(await host.evaluate(() => window.mockClipboard), 'typed on the client \u4e16');
+  // The setting turns it all off.
+  await client.click('#more-toggle');
+  await client.uncheck('#clip-enabled');
+  await client.waitForSelector('#clipboard', { state: 'hidden' });
+  await client.check('#clip-enabled');
+  await client.waitForSelector('#clipboard', { state: 'visible' });
+  await client.click('#more-toggle');
+
   // Host pointer: absolute mode shows it as the video's CSS cursor, relative mode as an overlay.
   const sendHost = (msg) => host.evaluate((m) => window.__control.send(JSON.stringify(m)), msg);
   const px = (rgba, n) => Buffer.from(Array(n).fill(rgba).flat()).toString('base64');

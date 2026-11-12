@@ -2,6 +2,7 @@
 //! [`serve::serve`], and its exe also runs the Windows service
 //! ([`service`]).
 
+pub mod clipboard;
 pub mod console;
 mod cursor;
 mod files;

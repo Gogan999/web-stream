@@ -3,6 +3,7 @@
 //! ([`service`]).
 
 mod bottleneck;
+pub mod clipboard;
 pub mod console;
 mod cursor;
 mod files;

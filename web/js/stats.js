@@ -1,5 +1,6 @@
 // Stream stats for the overlay, computed from successive RTCStatsReport snapshots
-// plus per-frame timing from requestVideoFrameCallback.
+// plus per-frame timing from requestVideoFrameCallback. What counts as unhealthy is in health.js.
+import { lossLevel, rttLevel, bitrateReduced, decodeSlow, encodeSlow, decodeLimitMs, encodeLimitMs } from './health.js';
 
 // Pull the fields we need out of an RTCStatsReport (or any Map of stats objects).
 export function snapshot(report, now) {
@@ -154,18 +155,16 @@ export function assess(s, host, config, bottleneck = null) {
   if (s.width && s.height && config?.width && config?.height && s.width * s.height < 0.9 * config.width * config.height) {
     add('resolution', 'warn', `Reduced resolution ${s.width}x${s.height} (asked ${config.width}x${config.height}): host scaled down for the network`);
   }
-  // The target follows the bandwidth estimate, which sinks whenever little is sent (a still or simple
-  // picture) and saws on Wi-Fi without any loss. It only costs picture quality while the encoder uses
-  // what it is given, so a lower target with the encoder well under it is not worth a warning.
-  const bitrateLimits = host?.sentKbps == null || host.sentKbps >= 0.8 * host.encoderKbps;
-  if (host?.encoderKbps != null && host.maxKbps > 0 && host.encoderKbps < 0.6 * host.maxKbps && bitrateLimits) {
+  const reduced = bitrateReduced(host);
+  if (reduced) {
     const bwe = host.bweKbps != null ? `, network carries ~${mb(host.bweKbps)}` : '';
-    add('bitrate', host.encoderKbps < 0.25 * host.maxKbps ? 'bad' : 'warn',
-      `Reduced bitrate ${mb(host.encoderKbps)} of ${mb(host.maxKbps)} Mb/s${bwe}`);
+    add('bitrate', reduced, `Reduced bitrate ${mb(host.encoderKbps)} of ${mb(host.maxKbps)} Mb/s${bwe}`);
   }
-  if (s.rttMs != null && s.rttMs >= 80) add('rtt', s.rttMs >= 150 ? 'bad' : 'warn', `Slow connection: round trip ${s.rttMs.toFixed(0)} ms`);
+  const rtt = rttLevel(s.rttMs);
+  if (rtt) add('rtt', rtt, `Slow connection: round trip ${s.rttMs.toFixed(0)} ms`);
   const loss = s.lossPct ?? (host?.loss != null ? host.loss * 100 : null);
-  if (loss != null && loss >= 1) add('loss', loss >= 5 ? 'bad' : 'warn', `Lossy connection: ${loss.toFixed(1)}% packets lost`);
+  const lossSev = lossLevel(loss);
+  if (lossSev) add('loss', lossSev, `Lossy connection: ${loss.toFixed(1)}% packets lost`);
   if (s.tcp) add('tcp', 'warn', 'TCP fallback in use: a lost packet stalls the stream until resent');
   if (s.relayed) add('relay', 'warn', 'Relayed through TURN: extra hop adds delay');
   if (s.freezesDelta > 0) add('freeze', 'bad', 'Picture froze');
@@ -178,9 +177,8 @@ export function assess(s, host, config, bottleneck = null) {
   if (s.fps != null && host?.fps > 10 && s.fps < 0.8 * host.fps) {
     add('fps', 'warn', `Showing ${s.fps.toFixed(0)} of ${host.fps.toFixed(0)} fps the host sends`);
   }
-  const budget = config?.fps > 0 ? 1000 / config.fps : null;
-  if (budget && s.decodeMs != null && s.decodeMs > budget) add('decode', 'warn', `Slow decode: ${s.decodeMs.toFixed(1)} ms per frame (budget ${budget.toFixed(1)})`);
-  if (budget && host?.encodeMs > budget) add('encode', 'warn', `Slow host encode: ${host.encodeMs.toFixed(1)} ms from capture to encoded (budget ${budget.toFixed(1)})`);
+  if (decodeSlow(s.decodeMs, config?.fps)) add('decode', 'warn', `Slow decode: ${s.decodeMs.toFixed(1)} ms per frame (limit ${decodeLimitMs(config.fps).toFixed(1)})`);
+  if (encodeSlow(host?.encodeMs, config?.fps)) add('encode', 'warn', `Slow host encode: ${host.encodeMs.toFixed(1)} ms from capture to encoded (limit ${encodeLimitMs(config.fps).toFixed(1)})`);
   return out.sort((a, b) => (a.sev === b.sev ? 0 : a.sev === 'bad' ? -1 : 1));
 }
 

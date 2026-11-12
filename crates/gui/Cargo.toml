@@ -19,6 +19,9 @@ ws-signaling = { path = "../signaling" }
 igd-next = "0.16"
 qrcode = { version = "0.14", default-features = false }
 eframe = { version = "0.32", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }
+ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier"] }
+semver = "1"
+sha2 = "0.10"
 
 [dev-dependencies]
 ws-input.workspace = true

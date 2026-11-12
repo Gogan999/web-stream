@@ -8,7 +8,7 @@
 //!
 //! The network host runs as LocalService with every privilege but one
 //! removed (in particular impersonation, which would let it borrow a SYSTEM
-//! token), in session 0, away from the user's desktop. It holds everything
+//! token), write-restricted and at low integrity (see [`network_token`]), in session 0, away from the user's desktop. It holds everything
 //! that parses what comes off the network.
 //!
 //! Each writes to a log file and runs in a job object, so it never outlives
@@ -27,16 +27,19 @@ use windows::Win32::Foundation::{
     HANDLE_FLAG_INHERIT, HLOCAL, LUID, LocalFree, SetHandleInformation, WAIT_OBJECT_0,
 };
 use windows::Win32::Security::Authorization::{
-    ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1, SE_FILE_OBJECT,
-    SetSecurityInfo,
+    ConvertStringSecurityDescriptorToSecurityDescriptorW, ConvertStringSidToSidW, SDDL_REVISION_1,
+    SE_FILE_OBJECT, SetNamedSecurityInfoW, SetSecurityInfo,
 };
 use windows::Win32::Security::{
-    AdjustTokenPrivileges, DACL_SECURITY_INFORMATION, DuplicateTokenEx, GetSecurityDescriptorDacl,
-    GetTokenInformation, LOGON32_LOGON_SERVICE, LOGON32_PROVIDER_DEFAULT, LogonUserW,
-    LookupPrivilegeValueW, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
-    SE_PRIVILEGE_REMOVED, SECURITY_ATTRIBUTES, SecurityIdentification, SetTokenInformation,
-    TOKEN_ALL_ACCESS, TOKEN_DUPLICATE, TOKEN_PRIVILEGES, TOKEN_QUERY, TokenPrimary,
-    TokenPrivileges, TokenSessionId,
+    AdjustTokenPrivileges, CreateRestrictedToken, DACL_SECURITY_INFORMATION, DISABLE_MAX_PRIVILEGE,
+    DuplicateTokenEx, GetLengthSid, GetSecurityDescriptorDacl, GetSecurityDescriptorSacl,
+    GetTokenInformation, LABEL_SECURITY_INFORMATION, LOGON32_LOGON_SERVICE,
+    LOGON32_PROVIDER_DEFAULT, LogonUserW, LookupPrivilegeValueW,
+    PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SE_PRIVILEGE_REMOVED,
+    SECURITY_ATTRIBUTES, SID_AND_ATTRIBUTES, SecurityIdentification, SetTokenInformation,
+    TOKEN_ALL_ACCESS, TOKEN_DUPLICATE, TOKEN_GROUPS, TOKEN_MANDATORY_LABEL, TOKEN_PRIVILEGES,
+    TOKEN_QUERY, TOKEN_USER, TokenIntegrityLevel, TokenLogonSid, TokenPrimary, TokenPrivileges,
+    TokenSessionId, TokenUser, WRITE_RESTRICTED,
 };
 use windows::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_ATTRIBUTE_DIRECTORY,
@@ -98,6 +101,26 @@ pub const DATA_FILE_SDDL: &str = "D:P(A;;FA;;;SY)(A;;FA;;;BA)";
 /// and LocalService, inherited by what is created inside; nothing from the
 /// folder above.
 pub const NETWORK_DIR_SDDL: &str = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;LS)";
+
+/// Low integrity, inherited by what is created in the network host's folder:
+/// the network host runs at low integrity, which can't write to anything
+/// labelled higher (every file and folder without a label of its own is
+/// medium), so its folder is the one place it can change.
+pub const NETWORK_DIR_LABEL_SDDL: &str = "S:(ML;OICI;NW;;;LW)";
+/// The same for a file created there before the label was set.
+pub const NETWORK_FILE_LABEL_SDDL: &str = "S:(ML;;NW;;;LW)";
+
+/// Group attributes: SE_GROUP_INTEGRITY and SE_GROUP_LOGON_ID.
+const SE_GROUP_INTEGRITY: u32 = 0x20;
+const SE_GROUP_LOGON_ID: u32 = 0xC000_0000;
+
+/// The low integrity level (S-1-16-4096).
+const LOW_INTEGRITY_SID: &str = "S-1-16-4096";
+/// Everyone and RESTRICTED: what a write to a system object (the network
+/// stack's device, say) is let through by, in the second access check a
+/// write-restricted token goes through.
+const EVERYONE_SID: &str = "S-1-1-0";
+const RESTRICTED_SID: &str = "S-1-5-12";
 
 /// The link pipe: SYSTEM only. Both ends are opened here and handed down,
 /// so no process ever opens it by name.
@@ -338,10 +361,23 @@ fn host_token(session: u32) -> anyhow::Result<Owned> {
     Ok(token)
 }
 
-/// A LocalService token with no privilege but [`NETWORK_KEEP_PRIVILEGES`],
-/// for the network host. LocalService has impersonation and token assignment, either of
-/// which could turn a compromised network host back into SYSTEM.
-pub fn network_token() -> anyhow::Result<Owned> {
+/// A LocalService token for the network host, cut down three ways, so that
+/// a compromised network host has little to gain:
+///
+/// - no privilege but [`NETWORK_KEEP_PRIVILEGES`] (LocalService has
+///   impersonation and token assignment, either of which could turn it back
+///   into SYSTEM);
+/// - write-restricted: every write is also checked against only the
+///   LocalService user, the logon session, Everyone and RESTRICTED, so it
+///   can't write to what is open to, say, every user or every service, only
+///   to what names LocalService itself (its folder);
+/// - low integrity, so it can't write up to anything at medium or above (the
+///   user's files and settings), except its own folder, which is labelled
+///   low ([`NETWORK_DIR_LABEL_SDDL`]).
+///
+/// Reading is unchanged, so the host still finds its own exe, system DLLs and
+/// the network stack.
+pub fn network_token(low_integrity: bool) -> anyhow::Result<Owned> {
     let (user, domain) = (wide("LocalService"), wide("NT AUTHORITY"));
     let mut token = HANDLE::default();
     // SAFETY: NUL-terminated strings; `token` receives a handle we own.
@@ -356,9 +392,129 @@ pub fn network_token() -> anyhow::Result<Owned> {
         )
     }
     .context("LogonUser(LocalService)")?;
-    let token = Owned(token);
+    let logon = Owned(token);
+    match restrict_network_token(&logon, low_integrity) {
+        Ok(token) => Ok(token),
+        Err(e) => {
+            // Still LocalService with one privilege: worse than restricted,
+            // far better than running the whole host as SYSTEM.
+            tracing::warn!(
+                "could not restrict the network host's token, using LocalService's: {e:#}"
+            );
+            strip_privileges(&logon, NETWORK_KEEP_PRIVILEGES)?;
+            Ok(logon)
+        }
+    }
+}
+
+fn restrict_network_token(logon: &Owned, low_integrity: bool) -> anyhow::Result<Owned> {
+    // LogonUser's token is a primary one; its user and logon-session SIDs
+    // are what the restricted checks keep.
+    let user_buf = token_info(logon, TokenUser)?;
+    // SAFETY: GetTokenInformation(TokenUser) wrote a TOKEN_USER.
+    let user_sid = unsafe { (*user_buf.as_ptr().cast::<TOKEN_USER>()).User.Sid };
+    let groups_buf = token_info(logon, TokenLogonSid)?;
+    let groups = groups_buf.as_ptr().cast::<TOKEN_GROUPS>();
+    // SAFETY: a TOKEN_GROUPS whose entries follow it.
+    let logon_sids: Vec<PSID> = unsafe {
+        std::slice::from_raw_parts(
+            (&raw const (*groups).Groups).cast::<SID_AND_ATTRIBUTES>(),
+            (*groups).GroupCount as usize,
+        )
+    }
+    .iter()
+    .filter(|g| g.Attributes & SE_GROUP_LOGON_ID == SE_GROUP_LOGON_ID)
+    .map(|g| g.Sid)
+    .collect();
+    let everyone = Sid::new(EVERYONE_SID)?;
+    let restricted = Sid::new(RESTRICTED_SID)?;
+
+    let restricting: Vec<SID_AND_ATTRIBUTES> = std::iter::once(user_sid)
+        .chain(logon_sids)
+        .chain([everyone.0, restricted.0])
+        .map(|sid| SID_AND_ATTRIBUTES {
+            Sid: sid,
+            Attributes: 0,
+        })
+        .collect();
+    let mut restricted_token = HANDLE::default();
+    // SAFETY: every SID outlives the call; DISABLE_MAX_PRIVILEGE removes all
+    // privileges but SeChangeNotify.
+    unsafe {
+        CreateRestrictedToken(
+            logon.0,
+            DISABLE_MAX_PRIVILEGE | WRITE_RESTRICTED,
+            None,
+            None,
+            Some(&restricting),
+            &mut restricted_token,
+        )
+    }
+    .context("CreateRestrictedToken")?;
+    let token = Owned(restricted_token);
+
+    if low_integrity {
+        set_low_integrity(&token)?;
+    }
+    // CreateRestrictedToken already removed what it was told to; checked
+    // anyway, so a change in what LocalService has fails loudly.
     strip_privileges(&token, NETWORK_KEEP_PRIVILEGES)?;
     Ok(token)
+}
+
+fn set_low_integrity(token: &Owned) -> anyhow::Result<()> {
+    let low = Sid::new(LOW_INTEGRITY_SID)?;
+    let label = TOKEN_MANDATORY_LABEL {
+        Label: SID_AND_ATTRIBUTES {
+            Sid: low.0,
+            Attributes: SE_GROUP_INTEGRITY,
+        },
+    };
+    // SAFETY: a TOKEN_MANDATORY_LABEL, with a SID kept alive by `low`.
+    unsafe {
+        SetTokenInformation(
+            token.0,
+            TokenIntegrityLevel,
+            (&raw const label).cast::<c_void>(),
+            size_of::<TOKEN_MANDATORY_LABEL>() as u32 + GetLengthSid(low.0),
+        )
+    }
+    .context("SetTokenInformation(TokenIntegrityLevel)")
+}
+
+/// A token's information of `class`, in a buffer aligned for the structure.
+fn token_info(
+    token: &Owned,
+    class: windows::Win32::Security::TOKEN_INFORMATION_CLASS,
+) -> anyhow::Result<Vec<u64>> {
+    let mut len = 0u32;
+    // SAFETY: a size query; fails with the size needed.
+    let _ = unsafe { GetTokenInformation(token.0, class, None, 0, &mut len) };
+    let mut buf = vec![0u64; (len as usize).div_ceil(8).max(1)];
+    // SAFETY: `buf` is writable for `len` bytes.
+    unsafe { GetTokenInformation(token.0, class, Some(buf.as_mut_ptr().cast()), len, &mut len) }
+        .context("GetTokenInformation")?;
+    Ok(buf)
+}
+
+/// A SID from its string form, freed on drop.
+struct Sid(PSID);
+
+impl Sid {
+    fn new(s: &str) -> anyhow::Result<Self> {
+        let w = wide(s);
+        let mut sid = PSID::default();
+        // SAFETY: NUL-terminated; `sid` is freed in drop.
+        unsafe { ConvertStringSidToSidW(PCWSTR(w.as_ptr()), &mut sid) }.context("SID")?;
+        Ok(Self(sid))
+    }
+}
+
+impl Drop for Sid {
+    fn drop(&mut self) {
+        // SAFETY: allocated by ConvertStringSidToSidW.
+        unsafe { LocalFree(Some(HLOCAL(self.0.0))) };
+    }
 }
 
 fn strip_privileges(token: &Owned, keep: &[&str]) -> anyhow::Result<()> {
@@ -578,6 +734,79 @@ pub fn secure_dir(path: &Path, sddl: &str) -> anyhow::Result<()> {
 /// or one of its hosts is writing, so it is opened sharing everything.
 pub fn secure_file(path: &Path, sddl: &str) -> anyhow::Result<()> {
     set_dacl(path, sddl, false)
+}
+
+/// Sets the mandatory integrity label of the folder `path` from `sddl`,
+/// through a handle that refuses a junction (see [`secure_dir`]).
+pub fn label_dir(path: &Path, sddl: &str) -> anyhow::Result<()> {
+    set_label(path, sddl, true)
+}
+
+/// The same for a plain file. A file with more than one hard link is
+/// refused: the label would reach every name, and the network host can make
+/// one of its own files a link to something else.
+pub fn label_file(path: &Path, sddl: &str) -> anyhow::Result<()> {
+    set_label(path, sddl, false)
+}
+
+fn set_label(path: &Path, sddl: &str, want_dir: bool) -> anyhow::Result<()> {
+    let sd = SecurityDescriptor::new(sddl)?;
+    let mut present = windows::core::BOOL::default();
+    let mut defaulted = windows::core::BOOL::default();
+    let mut sacl = std::ptr::null_mut();
+    // SAFETY: `sd` is a valid descriptor; `sacl` points into it.
+    unsafe { GetSecurityDescriptorSacl(sd.0, &mut present, &mut sacl, &mut defaulted) }
+        .context("GetSecurityDescriptorSacl")?;
+    let path_w = wide(&path.display().to_string());
+    // Held until the label is set, shared for reading and writing but not
+    // deleting or renaming: what was checked can't be swapped for a link
+    // before the label goes on it.
+    // SAFETY: a NUL-terminated path; the handle is closed by `Owned`.
+    let handle = Owned(
+        unsafe {
+            CreateFileW(
+                PCWSTR(path_w.as_ptr()),
+                FILE_READ_ATTRIBUTES.0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                None,
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                None,
+            )
+        }
+        .with_context(|| format!("open {} for its label", path.display()))?,
+    );
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: a valid handle and a structure to fill.
+    unsafe { GetFileInformationByHandle(handle.0, &mut info) }
+        .context("GetFileInformationByHandle")?;
+    let attributes = FILE_FLAGS_AND_ATTRIBUTES(info.dwFileAttributes);
+    if attributes.contains(FILE_ATTRIBUTE_DIRECTORY) != want_dir
+        || attributes.contains(FILE_ATTRIBUTE_REPARSE_POINT)
+        || (!want_dir && info.nNumberOfLinks != 1)
+    {
+        anyhow::bail!(
+            "{} is not a plain {}",
+            path.display(),
+            if want_dir { "folder" } else { "file" }
+        );
+    }
+    // By name: SetSecurityInfo on a handle is refused for a label (access
+    // denied, even as SYSTEM, found by CI), this isn't.
+    // SAFETY: a NUL-terminated path and a SACL that outlives the call.
+    unsafe {
+        SetNamedSecurityInfoW(
+            PCWSTR(path_w.as_ptr()),
+            SE_FILE_OBJECT,
+            LABEL_SECURITY_INFORMATION,
+            None,
+            None,
+            None,
+            Some(sacl.cast_const()),
+        )
+    }
+    .ok()
+    .with_context(|| format!("set the integrity label of {}", path.display()))
 }
 
 fn set_dacl(path: &Path, sddl: &str, want_dir: bool) -> anyhow::Result<()> {

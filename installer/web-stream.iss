@@ -13,6 +13,11 @@
 ;
 ; Silent install, as CI tests it:
 ;   web-stream-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /TASKS="autostart"
+;
+; The tray app's updater (crates/gui/src/update_check.rs) runs:
+;   web-stream-setup-X.Y.Z.exe /SILENT /SUPPRESSMSGBOXES /NORESTART /RELAUNCH
+; /RELAUNCH is ours: it starts the app again when setup is done (a silent
+; run otherwise starts nothing). Setup is not signed.
 ; Silent uninstall keeps settings unless /PURGE is given:
 ;   "%ProgramFiles%\web-stream\unins000.exe" /VERYSILENT /SUPPRESSMSGBOXES /PURGE
 
@@ -105,7 +110,11 @@ Filename: "{app}\{#AppExe}"; Parameters: "setup mic-driver"; Tasks: mic; Flags: 
 ; settings), installed with the defaults if newly asked for.
 Filename: "{app}\{#AppExe}"; Parameters: "service update --quiet"; Check: ServiceInstalled; Flags: runhidden; StatusMsg: "Updating the service..."
 Filename: "{app}\{#AppExe}"; Parameters: "service install --quiet"; Tasks: service; Check: not ServiceInstalled; Flags: runhidden; StatusMsg: "Installing the service..."
-Filename: "{app}\{#AppExe}"; Description: "Open web-stream host"; Flags: postinstall nowait runasoriginaluser skipifsilent
+Filename: "{app}\{#AppExe}"; Description: "Open web-stream host"; Flags: postinstall nowait runasoriginaluser skipifsilent; Check: not HasParam('/RELAUNCH')
+; The tray app's own updater runs this setup with /SILENT /RELAUNCH: start the
+; app again, as the user who clicked Update (not the administrator UAC
+; elevated to), once everything is installed.
+Filename: "{app}\{#AppExe}"; Flags: nowait runasoriginaluser; Check: HasParam('/RELAUNCH')
 
 [UninstallRun]
 Filename: "{app}\{#AppExe}"; Parameters: "service uninstall --quiet"; Check: ServiceInstalled; Flags: runhidden; RunOnceId: "service"

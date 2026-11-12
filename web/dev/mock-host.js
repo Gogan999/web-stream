@@ -144,7 +144,11 @@ async function offer() {
     channel.binaryType = 'arraybuffer';
     if (channel.label === 'control') window.__control = channel;
     if (channel.label === 'file') window.__file = channel;
-    channel.onopen = () => write({ ev: 'channel', label: channel.label, ordered: channel.ordered, maxRetransmits: channel.maxRetransmits });
+    channel.onopen = () => {
+      write({ ev: 'channel', label: channel.label, ordered: channel.ordered, maxRetransmits: channel.maxRetransmits });
+      // Like the real host: what it can do, when the control channel opens.
+      if (channel.label === 'control') channel.send(JSON.stringify({ type: 'capabilities', clipboard: !window.mockNoClipboard, sas: false, hostName: 'MOCK-PC', version: '0.0.0' }));
+    };
     channel.onmessage = (m) => {
       if (channel.label === 'control') {
         const c = JSON.parse(m.data);
@@ -169,6 +173,10 @@ async function offer() {
         }
         if (c.type === 'setMicEnabled' && c.enabled && window.mockNoMic) {
           channel.send(JSON.stringify({ type: 'micUnavailable', message: 'the host has the mic turned off (--no-mic)' }));
+        }
+        if (c.type === 'setClipboard') {
+          window.mockClipboard = c.text;
+          channel.send(JSON.stringify({ type: 'clipboardSet', ok: true }));
         }
         if (c.type === 'requestFile') sendFile(c.id);
         if (c.type === 'uploadFile') receiving.set(c.id, { name: c.name, size: c.size, parts: [], received: 0 }), channel.send(JSON.stringify({ type: 'uploadAccepted', id: c.id }));

@@ -36,11 +36,23 @@ test('phone: touch input, on-screen keyboard and small-screen toolbar', { timeou
   await client.waitForFunction(() => document.getElementById('video').videoWidth > 0, null, { timeout: 15000 });
 
   // Settings fold away behind one button; the overlay buttons show.
-  assert.equal(await client.isVisible('#bitrate'), false);
+  assert.equal(await client.isVisible('#priority'), false);
   assert.equal(await client.isVisible('#touchbar'), true);
   await client.tap('#more-toggle');
-  assert.equal(await client.isVisible('#bitrate'), true);
+  assert.equal(await client.isVisible('#priority'), true);
+  assert.equal(await client.isVisible('#bitrate'), false); // Advanced is folded
   await client.tap('#more-toggle');
+
+  // The toolbar fits a 360 px phone: nothing makes the page scroll sideways.
+  assert.equal(await client.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
+  assert.equal(await client.evaluate(() => [...document.querySelectorAll('#bar > button, #bar > select')].every((b) => b.hidden || b.getBoundingClientRect().right <= window.innerWidth)), true);
+  assert.equal(await client.textContent('#mouse-label'), 'Trackpad');
+
+  // The toolbar fits a 360 px phone: nothing makes the page scroll sideways.
+  await client.setViewportSize({ width: 360, height: 740 });
+  assert.equal(await client.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
+  assert.equal(await client.evaluate(() => [...document.querySelectorAll('#bar > button, #bar > select')].every((b) => b.hidden || b.getBoundingClientRect().right <= window.innerWidth)), true);
+  await client.setViewportSize({ width: 915, height: 412 });
 
   const inputs = async () => (await host.evaluate(() => window.mockLog)).filter((e) => e.ev === 'input');
   const clearLog = () => host.evaluate(() => { window.mockLog.length = 0; });
@@ -187,6 +199,13 @@ test('phone: touch input, on-screen keyboard and small-screen toolbar', { timeou
   got = (await inputs()).filter((e) => e.type === 'key').map((e) => [e.usage, e.down]);
   assert.deepEqual(got, [[0xe0, true], [0x29, true], [0x29, false], [0xe0, false]]);
   assert.ok(await client.evaluate(() => document.activeElement.id === 'kbd-input'), 'keyboard stayed open');
+  // F-keys and the Ctrl+C chord are on the row too.
+  await clearLog();
+  await client.tap('#keys [data-key="F5"]');
+  await client.tap('#keys [data-chord="ctrl+c"]');
+  await host.waitForFunction(() => window.mockLog.filter((e) => e.type === 'key').length >= 6);
+  got = (await inputs()).filter((e) => e.type === 'key').map((e) => [e.usage, e.down]);
+  assert.deepEqual(got, [[0x3e, true], [0x3e, false], [0xe0, true], [0x06, true], [0x06, false], [0xe0, false]]);
   // A hardware shortcut while the keyboard is open goes through whole, not as Ctrl alone.
   await clearLog();
   await client.keyboard.press('Control+KeyC');

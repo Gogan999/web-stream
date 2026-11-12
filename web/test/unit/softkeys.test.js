@@ -34,3 +34,34 @@ test('typed text becomes key presses', () => {
   typeDiff({ backspaces: 0, text: 'A' }, (u, d) => sent.push([u, d]), true);
   assert.deepEqual(sent, [[HID.KeyA, true], [HID.KeyA, false]]);
 });
+
+test('characters with no US key are typed as Unicode, in order with key presses', () => {
+  const keys = [];
+  const texts = [];
+  const log = [];
+  typeDiff({ backspaces: 0, text: 'a\u00e9\u4e16b\u200b' }, (u, d) => { keys.push([u, d]); log.push('k' + u + d); }, false, (t) => { texts.push(t); log.push('t:' + t); });
+  assert.deepEqual(texts, ['\u00e9\u4e16']);
+  assert.deepEqual(log, [`k${HID.KeyA}true`, `k${HID.KeyA}false`, 't:\u00e9\u4e16', `k${HID.KeyB}true`, `k${HID.KeyB}false`]);
+  // Trailing unmapped text is flushed; without a text sink it is dropped as before.
+  const tail = [];
+  typeDiff({ backspaces: 0, text: '\u{1f600}' }, () => {}, false, (t) => tail.push(t));
+  assert.deepEqual(tail, ['\u{1f600}']);
+  const none = [];
+  typeDiff({ backspaces: 0, text: '\u00e9' }, (u, d) => none.push([u, d]));
+  assert.deepEqual(none, []);
+});
+
+test('chord keys press the modifier around the key, and respect a held sticky one', async () => {
+  const { SoftKeyboard } = await import('../../js/softkeys.js');
+  const { HID } = await import('../../js/keymap.js');
+  const log = [];
+  const kb = Object.create(SoftKeyboard.prototype);
+  Object.assign(kb, { sticky: new Set(), send: (u, d) => log.push([u, d]), keys: null });
+  kb.chord('ctrl+c');
+  assert.deepEqual(log, [[HID.ControlLeft, true], [HID.KeyC, true], [HID.KeyC, false], [HID.ControlLeft, false]]);
+  log.length = 0;
+  kb.sticky.add(HID.ControlLeft); // Ctrl already down from the Ctrl key
+  kb.chord('ctrl+v');
+  assert.deepEqual(log.slice(0, 2), [[HID.KeyV, true], [HID.KeyV, false]]);
+  assert.deepEqual(log.at(-1), [HID.ControlLeft, false]); // sticky released afterwards
+});

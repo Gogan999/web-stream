@@ -16,7 +16,10 @@ forwarded on the router, or Windows Firewall blocks it on the Public
 profile. The stream can fall back to TCP 8444 if that is forwarded.
 
 **The browser warns about the certificate.** Expected the first time with
-the host's own certificate; compare the fingerprint the host app shows.
+the host's own certificate: iPhone **Show Details > visit this website**,
+Chrome **Advanced > Proceed**. To check, compare the first and last 8 hex
+digits of the fingerprint the host app shows under the QR code with the
+certificate details in the warning.
 Away from home, use a [Cloudflare Tunnel](cloudflare-tunnel.md), whose
 address has a certificate browsers trust.
 A *new* warning for a browser that was already paired means the host's

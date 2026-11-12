@@ -12,7 +12,11 @@ export const MSG = Object.freeze({
   RELEASE_ALL: 0x08,
   GAMEPAD_BUTTONS: 0x09,
   MOUSE_ABS_ON: 0x0a, // MOUSE_ABS for a display other than the main one
+  TEXT: 0x0b, // Unicode text to type on the host, UTF-8 up to TEXT_MAX bytes
 });
+
+// Most UTF-8 bytes the host takes in one text message.
+export const TEXT_MAX = 4096;
 
 const clampI16 = (v) => Math.max(-32768, Math.min(32767, Math.round(v)));
 const clampU16 = (v) => Math.max(0, Math.min(65535, Math.round(v)));
@@ -103,6 +107,34 @@ export function releaseAll() {
   return new Uint8Array([MSG.RELEASE_ALL]).buffer;
 }
 
+// Messages that type `text` on the host as Unicode characters, whatever its keyboard layout. The
+// host takes at most TEXT_MAX bytes in one, so longer text is split between characters. Returns
+// an array of buffers, in order (empty for empty text).
+export function text(str) {
+  const enc = new TextEncoder();
+  const out = [];
+  let chunk = '';
+  let bytes = 0;
+  const flush = () => {
+    if (!chunk) return;
+    const body = enc.encode(chunk);
+    const b = new Uint8Array(1 + body.length);
+    b[0] = MSG.TEXT;
+    b.set(body, 1);
+    out.push(b.buffer);
+    chunk = '';
+    bytes = 0;
+  };
+  for (const ch of String(str)) { // by code point, so a surrogate pair is never split
+    const n = enc.encode(ch).length;
+    if (bytes + n > TEXT_MAX) flush();
+    chunk += ch;
+    bytes += n;
+  }
+  flush();
+  return out;
+}
+
 // Decoder, used by tests and the dev mock host.
 export function decode(buf) {
   const v = new DataView(buf instanceof ArrayBuffer ? buf : buf.buffer, buf.byteOffset ?? 0, buf.byteLength);
@@ -140,6 +172,8 @@ export function decode(buf) {
       return { type: 'gamepad-disconnect', index: v.getUint8(1) };
     case MSG.RELEASE_ALL:
       return { type: 'release-all' };
+    case MSG.TEXT:
+      return { type: 'text', text: new TextDecoder().decode(new Uint8Array(v.buffer, v.byteOffset + 1, v.byteLength - 1)) };
     default:
       return { type: 'unknown', code: t };
   }

@@ -25,6 +25,7 @@ use ws_transport::{
 };
 
 use crate::bottleneck::{self, Bottleneck};
+use crate::clipboard::Clipboard;
 use crate::cursor::{CursorSession, CursorTarget};
 use crate::files::{FileCommand, FileMsg, FileSession};
 use crate::input::InputThread;
@@ -87,6 +88,48 @@ pub struct Signaled {
     pub peers: PeerCount,
 }
 
+/// A control message for the log. Clipboard text is what the user copied (it
+/// may be a password), so it is never logged, only its size.
+fn describe_client(msg: &ClientControl) -> String {
+    match msg {
+        ClientControl::SetClipboard { text } => {
+            format!("SetClipboard {{ text: <{} bytes> }}", text.len())
+        }
+        other => format!("{other:?}"),
+    }
+}
+
+/// See [`describe_client`].
+fn describe_host(msg: &HostControl) -> String {
+    match msg {
+        HostControl::Clipboard { text } => format!("Clipboard {{ text: <{} bytes> }}", text.len()),
+        other => format!("{other:?}"),
+    }
+}
+
+/// Opens the clipboard sync, unless it is off or this session can't (the
+/// browser is then told it is unavailable).
+fn open_clipboard(
+    opts: &MediaOptions,
+    control_tx: &mpsc::Sender<HostControl>,
+) -> Option<Clipboard> {
+    if !opts.clipboard {
+        tracing::info!("clipboard sharing is off (--no-clipboard)");
+        return None;
+    }
+    let tx = control_tx.clone();
+    let opened = Clipboard::open(move |text| {
+        let _ = tx.try_send(HostControl::Clipboard { text });
+    });
+    match opened {
+        Ok(clipboard) => Some(clipboard),
+        Err(e) => {
+            tracing::warn!("clipboard sharing is unavailable in this session: {e}");
+            None
+        }
+    }
+}
+
 pub async fn run(
     transport: Transport,
     mut events: Events,
@@ -101,6 +144,7 @@ pub async fn run(
     let (later_tx, mut later_rx) = mpsc::channel(8);
     let (cursor_target, _) = watch::channel(CursorTarget::default());
     let Signaled { codecs, mut peers } = signaled;
+    let clipboard = open_clipboard(&opts, &control_tx);
     let mut media = Media {
         transport,
         config: opts.video.clone(),
@@ -111,6 +155,7 @@ pub async fn run(
         audio: (opts.audio_kbps, opts.audio_frame_ms),
         opts,
         control_tx,
+        clipboard,
         control_open: false,
         unsent: Vec::new(),
         stopped_tx,
@@ -293,6 +338,9 @@ struct Media {
     /// Game audio bitrate (kb/s) and Opus frame length (ms).
     audio: (u32, u32),
     control_tx: mpsc::Sender<HostControl>,
+    /// The shared clipboard; `None` when it is off (`--no-clipboard`) or
+    /// this session cannot open the Windows clipboard.
+    clipboard: Option<Clipboard>,
     /// Replies made before the `control` channel opened (an error while
     /// starting media, say) wait here.
     control_open: bool,
@@ -486,8 +534,19 @@ impl Media {
                         enabled: self.opts.upload_dir.is_some(),
                         max_size: uploads::MAX_SIZE,
                     });
+                    if let Some(clipboard) = &self.clipboard {
+                        clipboard.set_active(true);
+                    }
                     self.reply(HostControl::RemoteUpdate {
-                        enabled: self.opts.update_log.is_some() && update::available(),
+                        enabled: self.opts.update_log.is_some()
+                            && update::available()
+                            && update::can_update_from_source(),
+                    });
+                    self.reply(HostControl::Capabilities {
+                        clipboard: self.clipboard.is_some(),
+                        sas: crate::sas::available(),
+                        host_name: computer_name(),
+                        version: env!("CARGO_PKG_VERSION").into(),
                     });
                     for msg in std::mem::take(&mut self.unsent) {
                         self.reply(msg);
@@ -500,6 +559,9 @@ impl Media {
                 tracing::debug!(channel = c, "channel closed");
                 if c == channels::CONTROL {
                     self.control_open = false;
+                    if let Some(clipboard) = &self.clipboard {
+                        clipboard.set_active(false);
+                    }
                     self.transfers = None;
                     self.cursor_target.send_modify(|t| t.origin = None);
                 }
@@ -1154,7 +1216,7 @@ impl Media {
                 return;
             }
         };
-        tracing::debug!(?msg, "control");
+        tracing::debug!("control {}", describe_client(&msg));
         match msg {
             ClientControl::ListDisplays => {
                 self.send_displays();
@@ -1236,7 +1298,18 @@ impl Media {
                 }
             }
             ClientControl::UpdateHost => self.update_host(),
+            ClientControl::SetClipboard { text } => self.set_clipboard(text),
         }
+    }
+
+    fn set_clipboard(&self, text: String) {
+        let Some(clipboard) = &self.clipboard else {
+            return self.reply(HostControl::ClipboardSet { ok: false });
+        };
+        let tx = self.control_tx.clone();
+        clipboard.set(text, move |ok| {
+            let _ = tx.try_send(HostControl::ClipboardSet { ok });
+        });
     }
 
     fn update_host(&self) {
@@ -1852,7 +1925,7 @@ impl Media {
             .await
         {
             Ok(true) => {}
-            Ok(false) => tracing::warn!("control channel full; dropped {msg:?}"),
+            Ok(false) => tracing::warn!("control channel full; dropped {}", describe_host(&msg)),
             Err(e) => tracing::debug!("control message not sent: {e}"),
         }
     }
@@ -1965,8 +2038,33 @@ fn target_kbps(bwe_bps: u64, max_kbps: u32) -> u32 {
     (kbps.min(u64::from(max_kbps)) as u32).max(MIN_KBPS)
 }
 
+/// The PC's name for the page, `web-stream host` when the environment has none.
+fn computer_name() -> String {
+    ["COMPUTERNAME", "HOSTNAME"]
+        .iter()
+        .filter_map(|k| std::env::var(k).ok())
+        .map(|n| n.trim().chars().take(64).collect::<String>())
+        .find(|n| !n.is_empty())
+        .unwrap_or_else(|| "web-stream host".into())
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn clipboard_text_is_not_logged() {
+        let secret = "hunter2-correct-horse";
+        let c = super::describe_client(&ClientControl::SetClipboard {
+            text: secret.into(),
+        });
+        assert!(!c.contains(secret) && c.contains("21 bytes"), "{c}");
+        let h = super::describe_host(&HostControl::Clipboard {
+            text: secret.into(),
+        });
+        assert!(!h.contains(secret) && h.contains("21 bytes"), "{h}");
+        // Everything else is logged as before.
+        assert!(super::describe_client(&ClientControl::ListDisplays).contains("ListDisplays"));
+    }
+
     use super::*;
 
     #[test]

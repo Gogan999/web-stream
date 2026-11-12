@@ -116,7 +116,19 @@ pub enum InputEvent {
     },
     /// Release every held key and button (focus lost, tab hidden).
     ReleaseAll,
+    /// Type this text as Unicode characters, whatever the host's keyboard
+    /// layout, as `SendInput` with `KEYEVENTF_UNICODE`. For text a phone
+    /// keyboard or a paste produced that has no key on a US layout. On the
+    /// reliable `input` channel, so it stays in order with key presses.
+    /// At most [`TEXT_MAX`] bytes of UTF-8.
+    Text {
+        text: String,
+    },
 }
+
+/// Most bytes of UTF-8 in one [`InputEvent::Text`]; the browser splits
+/// longer text into several events.
+pub const TEXT_MAX: usize = 4096;
 
 /// How many video streams (and so displays input can address) there are.
 pub const MAX_LANES: u8 = 2;
@@ -134,6 +146,9 @@ pub mod wire {
     /// [`MOUSE_ABS`] for a display other than the main one: a lane byte
     /// follows the type.
     pub const MOUSE_ABS_ON: u8 = 0x0a;
+    /// Unicode text: the type byte, then up to [`super::TEXT_MAX`] bytes of
+    /// UTF-8 (so, unlike the others, a variable length).
+    pub const TEXT: u8 = 0x0b;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -229,6 +244,15 @@ impl InputEvent {
     /// whole; the host never injects a partial event.
     pub fn decode(msg: &[u8]) -> Result<Self, InputDecodeError> {
         let &kind = msg.first().ok_or(InputDecodeError::Empty)?;
+        if kind == wire::TEXT {
+            let bytes = &msg[1..];
+            if bytes.len() > TEXT_MAX {
+                return Err(InputDecodeError::Invalid("text too long"));
+            }
+            let text = std::str::from_utf8(bytes)
+                .map_err(|_| InputDecodeError::Invalid("text is not UTF-8"))?;
+            return Ok(Self::Text { text: text.into() });
+        }
         // Absolute moves and gamepad state may carry a trailing sequence
         // number.
         let (expected, with_seq) = match kind {
@@ -363,6 +387,10 @@ impl InputEvent {
                 out.extend_from_slice(&[wire::GAMEPAD_DISCONNECT, index])
             }
             Self::ReleaseAll => out.push(wire::RELEASE_ALL),
+            Self::Text { ref text } => {
+                out.push(wire::TEXT);
+                out.extend_from_slice(text.as_bytes());
+            }
         }
         out
     }
@@ -488,7 +516,8 @@ mod tests {
             (0x09, &[16]),
             (0x0a, &[6, 8]),
         ];
-        for kind in 0..=255u8 {
+        // Text (0x0b) is variable length; it has its own test.
+        for kind in (0..=255u8).filter(|k| *k != wire::TEXT) {
             for len in 1..=20usize {
                 let mut msg = vec![0u8; len];
                 msg[0] = kind;
@@ -526,6 +555,35 @@ mod tests {
         assert!(matches!(
             InputEvent::decode(&[0x0a, 2, 0, 0, 0, 0]),
             Err(Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn text_round_trip_and_limits() {
+        let ev = InputEvent::Text {
+            text: "h\u{e9}llo \u{1f600} \u{4e16}".into(),
+        };
+        let wire = ev.encode();
+        assert_eq!(wire[0], 0x0b);
+        assert_eq!(InputEvent::decode(&wire), Ok(ev));
+        assert_eq!(
+            InputEvent::decode(&[0x0b]),
+            Ok(InputEvent::Text {
+                text: String::new()
+            })
+        );
+        // Not UTF-8, or too long: rejected whole.
+        assert!(matches!(
+            InputEvent::decode(&[0x0b, 0xff, 0xfe]),
+            Err(InputDecodeError::Invalid(_))
+        ));
+        let mut long = vec![0x0b];
+        long.resize(1 + TEXT_MAX, b'a');
+        assert!(InputEvent::decode(&long).is_ok());
+        long.push(b'a');
+        assert!(matches!(
+            InputEvent::decode(&long),
+            Err(InputDecodeError::Invalid(_))
         ));
     }
 

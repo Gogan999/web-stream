@@ -11,6 +11,9 @@ export { pictureRect };
 
 const GAMEPAD_KEEPALIVE_MS = 100;
 const MAX_PADS = 4;
+const PASTE_USAGE = hidUsage('KeyV');
+const CTRL_L = hidUsage('ControlLeft');
+const CTRL_R = hidUsage('ControlRight');
 // Once the pointer has rested this long, its last absolute position is re-sent reliably.
 export const ABS_SETTLE_MS = 100;
 // Chrome reads gamepads every 4 ms; polling only once per animation frame would leave a press waiting
@@ -53,7 +56,7 @@ export function videoPoint(clientX, clientY, rect, videoW, videoH, clamp = false
 }
 
 export class InputCapture {
-  constructor({ session, video, video2 = null, stage, onHotkey, keyTarget = null, onKeySent = null, onReleaseAll = null, displaySize = null, displaySize2 = null, zoom = null }) {
+  constructor({ session, video, video2 = null, stage, onHotkey, keyTarget = null, onKeySent = null, onReleaseAll = null, displaySize = null, displaySize2 = null, zoom = null, onBeforePaste = null }) {
     this.session = session;
     this.video = video;
     this.video2 = video2; // the second monitor's stream, when one is shown (mouse and wheel only)
@@ -61,6 +64,9 @@ export class InputCapture {
     this.onHotkey = onHotkey;
     this.keyTarget = keyTarget; // the on-screen keyboard's textarea (softkeys.js)
     this.onKeySent = onKeySent;
+    this.onBeforePaste = onBeforePaste; // () => promise to wait for before Ctrl+V reaches the host, or null
+    this.keyGate = null; // pending key sends behind a paste's wait
+    this.releaseEpoch = 0; // counts releaseAll()s
     this.onReleaseAll = onReleaseAll; // softkeys: forget sticky modifiers the host just let go
     this.displaySize = displaySize; // () => { width, height } of the host display, for trackpad scaling
     this.displaySize2 = displaySize2; // the same for the second monitor's display
@@ -155,7 +161,9 @@ export class InputCapture {
     this.stage.addEventListener('mouseenter', (e) => { if (!fromTouch(e)) this.stageFocused = true; }, opt);
     this.stage.addEventListener('mouseleave', (e) => {
       if (fromTouch(e)) return;
-      if (this.mode === 'absolute') this.releaseAll();
+      // A touch-driven session has no mouse to leave: a leave after the layout moved under a resting
+      // pointer must not let go of keys held with the on-screen Keys row.
+      if (this.mode === 'absolute' && !this.touchActive) this.releaseAll();
       this.stageFocused = false;
     }, opt);
 
@@ -427,8 +435,35 @@ export class InputCapture {
     e.stopPropagation();
     if (down) this.heldKeys.add(usage);
     else if (!this.heldKeys.delete(usage)) return; // key went down before we had focus
-    this.rel(P.key(usage, down));
-    this.onKeySent?.(usage, down);
+    this.sendKey(usage, down);
+  }
+
+  // Sends a key. Ctrl/Win+V first waits for onBeforePaste() (clipboard.js: the host must have this
+  // browser's clipboard before it sees the paste); keys after it queue behind it, so order holds.
+  sendKey(usage, down) {
+    const epoch = this.releaseEpoch;
+    const send = () => {
+      // Everything was released (focus lost) while waiting: the host was told, so a late press
+      // must not follow. (A key let go normally, by the user, still goes: its release queues behind.)
+      if (down && epoch !== this.releaseEpoch) return;
+      this.rel(P.key(usage, down));
+      this.onKeySent?.(usage, down);
+    };
+    const paste = down && usage === PASTE_USAGE && (this.heldKeys.has(CTRL_L) || this.heldKeys.has(CTRL_R));
+    if (!this.keyGate && paste) {
+      const wait = this.onBeforePaste?.();
+      if (wait) {
+        const gate = this.keyGate = Promise.resolve(wait).catch(() => {}).then(send);
+        gate.then(() => { if (this.keyGate === gate) this.keyGate = null; });
+        return;
+      }
+    }
+    if (this.keyGate) {
+      const gate = this.keyGate = this.keyGate.then(send);
+      gate.then(() => { if (this.keyGate === gate) this.keyGate = null; });
+    } else {
+      send();
+    }
   }
 
   // A full press and release of one key, for keys the browser keeps for itself (Esc in a window).
@@ -446,6 +481,7 @@ export class InputCapture {
     clearTimeout(this.holdTimer);
     clearTimeout(this.slideTimer);
     this.heldKeys.clear();
+    this.releaseEpoch++;
     this.onReleaseAll?.();
     this.motion = { dx: 0, dy: 0, abs: null };
     this.rel(P.releaseAll());

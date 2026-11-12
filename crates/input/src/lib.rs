@@ -25,6 +25,7 @@ pub mod gamepad;
 pub mod handler;
 pub mod keymap;
 pub mod mouse;
+pub mod text;
 
 #[cfg(windows)]
 mod win;

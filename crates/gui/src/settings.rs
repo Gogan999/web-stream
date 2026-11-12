@@ -73,6 +73,9 @@ pub struct Settings {
     /// One of [`GAMEPADS`].
     pub gamepad: String,
     pub allow_resolution_change: bool,
+    /// Share the clipboard's text with the connected browser, both ways
+    /// (default on; `--no-clipboard` when off).
+    pub clipboard: bool,
     /// Let the browser send files to this PC.
     pub allow_upload: bool,
     /// Where they go; empty: `Downloads\web-stream`.
@@ -87,7 +90,7 @@ pub struct Settings {
     /// Ask the router to forward the ports (UPnP). Off unless the user
     /// turns it on.
     pub upnp: bool,
-    /// The first-run setup was finished or dismissed.
+    /// First-run pairing was opened (the window opens on a QR code once).
     pub setup_done: bool,
 }
 
@@ -121,6 +124,7 @@ impl Default for Settings {
             mic_device: "auto".into(),
             gamepad: "xbox360".into(),
             allow_resolution_change: false,
+            clipboard: true,
             allow_upload: false,
             upload_dir: String::new(),
             allow_remote_update: false,
@@ -226,6 +230,9 @@ impl Settings {
         args.extend(["--gamepad".into(), self.gamepad.clone()]);
         if self.allow_resolution_change {
             args.push("--allow-resolution-change".into());
+        }
+        if !self.clipboard {
+            args.push("--no-clipboard".into());
         }
         if self.allow_upload {
             args.push("--allow-upload".into());
@@ -368,6 +375,19 @@ mod tests {
         );
         assert_eq!((o.media.audio_kbps, o.media.audio_frame_ms), (256, 20));
         assert!(o.media.update_log.is_some());
+        // Shared unless turned off, and the service gets the choice too.
+        assert!(o.media.clipboard);
+        assert!(Settings::default().serve_options().unwrap().media.clipboard);
+        let off = Settings {
+            clipboard: false,
+            ..Settings::default()
+        };
+        assert!(!off.serve_options().unwrap().media.clipboard);
+        assert!(
+            off.service_args()
+                .unwrap()
+                .contains(&"--no-clipboard".into())
+        );
         assert_eq!(
             Settings::default()
                 .serve_options()

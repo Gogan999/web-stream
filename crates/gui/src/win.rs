@@ -2,7 +2,7 @@
 //! at a time, and starting with Windows.
 
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::time::Duration;
 
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -42,23 +42,113 @@ const RUN_VALUE: &str = "web-stream host";
 /// The main window, once eframe has created it.
 static WINDOW: AtomicIsize = AtomicIsize::new(0);
 
+/// Set by the tray's "Check for updates"; the window takes it on its next
+/// frame (see [`take_update_request`]).
+static UPDATE_REQUESTED: AtomicBool = AtomicBool::new(false);
+
 thread_local! {
     /// Kept on the UI thread; dropped before exiting so the icon goes away.
     static TRAY: RefCell<Option<TrayIcon>> = const { RefCell::new(None) };
+    /// The tray's update item, whose text says when a newer version is known.
+    static UPDATE_ITEM: RefCell<Option<MenuItem>> = const { RefCell::new(None) };
+    /// The tray's Quit item, whose text depends on whether the service hosts.
+    static QUIT_ITEM: RefCell<Option<MenuItem>> = const { RefCell::new(None) };
 }
+
+/// True once per click on the tray's "Check for updates".
+pub fn take_update_request() -> bool {
+    UPDATE_REQUESTED.swap(false, Ordering::Relaxed)
+}
+
+/// Names the newer version in the tray menu and tooltip (UI thread only);
+/// `None` puts the plain texts back.
+pub fn set_tray_update(version: Option<&str>) {
+    UPDATE_ITEM.with(|i| {
+        if let Some(item) = i.borrow().as_ref() {
+            item.set_text(match version {
+                Some(v) => format!("Version {v} is available: update..."),
+                None => "Check for updates".to_string(),
+            });
+        }
+    });
+    TRAY.with(|t| {
+        if let Some(tray) = t.borrow().as_ref() {
+            let _ = tray.set_tooltip(Some(match version {
+                Some(v) => format!("{TITLE}: version {v} is available"),
+                None => TITLE.to_string(),
+            }));
+        }
+    });
+}
+
+/// The single-instance mutex, held for the life of the process (except
+/// while an update's setup runs: see [`release_instance`]).
+static INSTANCE: AtomicIsize = AtomicIsize::new(0);
 
 /// False if the app is already running; that copy's window is brought
 /// forward instead.
 pub fn single_instance() -> bool {
-    // Never closed: the mutex lives as long as the process.
-    let created = unsafe { CreateMutexW(None, false, w!("Local\\web-stream-host-gui")) };
-    if created.is_ok() && unsafe { GetLastError() } != ERROR_ALREADY_EXISTS {
+    if take_instance_mutex() {
         return true;
     }
     if let Ok(hwnd) = unsafe { FindWindowW(None, &HSTRING::from(TITLE)) } {
         show_hwnd(hwnd);
     }
     false
+}
+
+fn take_instance_mutex() -> bool {
+    let created = unsafe { CreateMutexW(None, false, w!("Local\\web-stream-host-gui")) };
+    let Ok(handle) = created else { return false };
+    if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+        unsafe {
+            let _ = CloseHandle(handle);
+        }
+        return false;
+    }
+    INSTANCE.store(handle.0 as isize, Ordering::Relaxed);
+    true
+}
+
+/// Lets go of the single-instance mutex, which the installer's `AppMutex`
+/// checks, before it is started.
+pub fn release_instance() {
+    let h = INSTANCE.swap(0, Ordering::Relaxed);
+    if h != 0 {
+        unsafe {
+            let _ = CloseHandle(windows::Win32::Foundation::HANDLE(h as *mut _));
+        }
+    }
+}
+
+/// Takes the mutex back after the installer could not be started.
+pub fn retake_instance() {
+    if INSTANCE.load(Ordering::Relaxed) == 0 {
+        take_instance_mutex();
+    }
+}
+
+/// Starts the downloaded setup as administrator (a UAC prompt, which it
+/// asks for itself), quietly, relaunching the app when it is done; returns
+/// once it started, not when it ends.
+pub fn run_setup(setup: &std::path::Path) -> anyhow::Result<()> {
+    let r = unsafe {
+        ShellExecuteW(
+            None,
+            w!("runas"),
+            &HSTRING::from(setup.as_os_str()),
+            w!("/SILENT /SUPPRESSMSGBOXES /NORESTART /RELAUNCH"),
+            None,
+            SW_SHOWNORMAL,
+        )
+    };
+    if r.0 as isize <= 32 {
+        anyhow::bail!(
+            "the administrator prompt was declined or the installer could not start ({})",
+            r.0 as isize
+        );
+    }
+    Ok(())
 }
 
 pub fn error_box(text: &str) {
@@ -192,8 +282,9 @@ pub fn hide_window() {
 /// while the window is hidden (and eframe isn't running frames).
 pub fn create_tray(host: Host, ctx: eframe::egui::Context) -> anyhow::Result<()> {
     let open = MenuItem::with_id("open", "Open web-stream host", true, None);
-    let pair = MenuItem::with_id("pair", "Pair a browser", true, None);
+    let pair = MenuItem::with_id("pair", "Pair a device", true, None);
     let drop = MenuItem::with_id("drop", "Disconnect the browser", true, None);
+    let update = MenuItem::with_id("update", "Check for updates", true, None);
     let quit_item = MenuItem::with_id("quit", "Quit", true, None);
     let menu = Menu::new();
     menu.append_items(&[
@@ -202,6 +293,7 @@ pub fn create_tray(host: Host, ctx: eframe::egui::Context) -> anyhow::Result<()>
         &pair,
         &drop,
         &PredefinedMenuItem::separator(),
+        &update,
         &quit_item,
     ])?;
     let (rgba, size) = icon_rgba();
@@ -212,6 +304,8 @@ pub fn create_tray(host: Host, ctx: eframe::egui::Context) -> anyhow::Result<()>
         .with_menu_on_left_click(false)
         .build()?;
     TRAY.with(|t| *t.borrow_mut() = Some(tray));
+    UPDATE_ITEM.with(|i| *i.borrow_mut() = Some(update));
+    QUIT_ITEM.with(|q| *q.borrow_mut() = Some(quit_item));
 
     let show = {
         let ctx = ctx.clone();
@@ -245,10 +339,31 @@ pub fn create_tray(host: Host, ctx: eframe::egui::Context) -> anyhow::Result<()>
             show();
         }
         "drop" => host.command(Command::DropSession),
+        "update" => {
+            UPDATE_REQUESTED.store(true, Ordering::Relaxed);
+            // The window shows the result and the Update button.
+            show();
+        }
         "quit" => quit(&host),
         _ => {}
     }));
     Ok(())
+}
+
+/// Quit only closes this app while the Windows service hosts, so the menu
+/// says so.
+/// False if there is no tray menu yet (try again later).
+pub fn set_service_mode(service: bool) -> bool {
+    QUIT_ITEM.with(|q| {
+        q.borrow().as_ref().is_some_and(|item| {
+            item.set_text(if service {
+                "Close tray (service keeps running)"
+            } else {
+                "Quit"
+            });
+            true
+        })
+    })
 }
 
 /// Stops the host (putting back a changed resolution) and exits. Runs on

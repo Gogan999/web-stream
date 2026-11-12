@@ -55,6 +55,8 @@ host options:
   --upload-dir DIR     where received files go, default Downloads\\web-stream
   --allow-remote-update  let the browser update the host to the latest main and
                        restart it (scripts\\update.ps1)
+  --no-clipboard       don't share the clipboard (text) with the browser; it is
+                       shared both ways while a browser is connected, up to 256 KiB
   --pair               open pairing for two minutes at startup
 ";
 
@@ -179,6 +181,10 @@ pub struct MediaOptions {
     /// Where update.ps1's output goes when the browser may update the host
     /// (`--allow-remote-update`); `None` refuses updates.
     pub update_log: Option<PathBuf>,
+    /// Share the clipboard's text with the connected browser, both ways
+    /// (off with `--no-clipboard`). Even when on, the host only shares it
+    /// if it can open the Windows clipboard in its session.
+    pub clipboard: bool,
 }
 
 impl ServeOptions {
@@ -215,6 +221,7 @@ impl ServeOptions {
             allow_resolution_change: false,
             upload_dir: None,
             update_log: None,
+            clipboard: true,
         };
         let mut no_mic = false;
         let mut allow_upload = false;
@@ -283,6 +290,7 @@ impl ServeOptions {
                 }
                 "--gamepad" => media.gamepad = parse_gamepad(value()?)?,
                 "--allow-resolution-change" => media.allow_resolution_change = true,
+                "--no-clipboard" => media.clipboard = false,
                 "--allow-upload" => allow_upload = true,
                 "--upload-dir" => upload_dir = Some(PathBuf::from(value()?)),
                 "--allow-remote-update" => allow_remote_update = true,
@@ -485,6 +493,12 @@ mod tests {
         assert!(parse(&["--audio-frame-ms", "5"]).is_err());
         assert_eq!(o.device_idle_expiry, Duration::from_secs(30 * 24 * 3600));
         assert!(o.extra_origins.is_empty());
+    }
+
+    #[test]
+    fn clipboard_is_shared_unless_turned_off() {
+        assert!(parse(&[]).unwrap().media.clipboard);
+        assert!(!parse(&["--no-clipboard"]).unwrap().media.clipboard);
     }
 
     #[test]

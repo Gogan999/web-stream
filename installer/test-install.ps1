@@ -82,8 +82,11 @@ function Install([string]$log) {
 
 # Setup as the tray app's updater runs it: quiet, asking for the app back.
 function Install-Relaunch([string]$log) {
-    $p = Start-Process -FilePath $Setup -Wait -PassThru -ArgumentList @(
+    # No -Wait: it waits for the whole process tree, and the relaunched app
+    # (which stays running) is a child of setup.
+    $p = Start-Process -FilePath $Setup -PassThru -ArgumentList @(
         '/SILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/RELAUNCH', "/LOG=`"$log`"")
+    if (-not $p.WaitForExit(300000)) { throw 'setup /RELAUNCH did not finish in 5 minutes' }
     if ($p.ExitCode -ne 0) {
         Get-Content $log -Tail 40
         throw "setup /RELAUNCH exited with $($p.ExitCode)"

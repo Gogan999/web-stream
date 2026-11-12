@@ -155,7 +155,9 @@ export class InputCapture {
     this.stage.addEventListener('mouseenter', (e) => { if (!fromTouch(e)) this.stageFocused = true; }, opt);
     this.stage.addEventListener('mouseleave', (e) => {
       if (fromTouch(e)) return;
-      if (this.mode === 'absolute') this.releaseAll();
+      // A touch-driven session has no mouse to leave: a leave after the layout moved under a resting
+      // pointer must not let go of keys held with the on-screen Keys row.
+      if (this.mode === 'absolute' && !this.touchActive) this.releaseAll();
       this.stageFocused = false;
     }, opt);
 

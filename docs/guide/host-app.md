@@ -4,14 +4,18 @@
 is a tray app: the window shows what the host is doing, and closing it
 leaves the host running in the system tray. Click the tray icon to bring
 the window back; **Quit** in the tray menu, or the **Quit** button, stops
-the host.
+the host. With the Windows service installed the button and menu item read
+**Close tray (service keeps running)** and only close this app.
 
 Only one copy of the app runs at a time. Starting it again brings the
 existing window forward.
 
 While the [Windows service](windows-service.md) is installed, the app
 never hosts on its own: the service does, and the app, run as
-administrator, attaches to it and shows it in this window.
+administrator, attaches to it and shows it in this window. Settings the
+service can't honour (receiving files, the web client folder) are greyed out
+with a note; the Settings page has **Stop the service** / **Start the
+service**.
 
 ## The window
 
@@ -52,10 +56,11 @@ The settings cover:
 | Video | Display to stream first, codec, size, frame rate, bitrate cap, quality |
 | Audio | Game audio quality and the device it comes from, the device the browser mic plays into |
 | Input | Gamepad type (Xbox 360 or DualShock 4) |
-| Permissions | Let the browser change this PC's resolution, send files to this PC, and update and restart the host |
+| Permissions | Let the browser change this PC's resolution, send files to this PC, and, in a build made from a git clone only, update and restart the host (an installed build doesn't show that box) |
 | More options | Any other host option, as command-line flags (see the [host options reference](../dev/host-options.md)); quote paths that contain spaces |
 
-**Save and restart** applies the changes (with the Windows service
+**Save and restart** applies the changes (it is just **Save** while the host is
+stopped: saving never starts a stopped host) (with the Windows service
 installed, **Save and apply to the service** applies them to the service). A browser that is streaming is
 disconnected and can reconnect straight away. While hosting, the window also
 lists the ports to forward on the router.

@@ -45,6 +45,9 @@ pub struct App {
     /// the window after the first frame whatever it was built with.
     #[cfg_attr(not(windows), allow(dead_code))]
     hide_in_frames: Option<u8>,
+    /// The tray's Quit item says the service keeps running.
+    #[cfg(windows)]
+    tray_service_label: bool,
 }
 
 impl App {
@@ -129,6 +132,8 @@ impl App {
             #[cfg(windows)]
             service,
             hide_in_frames: hidden.then_some(2),
+            #[cfg(windows)]
+            tray_service_label: false,
         };
         // A browser may ask for an update (when the settings allow it):
         // update.ps1 builds, then this app restarts itself on the build.
@@ -906,6 +911,10 @@ impl App {
     }
 
     fn settings_ui(&mut self, ui: &mut egui::Ui) {
+        // The service refuses these (see Settings::service_args): say so
+        // instead of leaving a control that does nothing.
+        let service = self.service_installed().is_some();
+        let from_source = ws_host::update::can_update_from_source();
         let d = &mut self.draft;
         egui::Grid::new("settings-video")
             .num_columns(2)
@@ -1022,29 +1031,50 @@ impl App {
                 ui.end_row();
                 ui.label("Files");
                 ui.vertical(|ui| {
-                    ui.checkbox(&mut d.allow_upload, "let the browser send files to this PC")
-                        .on_hover_text(
-                            "They are saved in this folder, marked as downloaded from the \
-                             internet, and never opened by the host",
-                        );
                     ui.add_enabled(
-                        d.allow_upload,
+                        !service,
+                        egui::Checkbox::new(
+                            &mut d.allow_upload,
+                            "let the browser send files to this PC",
+                        ),
+                    )
+                    .on_hover_text(
+                        "They are saved in this folder, marked as downloaded from the \
+                             internet, and never opened by the host",
+                    );
+                    ui.add_enabled(
+                        d.allow_upload && !service,
                         egui::TextEdit::singleline(&mut d.upload_dir)
                             .hint_text("Downloads\\web-stream"),
                     );
+                    if service {
+                        ui.weak("Not available while the Windows service hosts this PC");
+                    }
                 });
                 ui.end_row();
-                ui.label("Updates");
-                ui.checkbox(
-                    &mut d.allow_remote_update,
-                    "let the browser update and restart this host",
-                )
-                .on_hover_text(
-                    "Adds \"Update host\" to the browser's settings: it runs \
-                     scripts\\update.ps1 here (pull main, build), then this app restarts on \
-                     the new build. Only paired browsers can use it",
-                );
-                ui.end_row();
+                // Only a build made in a git clone can update itself; an
+                // installed build never offers it.
+                if from_source {
+                    ui.label("Updates");
+                    ui.vertical(|ui| {
+                        ui.add_enabled(
+                            !service,
+                            egui::Checkbox::new(
+                                &mut d.allow_remote_update,
+                                "let the browser update and restart this host",
+                            ),
+                        )
+                        .on_hover_text(
+                            "Adds \"Update host\" to the browser's settings: it runs \
+                             scripts\\update.ps1 here (pull main, build), then this app \
+                             restarts on the new build. Only paired browsers can use it",
+                        );
+                        if service {
+                            ui.weak("Not available while the Windows service hosts this PC");
+                        }
+                    });
+                    ui.end_row();
+                }
                 ui.label("On launch");
                 ui.checkbox(&mut d.start_hosting, "start hosting when the app opens");
                 ui.end_row();
@@ -1213,9 +1243,13 @@ impl App {
                         );
                         ui.end_row();
                         ui.label("Web client folder");
-                        ui.add(
-                            egui::TextEdit::singleline(&mut d.web_root)
-                                .hint_text("empty: the one built into the host"),
+                        ui.add_enabled(
+                            !service,
+                            egui::TextEdit::singleline(&mut d.web_root).hint_text(if service {
+                                "not used by the Windows service"
+                            } else {
+                                "empty: the one built into the host"
+                            }),
                         );
                         ui.end_row();
                         ui.label("More options");
@@ -1254,10 +1288,14 @@ impl App {
                      administrator prompt, unless this app runs as one)",
                 )
             } else {
-                (
-                    "Save and restart",
-                    "Settings take effect when the host starts",
-                )
+                if self.host.is_active() {
+                    ("Save and restart", "Restarts the host with these settings")
+                } else {
+                    (
+                        "Save",
+                        "The host is stopped: the settings apply when it starts",
+                    )
+                }
             };
             if ui
                 .add_enabled(changed, egui::Button::new(label))
@@ -1272,7 +1310,10 @@ impl App {
                     self.host.stop();
                     self.restart = true;
                 } else {
-                    self.start();
+                    // A stopped host stays stopped; the settings apply when
+                    // it is started.
+                    self.host
+                        .log("settings saved; they apply when hosting starts");
                 }
             }
             if ui.add_enabled(changed, egui::Button::new("Undo")).clicked() {
@@ -1333,7 +1374,15 @@ impl App {
                     self.apply_to_service();
                 }
             }
-            Some(_) => {
+            Some(running) => {
+                let (label, action) = if running {
+                    ("Stop the service", "stop")
+                } else {
+                    ("Start the service", "start")
+                };
+                if ui.button(label).clicked() {
+                    self.run_service(&[action]);
+                }
                 if ui
                     .button("Update the service")
                     .on_hover_text("Copies this build to the service and restarts it")
@@ -1449,6 +1498,13 @@ impl eframe::App for App {
         }
 
         self.open_first_pairing();
+        #[cfg(windows)]
+        {
+            let service = self.service_installed().is_some();
+            if service != self.tray_service_label && crate::win::set_service_mode(service) {
+                self.tray_service_label = service;
+            }
+        }
 
         let dropped: Vec<PathBuf> = ctx.input(|i| {
             i.raw
@@ -1473,7 +1529,17 @@ impl eframe::App for App {
                 }
                 ui.weak("certificate, paired browsers, settings and log");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Quit").clicked() {
+                    // The service hosts, so quitting only closes this window's app.
+                    let (label, hover) = if self.service_installed().is_some() {
+                        (
+                            "Close tray (service keeps running)",
+                            "Closes this app and its tray icon. The Windows service goes on \
+                             hosting; stop it in Settings",
+                        )
+                    } else {
+                        ("Quit", "Stops hosting and closes this app")
+                    };
+                    if ui.button(label).on_hover_text(hover).clicked() {
                         self.quit(ctx);
                     }
                 });
@@ -1578,7 +1644,7 @@ struct PairingView {
     countdown: Option<u64>,
     /// Codes are locked after wrong guesses.
     locked: bool,
-    /// Whether the "Show QR code" toggle is offered: only with a link, which
+    /// Whether the QR code is offered: only with a link, which
     /// exists only while pairing is open.
     offer_qr: bool,
 }

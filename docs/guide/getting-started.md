@@ -56,6 +56,13 @@ Host > Connect automatically** on the page). In Chrome on Android,
 iOS kept its cookies apart from Safari: open the QR link from the icon
 itself, or pair once more. Each host you use needs its own icon.
 
+**Using it away from home too?** If you were sent a Cloudflare Tunnel token,
+open **Settings**, set **Cloudflare Tunnel** to **Named (token)**, paste it
+in **Tunnel token** and save: the window then shows your own address (like
+`https://alex.example.com/`). Then follow
+[Connecting from outside your home](remote-access.md) for the stream's
+ports, and come back.
+
 The QR code works once, for two minutes. Press **Pair a device** again for
 each extra device. **Forget paired browsers** in the window unpairs all of
 them.

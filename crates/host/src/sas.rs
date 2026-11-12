@@ -14,6 +14,11 @@ pub fn install(send: impl Fn() -> Result<(), String> + Send + Sync + 'static) {
     let _ = SENDER.set(Box::new(send));
 }
 
+/// Whether [`request`] can work here (this process is the service's host).
+pub fn available() -> bool {
+    SENDER.get().is_some()
+}
+
 /// Asks for Ctrl+Alt+Del on the host. The error is for the browser.
 pub fn request() -> Result<(), String> {
     match SENDER.get() {

@@ -217,6 +217,19 @@ pub enum HostControl {
     RemoteUpdate {
         enabled: bool,
     },
+    /// What this host can do, so the page shows only buttons that work. Sent
+    /// when the `control` channel opens, after [`HostControl::Uploads`].
+    Capabilities {
+        /// Clipboard sync is available (false until the host implements it).
+        clipboard: bool,
+        /// Ctrl+Alt+Del works ([`ClientControl::SecureAttention`]): the host
+        /// runs as the web-stream service.
+        sas: bool,
+        /// The PC's name, for the page title and the not-connected screen.
+        host_name: String,
+        /// The host program's version.
+        version: String,
+    },
     /// How an update this browser started is going. `Started` is followed
     /// by the host restarting (the session drops and the browser reconnects
     /// to the new build) unless `Finished` (nothing to update) or `Failed`
@@ -328,6 +341,16 @@ mod tests {
     fn update_messages_shape() {
         let msg: ClientControl = serde_json::from_str(r#"{"type":"updateHost"}"#).unwrap();
         assert_eq!(msg, ClientControl::UpdateHost);
+        assert_eq!(
+            serde_json::to_string(&HostControl::Capabilities {
+                clipboard: false,
+                sas: true,
+                host_name: "PC".into(),
+                version: "1.0.0".into(),
+            })
+            .unwrap(),
+            r#"{"type":"capabilities","clipboard":false,"sas":true,"hostName":"PC","version":"1.0.0"}"#
+        );
         assert_eq!(
             serde_json::to_string(&HostControl::RemoteUpdate { enabled: true }).unwrap(),
             r#"{"type":"remoteUpdate","enabled":true}"#

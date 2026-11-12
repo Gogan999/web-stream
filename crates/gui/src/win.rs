@@ -45,6 +45,8 @@ static WINDOW: AtomicIsize = AtomicIsize::new(0);
 thread_local! {
     /// Kept on the UI thread; dropped before exiting so the icon goes away.
     static TRAY: RefCell<Option<TrayIcon>> = const { RefCell::new(None) };
+    /// The tray's Quit item, whose text depends on whether the service hosts.
+    static QUIT_ITEM: RefCell<Option<MenuItem>> = const { RefCell::new(None) };
 }
 
 /// False if the app is already running; that copy's window is brought
@@ -212,6 +214,7 @@ pub fn create_tray(host: Host, ctx: eframe::egui::Context) -> anyhow::Result<()>
         .with_menu_on_left_click(false)
         .build()?;
     TRAY.with(|t| *t.borrow_mut() = Some(tray));
+    QUIT_ITEM.with(|q| *q.borrow_mut() = Some(quit_item));
 
     let show = {
         let ctx = ctx.clone();
@@ -249,6 +252,22 @@ pub fn create_tray(host: Host, ctx: eframe::egui::Context) -> anyhow::Result<()>
         _ => {}
     }));
     Ok(())
+}
+
+/// Quit only closes this app while the Windows service hosts, so the menu
+/// says so.
+/// False if there is no tray menu yet (try again later).
+pub fn set_service_mode(service: bool) -> bool {
+    QUIT_ITEM.with(|q| {
+        q.borrow().as_ref().is_some_and(|item| {
+            item.set_text(if service {
+                "Close tray (service keeps running)"
+            } else {
+                "Quit"
+            });
+            true
+        })
+    })
 }
 
 /// Stops the host (putting back a changed resolution) and exits. Runs on

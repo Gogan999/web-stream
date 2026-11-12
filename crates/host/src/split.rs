@@ -84,6 +84,10 @@ enum Up {
         keyframe: bool,
         recovers_from: Option<u64>,
         capture_age_us: u64,
+        /// How long ago the frame went into the encoder. An older build
+        /// leaves it out: then it counts from capture.
+        #[serde(default)]
+        encode_start_age_us: Option<u64>,
         encode_age_us: u64,
         width: u32,
         height: u32,
@@ -541,7 +545,7 @@ pub async fn serve_network(
                     break Ok(());
                 };
                 match msg {
-                    Up::Video { lane, display, codec, frame_index, keyframe, recovers_from, capture_age_us, encode_age_us, width, height } => {
+                    Up::Video { lane, display, codec, frame_index, keyframe, recovers_from, capture_age_us, encode_start_age_us, encode_age_us, width, height } => {
                         transport.send_video(EncodedFrame {
                             lane,
                             display,
@@ -550,7 +554,7 @@ pub async fn serve_network(
                             keyframe,
                             recovers_from,
                             capture_time: ago(capture_age_us),
-                            encode_start_time: ago(capture_age_us),
+                            encode_start_time: ago(encode_start_age_us.unwrap_or(capture_age_us)),
                             encode_done_time: ago(encode_age_us),
                             width,
                             height,
@@ -842,6 +846,7 @@ pub async fn serve_media(
                         keyframe: f.keyframe,
                         recovers_from: f.recovers_from,
                         capture_age_us: age(f.capture_time),
+                        encode_start_age_us: Some(age(f.encode_start_time)),
                         encode_age_us: age(f.encode_done_time),
                         width: f.width,
                         height: f.height,
@@ -962,6 +967,43 @@ mod tests {
         };
         assert_eq!(link, "secret");
         assert_eq!(remaining_secs, None);
+    }
+
+    #[test]
+    fn the_encode_start_crosses_the_bridge() {
+        let up = Up::Video {
+            lane: 0,
+            display: DisplayId(0),
+            codec: VideoCodec::H264,
+            frame_index: 1,
+            keyframe: false,
+            recovers_from: None,
+            capture_age_us: 300_000,
+            encode_start_age_us: Some(100_000),
+            encode_age_us: 96_000,
+            width: 1920,
+            height: 1080,
+        };
+        let json = serde_json::to_string(&up).unwrap();
+        let Up::Video {
+            encode_start_age_us,
+            ..
+        } = serde_json::from_str(&json).unwrap()
+        else {
+            panic!("not Video");
+        };
+        assert_eq!(encode_start_age_us, Some(100_000));
+        // An older build's header has none.
+        let old = json.replace(r#""encode_start_age_us":100000,"#, "");
+        assert_ne!(old, json);
+        let Up::Video {
+            encode_start_age_us,
+            ..
+        } = serde_json::from_str(&old).unwrap()
+        else {
+            panic!("not Video");
+        };
+        assert_eq!(encode_start_age_us, None);
     }
 
     #[test]

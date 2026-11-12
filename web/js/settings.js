@@ -1,7 +1,16 @@
 // Stream settings chosen in the browser: codec, bitrate, resolution, frame rate, encoder quality and keyframe
 // handling, turned into the host's VideoConfig. Pure functions so they can be tested; main.js owns the UI.
 
-export const QUALITIES = Object.freeze(['speed', 'balanced', 'clarity', 'source']);
+// Priority is what the user picks (Smooth / Balanced / Sharp); the host's encoder preset is its
+// `quality` field. Source (for reading and working) is a bundle: see SOURCE_PRESET.
+export const PRIORITIES = Object.freeze(['smooth', 'balanced', 'sharp', 'source']);
+export const PRIORITY_QUALITY = Object.freeze({ smooth: 'speed', balanced: 'balanced', sharp: 'clarity', source: 'source' });
+export const QUALITY_PRIORITY = Object.freeze({ speed: 'smooth', balanced: 'balanced', clarity: 'sharp', source: 'source' });
+
+// What choosing Source sets besides the preset: host-native pixels (no scaling blur), no automatic
+// shrinking, and a bitrate with room for it; the host keeps each frame sharp and lowers the frame rate,
+// up to the one chosen, to fit the bitrate.
+export const SOURCE_PRESET = Object.freeze({ resolution: 'native', fps: 60, minScale: 100, bitrate: 'auto' });
 // Video codecs the host encodes, as VideoConfig names them, with the browser's MIME type for each.
 export const CODECS = Object.freeze({ h264: 'video/H264', h265: 'video/H265', av1: 'video/AV1' });
 export const MOUSE_MODES = Object.freeze(['relative', 'absolute']);
@@ -11,7 +20,9 @@ export const FRAME_RATES = Object.freeze([30, 60, 90, 120, 144]);
 export const KEYFRAME_SCALES = Object.freeze([1, 2, 3, 4]);
 // 'screen' fits this screen, 'native' is the host display's own size; the rest are fixed heights in the
 // display's shape (never above its own size).
+// 2160 is still read from old saved settings but no longer listed (MENU_RESOLUTIONS).
 export const RESOLUTIONS = Object.freeze(['screen', 'native', '2160', '1440', '1080', '720']);
+export const MENU_RESOLUTIONS = Object.freeze(['screen', 'native', '1440', '1080', '720']);
 
 // Auto resolution: the smallest share of the chosen width and height the host may drop to when the
 // bitrate is too low for it. 0 lets it go as low as it ever does (360 lines); 100 turns it off.
@@ -26,14 +37,10 @@ export const STATS_LEVELS = Object.freeze(['essential', 'detailed', 'debug']);
 // codec null: stream whatever the host streams now.
 export const DEFAULTS = Object.freeze({
   codec: null, mouseMode: 'relative',
-  bitrate: 'auto', resolution: 'screen', fps: 60, quality: 'balanced', keyframeScale: 2, recoverDrops: true, minScale: 0,
+  bitrate: 'auto', resolution: 'screen', fps: 60, priority: 'balanced', keyframeScale: 2, recoverDrops: true, minScale: 0,
   matchHost: false, mic: false,
   audioKbps: 'host', audioFrame: 'host', statsLevel: 'essential',
 });
-
-// What choosing the Source quality sets: see the handler in main.js. The frame rate is only a ceiling:
-// the host holds every frame to a fixed high quality and lowers the rate to stay within the bitrate.
-export const SOURCE_PRESET = Object.freeze({ resolution: 'native', fps: 60, minScale: 100, bitrate: 'auto' });
 
 const STORAGE_KEY = 'ws-stream-settings';
 const even = (v) => Math.max(2, Math.floor(v / 2) * 2);
@@ -76,7 +83,7 @@ export function videoConfig(settings, { screen, display, codec = 'h264', rotate 
   const { width, height } = streamSize(settings.resolution, screen, display, rotate);
   const fps = Number(settings.fps) || DEFAULTS.fps;
   const bitrateKbps = settings.bitrate === 'auto' ? autoKbps(width, height, fps) : Number(settings.bitrate);
-  const quality = QUALITIES.includes(settings.quality) ? settings.quality : DEFAULTS.quality;
+  const quality = PRIORITY_QUALITY[settings.priority] ?? PRIORITY_QUALITY[DEFAULTS.priority];
   return {
     codec, width, height, fps, bitrateKbps, quality,
     keyframeScale: settings.keyframeScale, recoverDrops: settings.recoverDrops, minScalePercent: settings.minScale,
@@ -121,17 +128,29 @@ export function screenPixels(win = globalThis) {
 export function sanitize(saved) {
   const v = saved && typeof saved === 'object' ? saved : {};
   const kbps = Number(v.bitrate);
-  const quality = v.quality === 'text' ? 'source' : v.quality; // its old name
+  let resolution = v.resolution;
+  let minScale = v.minScale;
+  let priority = v.priority;
+  if (!PRIORITIES.includes(priority)) {
+    // Settings saved before Priority existed: `quality` becomes the matching priority. Source (once
+    // called text) was a bundle: host-native pixels and no automatic shrinking.
+    const quality = v.quality === 'text' ? 'source' : v.quality;
+    priority = QUALITY_PRIORITY[quality] ?? DEFAULTS.priority;
+    if (quality === 'source') {
+      resolution = 'native';
+      minScale = 100;
+    }
+  }
   return {
     codec: Object.hasOwn(CODECS, v.codec) ? v.codec : DEFAULTS.codec,
     mouseMode: MOUSE_MODES.includes(v.mouseMode) ? v.mouseMode : DEFAULTS.mouseMode,
     bitrate: Number.isInteger(kbps) && kbps >= 500 && kbps <= 200000 ? String(kbps) : DEFAULTS.bitrate,
-    resolution: RESOLUTIONS.includes(v.resolution) ? v.resolution : DEFAULTS.resolution,
+    resolution: RESOLUTIONS.includes(resolution) ? resolution : DEFAULTS.resolution,
     fps: FRAME_RATES.includes(Number(v.fps)) ? Number(v.fps) : DEFAULTS.fps,
-    quality: QUALITIES.includes(quality) ? quality : DEFAULTS.quality,
+    priority,
     keyframeScale: KEYFRAME_SCALES.includes(Number(v.keyframeScale)) ? Number(v.keyframeScale) : DEFAULTS.keyframeScale,
     recoverDrops: v.recoverDrops !== false,
-    minScale: MIN_SCALES.includes(Number(v.minScale)) ? Number(v.minScale) : DEFAULTS.minScale,
+    minScale: MIN_SCALES.includes(Number(minScale)) ? Number(minScale) : DEFAULTS.minScale,
     matchHost: v.matchHost === true,
     mic: v.mic === true,
     audioKbps: AUDIO_KBPS.includes(v.audioKbps) ? v.audioKbps : DEFAULTS.audioKbps,

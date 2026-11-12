@@ -15,6 +15,11 @@
   <button id="connect" type="button">Connect</button>
   <span id="status" data-state="idle">Not connected</span>
   <span class="spacer"></span>
+  <!-- Quick switch, shown when the host has 2+ displays (the same choice as Settings > Display). -->
+  <select id="display-quick" aria-label="Display" title="Switch the host display (Ctrl+Alt+Shift+1-9)" hidden></select>
+  <button id="mouse-toggle" type="button" title="Mouse mode (Ctrl+Alt+Shift+M)"><span class="lead">Mouse: </span><span id="mouse-label">Game</span></button>
+  <button id="mic-toggle" type="button" aria-pressed="false" title="Send this browser's microphone to the host">Mic</button>
+  <!-- HOOK (Capabilities message): the host says whether Ctrl+Alt+Del works (service mode); main.js setSasVisible(). -->
   <button id="sas" type="button" title="Sends Ctrl+Alt+Del to the host, for its sign-in and lock screen. Needs the host to run as the web-stream service.">Ctrl+Alt+Del</button>
   <button id="fullscreen" type="button">Fullscreen</button>
   <button id="files-toggle" type="button" aria-expanded="false" aria-controls="files" aria-haspopup="true" hidden>Files</button>
@@ -32,65 +37,56 @@
   </div>
   <button id="more-toggle" type="button" aria-expanded="false" aria-controls="more" aria-haspopup="true">Settings ▾</button>
   <div id="more" class="panel" role="group" aria-label="Settings">
-    <!-- Everyday settings stay open; Advanced, Host and Shortcuts start folded (main.js remembers which are open). -->
-    <details id="set-display" open>
-      <summary>Display</summary>
-      <div class="group">
-        <label>Display <select id="display" disabled></select></label>
-        <label title="Show a second host display next to the first, each at its own full detail. It is another video stream, so it uses more bandwidth.">Second monitor <select id="display2" disabled></select></label>
-        <button id="popout" type="button" hidden title="Show the second monitor in a window of its own, to put on another screen. Double-click it for fullscreen. Needs pop-ups allowed.">Pop out</button>
-        <label>Resolution <select id="resolution"></select></label>
-        <label title="Lets the host lower the stream's resolution while the connection is too slow for it, and raise it again once there is room. Only when something moves on screen: a still desktop never lowers it.">Auto resolution <select id="min-scale"></select></label>
-        <label title="Change the host display's resolution to fit this screen. The host must be started with --allow-resolution-change; undone on disconnect."><input type="checkbox" id="match-host"> Match host resolution</label>
+    <!-- Settings: what a user changes now and then. Everything set-once is under Advanced (folded; main.js remembers it). -->
+    <div class="group">
+      <label>Display <select id="display" disabled></select></label>
+      <label title="Show a second host display next to the first, each at its own full detail. It is another video stream, so it uses more bandwidth.">Second monitor <select id="display2" disabled></select></label>
+      <button id="popout" type="button" hidden title="Show the second monitor in a window of its own, to put on another screen. Double-click it for fullscreen. Needs pop-ups allowed.">Pop out</button>
+      <label title="Smooth keeps motion fluid and the delay low; Sharp spends more on each picture; Source is for reading and working. The connection decides the rest.">Priority <select id="priority"></select></label>
+      <label title="The biggest picture to ask for. On a slow connection the host may send less.">Max resolution <select id="resolution"></select></label>
+      <label title="The highest frame rate to ask for. A still desktop sends fewer.">Max FPS <select id="fps"></select></label>
+      <label>Mouse
+        <select id="mouse-mode">
+          <option value="relative">Game (relative)</option>
+          <option value="absolute">Desktop (absolute)</option>
+        </select>
+      </label>
+      <div class="row">
+        <label title="Send this browser's microphone to the host, which plays it into its virtual cable (CABLE Input unless started with --mic-device). Games pick CABLE Output as their mic."><input type="checkbox" id="mic"> Mic</label>
+        <button id="stats-toggle" type="button" aria-pressed="false">Show stats</button>
       </div>
-    </details>
-    <details id="set-stream" open>
-      <summary>Stream</summary>
-      <div class="group">
-        <label title="H.265 and AV1 look better than H.264 at the same bitrate. Only codecs this browser can play are listed; if the host's GPU can't encode one, it streams H.264 and says so.">Codec <select id="codec"></select></label>
-        <label>Bitrate <select id="bitrate"></select></label>
-        <label>FPS <select id="fps"></select></label>
-        <label>Mouse
-          <select id="mouse-mode">
-            <option value="relative">Relative (game)</option>
-            <option value="absolute">Absolute (desktop)</option>
-          </select>
-        </label>
-        <div class="row">
-          <label title="Send this browser's microphone to the host, which plays it into its virtual cable (CABLE Input unless started with --mic-device). Games pick CABLE Output as their mic."><input type="checkbox" id="mic"> Mic</label>
-          <button id="stats-toggle" type="button" aria-pressed="false">Stats</button>
-        </div>
-      </div>
-    </details>
+    </div>
     <details id="set-advanced">
       <summary>Advanced</summary>
       <div class="group">
         <h3>Video</h3>
-        <label>Quality <select id="quality"></select></label>
+        <label title="H.265 and AV1 look better than H.264 at the same bitrate. Only codecs this browser can play are listed; if the host's GPU can't encode one, it streams H.264 and says so.">Codec <select id="codec"></select></label>
+        <label title="A ceiling, not a target: Auto picks a bitrate for the resolution and frame rate and the host lowers it when the connection can't carry it.">Max bitrate <select id="bitrate"></select></label>
+        <label title="Lets the host lower the stream's resolution while the connection is too slow for it, and raise it again once there is room, down to this share of the size. Only when something moves on screen: a still desktop never lowers it.">Auto resolution floor <select id="min-scale"></select></label>
         <label title="How many ordinary frames' worth of data a keyframe may use. Keyframes restart the picture (on connect, or after a packet is lost for good); bigger ones look sharper straight away but take that many frames to send.">Keyframe size <select id="keyframe-scale"></select></label>
         <label title="When the host drops a frame (it fell behind sending), have the encoder skip over it instead of sending a keyframe. Turn off if the picture smears or streaks after a hitch."><input type="checkbox" id="recover-drops"> Skip dropped frames</label>
-        <button id="autotune" type="button" title="Steps through bitrates and encoder qualities and keeps the best that streams cleanly. Run it while something moves on screen.">Auto-tune (test)</button>
+        <label title="Change the host display's resolution to fit this screen. The host must be started with --allow-resolution-change; undone on disconnect."><input type="checkbox" id="match-host"> Match host resolution</label>
+        <div class="row">
+          <button id="autotune" type="button" title="Steps through bitrates and encoder qualities and keeps the best that streams cleanly. Run it while something moves on screen. The result lasts for this connection unless you keep it.">Auto-tune (test)</button>
+          <button id="autotune-keep" type="button" hidden title="Save what auto-tune picked as this browser's Max bitrate and Priority.">Keep these</button>
+        </div>
         <h3>Audio</h3>
-        <label title="Game audio bitrate. Higher is closer to the original; 192 kb/s and up is hard to tell apart from it.">Bitrate <select id="audio-kbps"></select></label>
-        <label title="Longer frames sound better at the same bitrate; 10 ms reaches you 10 ms sooner.">Frame <select id="audio-frame"></select></label>
+        <label title="Game audio bitrate. Higher is closer to the original; 192 kb/s and up is hard to tell apart from it.">Audio bitrate <select id="audio-kbps"></select></label>
+        <label title="Longer frames sound better at the same bitrate; 10 ms reaches you 10 ms sooner.">Audio frame <select id="audio-frame"></select></label>
         <h3>Stats</h3>
         <label title="Essential: warnings (reduced resolution or bitrate, slow or lossy connection, TCP fallback, dropped frames) and the key figures. Detailed: every browser and host figure. Debug: adds totals, the connection route and raw host stats.">Stats level <select id="stats-level"></select></label>
-      </div>
-    </details>
-    <details id="set-host">
-      <summary>Host</summary>
-      <div class="group">
+        <h3>Host</h3>
         <div class="row">
           <button id="update-host" type="button" disabled title="Updates the host to the latest main and restarts it (scripts\update.ps1 on the host). Needs the tray app's &quot;let the browser update and restart this host&quot; setting.">Update host</button>
-          <button id="unpair" type="button" hidden>Unpair</button>
           <button id="diag-save" type="button" hidden title="Temporary: the browser side of a WS_DIAG run (page opened with ?diag)">Save diag log</button>
         </div>
-      </div>
-    </details>
-    <details id="set-shortcuts" class="hint">
-      <summary>Shortcuts</summary>
-      <div class="group">
-        <p>Ctrl+Alt+Shift with: 1–9 display · S stats · L stats level · F fullscreen · M mouse mode · Q release mouse · E send Esc</p>
+        <div class="row">
+          <button id="unpair" type="button" hidden>Unpair this browser</button>
+          <button id="reset-settings" type="button" title="Put every setting on this page back to its default. The host and the pairing are untouched.">Reset to defaults</button>
+        </div>
+        <!-- HOOK (Capabilities message): main.js setHostVersion() fills and shows this once the host reports its version. -->
+        <p id="version" class="note" hidden></p>
+        <p class="hint note shortcuts">Shortcuts, Ctrl+Alt+Shift with: 1–9 display · S stats · L stats level · F fullscreen · M mouse mode · Q release mouse · E send Esc</p>
       </div>
     </details>
   </div>
@@ -105,6 +101,11 @@
   <p id="pair-msg" role="status"></p>
 </form>
 <main id="stage" tabindex="-1">
+  <!-- Not connected: one large button in the middle. HOOK (Capabilities message): #stage-host gets the host's name. -->
+  <div id="stage-connect">
+    <button id="connect-big" type="button">Connect</button>
+    <p id="stage-host" hidden></p>
+  </div>
   <div id="view">
     <video id="video" autoplay playsinline disablepictureinpicture disableremoteplayback></video>
     <video id="video2" autoplay playsinline disablepictureinpicture disableremoteplayback hidden></video>
@@ -133,7 +134,13 @@
     <button type="button" data-key="Delete">Del</button>
     <button type="button" data-key="Backspace">Bksp</button>
     <button type="button" data-key="Enter">Enter</button>
+    <button type="button" data-chord="ctrl+c">Ctrl+C</button>
+    <button type="button" data-chord="ctrl+v">Ctrl+V</button>
+    <button type="button" data-chord="ctrl+z">Ctrl+Z</button>
     <button type="button" id="keys-sas">Ctrl+Alt+Del</button>
+    <span class="fkeys" role="group" aria-label="Function keys">
+      <button type="button" data-key="F1">F1</button><button type="button" data-key="F2">F2</button><button type="button" data-key="F3">F3</button><button type="button" data-key="F4">F4</button><button type="button" data-key="F5">F5</button><button type="button" data-key="F6">F6</button><button type="button" data-key="F7">F7</button><button type="button" data-key="F8">F8</button><button type="button" data-key="F9">F9</button><button type="button" data-key="F10">F10</button><button type="button" data-key="F11">F11</button><button type="button" data-key="F12">F12</button>
+    </span>
   </div>
   <textarea id="kbd-input" tabindex="-1" aria-label="On-screen keyboard input" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" enterkeyhint="enter"></textarea>
 </main>

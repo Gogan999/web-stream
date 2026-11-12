@@ -14,9 +14,15 @@ limits noted under [Phones and tablets](#phones-and-tablets).
 - Click **Connect**. Add `?autoconnect` to the address to connect as soon
   as the page loads.
 
-The toolbar holds **Connect**, the connection status, **Fullscreen** and
-**Settings ▾**. Settings opens one dropdown, grouped into Display, Video,
-Input, Audio and Other; click outside it or press Esc to close it.
+Not connected, a large **Connect** button sits in the middle of the page.
+Connected, the toolbar holds **Connect/Disconnect** and the status, then:
+a **display** switch (only when the host has two or more displays), **Mouse**
+(Game / Desktop; Trackpad / Direct on a touch screen), **Mic** (on/off),
+**Ctrl+Alt+Del**, **Files** (only when files are offered or accepted),
+**Fullscreen** and **Settings ▾**. Settings is one flat dropdown of the
+things you change now and then; everything you set once is under its folded
+**Advanced** section (remembered). Click outside the dropdown or press Esc
+to close it.
 
 ## Mouse and keyboard
 
@@ -28,7 +34,7 @@ Input, Audio and Other; click outside it or press Esc to close it.
   keyboard.
 - In a window the browser keeps Esc for itself (to free the mouse), so it
   never reaches the host. Use **Ctrl+Alt+Shift+E** to send Esc.
-- **Ctrl+Alt+Del** in the toolbar sends it to the host when the host runs as
+- **Ctrl+Alt+Del** on the toolbar sends it to the host when the host runs as
   a [Windows service](windows-service.md#ctrlaltdel).
 
 ### Hotkeys
@@ -47,50 +53,70 @@ All hotkeys are **Ctrl+Alt+Shift** plus:
 
 ## Stream settings
 
-Settings are remembered in this browser.
+Settings are remembered in this browser. **Reset to defaults** (Advanced)
+puts them all back. The host adapts the stream to the connection; these
+choices are the limits and the preference it works within.
 
-- **Resolution:** *Match this screen* (default) streams at this screen's
-  size in device pixels, fitted to the host display's shape and never
-  larger than it. *Host native* is the display's own size; the others are
-  fixed heights.
-- **Bitrate:** *Auto* picks from resolution and frame rate (20 Mb/s at
-  1080p60). It is a ceiling: the host follows the network's measured
-  bandwidth below it.
-- **FPS** and **Quality:** *Speed* (fastest encode, softest picture),
-  *Balanced*, *Clarity* (slowest encode the frame rate allows, more
-  detail in fast motion), or *Source* (for reading and working: every frame is
-  coded as close to the desktop as the encoder allows, and the frame rate,
-  up to the one chosen, drops to stay within the bitrate, so a still screen
-  stays sharp at a high rate and fast motion drops frames instead of going
-  soft. It also sets host-native resolution, 60 fps and automatic shrinking
-  off).
-- **Second monitor** (Display group) streams another host display next to
-  the first, each at its own full detail, as a second video. It needs about
-  as much bandwidth again. *Pop out* moves it to a window of its own, which
-  you can put on another screen of yours (double-click it for fullscreen;
-  the browser may ask you to allow pop-ups first). Mouse, wheel and keys
-  work in both. With *Mouse: Absolute (desktop)*, moving across from one
-  video to the other crosses between the host's monitors; in Relative mode
-  the host pointer simply moves across them.
+In Settings:
+
+- **Priority:** *Smooth* (fast encode, lowest delay, softest picture),
+  *Balanced* (default), *Sharp* (slowest encode the frame rate allows,
+  more detail in fast motion) or *Source* (for reading and working: every
+  frame is coded as close to the desktop as the encoder allows, and the
+  frame rate, up to Max FPS, drops to stay within the bitrate, so a still
+  screen stays sharp and fast motion drops frames instead of going soft.
+  Choosing it also sets host-native resolution, 60 fps, Auto resolution
+  floor Off and Auto bitrate). Replaces the old *Quality*; a saved Speed,
+  Balanced or Clarity becomes Smooth, Balanced or Sharp, and a saved
+  *Source* stays Source.
+- **Max resolution:** *Match this screen* (default) streams at this
+  screen's size in device pixels, fitted to the host display's shape and
+  never larger than it. *Host native* is the display's own size; the others
+  are fixed heights. On a slow connection the host may send less.
+- **Max FPS:** the highest frame rate to ask for.
+- **Second monitor** streams another host display next to the first, each
+  at its own full detail, as a second video. It needs about as much
+  bandwidth again. *Pop out* moves it to a window of its own, which you can
+  put on another screen of yours (double-click it for fullscreen; the
+  browser may ask you to allow pop-ups first). Mouse, wheel and keys work in
+  both. With *Mouse: Desktop*, moving across from one video to the other
+  crosses between the host's monitors; in Game mode the host pointer simply
+  moves across them.
+- **Mouse** and **Mic** (also on the toolbar). **Mic** sends this browser's
+  microphone to the host. Off by default; the browser asks for permission
+  the first time, and turning it on or off doesn't reconnect. The host needs
+  a virtual microphone driver (see
+  [Microphone](audio-and-gamepads.md#microphone)).
+- **Show stats** toggles the overlay.
+
+In Advanced:
+
 - **Codec:** overrides the host's codec for this browser. The host falls
   back to H.264 if either side can't handle the choice.
-- **Match host resolution** switches the host display to the largest
-  resolution that fits this screen, and is undone on disconnect. Off by
-  default; the host must also allow it in its settings.
-- **Audio bitrate** and **Frame:** game audio quality. *Host setting* keeps
-  the host's own (128 kb/s and 10 ms unless changed). 20 ms frames sound
-  better at the same bitrate and arrive 10 ms later. Changes apply
+- **Max bitrate:** *Auto* picks from resolution and frame rate (20 Mb/s at
+  1080p60). It is a ceiling: the host follows the network's measured
+  bandwidth below it.
+- **Auto resolution floor:** how far the host may shrink the picture while
+  the connection is too slow (On = as low as needed, 75%, 50%, Off).
+- **Keyframe size**, **Skip dropped frames**, **Match host resolution**
+  (switches the host display to the largest resolution that fits this
+  screen, undone on disconnect; off by default; the host must also allow
+  it in its settings).
+- **Audio bitrate** and **Audio frame:** game audio quality. *Host setting*
+  keeps the host's own (128 kb/s and 10 ms unless changed). 20 ms frames
+  sound better at the same bitrate and arrive 10 ms later. Changes apply
   immediately.
-- **Mic** sends this browser's microphone to the host. Off by default; the
-  browser asks for permission the first time, and turning it on or off
-  doesn't reconnect. The host needs a virtual microphone driver (see
-  [Microphone](audio-and-gamepads.md#microphone)).
-- **Auto-tune (test)** tries bitrates from 10 to 150 Mb/s, then Clarity and
-  Balanced, about 7 seconds each, and keeps the best that streams without
+- **Stats level**, and the shortcut list.
+- **Auto-tune (test)** tries bitrates from 10 to 150 Mb/s, then Sharp and
+  Balanced, about 7 seconds each, and uses the best that streams without
   freezes, drops, loss or slow encoding or decoding, minus 15% headroom.
-  Run it while something moves on screen. Click again to stop.
-- **Update host** (under Other) appears when the host allows updates from
-  the browser. See [Building from source](../dev/building.md#updating-from-the-browser).
+  The result lasts for this connection only; press **Keep these** to save it
+  as Max bitrate and Priority. Run it while something moves on screen. Click
+  again to stop. The stats overlay and auto-tune judge health by the same
+  limits (`web/js/health.js`).
+- **Update host** appears when the host allows updates from the browser. See
+  [Building from source](../dev/building.md#updating-from-the-browser).
+- **Unpair this browser** and **Reset to defaults**.
 
 ## Files
 
@@ -129,26 +155,26 @@ limits below.
   finger-sized. Buttons over the stream (top right) stay available in
   fullscreen: **Fit** (while zoomed), **Keyboard**, **Keys** and
   **Fullscreen**.
-- **Mouse: Relative** works as a trackpad: drag moves the cursor, tap
+- **Mouse: Trackpad** (Game) works as a trackpad: drag moves the cursor, tap
   clicks, two-finger tap right-clicks, two-finger drag scrolls. To drag
   (move a window, select text), tap and then touch again straight away and
   drag, like a laptop trackpad; holding still for half a second and then
   dragging also works.
-- **Mouse: Absolute** is direct touch: the cursor goes where your finger
+- **Mouse: Direct** (Desktop) is direct touch: the cursor goes where your finger
   is. Tap clicks there, drag drags, hold or two-finger tap right-clicks,
-  two-finger drag scrolls.
+  two-finger drag scrolls. A three-finger tap middle-clicks in both modes.
 - **Pinch** zooms into the stream on the phone (the host's screen doesn't
   change), and moving the pinch pans. A two-finger drag still scrolls on the
   host; turn on **Pan** (shown while zoomed) to make it pan the view
-  instead. In Relative mode the view follows the pointer. **Fit**, or
+  instead. In Trackpad mode the view follows the pointer. **Fit**, or
   pinching back out, returns to the full view. Trackpad motion gets finer
   as you zoom in.
 - **Keyboard** opens the phone's keyboard. Text is sent as key presses on a
   US layout (the host's layout decides what they produce); characters a US
   keyboard can't type are skipped. Some phone keyboards only send a word
   once it is finished.
-- **Keys** shows Esc, Tab, Ctrl, Alt, Shift, Win, arrows, Del, Backspace
-  and Enter. Ctrl, Alt, Shift and Win stay held until the next key (tap
+- **Keys** shows Esc, Tab, Ctrl, Alt, Shift, Win, arrows, Del, Backspace,
+  Enter, Ctrl+C, Ctrl+V, Ctrl+Z and Ctrl+Alt+Del, and a scrolling row of F1 to F12. Ctrl, Alt, Shift and Win stay held until the next key (tap
   again to release), so Ctrl+Esc is Ctrl, then Esc.
 - **Fullscreen** on Android also rotates the phone to the host display's
   shape. iPhone Safari can't make a page fullscreen, so the stream fills the

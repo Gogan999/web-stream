@@ -2,7 +2,10 @@
 // that streams cleanly. Run it while something is moving on screen: a still desktop needs few bits,
 // so the network is never really loaded, and the result says so.
 //
+// What counts as a problem is health.js, shared with the stats overlay.
 // The policy lives here; main.js supplies apply(config), measure(ms) and wait(ms).
+
+import { LIMITS, lossLevel, bandwidthShort, decodeSlow, encodeSlow, moving as isMoving } from './health.js';
 
 export const LADDER_KBPS = Object.freeze([10000, 20000, 30000, 50000, 80000, 120000, 150000]);
 export const FLOOR_KBPS = 5000;
@@ -22,26 +25,20 @@ export class Cancelled extends Error {
 // bitrate (a host whose encoder is slow at any bitrate would otherwise fail every step and end on the
 // floor), only while picking the encoder quality.
 export function problem(m, config, { encode = true } = {}) {
-  const frameMs = 1000 / config.fps;
   if (m.freezes > 0) return 'the picture froze';
-  if (m.keyframeRequests > 1) return 'frames were dropped on the way';
-  if (m.loss != null && m.loss > 0.02) return `${(m.loss * 100).toFixed(1)}% packet loss`;
-  // The estimate only climbs as far as what is sent, and a still picture sends little, so it says
-  // something only while the picture moves.
-  if (moving(m, config) && m.bweKbps != null && m.bweKbps < config.bitrateKbps * 0.85) {
+  if (m.keyframeRequests > LIMITS.keyframesTolerated) return 'frames were dropped on the way';
+  if (m.loss != null && lossLevel(m.loss * 100)) return `${(m.loss * 100).toFixed(1)}% packet loss`;
+  if (bandwidthShort(m.bweKbps, config.bitrateKbps, moving(m, config))) {
     return `the network only carries about ${(m.bweKbps / 1000).toFixed(0)} Mb/s`;
   }
-  // Capture to encoded: besides the encode itself, a frame can wait up to about a frame time for its
-  // slot at the target rate, so only more than a frame time means the encoder can't keep up.
-  if (encode && m.encodeMs != null && m.encodeMs > frameMs) return `host encode too slow (${m.encodeMs.toFixed(1)} ms)`;
-  if (m.decodeMs != null && m.decodeMs > frameMs * 0.6) return `browser decode too slow (${m.decodeMs.toFixed(1)} ms)`;
+  if (encode && encodeSlow(m.encodeMs, config.fps)) return `host encode too slow (${m.encodeMs.toFixed(1)} ms)`;
+  if (decodeSlow(m.decodeMs, config.fps)) return `browser decode too slow (${m.decodeMs.toFixed(1)} ms)`;
   return null;
 }
 
-// Whether the picture was moving: the host encodes at the full frame rate only then (a still
-// desktop is re-sent about 10 times a second).
+// Whether the picture was moving: the host encodes at the full frame rate only then.
 export function moving(m, config) {
-  return m.hostFps != null && m.hostFps >= config.fps * 0.8;
+  return isMoving(m.hostFps, config.fps);
 }
 
 const mbps = (kbps) => `${(kbps / 1000).toFixed(kbps % 1000 ? 1 : 0)} Mb/s`;

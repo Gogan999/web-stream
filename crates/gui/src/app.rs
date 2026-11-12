@@ -1491,14 +1491,14 @@ impl App {
             }
             #[cfg(windows)]
             update_check::State::Ready(r, path) => {
-                if ui
+                let install = ui
                     .button(format!("Install {} and restart", r.version))
                     .on_hover_text(
                         "Stops hosting, runs the installer (a Windows administrator prompt), \
                          and starts the app again",
                     )
-                    .clicked()
-                {
+                    .clicked();
+                if install {
                     self.install_update(&path);
                 }
             }

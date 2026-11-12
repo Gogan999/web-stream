@@ -14,8 +14,12 @@ export function parseCapabilities(msg) {
   };
 }
 
-/** Shows or hides the Ctrl+Alt+Del buttons (they only work with the service) and names the page. */
-export function applyCapabilities(caps, { sasButtons, doc }) {
-  for (const el of sasButtons) el.hidden = !caps.sas;
-  if (doc) doc.title = caps.hostName ? `${caps.hostName} - web-stream` : 'web-stream';
+/**
+ * Applies what the host said through the page's hooks: Ctrl+Alt+Del is shown only when the host
+ * can send it (the service), and the host name and version are shown. Missing text clears them.
+ */
+export function applyCapabilities(caps, { setSasVisible, setHostName, setHostVersion }) {
+  setSasVisible(caps.sas);
+  setHostName(caps.hostName);
+  setHostVersion(caps.version);
 }

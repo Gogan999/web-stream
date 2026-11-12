@@ -30,7 +30,7 @@ const ui = {
   pairCode: $('pair-code'), pairConfirm: $('pair-confirm'), pairMsg: $('pair-msg'),
   resolution: $('resolution'), codec: $('codec'), bitrate: $('bitrate'), fps: $('fps'),
   keyframeScale: $('keyframe-scale'), recoverDrops: $('recover-drops'), minScale: $('min-scale'),
-  matchHost: $('match-host'), autotune: $('autotune'), mic: $('mic'),
+  matchHost: $('match-host'), autoconnect: $('autoconnect'), autotune: $('autotune'), mic: $('mic'),
   audioKbps: $('audio-kbps'), audioFrame: $('audio-frame'),
   moreToggle: $('more-toggle'), more: $('more'), kbdToggle: $('kbd-toggle'), keysToggle: $('keys-toggle'), keys: $('keys'),
   kbdInput: $('kbd-input'), touchFullscreen: $('touch-fullscreen'), view: $('view'), zoomReset: $('zoom-reset'), zoomPan: $('zoom-pan'),
@@ -356,6 +356,7 @@ function showSettings() {
   ui.minScale.value = String(settings.minScale);
   ui.recoverDrops.checked = !!settings.recoverDrops;
   ui.matchHost.checked = !!settings.matchHost;
+  ui.autoconnect.checked = settings.autoconnect !== false;
   showMic();
   showMouseLabel();
   ui.audioKbps.value = settings.audioKbps;
@@ -405,6 +406,11 @@ ui.recoverDrops.addEventListener('change', () => {
   settings.recoverDrops = ui.recoverDrops.checked;
   settingsStore.save(settings);
   applySettings();
+});
+
+ui.autoconnect.addEventListener('change', () => {
+  settings.autoconnect = ui.autoconnect.checked;
+  settingsStore.save(settings);
 });
 
 ui.matchHost.addEventListener('change', () => {
@@ -1121,5 +1127,7 @@ checkPairing().then(async (paired) => {
     ui.pairMsg.textContent = 'That pairing link was damaged. Scan the QR code on the host again.';
   }
   if (!paired && pairingLink) paired = await pairFromLink(pairingLink);
-  if (paired && (pairingLink || params.has('autoconnect'))) connect();
+  // A paired page connects by itself unless "Connect automatically" is off (a pairing link always does).
+  // `?autoconnect` stays in the manifest for home-screen icons saved before the setting existed.
+  if (paired && (pairingLink || settings.autoconnect)) connect();
 });

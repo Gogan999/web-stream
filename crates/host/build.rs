@@ -1,5 +1,5 @@
-//! Embeds the web client (`web/index.html`, `style.css`, the manifest and
-//! `js/`) in the binary, so the client served is always the one this host
+//! Embeds the web client (`web/index.html`, `style.css`, the manifest,
+//! `icons/*.png` and `js/`) in the binary, so the client served is always the one this host
 //! was built with. `--web-root` still overrides it.
 
 use std::fmt::Write;
@@ -23,6 +23,18 @@ fn main() {
         files.push((format!("js/{name}"), p));
     }
 
+    let icons = web.join("icons");
+    let mut pngs: Vec<_> = std::fs::read_dir(&icons)
+        .expect("web/icons")
+        .map(|e| e.expect("web/icons entry").path())
+        .filter(|p| p.extension().is_some_and(|e| e == "png"))
+        .collect();
+    pngs.sort();
+    for p in pngs {
+        let name = p.file_name().unwrap().to_str().expect("utf-8 file name");
+        files.push((format!("icons/{name}"), p));
+    }
+
     let mut out = String::from("pub static WEB_FILES: &[(&str, &[u8])] = &[\n");
     for (path, file) in &files {
         let file = file
@@ -38,6 +50,7 @@ fn main() {
     }
     out.push_str("];\n");
     println!("cargo:rerun-if-changed={}", js.display());
+    println!("cargo:rerun-if-changed={}", icons.display());
     let dest = Path::new(&std::env::var("OUT_DIR").unwrap()).join("web_files.rs");
     std::fs::write(dest, out).unwrap();
 }

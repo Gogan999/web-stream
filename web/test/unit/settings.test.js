@@ -159,3 +159,10 @@ test('the Source priority bundle asks for host-native pixels at up to 60 fps wit
   assert.equal(cfg.quality, 'source');
   assert.deepEqual([cfg.width, cfg.height, cfg.fps, cfg.minScalePercent], [2560, 1440, 60, 100]);
 });
+
+test('connect automatically is on unless it was turned off', () => {
+  assert.equal(DEFAULTS.autoconnect, true);
+  assert.equal(sanitize({}).autoconnect, true);
+  assert.equal(sanitize({ autoconnect: 'no' }).autoconnect, true);
+  assert.equal(sanitize({ autoconnect: false }).autoconnect, false);
+});

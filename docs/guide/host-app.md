@@ -24,10 +24,12 @@ service**.
   compare with the browser's.
 - **Connected browser:** who is connected, with **Disconnect**.
 - **Pair a device:** opens pairing for two minutes and shows a QR code
-  with a one-time pairing link for a phone's camera. A browser can instead
-  ask for a code, which appears here in large digits; the window comes
-  forward by itself when that happens. **Forget paired browsers** removes
-  every paired browser.
+  at once, with a one-time pairing link for a phone's camera. Under it: what
+  the phone's certificate warning means and the first and last 8 hex digits
+  of the fingerprint to compare. A browser can instead ask for a code, which
+  appears here in large digits; the window comes forward by itself when that
+  happens. The first time the app opens it starts pairing for you.
+  **Forget paired browsers** removes every paired browser.
 - **Send file...:** offers files to the connected browser (or drop files
   onto the window). See [Sharing files](#sharing-files).
 - **Settings:** see below.
@@ -39,8 +41,9 @@ service**.
   it.
 - **Recent activity.** The full log is `ws-host-gui.log` in the data
   folder, which **Open data folder** opens.
-- **Setup** brings back the first-run setup (port forwarding, port test and
-  pairing).
+- **Remote access (away from home):** port forwarding (UPnP), the port
+  test and the Cloudflare Tunnel state, folded away because at home none of
+  it is needed.
 
 ## Settings
 

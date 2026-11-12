@@ -37,6 +37,7 @@ mod qr;
 mod service_watch;
 mod settings;
 mod setup;
+mod update_check;
 mod upnp;
 #[cfg(windows)]
 mod win;

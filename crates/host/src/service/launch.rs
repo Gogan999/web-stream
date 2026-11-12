@@ -28,7 +28,7 @@ use windows::Win32::Foundation::{
 };
 use windows::Win32::Security::Authorization::{
     ConvertStringSecurityDescriptorToSecurityDescriptorW, ConvertStringSidToSidW, SDDL_REVISION_1,
-    SE_FILE_OBJECT, SetSecurityInfo,
+    SE_FILE_OBJECT, SetNamedSecurityInfoW, SetSecurityInfo,
 };
 use windows::Win32::Security::{
     AdjustTokenPrivileges, CreateRestrictedToken, DACL_SECURITY_INFORMATION, DISABLE_MAX_PRIVILEGE,
@@ -840,6 +840,53 @@ fn set_label_with(
             path.display()
         )
     })
+}
+
+/// For the CI test: every way of setting the label of `path` that is tried,
+/// and what each said, one line each.
+pub fn label_diagnose(path: &Path, sddl: &str, want_dir: bool) -> Vec<String> {
+    let mut lines = Vec::new();
+    let sd = match SecurityDescriptor::new(sddl) {
+        Ok(sd) => sd,
+        Err(e) => return vec![format!("security descriptor: {e:#}")],
+    };
+    let mut present = windows::core::BOOL::default();
+    let mut defaulted = windows::core::BOOL::default();
+    let mut sacl = std::ptr::null_mut();
+    // SAFETY: `sd` is a valid descriptor; `sacl` points into it.
+    let got = unsafe { GetSecurityDescriptorSacl(sd.0, &mut present, &mut sacl, &mut defaulted) };
+    lines.push(format!(
+        "sacl from sddl: {got:?} present={} null={}",
+        present.as_bool(),
+        sacl.is_null()
+    ));
+    for system_security in [false, true] {
+        if system_security {
+            lines.push(format!(
+                "enable SeSecurityPrivilege: {:?}",
+                enable_privilege("SeSecurityPrivilege").map_err(|e| format!("{e:#}"))
+            ));
+        }
+        lines.push(format!(
+            "handle, system_security={system_security}: {:?}",
+            set_label_with(path, sacl, want_dir, system_security).map_err(|e| format!("{e:#}"))
+        ));
+    }
+    let path_w = wide(&path.display().to_string());
+    // SAFETY: a NUL-terminated path and a SACL that outlives the call.
+    let named = unsafe {
+        SetNamedSecurityInfoW(
+            PCWSTR(path_w.as_ptr()),
+            SE_FILE_OBJECT,
+            LABEL_SECURITY_INFORMATION,
+            None,
+            None,
+            None,
+            Some(sacl.cast_const()),
+        )
+    };
+    lines.push(format!("SetNamedSecurityInfoW: {named:?}"));
+    lines
 }
 
 /// Switches on `name` in this process's token, which must hold it.

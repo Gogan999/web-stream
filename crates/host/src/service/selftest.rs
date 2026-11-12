@@ -64,6 +64,31 @@ fn run_in(outside: &Path, report: &Path) -> anyhow::Result<String> {
     let _ = std::fs::remove_file(dir.join(NEW_FILE));
     std::fs::write(&old, b"old")?;
 
+    // What the label calls do here, and whether icacls can set one at all.
+    let probe = outside.join("probe");
+    std::fs::create_dir_all(&probe)?;
+    for (what, path) in [("temp folder", &probe), ("network folder", &dir)] {
+        for line in launch::label_diagnose(path, launch::NETWORK_DIR_LABEL_SDDL, true) {
+            note(report, &format!("[{what}] {line}\n"));
+        }
+        let icacls = std::process::Command::new("icacls")
+            .arg(path)
+            .args(["/setintegritylevel", "(OI)(CI)L"])
+            .output();
+        match icacls {
+            Ok(o) => note(
+                report,
+                &format!(
+                    "[{what}] icacls /setintegritylevel: {} {}{}\n",
+                    o.status,
+                    String::from_utf8_lossy(&o.stdout),
+                    String::from_utf8_lossy(&o.stderr)
+                ),
+            ),
+            Err(e) => note(report, &format!("[{what}] icacls did not run: {e}\n")),
+        }
+    }
+
     let (dir, low) = scm::prepare_network_dir()?;
     if !low {
         bail!("the folder and its files could not all be labelled low integrity");

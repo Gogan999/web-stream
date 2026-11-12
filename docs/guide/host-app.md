@@ -60,6 +60,27 @@ lists the ports to forward on the router.
 Settings are saved in `%LOCALAPPDATA%\web-stream\gui-settings.json`, next to
 the certificate and the paired browsers.
 
+## Updating
+
+Updates are only ever started by you; the app never installs anything on
+its own. Open **Settings > Updates** (or right-click the tray icon and
+choose **Check for updates**) and click **Check for updates**. If a newer
+release exists, the window shows its version and notes. **Download update**
+fetches the installer from the project's GitHub release and checks its size
+and SHA-256 against the release's `manifest.json` (a mismatch deletes it).
+**Install and restart** then stops hosting, runs the installer (Windows asks
+for administrator permission, and warns that the installer is not signed:
+**More info > Run anyway**) and starts the app again, with your settings
+and paired browsers kept and the Windows service updated if it is installed.
+If you decline the administrator prompt, the old version keeps hosting.
+
+**Look for a new version when the app starts** (off by default) makes the
+app check once when it opens and name a newer version in the tray menu and
+at the top of the window; you still choose when to install. Pre-releases are
+never offered. The first start after an update says "Updated to version X".
+The downloaded installer is kept in `updates` in the data folder until the
+next start.
+
 ## Video quality
 
 The encoder follows the connection's measured bandwidth, up to the bitrate

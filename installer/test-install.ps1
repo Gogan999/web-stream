@@ -80,6 +80,16 @@ function Install([string]$log) {
     }
 }
 
+# Setup as the tray app's updater runs it: quiet, asking for the app back.
+function Install-Relaunch([string]$log) {
+    $p = Start-Process -FilePath $Setup -Wait -PassThru -ArgumentList @(
+        '/SILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/RELAUNCH', "/LOG=`"$log`"")
+    if ($p.ExitCode -ne 0) {
+        Get-Content $log -Tail 40
+        throw "setup /RELAUNCH exited with $($p.ExitCode)"
+    }
+}
+
 function Status([string]$path) {
     # -k: the host's certificate is self-signed.
     & curl.exe -k -s -o NUL -w '%{http_code}' --max-time 5 "https://127.0.0.1:8443$path"
@@ -98,6 +108,9 @@ $run = Get-RunValue
 Check ($run -eq "`"$Exe`" --hidden") "start with Windows points at the installed app ($run)"
 Check (Test-Path $UninstallKey) 'listed in Apps'
 
+# A plain silent install starts nothing; only /RELAUNCH starts the app.
+Check ($null -eq (Get-Process -Name 'ws-host-gui' -ErrorAction SilentlyContinue)) 'a silent install does not start the app'
+
 # The host the installed app runs.
 Add-SoftwareGl
 $env:GALLIUM_DRIVER = 'llvmpipe'
@@ -110,6 +123,22 @@ foreach ($i in 1..60) {
 }
 Check ($session -eq '401') "the host answers, unpaired (/api/session: $session)"
 Check ((Status '/') -eq '200') 'the host serves the web client'
+if ($Failures.Count) { Show-Logs }
+Stop-Process -Name 'ws-host-gui' -Force -ErrorAction SilentlyContinue
+Start-Sleep -Seconds 2
+
+# An update, as the tray app runs it: setup /SILENT /RELAUNCH over the
+# installed version, which must leave the app running again (with its
+# single-instance lock free for it, since the old copy exited).
+Install-Relaunch (Join-Path $env:RUNNER_TEMP 'setup3.log')
+$session = ''
+foreach ($i in 1..60) {
+    $session = Status '/api/session'
+    if ($session -eq '401') { break }
+    Start-Sleep -Seconds 1
+}
+Check ($null -ne (Get-Process -Name 'ws-host-gui' -ErrorAction SilentlyContinue)) '/RELAUNCH starts the app again'
+Check ($session -eq '401') "the relaunched app hosts (/api/session: $session)"
 if ($Failures.Count) { Show-Logs }
 Stop-Process -Name 'ws-host-gui' -Force -ErrorAction SilentlyContinue
 Start-Sleep -Seconds 2

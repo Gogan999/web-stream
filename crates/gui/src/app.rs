@@ -12,6 +12,7 @@ use ws_host::serve::{Command, Event};
 use crate::firstrun::{self, FirstRun};
 use crate::host::{FileStatus, Host, PairingCode, Status};
 use crate::settings::{CODECS, GAMEPADS, QUALITIES, Settings, TUNNELS};
+use crate::update_check::{self, Updater};
 use crate::{portcheck, qr, upnp};
 
 pub struct App {
@@ -46,6 +47,14 @@ pub struct App {
     /// is the way to pair, and the QR code carries the pairing secret, so it
     /// should not sit on screen unless asked for. Not saved.
     show_qr: bool,
+    updater: Updater,
+    update_prefs: update_check::Prefs,
+    /// Set for the first run after an update: "Updated to vX".
+    updated_to: Option<String>,
+    /// The version the tray menu names as available, to change it only on
+    /// a change.
+    #[cfg(windows)]
+    tray_update: Option<String>,
 }
 
 impl App {
@@ -111,7 +120,23 @@ impl App {
             upnp.want(Some(settings.forwarded_ports()));
         }
 
+        let repaint = cc.egui_ctx.clone();
+        let updater = Updater::new(&data_dir, move || repaint.request_repaint());
+        let update_prefs = update_check::Prefs::load(&data_dir);
+        if update_prefs.notify_on_start {
+            updater.check();
+        }
+        let updated_to = update_check::take_updated_notice(&data_dir, update_check::VERSION);
+        if let Some(v) = &updated_to {
+            host.log(format!("updated to version {v}"));
+        }
+
         let mut app = Self {
+            updater,
+            update_prefs,
+            updated_to,
+            #[cfg(windows)]
+            tray_update: None,
             first_run: FirstRun::new(),
             show_setup: !settings.setup_done,
             upnp,
@@ -566,6 +591,54 @@ impl App {
         match crate::win::run_elevated(&args) {
             Ok(()) => crate::win::hand_over(&self.host),
             Err(e) => self.host.log(format!("connect to the service: {e:#}")),
+        }
+    }
+
+    /// Keeps the tray's update item in step with what the updater knows, and
+    /// answers its "Check for updates".
+    #[cfg(windows)]
+    fn sync_update_tray(&mut self) {
+        if crate::win::take_update_request() {
+            self.updater.check();
+        }
+        let known = match self.updater.state() {
+            update_check::State::Available(r)
+            | update_check::State::Downloading(r, _)
+            | update_check::State::Ready(r, _) => Some(r.version),
+            _ => None,
+        };
+        if known != self.tray_update {
+            crate::win::set_tray_update(known.as_deref());
+            self.tray_update = known;
+        }
+    }
+
+    /// Hands over to the downloaded setup: stops the host, lets go of the
+    /// single-instance lock the installer checks, starts the installer (its
+    /// own UAC prompt) and exits; setup relaunches the app when it is done.
+    /// If the installer does not start (UAC declined), hosting goes on.
+    #[cfg(windows)]
+    fn install_update(&mut self, setup: &std::path::Path) {
+        self.host.log("update: handing over to the installer");
+        let was_hosting = self.host.is_active();
+        self.host.stop_and_wait(Duration::from_secs(15));
+        crate::win::release_instance();
+        match crate::win::run_setup(setup) {
+            // Like a hand-over: the router keeps forwarding the ports, which
+            // the relaunched app goes on renewing.
+            Ok(()) => crate::win::hand_over(&self.host),
+            Err(e) => {
+                crate::win::retake_instance();
+                self.host.log(format!("update cancelled: {e:#}"));
+                if was_hosting {
+                    self.start();
+                }
+                self.updater.set(update_check::State::Failed(
+                    "Update cancelled: the installer was not allowed to start. \
+                     This version keeps running."
+                        .into(),
+                ));
+            }
         }
     }
 
@@ -1324,6 +1397,119 @@ impl App {
         });
     }
 
+    /// At the top of the window: "Updated to vX" once after an update, and a
+    /// newer version once a check has found one.
+    fn update_banner_ui(&mut self, ui: &mut egui::Ui) {
+        if let Some(v) = self.updated_to.clone() {
+            ui.horizontal(|ui| {
+                ui.colored_label(
+                    Color32::from_rgb(60, 160, 90),
+                    format!("Updated to version {v}."),
+                );
+                if ui.small_button("Dismiss").clicked() {
+                    self.updated_to = None;
+                }
+            });
+        }
+        if let update_check::State::Available(r) = self.updater.state() {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(format!("Version {} is available.", r.version)).strong());
+                self.update_buttons(ui);
+            });
+            ui.separator();
+        }
+    }
+
+    /// Settings > Updates: this version, the manual check, the optional
+    /// check at start.
+    fn updates_ui(&mut self, ui: &mut egui::Ui) {
+        ui.strong("Updates");
+        ui.label(format!("This is version {}.", update_check::VERSION));
+        ui.horizontal(|ui| {
+            let busy = matches!(
+                self.updater.state(),
+                update_check::State::Checking | update_check::State::Downloading(..)
+            );
+            if ui
+                .add_enabled(!busy, egui::Button::new("Check for updates"))
+                .clicked()
+            {
+                self.updater.check();
+            }
+            self.update_buttons(ui);
+        });
+        match self.updater.state() {
+            update_check::State::Idle => {}
+            update_check::State::Checking => {
+                ui.weak("Asking GitHub...");
+            }
+            update_check::State::UpToDate => {
+                ui.label("You have the latest version.");
+            }
+            update_check::State::Available(r) | update_check::State::Ready(r, _) => {
+                ui.label(format!("Version {} is available.", r.version));
+                if !r.notes.is_empty() {
+                    ui.weak(&r.notes);
+                }
+            }
+            update_check::State::Downloading(r, done) => {
+                let frac = (done as f32 / r.size.max(1) as f32).clamp(0.0, 1.0);
+                ui.add(egui::ProgressBar::new(frac).text(format!(
+                    "Downloading version {}: {:.1} of {:.1} MB",
+                    r.version,
+                    done as f64 / 1e6,
+                    r.size as f64 / 1e6
+                )));
+            }
+            update_check::State::Failed(e) => {
+                ui.colored_label(Color32::RED, e);
+            }
+        }
+        if ui
+            .checkbox(
+                &mut self.update_prefs.notify_on_start,
+                "Look for a new version when the app starts",
+            )
+            .on_hover_text("Only looks and tells you; nothing is installed until you click")
+            .changed()
+        {
+            if let Err(e) = self.update_prefs.save(&self.data_dir) {
+                self.host
+                    .log(format!("could not save the update setting: {e:#}"));
+            }
+        }
+        ui.weak("Updates are never installed on their own. The installer is not signed: Windows may warn about it.");
+    }
+
+    /// The button for the next step: download, or install what is downloaded.
+    fn update_buttons(&mut self, ui: &mut egui::Ui) {
+        match self.updater.state() {
+            update_check::State::Available(_) => {
+                if ui.button("Download update").clicked() {
+                    self.updater.download();
+                }
+            }
+            #[cfg(windows)]
+            update_check::State::Ready(r, path) => {
+                if ui
+                    .button(format!("Install {} and restart", r.version))
+                    .on_hover_text(
+                        "Stops hosting, runs the installer (a Windows administrator prompt), \
+                         and starts the app again",
+                    )
+                    .clicked()
+                {
+                    self.install_update(&path);
+                }
+            }
+            #[cfg(not(windows))]
+            update_check::State::Ready(..) => {
+                ui.weak("Downloaded. Installing is only done on Windows.");
+            }
+            _ => {}
+        }
+    }
+
     fn log_ui(&self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical()
             .max_height(140.0)
@@ -1417,6 +1603,9 @@ impl eframe::App for App {
             }
         }
 
+        #[cfg(windows)]
+        self.sync_update_tray();
+
         let dropped: Vec<PathBuf> = ctx.input(|i| {
             i.raw
                 .dropped_files
@@ -1455,11 +1644,16 @@ impl eframe::App for App {
                     egui::Frame::group(ui.style()).show(ui, |ui| self.setup_ui(ui));
                     ui.add_space(4.0);
                 }
+                self.update_banner_ui(ui);
                 self.status_ui(ui);
                 ui.separator();
                 self.session_ui(ui);
                 ui.separator();
-                egui::CollapsingHeader::new("Settings").show(ui, |ui| self.settings_ui(ui));
+                egui::CollapsingHeader::new("Settings").show(ui, |ui| {
+                    self.settings_ui(ui);
+                    ui.separator();
+                    self.updates_ui(ui);
+                });
                 egui::CollapsingHeader::new("Activity")
                     .default_open(true)
                     .show(ui, |ui| self.log_ui(ui));

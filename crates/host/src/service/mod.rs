@@ -37,6 +37,8 @@ mod launch;
 mod sas;
 #[cfg(windows)]
 pub(crate) mod scm;
+#[cfg(windows)]
+mod selftest;
 
 pub const USAGE: &str = "\
 service install [host options]
@@ -99,6 +101,11 @@ pub fn main(args: &[String]) -> anyhow::Result<String> {
         Some("session-host") => imp::session_host(rest).map(|()| String::new()),
         // Started by the service as LocalService.
         Some("network-host") => imp::network_host(rest).map(|()| String::new()),
+        // CI only: see selftest.rs.
+        #[cfg(windows)]
+        Some("sandbox-test") => selftest::run(rest),
+        #[cfg(windows)]
+        Some("sandbox-child") => selftest::child(rest),
         Some("-h" | "--help") | None => Ok(USAGE.into()),
         Some(other) => bail!("unknown service command {other:?}\n\n{USAGE}"),
     }

@@ -85,12 +85,13 @@ pub fn network_dir() -> anyhow::Result<PathBuf> {
 /// a handle that refuses a junction, its files are never re-permitted (one
 /// could be a hard link to a SYSTEM file), and files are only ever created
 /// new, never written through what is there.
-fn prepare_network_dir() -> anyhow::Result<PathBuf> {
+pub(super) fn prepare_network_dir() -> anyhow::Result<(PathBuf, bool)> {
     let dir = network_dir()?;
     // Inside the service's own folder, which only SYSTEM and administrators
     // can change: making it can't be redirected.
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     launch::secure_dir(&dir, launch::NETWORK_DIR_SDDL)?;
+    let low = label_network_dir(&dir);
     let old = data_dir()?;
     for name in super::NETWORK_FILES {
         let from = old.join(name);
@@ -105,7 +106,34 @@ fn prepare_network_dir() -> anyhow::Result<PathBuf> {
         }
         let _ = std::fs::remove_file(&from);
     }
-    Ok(dir)
+    Ok((dir, low))
+}
+
+/// Labels the network host's folder, and the files already in it, low
+/// integrity, so that a network host at low integrity (see
+/// `launch::network_token`) can still write there. Whether it all worked: if
+/// not, the network host must not be given a low integrity token, which
+/// couldn't write its own data. Never fails, because failing here would
+/// leave the stream down for want of a hardening step.
+fn label_network_dir(dir: &Path) -> bool {
+    if let Err(e) = launch::label_dir(dir, launch::NETWORK_DIR_LABEL_SDDL) {
+        tracing::warn!("the network host runs without low integrity: {e:#}");
+        return false;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    let mut all = true;
+    for entry in entries.flatten() {
+        // Folders aren't made in here; a link (or anything else that can't
+        // be labelled) is one the network host can't write, so low integrity
+        // can't be used.
+        if let Err(e) = launch::label_file(&entry.path(), launch::NETWORK_FILE_LABEL_SDDL) {
+            tracing::warn!("the network host runs without low integrity: {e:#}");
+            all = false;
+        }
+    }
+    all
 }
 
 /// Creates `path` with `contents`, failing if anything is there already
@@ -264,7 +292,7 @@ fn copy_certificate(
         return Ok(args);
     }
     // Where the network host reads them.
-    let dir = prepare_network_dir()?;
+    let (dir, _) = prepare_network_dir()?;
     for (flag, src, name) in copies {
         let dest = dir.join(name);
         // Installing again with the copy itself: nothing to copy.
@@ -598,7 +626,11 @@ impl Supervisor {
             );
             return NetworkStart::CantSplit;
         }
-        let token = match launch::network_token() {
+        let (dir, low) = match prepare_network_dir() {
+            Ok(prepared) => prepared,
+            Err(e) => return NetworkStart::Failed(e),
+        };
+        let token = match launch::network_token(low) {
             Ok(token) => token,
             Err(e) => {
                 tracing::error!(
@@ -609,7 +641,6 @@ impl Supervisor {
             }
         };
         let started = (|| {
-            let dir = prepare_network_dir()?;
             let args = super::relocate_files(&self.args, &self.data_dir, &dir);
             let (ours, theirs) = launch::link_pipe()?;
             let (alive, alive_theirs) = launch::alive_pipe()?;

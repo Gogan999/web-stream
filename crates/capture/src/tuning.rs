@@ -33,6 +33,11 @@ pub(crate) struct Tuning {
     pub vbv_frames: f64,
     /// A keyframe's VBV is this many times `vbv_frames`, 1..=4.
     pub keyframe_scale: u8,
+    /// The picture is held to a fixed high quality and the *frame rate*
+    /// absorbs the bitrate limit (see [`ws_proto::VideoQuality::Source`]):
+    /// the encoder gets a quantizer ceiling instead of a constant bitrate,
+    /// and the pacer spends the bitrate by delaying frames.
+    pub source: bool,
 }
 
 pub(crate) fn tuning(config: &VideoConfig) -> Tuning {
@@ -43,6 +48,7 @@ pub(crate) fn tuning(config: &VideoConfig) -> Tuning {
         preset,
         vbv_frames,
         keyframe_scale: config.keyframe_scale.clamp(1, fits),
+        source: config.quality == VideoQuality::Source,
     }
 }
 
@@ -72,19 +78,16 @@ fn effort(config: &VideoConfig) -> (u8, f64) {
             by_rate(6, 4, 2),
             (MAX_BURST_SECS * f64::from(config.fps.max(1))).clamp(1.0, 2.0),
         ),
-        // Text is meant for desktop work at 30 fps or less, where the
-        // encoder has time for the slowest presets: one step slower than
-        // Clarity at the same pixel rate, and a frame may take as long as
-        // Clarity's to send.
-        VideoQuality::Text => (
-            if rate <= P1440_60 / 2 {
+        // Source codes each frame as well as the encoder can, so it takes
+        // the slowest presets its pixel rate allows. It rarely runs at the
+        // full frame rate: the pacer delays frames to fit the bitrate.
+        VideoQuality::Source => (
+            if rate <= P1440_60 {
                 7
-            } else if rate <= P2160_60 / 2 {
-                6
             } else if rate <= P2160_60 {
-                4
+                6
             } else {
-                2
+                4
             },
             (MAX_BURST_SECS * f64::from(config.fps.max(1))).clamp(1.0, 2.0),
         ),
@@ -124,17 +127,14 @@ mod tests {
     }
 
     #[test]
-    fn text_uses_the_slowest_presets_at_desktop_frame_rates() {
+    fn source_uses_the_slowest_presets_and_paces_by_bitrate() {
         use VideoQuality::*;
-        assert_eq!(tuning(&cfg(1920, 1080, 30, Text)).preset, 7);
-        assert_eq!(tuning(&cfg(2560, 1440, 30, Text)).preset, 7);
-        assert_eq!(tuning(&cfg(3840, 2160, 30, Text)).preset, 6);
-        // Never slower than Clarity would allow once the rate is high.
-        assert!(
-            tuning(&cfg(3840, 2160, 60, Text)).preset
-                <= tuning(&cfg(3840, 2160, 60, Clarity)).preset
-        );
-        assert_eq!(tuning(&cfg(1920, 1080, 30, Text)).vbv_frames, 1.0);
+        assert_eq!(tuning(&cfg(1920, 1080, 60, Source)).preset, 7);
+        assert_eq!(tuning(&cfg(2560, 1440, 60, Source)).preset, 7);
+        assert_eq!(tuning(&cfg(3840, 2160, 60, Source)).preset, 6);
+        assert_eq!(tuning(&cfg(3840, 2160, 144, Source)).preset, 4);
+        assert!(tuning(&cfg(2560, 1440, 60, Source)).source);
+        assert!(!tuning(&cfg(2560, 1440, 60, Clarity)).source);
     }
 
     #[test]

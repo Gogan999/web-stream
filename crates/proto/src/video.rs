@@ -38,9 +38,14 @@ pub enum VideoQuality {
     /// Slowest encode the frame rate allows, and a little room for large
     /// frames (fast motion, keyframes) to take longer than one frame time.
     Clarity,
-    /// For reading text and working: the slowest encode, aimed at 30 fps
-    /// or less. Sharpness first, motion second.
-    Text,
+    /// For reading and working: every frame is coded as close to the
+    /// desktop as the encoder allows (a low quantizer ceiling, slowest
+    /// presets), and the frame rate falls as needed to stay within the
+    /// bitrate: a still or slowly changing screen stays sharp at a high
+    /// frame rate, fast motion drops frames instead of going soft.
+    /// Older clients and hosts called this `text`.
+    #[serde(alias = "text")]
+    Source,
 }
 
 /// How long the oldest video packet has waited in the transport's send
@@ -176,6 +181,17 @@ pub struct EncodedFrame {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_quality_answers_to_its_old_name() {
+        let q = |s: &str| serde_json::from_str::<VideoQuality>(s).unwrap();
+        assert_eq!(q("\"source\""), VideoQuality::Source);
+        assert_eq!(q("\"text\""), VideoQuality::Source);
+        assert_eq!(
+            serde_json::to_string(&VideoQuality::Source).unwrap(),
+            "\"source\""
+        );
+    }
 
     #[test]
     fn clamps_hostile_config() {

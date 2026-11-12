@@ -410,7 +410,7 @@ pub fn parse_quality(s: &str) -> anyhow::Result<VideoQuality> {
         "speed" => VideoQuality::Speed,
         "balanced" => VideoQuality::Balanced,
         "clarity" => VideoQuality::Clarity,
-        "text" => VideoQuality::Text,
+        "source" | "text" => VideoQuality::Source,
         q => bail!("unknown quality {q}"),
     })
 }

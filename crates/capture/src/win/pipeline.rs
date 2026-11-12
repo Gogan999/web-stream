@@ -15,7 +15,8 @@ use windows::Win32::System::Threading::{
 };
 use ws_diag::diag;
 use ws_proto::{
-    DisplayId, EncodedFrame, SendBacklog, VideoCodec, VideoConfig, mono_micros, mono_now,
+    DisplayId, EncodedFrame, SendBacklog, VideoCodec, VideoConfig, VideoQuality, mono_micros,
+    mono_now,
 };
 
 use super::convert::Converter;
@@ -196,6 +197,9 @@ enum Report {
     /// full), nor anything after it still in the encoder that built on
     /// it; frames from `from` on are missing.
     Lost { from: u64, keyframe: bool },
+    /// A frame left the encoder, `bytes` long (zero if it failed): what it
+    /// cost, for pacing by bitrate.
+    Done { bytes: usize },
     /// The consumer has gone away.
     Closed,
 }
@@ -296,7 +300,14 @@ impl Session {
             reports_tx,
             enc,
             display: id,
-            sched: Scheduler::new(config.fps),
+            sched: {
+                let sched = Scheduler::new(config.fps);
+                if config.quality == VideoQuality::Source {
+                    sched.pace_by_bitrate(config.bitrate_kbps)
+                } else {
+                    sched
+                }
+            },
             bitrate: BitrateGate::new(config.bitrate_kbps),
             config,
             max,
@@ -323,6 +334,7 @@ impl Session {
             while let Ok(report) = self.reports.try_recv() {
                 match report {
                     Report::Lost { from, keyframe } => self.frame_lost(from, keyframe),
+                    Report::Done { bytes } => self.sched.frame_done(Instant::now(), bytes),
                     Report::Closed => return Ok(()),
                 }
             }
@@ -684,6 +696,7 @@ impl Session {
             }
             diag!("cap_cmd", "bitrate kbps={kbps} applied={actual}");
             self.config.bitrate_kbps = actual;
+            self.sched.set_bitrate(actual);
             self.bitrate.applied(now, actual);
         }
         self.frame_index += 1;
@@ -706,6 +719,7 @@ fn deliver(
             Err((meta, e)) => {
                 // The capture thread rebuilds the encoder on its next frame.
                 tracing::warn!(index = meta.index, "encoding failed: {e}");
+                let _ = reports.send(Report::Done { bytes: 0 });
                 let _ = reports.send(Report::Lost {
                     from: meta.recovers_from.unwrap_or(meta.index),
                     keyframe: true,
@@ -716,6 +730,7 @@ fn deliver(
         let meta = encoded.meta;
         let keyframe = encoded.keyframe;
         let bytes = encoded.data.len();
+        let _ = reports.send(Report::Done { bytes });
         let frame = EncodedFrame {
             // The host numbers the stream this pipeline feeds.
             lane: 0,

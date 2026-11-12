@@ -228,6 +228,99 @@ impl BitrateGate {
     }
 }
 
+/// Most that may be owed, in time at the target bitrate, when the next
+/// frame starts: one frame's burst, as the other qualities' VBV allows.
+const BUDGET_SLACK: Duration = Duration::from_millis(20);
+
+/// Spends the bitrate by delaying frames, for the Source quality, where
+/// every frame costs what the picture needs and the frame rate gives.
+///
+/// Each frame's bits are added to what is owed, which drains at the target
+/// bitrate; a frame may start once no more than [`BUDGET_SLACK`] is owed. A
+/// still screen costs almost nothing and runs at the full frame rate; a
+/// frame that costs as much as the budget gives in 200 ms holds the next
+/// ones back for about that long. One frame at a time is in the encoder, so
+/// the next frame is never decided before the last one's cost is known.
+#[derive(Debug)]
+pub(crate) struct RateBudget {
+    bits_per_sec: f64,
+    /// Bits owed as of `at`.
+    owed: f64,
+    at: Option<Instant>,
+    in_flight: u32,
+    /// When the newest frame in the encoder went in.
+    submitted_at: Option<Instant>,
+}
+
+/// A frame still in the encoder after this long is taken as lost, so a
+/// missing completion can't stall the stream.
+const IN_FLIGHT_MAX: Duration = Duration::from_millis(250);
+
+impl RateBudget {
+    pub(crate) fn new(kbps: u32) -> Self {
+        Self {
+            bits_per_sec: f64::from(kbps.max(1)) * 1000.0,
+            owed: 0.0,
+            at: None,
+            in_flight: 0,
+            submitted_at: None,
+        }
+    }
+
+    pub(crate) fn set_rate(&mut self, kbps: u32) {
+        self.bits_per_sec = f64::from(kbps.max(1)) * 1000.0;
+    }
+
+    fn owed_at(&self, now: Instant) -> f64 {
+        let drained = self
+            .at
+            .map_or(0.0, |at| now.saturating_duration_since(at).as_secs_f64())
+            * self.bits_per_sec;
+        (self.owed - drained).max(0.0)
+    }
+
+    /// Time until the next frame may start; zero if it may now.
+    pub(crate) fn wait(&self, now: Instant) -> Duration {
+        let waiting = self.in_flight > 0
+            && self
+                .submitted_at
+                .is_some_and(|t| now.saturating_duration_since(t) < IN_FLIGHT_MAX);
+        if waiting {
+            // The cost isn't known yet; look again soon.
+            return Duration::from_millis(1);
+        }
+        let over = self.owed_at(now) - BUDGET_SLACK.as_secs_f64() * self.bits_per_sec;
+        if over <= 0.0 {
+            Duration::ZERO
+        } else {
+            Duration::from_secs_f64(over / self.bits_per_sec)
+        }
+    }
+
+    pub(crate) fn ready(&self, now: Instant) -> bool {
+        self.wait(now).is_zero()
+    }
+
+    /// A frame went into the encoder.
+    pub(crate) fn submitted(&mut self, now: Instant) {
+        self.in_flight += 1;
+        self.submitted_at = Some(now);
+    }
+
+    /// A frame came out of the encoder at `now` and is `bytes` long (zero
+    /// if it never came out).
+    pub(crate) fn completed(&mut self, now: Instant, bytes: usize) {
+        self.in_flight = self.in_flight.saturating_sub(1);
+        self.owed = self.owed_at(now) + bytes as f64 * 8.0;
+        self.at = Some(now);
+    }
+
+    /// The encoder was rebuilt: nothing is in it any more.
+    pub(crate) fn reset(&mut self) {
+        self.in_flight = 0;
+    }
+}
+
 /// What the capture thread should encode next.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct EncodeJob {
@@ -246,6 +339,8 @@ pub(crate) struct EncodeJob {
 #[derive(Debug)]
 pub(crate) struct Scheduler {
     pacer: Pacer,
+    /// Set for the Source quality.
+    budget: Option<RateBudget>,
     has_image: bool,
     pending: Option<Instant>,
     keyframe_requested: bool,
@@ -259,11 +354,33 @@ impl Scheduler {
     pub(crate) fn new(fps: u32) -> Self {
         Self {
             pacer: Pacer::new(fps),
+            budget: None,
             has_image: false,
             pending: None,
             keyframe_requested: false,
             repair_requested: false,
             idr_next: true,
+        }
+    }
+
+    /// Spends `kbps` by delaying frames instead of leaving it to the
+    /// encoder (see [`RateBudget`]).
+    pub(crate) fn pace_by_bitrate(mut self, kbps: u32) -> Self {
+        self.budget = Some(RateBudget::new(kbps));
+        self
+    }
+
+    /// The bitrate to spend changed.
+    pub(crate) fn set_bitrate(&mut self, kbps: u32) {
+        if let Some(b) = &mut self.budget {
+            b.set_rate(kbps);
+        }
+    }
+
+    /// A frame left the encoder at `now`, `bytes` long (zero if lost).
+    pub(crate) fn frame_done(&mut self, now: Instant, bytes: usize) {
+        if let Some(b) = &mut self.budget {
+            b.completed(now, bytes);
         }
     }
 
@@ -312,6 +429,9 @@ impl Scheduler {
         self.idr_next = true;
         // Another display may refresh at another rate.
         self.pacer.forget_source();
+        if let Some(b) = &mut self.budget {
+            b.reset();
+        }
     }
 
     /// Whether [`Self::poll`] would return a job now.
@@ -322,7 +442,7 @@ impl Scheduler {
         let paced = match self.pending {
             Some(_) => self.pacer.ready(now),
             None => self.pacer.idle_repeat_due(now),
-        };
+        } && self.budget.as_ref().is_none_or(|b| b.ready(now));
         paced || self.keyframe_requested || self.repair_requested
     }
 
@@ -346,6 +466,9 @@ impl Scheduler {
     /// dropped because the consumer's channel was full.
     pub(crate) fn encoded(&mut self, now: Instant, job: EncodeJob, delivered: bool) {
         self.pacer.encoded(now);
+        if let Some(b) = &mut self.budget {
+            b.submitted(now);
+        }
         self.repair_requested = false;
         if job.idr {
             self.keyframe_requested = false;
@@ -361,7 +484,12 @@ impl Scheduler {
         if self.has_image && (self.keyframe_requested || self.repair_requested) {
             return Duration::ZERO;
         }
-        self.pacer.wait(now, self.pending.is_some())
+        let wait = self.pacer.wait(now, self.pending.is_some());
+        match &self.budget {
+            // Not before the budget allows, and never a busy poll.
+            Some(b) if !b.ready(now) => wait.max(b.wait(now)).max(Duration::from_millis(1)),
+            _ => wait,
+        }
     }
 }
 
@@ -673,5 +801,78 @@ mod scheduler_tests {
         // A keyframe takes whatever waits.
         g.request(9_500);
         assert_eq!(g.take_now(), Some(9_500));
+    }
+
+    #[test]
+    fn a_cheap_frame_leaves_the_budget_open() {
+        let now = Instant::now();
+        let mut b = RateBudget::new(20_000);
+        assert!(b.ready(now));
+        b.submitted(now);
+        // The frame is not done yet: wait for its cost.
+        assert!(!b.ready(now));
+        // 2 KB at 20 Mb/s is under a millisecond of the budget.
+        b.completed(now + Duration::from_millis(5), 2_000);
+        assert!(b.ready(now + Duration::from_millis(5)));
+    }
+
+    #[test]
+    fn a_costly_frame_holds_the_next_ones_for_what_it_cost() {
+        let now = Instant::now();
+        let mut b = RateBudget::new(20_000);
+        b.submitted(now);
+        // 500 KB = 4 Mbit = 200 ms at 20 Mb/s.
+        b.completed(now, 500_000);
+        let wait = b.wait(now);
+        // 200 ms less the 20 ms of slack.
+        assert!(
+            (wait.as_secs_f64() - 0.180).abs() < 0.001,
+            "waited {wait:?}"
+        );
+        assert!(!b.ready(now + Duration::from_millis(100)));
+        assert!(b.ready(now + Duration::from_millis(181)));
+    }
+
+    #[test]
+    fn the_average_rate_matches_the_bitrate() {
+        // Frames of 100 KB (0.8 Mbit) at 20 Mb/s: 25 frames a second.
+        let start = Instant::now();
+        let mut b = RateBudget::new(20_000);
+        let mut now = start;
+        let mut frames = 0;
+        while now < start + Duration::from_secs(10) {
+            if b.ready(now) {
+                b.submitted(now);
+                b.completed(now, 100_000);
+                frames += 1;
+            }
+            now += Duration::from_millis(1);
+        }
+        let fps = f64::from(frames) / 10.0;
+        assert!((fps - 25.0).abs() < 1.0, "{fps} fps");
+    }
+
+    #[test]
+    fn a_frame_that_never_comes_out_cannot_stall_the_stream() {
+        let now = Instant::now();
+        let mut b = RateBudget::new(20_000);
+        b.submitted(now);
+        assert!(!b.ready(now + Duration::from_millis(100)));
+        assert!(b.ready(now + IN_FLIGHT_MAX + Duration::from_millis(1)));
+    }
+
+    #[test]
+    fn the_source_scheduler_waits_for_the_budget_without_spinning() {
+        let now = Instant::now();
+        let mut s = Scheduler::new(60).pace_by_bitrate(20_000);
+        s.new_image(now);
+        let job = s.poll(now).expect("the first frame goes at once");
+        s.encoded(now, job, true);
+        s.frame_done(now, 500_000);
+        s.new_image(now + Duration::from_millis(17));
+        let later = now + Duration::from_millis(17);
+        assert!(!s.due(later));
+        assert!(s.wait(later) >= Duration::from_millis(100));
+        assert!(s.due(now + Duration::from_millis(190)));
     }
 }

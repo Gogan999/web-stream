@@ -1,7 +1,7 @@
 // Stream settings chosen in the browser: codec, bitrate, resolution, frame rate, encoder quality and keyframe
 // handling, turned into the host's VideoConfig. Pure functions so they can be tested; main.js owns the UI.
 
-export const QUALITIES = Object.freeze(['speed', 'balanced', 'clarity', 'text']);
+export const QUALITIES = Object.freeze(['speed', 'balanced', 'clarity', 'source']);
 // Video codecs the host encodes, as VideoConfig names them, with the browser's MIME type for each.
 export const CODECS = Object.freeze({ h264: 'video/H264', h265: 'video/H265', av1: 'video/AV1' });
 export const MOUSE_MODES = Object.freeze(['relative', 'absolute']);
@@ -31,8 +31,9 @@ export const DEFAULTS = Object.freeze({
   audioKbps: 'host', audioFrame: 'host', statsLevel: 'essential',
 });
 
-// What choosing the Text quality sets: see the handler in main.js.
-export const TEXT_PRESET = Object.freeze({ resolution: 'native', fps: 30, minScale: 100, bitrate: 'auto' });
+// What choosing the Source quality sets: see the handler in main.js. The frame rate is only a ceiling:
+// the host holds every frame to a fixed high quality and lowers the rate to stay within the bitrate.
+export const SOURCE_PRESET = Object.freeze({ resolution: 'native', fps: 60, minScale: 100, bitrate: 'auto' });
 
 const STORAGE_KEY = 'ws-stream-settings';
 const even = (v) => Math.max(2, Math.floor(v / 2) * 2);
@@ -120,13 +121,14 @@ export function screenPixels(win = globalThis) {
 export function sanitize(saved) {
   const v = saved && typeof saved === 'object' ? saved : {};
   const kbps = Number(v.bitrate);
+  const quality = v.quality === 'text' ? 'source' : v.quality; // its old name
   return {
     codec: Object.hasOwn(CODECS, v.codec) ? v.codec : DEFAULTS.codec,
     mouseMode: MOUSE_MODES.includes(v.mouseMode) ? v.mouseMode : DEFAULTS.mouseMode,
     bitrate: Number.isInteger(kbps) && kbps >= 500 && kbps <= 200000 ? String(kbps) : DEFAULTS.bitrate,
     resolution: RESOLUTIONS.includes(v.resolution) ? v.resolution : DEFAULTS.resolution,
     fps: FRAME_RATES.includes(Number(v.fps)) ? Number(v.fps) : DEFAULTS.fps,
-    quality: QUALITIES.includes(v.quality) ? v.quality : DEFAULTS.quality,
+    quality: QUALITIES.includes(quality) ? quality : DEFAULTS.quality,
     keyframeScale: KEYFRAME_SCALES.includes(Number(v.keyframeScale)) ? Number(v.keyframeScale) : DEFAULTS.keyframeScale,
     recoverDrops: v.recoverDrops !== false,
     minScale: MIN_SCALES.includes(Number(v.minScale)) ? Number(v.minScale) : DEFAULTS.minScale,

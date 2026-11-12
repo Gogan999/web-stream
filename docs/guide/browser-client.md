@@ -58,9 +58,12 @@ Settings are remembered in this browser.
   bandwidth below it.
 - **FPS** and **Quality:** *Speed* (fastest encode, softest picture),
   *Balanced*, *Clarity* (slowest encode the frame rate allows, more
-  detail in fast motion), or *Text* (for reading and working: it also sets
-  host-native resolution, 30 fps and automatic shrinking off, and uses the
-  slowest encoder presets).
+  detail in fast motion), or *Source* (for reading and working: every frame is
+  coded as close to the desktop as the encoder allows, and the frame rate,
+  up to the one chosen, drops to stay within the bitrate, so a still screen
+  stays sharp at a high rate and fast motion drops frames instead of going
+  soft. It also sets host-native resolution, 60 fps and automatic shrinking
+  off).
 - **Second monitor** (Display group) streams another host display next to
   the first, each at its own full detail, as a second video. It needs about
   as much bandwidth again. *Pop out* moves it to a window of its own, which

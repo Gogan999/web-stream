@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { autoKbps, fitToDisplay, streamSize, videoConfig, sameConfig, audioConfig, load, save, sanitize, decodableCodecs, DEFAULTS } from '../../js/settings.js';
+import { PRIORITIES, PRIORITY_QUALITY, QUALITY_PRIORITY, autoKbps, fitToDisplay, streamSize, videoConfig, sameConfig, audioConfig, load, save, sanitize, decodableCodecs, DEFAULTS } from '../../js/settings.js';
 
 test('auto bitrate is 20 Mb/s at 1080p60 and grows with pixel rate', () => {
   assert.equal(autoKbps(1920, 1080, 60), 20000);
@@ -44,7 +44,7 @@ test('a phone held upright is fitted as it will be turned', () => {
 test('video config from settings', () => {
   const c = videoConfig({ ...DEFAULTS }, { screen: { width: 1920, height: 1080 }, display: { width: 1920, height: 1080 }, codec: 'av1' });
   assert.deepEqual(c, { codec: 'av1', width: 1920, height: 1080, fps: 60, bitrateKbps: 20000, quality: 'balanced', keyframeScale: 2, recoverDrops: true, minScalePercent: 0 });
-  const fixed = videoConfig({ ...DEFAULTS, bitrate: '50000', quality: 'clarity', fps: '120' }, { screen: { width: 1920, height: 1080 }, display: null });
+  const fixed = videoConfig({ ...DEFAULTS, bitrate: '50000', priority: 'sharp', fps: '120' }, { screen: { width: 1920, height: 1080 }, display: null });
   assert.equal(fixed.bitrateKbps, 50000);
   assert.equal(fixed.fps, 120);
   assert.equal(fixed.quality, 'clarity');
@@ -79,11 +79,11 @@ test('settings survive broken storage', () => {
 });
 
 test('junk in storage falls back field by field', () => {
-  const map = new Map([['ws-stream-settings', JSON.stringify({ bitrate: 'abc', resolution: 'foo', fps: 59.5, quality: 'max', keyframeScale: 9, recoverDrops: 'no', minScale: 33, matchHost: 'yes', mic: 1 })]]);
+  const map = new Map([['ws-stream-settings', JSON.stringify({ bitrate: 'abc', resolution: 'foo', fps: 59.5, priority: 'max', quality: 'max', keyframeScale: 9, recoverDrops: 'no', minScale: 33, matchHost: 'yes', mic: 1 })]]);
   const mem = { getItem: (k) => map.get(k) ?? null, setItem: (k, v) => map.set(k, v) };
   assert.deepEqual(load(mem), { ...DEFAULTS });
-  map.set('ws-stream-settings', JSON.stringify({ bitrate: '999999', fps: '120', quality: 'clarity' }));
-  assert.deepEqual(load(mem), { ...DEFAULTS, fps: 120, quality: 'clarity' });
+  map.set('ws-stream-settings', JSON.stringify({ bitrate: '999999', fps: '120', priority: 'sharp' }));
+  assert.deepEqual(load(mem), { ...DEFAULTS, fps: 120, priority: 'sharp' });
   map.set('ws-stream-settings', '[1,2]');
   assert.deepEqual(load(mem), { ...DEFAULTS });
   const c = videoConfig({ bitrate: 'abc', resolution: 'foo', fps: 59.5 }, { screen: { width: 1920, height: 1080 }, display: { width: 1920, height: 1080 } });
@@ -118,10 +118,37 @@ test('only codecs the browser decodes are offered', () => {
   assert.deepEqual(decodableCodecs(undefined), ['h264', 'h265', 'av1']);
 });
 
-test('the source quality bundle asks for host-native pixels at up to 60 fps with automatic shrinking off', async () => {
-  const s = await import('../../js/settings.js');
-  const settings = { ...s.DEFAULTS, quality: 'source', ...s.SOURCE_PRESET };
-  const cfg = s.videoConfig(settings, { screen: { width: 1280, height: 720 }, display: { width: 2560, height: 1440 } });
-  assert.equal(cfg.quality, 'source');
-  assert.deepEqual([cfg.width, cfg.height, cfg.fps, cfg.minScalePercent], [2560, 1440, 60, 100]);
+test('priority maps to the host encoder preset', () => {
+  assert.deepEqual(PRIORITIES, ['smooth', 'balanced', 'sharp']);
+  const opts = { screen: { width: 1920, height: 1080 }, display: null };
+  for (const [priority, quality] of [['smooth', 'speed'], ['balanced', 'balanced'], ['sharp', 'clarity']]) {
+    assert.equal(PRIORITY_QUALITY[priority], quality);
+    assert.equal(videoConfig({ ...DEFAULTS, priority }, opts).quality, quality);
+  }
+  assert.equal(sanitize({ priority: 'loud' }).priority, 'balanced');
+});
+
+test('settings saved before Priority are migrated', () => {
+  // Quality names become the matching priority; the saved bitrate and others are kept.
+  for (const [quality, priority] of [['speed', 'smooth'], ['balanced', 'balanced'], ['clarity', 'sharp']]) {
+    const m = sanitize({ quality, bitrate: '42500', fps: 90, resolution: '1080', minScale: 75 });
+    assert.deepEqual([m.priority, m.bitrate, m.fps, m.resolution, m.minScale], [priority, '42500', 90, '1080', 75]);
+    assert.equal(m.quality, undefined);
+  }
+  // Source (and its older name, text): Sharp, host-native pixels, automatic shrinking off.
+  for (const quality of ['source', 'text']) {
+    const m = sanitize({ quality, resolution: '720', minScale: 50, bitrate: 'auto' });
+    assert.deepEqual([m.priority, m.resolution, m.minScale], ['sharp', 'native', 100]);
+    const cfg = videoConfig(m, { screen: { width: 1280, height: 720 }, display: { width: 2560, height: 1440 } });
+    assert.deepEqual([cfg.width, cfg.height, cfg.minScalePercent, cfg.quality], [2560, 1440, 100, 'clarity']);
+  }
+  // A saved 2160 setting (no longer in the menu) and fixed bitrates still load.
+  assert.equal(sanitize({ resolution: '2160', bitrate: '80000' }).resolution, '2160');
+  assert.equal(sanitize({ resolution: '2160', bitrate: '80000' }).bitrate, '80000');
+  // Migrating twice changes nothing, and a stored priority beats a leftover quality.
+  const once = sanitize({ quality: 'source' });
+  assert.deepEqual(sanitize(once), once);
+  assert.equal(sanitize({ priority: 'smooth', quality: 'source' }).priority, 'smooth');
+  assert.equal(sanitize({ priority: 'smooth', quality: 'source' }).resolution, 'screen');
+  assert.equal(QUALITY_PRIORITY.source, 'sharp');
 });

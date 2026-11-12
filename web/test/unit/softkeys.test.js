@@ -34,3 +34,18 @@ test('typed text becomes key presses', () => {
   typeDiff({ backspaces: 0, text: 'A' }, (u, d) => sent.push([u, d]), true);
   assert.deepEqual(sent, [[HID.KeyA, true], [HID.KeyA, false]]);
 });
+
+test('chord keys press the modifier around the key, and respect a held sticky one', async () => {
+  const { SoftKeyboard } = await import('../../js/softkeys.js');
+  const { HID } = await import('../../js/keymap.js');
+  const log = [];
+  const kb = Object.create(SoftKeyboard.prototype);
+  Object.assign(kb, { sticky: new Set(), send: (u, d) => log.push([u, d]), keys: null });
+  kb.chord('ctrl+c');
+  assert.deepEqual(log, [[HID.ControlLeft, true], [HID.KeyC, true], [HID.KeyC, false], [HID.ControlLeft, false]]);
+  log.length = 0;
+  kb.sticky.add(HID.ControlLeft); // Ctrl already down from the Ctrl key
+  kb.chord('ctrl+v');
+  assert.deepEqual(log.slice(0, 2), [[HID.KeyV, true], [HID.KeyV, false]]);
+  assert.deepEqual(log.at(-1), [HID.ControlLeft, false]); // sticky released afterwards
+});

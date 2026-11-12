@@ -49,6 +49,12 @@ jobs:
       - name: build release
         if: matrix.os == 'windows-latest'
         run: cargo build --workspace --release
+      # The service's network host: label on its folder, and what a process
+      # with its token can and can't write, run as SYSTEM.
+      - name: network host sandbox
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: ./installer/test-network-sandbox.ps1 -Exe target/release/ws-host-gui.exe
       # The installer friends download: built, installed silently, started,
       # uninstalled, and checked for leftovers.
       - name: installer

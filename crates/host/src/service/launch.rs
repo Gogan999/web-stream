@@ -34,12 +34,12 @@ use windows::Win32::Security::{
     AdjustTokenPrivileges, CreateRestrictedToken, DACL_SECURITY_INFORMATION, DISABLE_MAX_PRIVILEGE,
     DuplicateTokenEx, GetLengthSid, GetSecurityDescriptorDacl, GetSecurityDescriptorSacl,
     GetTokenInformation, LABEL_SECURITY_INFORMATION, LOGON32_LOGON_SERVICE,
-    LOGON32_PROVIDER_DEFAULT, LogonUserW, LookupPrivilegeValueW,
-    PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SE_PRIVILEGE_REMOVED,
-    SECURITY_ATTRIBUTES, SID_AND_ATTRIBUTES, SecurityIdentification, SetTokenInformation,
-    TOKEN_ALL_ACCESS, TOKEN_DUPLICATE, TOKEN_GROUPS, TOKEN_MANDATORY_LABEL, TOKEN_PRIVILEGES,
-    TOKEN_QUERY, TOKEN_USER, TokenIntegrityLevel, TokenLogonSid, TokenPrimary, TokenPrivileges,
-    TokenSessionId, TokenUser, WRITE_RESTRICTED,
+    LOGON32_PROVIDER_DEFAULT, LUID_AND_ATTRIBUTES, LogonUserW, LookupPrivilegeValueW,
+    PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SE_PRIVILEGE_ENABLED,
+    SE_PRIVILEGE_REMOVED, SECURITY_ATTRIBUTES, SID_AND_ATTRIBUTES, SecurityIdentification,
+    SetTokenInformation, TOKEN_ADJUST_PRIVILEGES, TOKEN_ALL_ACCESS, TOKEN_DUPLICATE, TOKEN_GROUPS,
+    TOKEN_MANDATORY_LABEL, TOKEN_PRIVILEGES, TOKEN_QUERY, TOKEN_USER, TokenIntegrityLevel,
+    TokenLogonSid, TokenPrimary, TokenPrivileges, TokenSessionId, TokenUser, WRITE_RESTRICTED,
 };
 use windows::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_ATTRIBUTE_DIRECTORY,
@@ -109,6 +109,9 @@ pub const NETWORK_DIR_SDDL: &str = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;F
 pub const NETWORK_DIR_LABEL_SDDL: &str = "S:(ML;OICI;NW;;;LW)";
 /// The same for a file created there before the label was set.
 pub const NETWORK_FILE_LABEL_SDDL: &str = "S:(ML;;NW;;;LW)";
+
+/// The right to change a SACL (winnt.h).
+const ACCESS_SYSTEM_SECURITY: u32 = 0x0100_0000;
 
 /// Group attributes: SE_GROUP_INTEGRITY and SE_GROUP_LOGON_ID.
 const SE_GROUP_INTEGRITY: u32 = 0x20;
@@ -377,7 +380,7 @@ fn host_token(session: u32) -> anyhow::Result<Owned> {
 ///
 /// Reading is unchanged, so the host still finds its own exe, system DLLs and
 /// the network stack.
-pub fn network_token() -> anyhow::Result<Owned> {
+pub fn network_token(low_integrity: bool) -> anyhow::Result<Owned> {
     let (user, domain) = (wide("LocalService"), wide("NT AUTHORITY"));
     let mut token = HANDLE::default();
     // SAFETY: NUL-terminated strings; `token` receives a handle we own.
@@ -393,7 +396,7 @@ pub fn network_token() -> anyhow::Result<Owned> {
     }
     .context("LogonUser(LocalService)")?;
     let logon = Owned(token);
-    match restrict_network_token(&logon) {
+    match restrict_network_token(&logon, low_integrity) {
         Ok(token) => Ok(token),
         Err(e) => {
             // Still LocalService with one privilege: worse than restricted,
@@ -407,7 +410,7 @@ pub fn network_token() -> anyhow::Result<Owned> {
     }
 }
 
-fn restrict_network_token(logon: &Owned) -> anyhow::Result<Owned> {
+fn restrict_network_token(logon: &Owned, low_integrity: bool) -> anyhow::Result<Owned> {
     // LogonUser's token is a primary one; its user and logon-session SIDs
     // are what the restricted checks keep.
     let user_buf = token_info(logon, TokenUser)?;
@@ -453,6 +456,16 @@ fn restrict_network_token(logon: &Owned) -> anyhow::Result<Owned> {
     .context("CreateRestrictedToken")?;
     let token = Owned(restricted_token);
 
+    if low_integrity {
+        set_low_integrity(&token)?;
+    }
+    // CreateRestrictedToken already removed what it was told to; checked
+    // anyway, so a change in what LocalService has fails loudly.
+    strip_privileges(&token, NETWORK_KEEP_PRIVILEGES)?;
+    Ok(token)
+}
+
+fn set_low_integrity(token: &Owned) -> anyhow::Result<()> {
     let low = Sid::new(LOW_INTEGRITY_SID)?;
     let label = TOKEN_MANDATORY_LABEL {
         Label: SID_AND_ATTRIBUTES {
@@ -469,11 +482,7 @@ fn restrict_network_token(logon: &Owned) -> anyhow::Result<Owned> {
             size_of::<TOKEN_MANDATORY_LABEL>() as u32 + GetLengthSid(low.0),
         )
     }
-    .context("SetTokenInformation(TokenIntegrityLevel)")?;
-    // CreateRestrictedToken already removed what it was told to; checked
-    // anyway, so a change in what LocalService has fails loudly.
-    strip_privileges(&token, NETWORK_KEEP_PRIVILEGES)?;
-    Ok(token)
+    .context("SetTokenInformation(TokenIntegrityLevel)")
 }
 
 /// A token's information of `class`, in a buffer aligned for the structure.
@@ -745,13 +754,48 @@ pub fn label_file(path: &Path, sddl: &str) -> anyhow::Result<()> {
 
 fn set_label(path: &Path, sddl: &str, want_dir: bool) -> anyhow::Result<()> {
     let sd = SecurityDescriptor::new(sddl)?;
+    let mut present = windows::core::BOOL::default();
+    let mut defaulted = windows::core::BOOL::default();
+    let mut sacl = std::ptr::null_mut();
+    // SAFETY: `sd` is a valid descriptor; `sacl` points into it.
+    unsafe { GetSecurityDescriptorSacl(sd.0, &mut present, &mut sacl, &mut defaulted) }
+        .context("GetSecurityDescriptorSacl")?;
+    // Changing a label asks for WRITE_OWNER; some systems also want the
+    // right to change the SACL, which needs SeSecurityPrivilege switched on.
+    // The first that works is used.
+    let mut last = None;
+    for system_security in [false, true] {
+        if system_security {
+            if let Err(e) = enable_privilege("SeSecurityPrivilege") {
+                last.get_or_insert(e);
+                break;
+            }
+        }
+        match set_label_with(path, sacl, want_dir, system_security) {
+            Ok(()) => return Ok(()),
+            Err(e) => last = Some(e),
+        }
+    }
+    Err(last.unwrap_or_else(|| anyhow::anyhow!("no way to set the label")))
+}
+
+fn set_label_with(
+    path: &Path,
+    sacl: *mut windows::Win32::Security::ACL,
+    want_dir: bool,
+    system_security: bool,
+) -> anyhow::Result<()> {
     let path_w = wide(&path.display().to_string());
+    let mut access = (WRITE_OWNER | FILE_READ_ATTRIBUTES).0;
+    if system_security {
+        access |= ACCESS_SYSTEM_SECURITY;
+    }
     // SAFETY: a NUL-terminated path; the handle is closed by `Owned`.
     let handle = Owned(
         unsafe {
             CreateFileW(
                 PCWSTR(path_w.as_ptr()),
-                (WRITE_OWNER | FILE_READ_ATTRIBUTES).0,
+                access,
                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                 None,
                 OPEN_EXISTING,
@@ -759,7 +803,7 @@ fn set_label(path: &Path, sddl: &str, want_dir: bool) -> anyhow::Result<()> {
                 None,
             )
         }
-        .with_context(|| format!("open {}", path.display()))?,
+        .with_context(|| format!("open {} for its label", path.display()))?,
     );
     let mut info = BY_HANDLE_FILE_INFORMATION::default();
     // SAFETY: a valid handle and a structure to fill.
@@ -776,12 +820,6 @@ fn set_label(path: &Path, sddl: &str, want_dir: bool) -> anyhow::Result<()> {
             if want_dir { "folder" } else { "file" }
         );
     }
-    let mut present = windows::core::BOOL::default();
-    let mut defaulted = windows::core::BOOL::default();
-    let mut sacl = std::ptr::null_mut();
-    // SAFETY: `sd` is a valid descriptor; `sacl` points into it.
-    unsafe { GetSecurityDescriptorSacl(sd.0, &mut present, &mut sacl, &mut defaulted) }
-        .context("GetSecurityDescriptorSacl")?;
     // SAFETY: a valid handle opened with WRITE_OWNER, and a SACL that
     // outlives the call.
     unsafe {
@@ -796,7 +834,46 @@ fn set_label(path: &Path, sddl: &str, want_dir: bool) -> anyhow::Result<()> {
         )
     }
     .ok()
-    .with_context(|| format!("set the integrity label of {}", path.display()))
+    .with_context(|| {
+        format!(
+            "set the integrity label of {} (system security access: {system_security})",
+            path.display()
+        )
+    })
+}
+
+/// Switches on `name` in this process's token, which must hold it.
+fn enable_privilege(name: &str) -> anyhow::Result<()> {
+    let mut token = HANDLE::default();
+    // SAFETY: the pseudo handle needs no closing; `token` is ours.
+    unsafe {
+        OpenProcessToken(
+            GetCurrentProcess(),
+            TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+            &mut token,
+        )
+    }
+    .context("OpenProcessToken")?;
+    let token = Owned(token);
+    let mut luid = LUID::default();
+    // SAFETY: a NUL-terminated name.
+    unsafe { LookupPrivilegeValueW(None, PCWSTR(wide(name).as_ptr()), &mut luid) }
+        .with_context(|| format!("look up {name}"))?;
+    let tp = TOKEN_PRIVILEGES {
+        PrivilegeCount: 1,
+        Privileges: [LUID_AND_ATTRIBUTES {
+            Luid: luid,
+            Attributes: SE_PRIVILEGE_ENABLED,
+        }],
+    };
+    // SAFETY: a valid TOKEN_PRIVILEGES with one entry.
+    unsafe { AdjustTokenPrivileges(token.0, false, Some(&tp), 0, None, None) }
+        .with_context(|| format!("enable {name}"))?;
+    // SAFETY: no arguments.
+    if unsafe { GetLastError() } == ERROR_NOT_ALL_ASSIGNED {
+        anyhow::bail!("this process does not hold {name}");
+    }
+    Ok(())
 }
 
 fn set_dacl(path: &Path, sddl: &str, want_dir: bool) -> anyhow::Result<()> {

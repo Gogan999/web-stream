@@ -102,7 +102,7 @@ browser is connected: what you copy here appears on the browser's
 clipboard, and what the browser copies is put on this PC's, up to 256 KiB.
 Only text is shared, not files or images (use **Send file...** for files).
 Nothing is read from the clipboard while no browser is connected, and
-text that a password manager marks as private is never read. Any paired
+text that a password manager marks as private (excluded from monitoring, clipboard history or the cloud clipboard) is never read. Any paired
 browser can read what you copy here while it is connected, so turn the box
 off if you don't want that (the flag is `--no-clipboard`).
 

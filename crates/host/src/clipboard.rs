@@ -82,6 +82,21 @@ impl SyncState {
     }
 }
 
+/// Whether the program that copied asked for the text to stay out of
+/// clipboard monitoring, history or the cloud, which is how password managers
+/// mark what they copy. `monitor_excluded` is whether the
+/// `ExcludeClipboardContentFromMonitorProcessing` format is present (its
+/// mere presence counts); the other two are the DWORD values of
+/// `CanIncludeInClipboardHistory` and `CanUploadToCloudClipboard` when
+/// present, where 0 means no.
+pub fn marked_private(
+    monitor_excluded: bool,
+    include_in_history: Option<u32>,
+    upload_to_cloud: Option<u32>,
+) -> bool {
+    monitor_excluded || include_in_history == Some(0) || upload_to_cloud == Some(0)
+}
+
 /// An open clipboard. Dropping it ends its thread.
 pub struct Clipboard {
     state: Arc<Mutex<SyncState>>,
@@ -427,10 +442,14 @@ mod imp {
             }
             let excluded =
                 RegisterClipboardFormatW(w!("ExcludeClipboardContentFromMonitorProcessing"));
-            if excluded != 0 && IsClipboardFormatAvailable(excluded).is_ok() {
-                return Ok(Read::NoText);
-            }
+            let history = RegisterClipboardFormatW(w!("CanIncludeInClipboardHistory"));
+            let cloud = RegisterClipboardFormatW(w!("CanUploadToCloudClipboard"));
             with_clipboard(hwnd, || {
+                let monitor_excluded =
+                    excluded != 0 && IsClipboardFormatAvailable(excluded).is_ok();
+                if marked_private(monitor_excluded, dword(history), dword(cloud)) {
+                    return Ok(Read::NoText);
+                }
                 let handle = GetClipboardData(CF_UNICODETEXT).map_err(|e| e.to_string())?;
                 let mem = HGLOBAL(handle.0);
                 // UTF-8 is at least one byte per UTF-16 unit, so more units
@@ -451,6 +470,28 @@ mod imp {
                 let _ = GlobalUnlock(mem);
                 Ok(Read::Text(text))
             })?
+        }
+    }
+
+    /// The DWORD stored under a registered clipboard format, if the clipboard
+    /// (open) has it.
+    unsafe fn dword(format: u32) -> Option<u32> {
+        // SAFETY: the clipboard is open; the memory is locked while read.
+        unsafe {
+            if format == 0 || IsClipboardFormatAvailable(format).is_err() {
+                return None;
+            }
+            let mem = HGLOBAL(GetClipboardData(format).ok()?.0);
+            if GlobalSize(mem) < 4 {
+                return None;
+            }
+            let ptr = GlobalLock(mem) as *const u32;
+            if ptr.is_null() {
+                return None;
+            }
+            let v = ptr.read_unaligned();
+            let _ = GlobalUnlock(mem);
+            Some(v)
         }
     }
 
@@ -551,6 +592,15 @@ mod tests {
         assert!(s.remote_set("kept"));
         assert!(!s.remote_set(&big));
         assert_eq!(s.local_changed("kept".into()), Local::Echo);
+    }
+
+    #[test]
+    fn private_marks_keep_text_out() {
+        assert!(!marked_private(false, None, None));
+        assert!(!marked_private(false, Some(1), Some(1)));
+        assert!(marked_private(true, None, None));
+        assert!(marked_private(false, Some(0), None));
+        assert!(marked_private(false, Some(1), Some(0)));
     }
 
     #[test]

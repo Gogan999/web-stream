@@ -87,6 +87,25 @@ pub struct Signaled {
     pub peers: PeerCount,
 }
 
+/// A control message for the log. Clipboard text is what the user copied (it
+/// may be a password), so it is never logged, only its size.
+fn describe_client(msg: &ClientControl) -> String {
+    match msg {
+        ClientControl::SetClipboard { text } => {
+            format!("SetClipboard {{ text: <{} bytes> }}", text.len())
+        }
+        other => format!("{other:?}"),
+    }
+}
+
+/// See [`describe_client`].
+fn describe_host(msg: &HostControl) -> String {
+    match msg {
+        HostControl::Clipboard { text } => format!("Clipboard {{ text: <{} bytes> }}", text.len()),
+        other => format!("{other:?}"),
+    }
+}
+
 /// Opens the clipboard sync, unless it is off or this session can't (the
 /// browser is then told it is unavailable).
 fn open_clipboard(
@@ -1104,7 +1123,7 @@ impl Media {
                 return;
             }
         };
-        tracing::debug!(?msg, "control");
+        tracing::debug!("control {}", describe_client(&msg));
         match msg {
             ClientControl::ListDisplays => {
                 self.send_displays();
@@ -1794,7 +1813,7 @@ impl Media {
             .await
         {
             Ok(true) => {}
-            Ok(false) => tracing::warn!("control channel full; dropped {msg:?}"),
+            Ok(false) => tracing::warn!("control channel full; dropped {}", describe_host(&msg)),
             Err(e) => tracing::debug!("control message not sent: {e}"),
         }
     }
@@ -1911,6 +1930,21 @@ fn target_kbps(bwe_bps: u64, max_kbps: u32) -> u32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn clipboard_text_is_not_logged() {
+        let secret = "hunter2-correct-horse";
+        let c = super::describe_client(&ClientControl::SetClipboard {
+            text: secret.into(),
+        });
+        assert!(!c.contains(secret) && c.contains("21 bytes"), "{c}");
+        let h = super::describe_host(&HostControl::Clipboard {
+            text: secret.into(),
+        });
+        assert!(!h.contains(secret) && h.contains("21 bytes"), "{h}");
+        // Everything else is logged as before.
+        assert!(super::describe_client(&ClientControl::ListDisplays).contains("ListDisplays"));
+    }
+
     use super::*;
 
     fn display(id: u32, primary: bool) -> DisplayInfo {

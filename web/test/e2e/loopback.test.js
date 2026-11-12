@@ -192,6 +192,14 @@ test('client streams from mock host, sends input and switches display', { timeou
       await client.waitForTimeout(100);
     }
   };
+  // Close it again if it is open: Escape can be taken by the select that was just used.
+  const closeSettings = async () => {
+    for (let i = 0; i < 3 && (await client.isVisible('#more')); i++) {
+      await client.click('#more-toggle');
+      await client.waitForTimeout(100);
+    }
+    await client.waitForSelector('#more', { state: 'hidden' });
+  };
   // Second monitor: choosing one plays a second video beside the first, and a click on it says which
   // monitor it was on. Off again puts the layout back.
   await openSettings();
@@ -237,7 +245,7 @@ test('client streams from mock host, sends input and switches display', { timeou
   await client.selectOption('#display2', 'off');
   await client.keyboard.press('Escape');
   await client.waitForFunction(() => !document.body.classList.contains('dual') && document.getElementById('video2').hidden);
-  await client.waitForSelector('#more', { state: 'hidden' });
+  await closeSettings();
 
   // Tab never lands in the hidden on-screen keyboard textarea.
   await client.mouse.move(1, 1); // off the stream, so Tab moves focus instead of going to the host
@@ -284,7 +292,7 @@ test('client streams from mock host, sends input and switches display', { timeou
   assert.deepEqual(keys[at + 1], [0x29, false]);
 
   // Stats overlay fills in.
-  await client.waitForSelector('#more', { state: 'hidden' });
+  await closeSettings();
   await client.click('#more-toggle');
   // Advanced stays unfolded from the audio step.
   await client.selectOption('#stats-level', 'detailed');

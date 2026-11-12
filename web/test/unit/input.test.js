@@ -28,9 +28,10 @@ test('device name from user agent', () => {
 
 import { pairingError } from '../../js/pairing.js';
 test('pairing error messages', () => {
-  assert.match(pairingError(403, { error: 'pairing_closed' }), /Open pairing on the host/);
-  assert.match(pairingError(423, { error: 'locked' }), /Reopen pairing/);
-  assert.match(pairingError(409, { error: 'busy' }), /Another pairing is in progress/);
+  assert.match(pairingError(403, { error: 'pairing_closed' }), /Press "Pair a device" on the host/);
+  assert.match(pairingError(423, { error: 'locked' }), /Pair a device/);
+  assert.match(pairingError(409, { error: 'busy' }), /Another device is pairing right now; try again in a minute/);
+  assert.match(pairingError(410, {}), /Request code/);
   assert.match(pairingError(500), /Pairing failed \(500\)/);
 });
 

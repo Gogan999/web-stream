@@ -22,7 +22,7 @@ pub struct Watcher {
     /// The service: installed (`Some`), and running.
     installed: Arc<Mutex<Option<bool>>>,
     poke: mpsc::Sender<()>,
-    /// Open pairing once attached (`--pair`, or "Pair a browser" in the
+    /// Open pairing once attached (`--pair`, or "Pair a device" in the
     /// copy that handed over).
     pair: Arc<AtomicBool>,
     pub elevated: bool,

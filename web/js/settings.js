@@ -27,7 +27,7 @@ export const STATS_LEVELS = Object.freeze(['essential', 'detailed', 'debug']);
 export const DEFAULTS = Object.freeze({
   codec: null, mouseMode: 'relative',
   bitrate: 'auto', resolution: 'screen', fps: 60, quality: 'balanced', keyframeScale: 2, recoverDrops: true, minScale: 0,
-  matchHost: false, mic: false,
+  matchHost: false, mic: false, autoconnect: true,
   audioKbps: 'host', audioFrame: 'host', statsLevel: 'essential',
 });
 
@@ -134,6 +134,8 @@ export function sanitize(saved) {
     minScale: MIN_SCALES.includes(Number(v.minScale)) ? Number(v.minScale) : DEFAULTS.minScale,
     matchHost: v.matchHost === true,
     mic: v.mic === true,
+    // A paired page connects as soon as it loads, unless this is turned off.
+    autoconnect: v.autoconnect !== false,
     audioKbps: AUDIO_KBPS.includes(v.audioKbps) ? v.audioKbps : DEFAULTS.audioKbps,
     audioFrame: AUDIO_FRAMES.includes(v.audioFrame) ? v.audioFrame : DEFAULTS.audioFrame,
     statsLevel: STATS_LEVELS.includes(v.statsLevel) ? v.statsLevel : DEFAULTS.statsLevel,

@@ -192,7 +192,7 @@ pub fn hide_window() {
 /// while the window is hidden (and eframe isn't running frames).
 pub fn create_tray(host: Host, ctx: eframe::egui::Context) -> anyhow::Result<()> {
     let open = MenuItem::with_id("open", "Open web-stream host", true, None);
-    let pair = MenuItem::with_id("pair", "Pair a browser", true, None);
+    let pair = MenuItem::with_id("pair", "Pair a device", true, None);
     let drop = MenuItem::with_id("drop", "Disconnect the browser", true, None);
     let quit_item = MenuItem::with_id("quit", "Quit", true, None);
     let menu = Menu::new();

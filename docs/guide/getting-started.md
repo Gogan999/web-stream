@@ -30,35 +30,58 @@ an exception for `C:\Program Files\web-stream`. In Windows Security that is
 **Virus & threat protection > Manage settings > Exclusions > Add an
 exclusion > Folder**.
 
-## 2. First-run setup
+## 2. Pair your phone
 
-The **web-stream host** window opens on **Set up this PC**. The app also
-lives in the system tray (bottom right, near the clock); closing the window
-keeps it running there.
+The **web-stream host** window opens by itself the first time, with a QR
+code already showing. The app also lives in the system tray (bottom right,
+near the clock); closing the window keeps it running there.
 
-- **Only using it at home?** Skip to step 3.
-- **Using it away from home too?** If you were sent a Cloudflare Tunnel
-  token, open **Settings**, set **Cloudflare Tunnel** to **Named (token)**,
-  paste it in **Tunnel token** and save: the window then shows your own
-  address (like `https://alex.example.com/`). Then follow
-  [Connecting from outside your home](remote-access.md) for the stream's
-  ports, and come back.
-
-## 3. Pair your phone
-
-1. Press **Pair a phone**. A QR code appears.
-2. Scan it with the phone's camera and open the link.
-3. The first time, the browser warns about the certificate (not through a
-   [Cloudflare Tunnel](cloudflare-tunnel.md)).
+1. Scan the QR code with the phone's camera and open the link. (Later, press
+   **Pair a device** for a new one.)
+2. The first time, the phone warns that the connection isn't private. That
+   is expected: the host uses its own certificate. It does not happen
+   through a [Cloudflare Tunnel](cloudflare-tunnel.md).
    - **iPhone:** **Show Details > visit this website > Visit Website**.
    - **Chrome:** **Advanced > Proceed**.
-4. The page pairs by itself and connects.
+   - Only if you want to check: tap the warning's certificate details. The
+     host window shows the first and last 8 hex digits of the certificate's
+     fingerprint under the QR code.
+3. The page pairs by itself and connects.
 
-On iPhone, **Share > Add to Home Screen** keeps it one tap away.
+On iPhone, **Share > Add to Home Screen** puts a web-stream icon on the
+home screen. It opens full screen and connects straight away, because the
+paired browser connects automatically (turn that off under **Settings >
+Host > Connect automatically** on the page). In Chrome on Android,
+**Install app** does the same. If the home-screen icon asks to pair again,
+iOS kept its cookies apart from Safari: open the QR link from the icon
+itself, or pair once more. Each host you use needs its own icon.
 
-The QR code works once, for two minutes. Press **Pair a phone** again for
+The QR code works once, for two minutes. Press **Pair a device** again for
 each extra device. **Forget paired browsers** in the window unpairs all of
 them.
+
+**On a laptop, or without a camera:** open the address shown in the host
+window, press **Request code** and type the 6-digit code the host window
+shows.
+
+## 3. Away from home (optional)
+
+At home on the same Wi-Fi nothing more is needed. From elsewhere, open
+**Remote access (away from home)** in the host window. If you were sent a
+Cloudflare Tunnel token, open **Settings**, set **Cloudflare Tunnel** to
+**Named (token)**, paste it in **Tunnel token** and save: the window then
+shows your own address (like `https://alex.example.com/`). Then follow
+[Connecting from outside your home](remote-access.md) for the stream's
+ports.
+
+## If someone sent you a link
+
+You need nothing installed. Open the link, accept the certificate warning
+described above (once), and ask whoever runs the PC to press **Pair a
+device** and show you the QR code or the 6-digit code. After that, open the
+same link or the home-screen icon any time. If the warning ever comes back
+for a browser that was already paired, don't click past it unless the host
+owner says the PC's certificate changed.
 
 ## Next steps
 

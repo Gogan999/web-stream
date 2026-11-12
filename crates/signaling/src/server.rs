@@ -366,6 +366,7 @@ fn embedded_file(
         Some("css") => "text/css; charset=utf-8",
         Some("js") => "text/javascript; charset=utf-8",
         Some("webmanifest") => "application/manifest+json",
+        Some("png") => "image/png",
         _ => "application/octet-stream",
     };
     ([(header::CONTENT_TYPE, mime)], *body).into_response()
@@ -863,6 +864,14 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(header::HOST, HeaderValue::from_str(value).unwrap());
         request_host(&headers)
+    }
+
+    #[test]
+    fn embedded_pngs_are_served_as_images() {
+        static FILES: &[(&str, &[u8])] = &[("icons/icon-192.png", b"\x89PNG")];
+        let r = embedded_file(FILES, &"/icons/icon-192.png".parse().unwrap());
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(r.headers()[header::CONTENT_TYPE], "image/png");
     }
 
     #[test]

@@ -35,17 +35,16 @@ pub struct App {
     #[cfg(windows)]
     service: crate::service_watch::Watcher,
     first_run: FirstRun,
-    /// Shows the first-run setup at the top of the window.
-    show_setup: bool,
+    /// First run: open pairing once the host is up and say what to do with
+    /// the QR code. Cleared when pairing was opened, or the user did it.
+    first_pairing: bool,
+    /// Shows the first-run hint in the pairing card, until a browser connects.
+    first_hint: bool,
     upnp: &'static upnp::Mapper,
     /// Frames until the window hides itself, for `--hidden`. eframe shows
     /// the window after the first frame whatever it was built with.
     #[cfg_attr(not(windows), allow(dead_code))]
     hide_in_frames: Option<u8>,
-    /// Whether the pairing QR code is drawn. Off at first: the code to type
-    /// is the way to pair, and the QR code carries the pairing secret, so it
-    /// should not sit on screen unless asked for. Not saved.
-    show_qr: bool,
 }
 
 impl App {
@@ -113,7 +112,8 @@ impl App {
 
         let mut app = Self {
             first_run: FirstRun::new(),
-            show_setup: !settings.setup_done,
+            first_pairing: !settings.setup_done,
+            first_hint: !settings.setup_done,
             upnp,
             host,
             draft: settings.clone(),
@@ -129,7 +129,6 @@ impl App {
             #[cfg(windows)]
             service,
             hide_in_frames: hidden.then_some(2),
-            show_qr: false,
         };
         // A browser may ask for an update (when the settings allow it):
         // update.ps1 builds, then this app restarts itself on the build.
@@ -215,12 +214,9 @@ impl App {
         }
     }
 
-    /// The first-run setup: reaching the host from outside, then pairing a
-    /// phone.
-    fn setup_ui(&mut self, ui: &mut egui::Ui) {
-        ui.label(RichText::new("Set up this PC").strong().size(16.0));
-        ui.add_space(4.0);
-        ui.label(RichText::new("1. Use it away from home (optional)").strong());
+    /// Reaching the host from outside (a Cloudflare Tunnel, opt-in UPnP, the
+    /// port test). Folded away: at home on the same Wi-Fi none of it is needed.
+    fn remote_access_ui(&mut self, ui: &mut egui::Ui) {
         ui.label(
             "At home on the same Wi-Fi nothing is needed. From elsewhere, a Cloudflare Tunnel \
              (Settings below) serves the page with no certificate warning, and the router has \
@@ -301,28 +297,6 @@ impl App {
         });
         if let Some(report) = &report {
             firstrun::report_ui(ui, report);
-        }
-
-        ui.add_space(6.0);
-        ui.label(RichText::new("2. Pair your phone").strong());
-        let running = matches!(self.host.state().status, Status::Running { .. });
-        ui.horizontal_wrapped(|ui| {
-            if ui
-                .add_enabled(running, egui::Button::new("Pair a phone"))
-                .clicked()
-            {
-                self.host.command(Command::OpenPairing);
-            }
-            ui.label("then scan the QR code that appears below with the phone's camera.");
-        });
-        ui.add_space(6.0);
-        if ui
-            .button("Done")
-            .on_hover_text("\"Setup\" at the bottom brings this back")
-            .clicked()
-        {
-            self.show_setup = false;
-            self.save_one(|s| s.setup_done = true);
         }
     }
 
@@ -435,6 +409,53 @@ impl App {
         let url = firstrun::pairing_url(&host, link);
         qr::show(ui, &url, 200.0).on_hover_text("Pairs one browser, once, while pairing is open");
         ui.weak("Pairs once, while pairing is open. Anyone who can see this code can pair.");
+    }
+
+    /// Under the QR code: what the phone's certificate warning means, and the
+    /// ends of the fingerprint to compare. Not shown for the Cloudflare Tunnel
+    /// address, which has a certificate browsers trust.
+    fn certificate_hint_ui(&self, ui: &mut egui::Ui) {
+        let Some((_, host)) = self.pairing_addresses() else {
+            return;
+        };
+        let (fingerprint, self_signed, tunnel_url) = {
+            let state = self.host.state();
+            match &state.status {
+                Status::Running {
+                    fingerprint,
+                    self_signed,
+                    ..
+                } => (fingerprint.clone(), *self_signed, state.tunnel_url.clone()),
+                _ => return,
+            }
+        };
+        let Some(hint) = certificate_hint(&host, tunnel_url.as_deref(), self_signed, &fingerprint)
+        else {
+            return;
+        };
+        ui.add_space(4.0);
+        ui.label(CERT_WARNING_TEXT);
+        ui.weak(format!(
+            "Only if you want to check: tap the warning's certificate details. They should \
+             start {} and end {}.",
+            hint.start, hint.end
+        ));
+    }
+
+    /// First run: open pairing once, as soon as the host is up, so the window
+    /// opens on a QR code to scan. Not while the service hosts (its pairing
+    /// takes an administrator).
+    fn open_first_pairing(&mut self) {
+        if !self.first_pairing || !matches!(self.host.state().status, Status::Running { .. }) {
+            return;
+        }
+        #[cfg(windows)]
+        if self.service_installed() == Some(true) && !self.service.elevated {
+            return;
+        }
+        self.first_pairing = false;
+        self.host.command(Command::OpenPairing);
+        self.save_one(|s| s.setup_done = true);
     }
 
     fn quit(&mut self, ctx: &egui::Context) {
@@ -738,7 +759,7 @@ impl App {
             let hand_over = false;
             if hand_over {
                 if ui
-                    .button("Pair a browser (administrator)")
+                    .button("Pair a device (administrator)")
                     .on_hover_text(
                         "Opens this app as administrator, attached to the service, and lets a \
                          browser ask for a pairing code for two minutes",
@@ -749,7 +770,7 @@ impl App {
                     self.hand_over(true);
                 }
             } else if ui
-                .add_enabled(running, egui::Button::new("Pair a browser"))
+                .add_enabled(running, egui::Button::new("Pair a device"))
                 .on_hover_text("Lets a browser ask for a pairing code for two minutes")
                 .clicked()
             {
@@ -785,13 +806,23 @@ impl App {
             (PairingStage::CodesLocked, _) => {}
             _ => {}
         }
-        // Whatever a browser does with codes: anyone who can reach the port
-        // can ask for one.
+        // The QR code is the easy way to pair a phone, so it is shown whenever
+        // pairing is open (it only lives for those two minutes, and pairs once).
         if let (true, Some(link)) = (view.offer_qr, &link) {
-            ui.checkbox(&mut self.show_qr, "Show QR code");
-            if self.show_qr {
-                self.pairing_qr_ui(ui, link, view.stage != PairingStage::AwaitingCode);
+            if self.first_hint && connected.is_none() {
+                ui.label(
+                    RichText::new(
+                        "First time? Scan this QR code with your phone's camera, then open \
+                         the link.",
+                    )
+                    .strong(),
+                );
             }
+            self.pairing_qr_ui(ui, link, view.stage != PairingStage::AwaitingCode);
+            self.certificate_hint_ui(ui);
+        }
+        if connected.is_some() {
+            self.first_hint = false;
         }
         if pairing_until.is_some() || code.is_some() {
             ui.ctx().request_repaint_after(Duration::from_millis(500));
@@ -1417,6 +1448,8 @@ impl eframe::App for App {
             }
         }
 
+        self.open_first_pairing();
+
         let dropped: Vec<PathBuf> = ctx.input(|i| {
             i.raw
                 .dropped_files
@@ -1438,9 +1471,6 @@ impl eframe::App for App {
                 if ui.button("Open data folder").clicked() {
                     open_folder(&self.data_dir);
                 }
-                if !self.show_setup && ui.button("Setup").clicked() {
-                    self.show_setup = true;
-                }
                 ui.weak("certificate, paired browsers, settings and log");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("Quit").clicked() {
@@ -1451,14 +1481,12 @@ impl eframe::App for App {
         });
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
-                if self.show_setup {
-                    egui::Frame::group(ui.style()).show(ui, |ui| self.setup_ui(ui));
-                    ui.add_space(4.0);
-                }
                 self.status_ui(ui);
                 ui.separator();
                 self.session_ui(ui);
                 ui.separator();
+                egui::CollapsingHeader::new("Remote access (away from home)")
+                    .show(ui, |ui| self.remote_access_ui(ui));
                 egui::CollapsingHeader::new("Settings").show(ui, |ui| self.settings_ui(ui));
                 egui::CollapsingHeader::new("Activity")
                     .default_open(true)
@@ -1579,6 +1607,43 @@ fn pairing_view(
     }
 }
 
+/// What the pairing card tells a friend about the browser's certificate
+/// warning (the host's certificate is self-signed).
+const CERT_WARNING_TEXT: &str = "Your phone will warn that the connection isn't private. That \
+     is expected the first time. Tap Show Details > visit this website (iPhone) or Advanced > \
+     Proceed (Chrome).";
+
+/// The first and last 8 hex digits of the certificate fingerprint.
+#[derive(Debug, PartialEq)]
+struct CertificateHint {
+    start: String,
+    end: String,
+}
+
+/// The certificate guidance for the address in the QR code, or `None` when
+/// there is nothing to warn about: a CA-signed certificate, or the Cloudflare
+/// Tunnel address (its certificate is trusted by browsers).
+fn certificate_hint(
+    host: &str,
+    tunnel_url: Option<&str>,
+    self_signed: bool,
+    fingerprint: &str,
+) -> Option<CertificateHint> {
+    let through_tunnel = tunnel_url.is_some_and(|t| t.trim_end_matches('/') == host);
+    if !self_signed || through_tunnel {
+        return None;
+    }
+    // "AA:BB:...": four bytes at each end.
+    let groups: Vec<&str> = fingerprint.split(':').collect();
+    if groups.len() < 8 {
+        return None;
+    }
+    Some(CertificateHint {
+        start: groups[..4].join(":"),
+        end: groups[groups.len() - 4..].join(":"),
+    })
+}
+
 /// The red notice for locked codes, if any. A code lockout doesn't stop the
 /// QR link, and pairing again clears the lockout, so an open window names
 /// both; a closed one has no QR left to promise. A code on screen can't be
@@ -1589,11 +1654,11 @@ fn locked_notice(view: &PairingView) -> Option<&'static str> {
     }
     match view.stage {
         PairingStage::CodesLocked => Some(
-            "Codes are locked after too many wrong tries. The QR code still works (tick \
-             \"Show QR code\"), or click Pair a browser again to unlock codes.",
+            "Codes are locked after too many wrong tries. The QR code still works, \
+             or click Pair a device again to unlock codes.",
         ),
         PairingStage::Closed => Some(
-            "Codes are locked after too many wrong tries. Click Pair a browser to \
+            "Codes are locked after too many wrong tries. Click Pair a device to \
              unlock them.",
         ),
         PairingStage::AwaitingCode | PairingStage::Code => None,
@@ -1610,6 +1675,28 @@ mod tests {
             device_name: "Phone".into(),
             expires: now + Duration::from_secs(60),
         }
+    }
+
+    #[test]
+    fn certificate_hint_shows_the_fingerprint_ends() {
+        let fp = (0..32)
+            .map(|i| format!("{i:02X}"))
+            .collect::<Vec<_>>()
+            .join(":");
+        let h = certificate_hint("https://192.168.1.20:8443", None, true, &fp).unwrap();
+        assert_eq!(h.start, "00:01:02:03");
+        assert_eq!(h.end, "1C:1D:1E:1F");
+    }
+
+    #[test]
+    fn no_certificate_hint_for_the_tunnel_or_a_trusted_certificate() {
+        let fp = vec!["AB"; 32].join(":");
+        let tunnel = Some("https://pc.example.com/");
+        assert!(certificate_hint("https://pc.example.com", tunnel, true, &fp).is_none());
+        assert!(certificate_hint("https://192.168.1.20:8443", None, false, &fp).is_none());
+        // Another address of the same host still has the self-signed warning.
+        assert!(certificate_hint("https://192.168.1.20:8443", tunnel, true, &fp).is_some());
+        assert!(certificate_hint("https://x:1", None, true, "short").is_none());
     }
 
     #[test]
@@ -1657,7 +1744,7 @@ mod tests {
         assert!(v.offer_qr);
         let notice = locked_notice(&v).expect("a notice while locked");
         assert!(notice.contains("QR code still works"));
-        assert!(notice.contains("Show QR code"));
+        assert!(!notice.contains("Show QR code"));
         assert!(notice.contains("again to unlock"));
         assert!(!notice.contains("ask for"));
     }

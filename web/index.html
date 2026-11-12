@@ -5,6 +5,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
 <meta name="theme-color" content="#000000">
 <link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="web-stream">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'">
 <title>web-stream</title>
 <link rel="stylesheet" href="style.css">
@@ -80,6 +86,7 @@
     <details id="set-host">
       <summary>Host</summary>
       <div class="group">
+        <label title="Connect as soon as the page opens, when this browser is already paired. Applies to the home-screen icon too."><input type="checkbox" id="autoconnect"> Connect automatically</label>
         <div class="row">
           <button id="update-host" type="button" disabled title="Updates the host to the latest main and restarts it (scripts\update.ps1 on the host). Needs the tray app's &quot;let the browser update and restart this host&quot; setting.">Update host</button>
           <button id="unpair" type="button" hidden>Unpair</button>
@@ -97,7 +104,8 @@
 </header>
 <form id="pair" hidden>
   <h1>Pair this browser</h1>
-  <p>This browser isn't paired with the host yet. Request a code, then type the 6-digit code shown on the host.</p>
+  <p>This browser isn't paired with the host yet. Open pairing on the host (<b>Pair a device</b>), then press Request code and type the 6-digit code it shows. Or scan the QR code on the host with this device's camera.</p>
+  <p class="hint">The first time, the browser may warn that the connection isn't private. That is expected: the host uses its own certificate.</p>
   <label>Device name <input id="device-name" maxlength="64" required></label>
   <button id="pair-start" type="button">Request code</button>
   <label>Code <input id="pair-code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" disabled></label>

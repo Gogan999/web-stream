@@ -10,6 +10,7 @@ Pairing and signaling: [`docs/dev/signaling.md`](../docs/dev/signaling.md). Data
 |---|---|
 | `index.html`, `style.css` | Toolbar with a Settings dropdown, plus a full-size `<video>`, stats overlay and touch overlay |
 | `manifest.webmanifest` | Lets a phone add the client to its home screen, opening fullscreen and landscape |
+| `icons/` | The home-screen icons (192, 512, maskable 512 and the 180 px iOS one) the manifest and `index.html` point to; the host embeds them |
 | `js/main.js` | UI wiring, hotkeys, fullscreen + Keyboard Lock, stats polling |
 | `js/session.js` | Signaling + `RTCPeerConnection`, data channels, low playout delay |
 | `js/signaling.js` | WebSocket signaling client |

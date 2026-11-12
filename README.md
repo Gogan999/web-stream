@@ -45,7 +45,7 @@ and follow [Getting started](docs/guide/getting-started.md).
 **Using web-stream**
 
 - [Getting started](docs/guide/getting-started.md): install, set up and
-  pair a phone
+  pair a device
 - [Connecting from outside your home](docs/guide/remote-access.md)
 - [Cloudflare Tunnel](docs/guide/cloudflare-tunnel.md)
 - [Using the browser client](docs/guide/browser-client.md)

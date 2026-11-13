@@ -1,6 +1,8 @@
 //! DXGI Desktop Duplication for one output.
 
-use windows::Win32::Foundation::E_ACCESSDENIED;
+use std::time::Duration;
+
+use windows::Win32::Foundation::{E_ACCESSDENIED, E_INVALIDARG};
 use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
 use windows::Win32::Graphics::Dxgi::{
     DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_NOT_CURRENTLY_AVAILABLE, DXGI_ERROR_UNSUPPORTED,
@@ -11,6 +13,10 @@ use windows::core::Interface;
 
 use super::{Gpu, win_err};
 use crate::{CaptureError, Result};
+
+/// Tries after the first for a duplication DXGI refuses for a moment.
+const RETRIES: u32 = 5;
+const RETRY_WAIT: Duration = Duration::from_millis(60);
 
 pub(crate) enum Acquired {
     /// The desktop image changed. Valid until the next `acquire` call. The
@@ -31,7 +37,26 @@ pub(crate) struct Duplicator {
 
 impl Duplicator {
     pub(crate) fn new(output: &IDXGIOutput1, gpu: &Gpu) -> Result<Self> {
-        let dup = unsafe { output.DuplicateOutput(&gpu.device) }.map_err(|e| {
+        // Right after another duplication of this output was released (a
+        // resize, a display switch) or while the desktop settles after a mode
+        // change, DXGI answers E_INVALIDARG or "not currently available" for
+        // a moment; a short wait gets through where failing at once made the
+        // caller rebuild everything.
+        let mut tries = 0;
+        let dup = loop {
+            match unsafe { output.DuplicateOutput(&gpu.device) } {
+                Err(e)
+                    if tries < RETRIES
+                        && (e.code() == E_INVALIDARG
+                            || e.code() == DXGI_ERROR_NOT_CURRENTLY_AVAILABLE) =>
+                {
+                    tries += 1;
+                    std::thread::sleep(RETRY_WAIT);
+                }
+                other => break other,
+            }
+        }
+        .map_err(|e| {
             let hint = match e.code() {
                 E_ACCESSDENIED => {
                     " (the lock screen or a UAC prompt is showing; only the host service can capture those)"

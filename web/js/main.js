@@ -748,7 +748,7 @@ setInterval(async () => {
   if (!receiver) return stallWatchdog.reset();
   try {
     const video = [...(await receiver.getStats()).values()].find((s) => s.type === 'inbound-rtp');
-    if (stallWatchdog.update(video, performance.now())) session?.sendControl({ type: 'requestKeyframe' });
+    if (stallWatchdog.update(video, performance.now(), document.hidden)) session?.sendControl({ type: 'requestKeyframe' });
   } catch {
     // a closing connection
   }

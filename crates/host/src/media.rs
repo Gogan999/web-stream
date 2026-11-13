@@ -70,6 +70,9 @@ const MIN_RESTART_GAP: Duration = Duration::from_secs(1);
 /// this many asks within this window restart the video.
 const STALL_ASKS: usize = 3;
 const STALL_WINDOW: Duration = Duration::from_secs(10);
+/// At most this many stall restarts per backoff window.
+const STALL_RESTARTS: usize = 3;
+const STALL_BACKOFF: Duration = Duration::from_secs(60);
 
 /// Video codecs the browser's answer accepted; `None` until known.
 pub type AcceptedCodecs = watch::Receiver<Option<Vec<VideoCodec>>>;
@@ -184,6 +187,7 @@ pub async fn run(
         sent: Arc::default(),
         keyframe_requests: Arc::default(),
         browser_asks: Vec::new(),
+        stall_restarts: Vec::new(),
         changed_modes: ChangedModes::default(),
         mode_busy: false,
         last_mode_change: None,
@@ -388,6 +392,8 @@ struct Media {
     /// while packets arrive and nothing decodes, so repeated asks mean a
     /// stream that stays dead, which a restart of the video fixes.
     browser_asks: Vec<Instant>,
+    /// When video was last restarted for a stall, to back off.
+    stall_restarts: Vec<Instant>,
     /// Displays whose resolution this session changed, to put back.
     changed_modes: ChangedModes,
     /// A resolution change or restore is running.
@@ -1526,6 +1532,18 @@ impl Media {
             return false;
         }
         self.browser_asks.clear();
+        // Back off: a restart that doesn't cure the stall (a broken decoder)
+        // must not make the host churn, so after STALL_RESTARTS in
+        // STALL_BACKOFF it only logs.
+        self.stall_restarts
+            .retain(|t| now.duration_since(*t) < STALL_BACKOFF);
+        if self.stall_restarts.len() >= STALL_RESTARTS {
+            tracing::warn!(
+                "the browser's video is still stalled after restarts; not restarting again for now"
+            );
+            return false;
+        }
+        self.stall_restarts.push(now);
         true
     }
 

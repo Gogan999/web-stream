@@ -19,9 +19,10 @@ export class StallWatchdog {
     this.asked = null;
   }
 
-  // `video` is the receiver's inbound-rtp stats (or null); `now` in ms. True: ask for a keyframe now.
-  update(video, now) {
-    if (!video) {
+  // `video` is the receiver's inbound-rtp stats (or null); `now` in ms; `hidden` is a background tab,
+  // where the browser throttles decoding and a stall is expected. True: ask for a keyframe now.
+  update(video, now, hidden = false) {
+    if (!video || hidden) {
       this.reset();
       return false;
     }

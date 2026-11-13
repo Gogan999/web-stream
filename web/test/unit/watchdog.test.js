@@ -33,3 +33,10 @@ test('no packets at all is not a stall, and a missing report resets', () => {
   w.update(null, 12000);
   assert.equal(w.since, null);
 });
+
+test('a hidden tab never asks and starts over when shown', () => {
+  const w = new StallWatchdog();
+  for (let t = 0; t < 10; t++) assert.equal(w.update(v(t * 1000, 0), t * 1000, true), false);
+  assert.equal(w.update(v(10000, 0), 10000, false), false);
+  assert.equal(w.update(v(11000, 0), 11000, false), false);
+});

@@ -37,7 +37,7 @@ tags**, choose **Selected branches and tags** and add the tag rule `v*`.
 
 ## Making a release
 
-Set `version` in `Cargo.toml` to the new version and merge that to `main`.
+Set `version` in `Cargo.toml` to the full new version, pre-release suffix included (`1.0.0-rc.1`, not `1.0.0`), and merge that to `main`. The built app reports `Cargo.toml`'s version, and the updater compares it with the release's, so a release candidate must say `-rc.N` in the binary too.
 Then either:
 
 - **From the Actions tab** (no git needed): Actions > release > **Run

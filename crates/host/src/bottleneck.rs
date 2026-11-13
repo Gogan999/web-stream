@@ -140,8 +140,11 @@ fn judge(host: &HostSample, client: Option<&ClientStats>) -> (Verdict, String) {
         }
         // The host sends frames the browser neither shows nor even decodes,
         // with the link clean: the decoder or renderer can't keep up.
-        let behind = host.fps >= 15.0 && c.fps < 0.7 * host.fps;
-        if c.dropped > 0 || c.freezes > 0 || behind {
+        // Nothing decoded at all is a stalled stream, not a slow decoder:
+        // shrinking the picture can't fix it.
+        let behind = host.fps >= 15.0 && c.fps >= 1.0 && c.fps < 0.7 * host.fps;
+        let stalled = c.fps < 1.0;
+        if !stalled && (c.dropped > 0 || c.freezes > 0 || behind) {
             return (
                 Verdict::Limited(Limiter::ClientDecode),
                 format!(
@@ -532,5 +535,16 @@ mod tests {
         assert_eq!(rep.limiter, Limiter::None);
         assert!(rep.relieving);
         assert_eq!(rep.relieving_for, Limiter::ClientDecode);
+    }
+
+    #[test]
+    fn a_browser_decoding_nothing_is_not_a_slow_decoder() {
+        let mut r = Run::new();
+        let mut c = client(0.0);
+        c.fps = 0.0;
+        c.decode_ms = None;
+        let o = r.seconds(30, host(8.0), Some(c));
+        assert!(steps(&o).is_empty());
+        assert!(o.iter().all(|o| o.report.is_none()));
     }
 }

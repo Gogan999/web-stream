@@ -171,6 +171,11 @@ pub struct EncodedFrame {
     pub recovers_from: Option<u64>,
     /// When the desktop image was captured.
     pub capture_time: MicrosMono,
+    /// When the frame went into the encoder, after any time the pacer held
+    /// it back (Source quality holds an image to meet its bitrate).
+    /// `encode_done_time` less this is what the encoder itself took; less
+    /// `capture_time` it includes the hold.
+    pub encode_start_time: MicrosMono,
     /// When the encoder returned the bitstream.
     pub encode_done_time: MicrosMono,
     pub width: u32,

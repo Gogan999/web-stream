@@ -750,6 +750,7 @@ fn deliver(
             keyframe,
             recovers_from: meta.recovers_from.filter(|_| !keyframe),
             capture_time: mono_micros(meta.captured),
+            encode_start_time: mono_micros(meta.started),
             encode_done_time: mono_now(),
             width: meta.width,
             height: meta.height,

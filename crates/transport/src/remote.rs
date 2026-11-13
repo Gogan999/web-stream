@@ -172,6 +172,7 @@ mod tests {
             keyframe: i == 0,
             recovers_from: None,
             capture_time: 0,
+            encode_start_time: 0,
             encode_done_time: 0,
             width: 1,
             height: 1,

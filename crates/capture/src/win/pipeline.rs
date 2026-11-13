@@ -563,7 +563,17 @@ impl Session {
                 self.enc.converter = converter;
                 // A new duplication hands over the whole desktop at once,
                 // which a still desktop otherwise wouldn't.
-                self.switch_to(self.display, false)
+                if let Err(e) = self.switch_to(self.display, false) {
+                    // The encoder is already at the new size, so the resize
+                    // has happened. Failing it here made the host restart the
+                    // whole video over a duplication that was only slow to
+                    // reopen; the capture loop keeps retrying it (and sends
+                    // an IDR with the first image) as after a lost one.
+                    diag!("capture_resize", "dup_failed={e}");
+                    tracing::warn!("reopening desktop duplication after resize: {e}");
+                    self.dup = None;
+                }
+                Ok(())
             }
             Err(e) => {
                 tracing::debug!("resizing in place failed ({e}); opening a new encoder");

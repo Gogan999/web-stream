@@ -15,6 +15,7 @@ import { Files, Uploads, formatSize } from './files.js';
 import { applyCapabilities, parseCapabilities } from './capabilities.js';
 import { DiagLog, diagEnabled } from './diag.js';
 import { ZoomView } from './zoom.js';
+import { StallWatchdog } from './watchdog.js';
 
 const $ = (id) => document.getElementById(id);
 // First thing: the pairing link's secret leaves the address bar (and history) before anything else
@@ -736,6 +737,22 @@ function toggleStats() {
   if (ui.stats.hidden) stopStats();
   else startStats();
 }
+
+// A stream that arrives but never decodes (the host restarted its video and the new keyframe was lost or
+// unusable) is rescued by asking the host for a keyframe, and the host restarts its video if that repeats.
+const stallWatchdog = new StallWatchdog();
+setInterval(async () => {
+  const pc = session?.pc;
+  if (!pc) return stallWatchdog.reset();
+  const receiver = pc.getTransceivers().find((t) => t.receiver.track?.kind === 'video')?.receiver;
+  if (!receiver) return stallWatchdog.reset();
+  try {
+    const video = [...(await receiver.getStats()).values()].find((s) => s.type === 'inbound-rtp');
+    if (stallWatchdog.update(video, performance.now())) session?.sendControl({ type: 'requestKeyframe' });
+  } catch {
+    // a closing connection
+  }
+}, 1000);
 
 function startStats() {
   stopStats();

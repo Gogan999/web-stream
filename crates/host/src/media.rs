@@ -66,6 +66,10 @@ const UNSENT_MAX: usize = 16;
 /// A `setVideoConfig` that needs a new pipeline waits until the last one is
 /// at least this old.
 const MIN_RESTART_GAP: Duration = Duration::from_secs(1);
+/// The browser asks for a keyframe every 2 s while its video is stalled:
+/// this many asks within this window restart the video.
+const STALL_ASKS: usize = 3;
+const STALL_WINDOW: Duration = Duration::from_secs(10);
 
 /// Video codecs the browser's answer accepted; `None` until known.
 pub type AcceptedCodecs = watch::Receiver<Option<Vec<VideoCodec>>>;
@@ -179,6 +183,7 @@ pub async fn run(
         transitions: 0,
         sent: Arc::default(),
         keyframe_requests: Arc::default(),
+        browser_asks: Vec::new(),
         changed_modes: ChangedModes::default(),
         mode_busy: false,
         last_mode_change: None,
@@ -379,6 +384,10 @@ struct Media {
     /// Keyframe requests passed to the encoder since the last stats
     /// report; counted by the transport's video sink too.
     keyframe_requests: Arc<AtomicU32>,
+    /// When the browser last asked for a keyframe itself. It does so only
+    /// while packets arrive and nothing decodes, so repeated asks mean a
+    /// stream that stays dead, which a restart of the video fixes.
+    browser_asks: Vec<Instant>,
     /// Displays whose resolution this session changed, to put back.
     changed_modes: ChangedModes,
     /// A resolution change or restore is running.
@@ -1147,6 +1156,17 @@ impl Media {
                     self.keyframe_requests.fetch_add(1, Ordering::Relaxed);
                     v.pipeline.request_keyframe();
                 }
+                if self.browser_asks_stalled(Instant::now()) {
+                    tracing::warn!("the browser keeps asking for a keyframe; restarting video");
+                    ws_diag::diag!("media_event", "stalled_restart");
+                    // A full restart, not `rebuild`: that resizes in place,
+                    // which does nothing when the size is unchanged.
+                    if let Err(e) = self.start_video() {
+                        tracing::error!("video: {e}");
+                        self.error(format!("could not restart video: {e}"));
+                    }
+                    self.display_changed();
+                }
             }
             ClientControl::SetVideoConfig { config } => self.set_video_config(config.clamped()),
             ClientControl::SetAudioConfig {
@@ -1494,6 +1514,19 @@ impl Media {
             .limit(Instant::now(), c.width, c.height, c.min_scale_percent);
         self.set_ceiling();
         self.request_rebuild();
+    }
+
+    /// Records a browser keyframe request; true once it has asked
+    /// [`STALL_ASKS`] times within [`STALL_WINDOW`] with no restart between.
+    fn browser_asks_stalled(&mut self, now: Instant) -> bool {
+        self.browser_asks
+            .retain(|t| now.duration_since(*t) < STALL_WINDOW);
+        self.browser_asks.push(now);
+        if self.browser_asks.len() < STALL_ASKS {
+            return false;
+        }
+        self.browser_asks.clear();
+        true
     }
 
     /// Rebuilds the pipeline now, or once [`MIN_RESTART_GAP`] after the

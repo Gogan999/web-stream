@@ -15,6 +15,7 @@ import { Files, Uploads, formatSize } from './files.js';
 import { applyCapabilities, parseCapabilities } from './capabilities.js';
 import { DiagLog, diagEnabled } from './diag.js';
 import { ZoomView } from './zoom.js';
+import { ClientReporter } from './telemetry.js';
 
 const $ = (id) => document.getElementById(id);
 // First thing: the pairing link's secret leaves the address bar (and history) before anything else
@@ -69,6 +70,7 @@ let cursor = null;
 let cursor2 = null; // the pointer on the second monitor's video
 let popout = null; // the second monitor's window, while it has one
 let statsTimer = 0;
+const reporter = new ClientReporter({ getPc: () => session?.pc, send: (m) => session?.sendControl(m) });
 let prevSnap = null;
 const frameTimer = new FrameTimer(ui.video);
 const alerts = new Alerts();
@@ -124,12 +126,14 @@ async function connect() {
     uploads.clear();
     if (diag && session.pc) diag.start(session.pc, ui.video);
     session.sendControl({ type: 'listDisplays' });
+    reporter.start();
     sendCursorMode();
     // The host keeps the last choice across sessions; tell it this browser's.
     session.sendControl({ type: 'setMicEnabled', enabled: settings.mic });
     session.sendControl(settingsStore.audioConfig(settings));
   });
   session.addEventListener('closed', () => {
+    reporter.stop();
     setRemoteUpdate(false);
     clip.reset();
     setSasVisible(false);
@@ -174,6 +178,7 @@ async function connect() {
 }
 
 function disconnect() {
+  reporter.stop();
   diag?.stop();
   if (input) input.stop();
   if (session) session.close();
@@ -247,6 +252,9 @@ function onControl(msg) {
     host.stats = msg;
     diag?.add('host_stats', msg);
     if (tuneWindow) tuneWindow.push(msg);
+  } else if (msg.type === 'bottleneck' && host) {
+    host.bottleneck = msg;
+    diag?.add('bottleneck', msg);
   } else if (msg.type === 'capabilities') {
     applyCapabilities(parseCapabilities(msg), { setSasVisible, setHostName, setHostVersion, setClipboardAvailable: (on) => clip.setAvailable(on) });
   } else if (msg.type === 'remoteUpdate') {
@@ -751,7 +759,7 @@ function startStats() {
 }
 
 function showStats(s, now) {
-  const active = alerts.update(assess(s, host?.stats, host?.config), now);
+  const active = alerts.update(assess(s, host?.stats, host?.config, host?.bottleneck), now);
   ui.stats.replaceChildren(...render(settings.statsLevel, s, frameTimer.avgMs, host?.stats, host?.config, active).map(({ text, sev }) => {
     const line = document.createElement('span');
     if (sev) line.className = sev;

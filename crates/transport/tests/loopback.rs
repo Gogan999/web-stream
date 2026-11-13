@@ -29,6 +29,7 @@ fn frame(index: u64, keyframe: bool) -> EncodedFrame {
         keyframe,
         recovers_from: None,
         capture_time: index * 16_667,
+        encode_start_time: index * 16_667,
         encode_done_time: index * 16_667 + 2_000,
         width: 1920,
         height: 1080,

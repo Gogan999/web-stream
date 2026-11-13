@@ -128,6 +128,10 @@ pub enum ClientControl {
     Ping {
         client_time_ms: f64,
     },
+    /// How the browser is coping, about once a second while video runs.
+    /// The host sets it beside its own figures to tell which end is the
+    /// bottleneck ([`HostControl::Bottleneck`]).
+    ClientStats(ClientStats),
     /// Ctrl+Alt+Del, which no browser can send as keys: the host asks
     /// Windows for the secure attention sequence (sign-in and lock screen,
     /// Task Manager menu). Only a host running as the web-stream service
@@ -273,6 +277,9 @@ pub enum HostControl {
     /// Sent about once a second while video runs, for the browser's stats
     /// overlay and auto-tune.
     VideoStats(VideoStats),
+    /// Which part of the chain is limiting the stream now, and what the host
+    /// did about it. Sent when either changes.
+    Bottleneck(BottleneckReport),
     /// The host pointer changed shape, or was hidden or shown. Sent when the
     /// stream starts and on every change.
     CursorShape(CursorShape),
@@ -351,6 +358,59 @@ pub struct VideoStats {
     /// Late or dropped frames the encoder skipped over without a keyframe.
     #[serde(default)]
     pub recovered_frames: u32,
+}
+
+/// The browser's side of the stream over the last second, from its own
+/// stats. Untrusted: the host clamps and sanity-checks it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClientStats {
+    /// Frames decoded per second.
+    pub fps: f32,
+    /// Average decode time per frame, if any frame was decoded.
+    pub decode_ms: Option<f32>,
+    /// Frames the browser decoded but did not show, in the interval.
+    #[serde(default)]
+    pub dropped: u32,
+    /// Times the picture froze in the interval.
+    #[serde(default)]
+    pub freezes: u32,
+    /// The page is in the background, where browsers throttle video: the
+    /// numbers say nothing about the PC.
+    #[serde(default)]
+    pub hidden: bool,
+}
+
+/// What limits the stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Limiter {
+    /// Nothing: the stream keeps up.
+    #[default]
+    None,
+    /// The link: frames are late or dropped, or packets are lost.
+    Network,
+    /// The host's encoder takes longer than a frame.
+    HostEncode,
+    /// The browser decodes or shows frames slower than they arrive.
+    ClientDecode,
+}
+
+/// See [`HostControl::Bottleneck`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BottleneckReport {
+    pub limiter: Limiter,
+    /// What was seen, in a short sentence for the stats overlay.
+    pub detail: String,
+    /// The size the host encodes at now, percent of the browser's asked size.
+    pub scale_percent: u32,
+    /// Of that, how much is lost to relieving the limiter above (the host
+    /// would otherwise run larger).
+    pub relieving: bool,
+    /// What the size is being held down for (`None` when it isn't).
+    #[serde(default)]
+    pub relieving_for: Limiter,
 }
 
 #[cfg(test)]

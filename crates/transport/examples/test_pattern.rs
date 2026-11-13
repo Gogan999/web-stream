@@ -235,6 +235,7 @@ fn encode_loop(transport: Transport, want_keyframe: Arc<AtomicBool>) {
                 keyframe: pkt.frame_type == FrameType::KEY,
                 recovers_from: None,
                 capture_time: capture.as_micros() as u64,
+                encode_start_time: capture.as_micros() as u64,
                 encode_done_time: start.elapsed().as_micros() as u64,
                 width: W as u32,
                 height: H as u32,

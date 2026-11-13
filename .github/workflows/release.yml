@@ -64,7 +64,7 @@ jobs:
           base="${BASH_REMATCH[1]}"
           pre="${BASH_REMATCH[2]}"
           cargo_version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
-          if [ "$cargo_version" != "$base" ]; then
+          if [ "$cargo_version" != "${base}${pre}" ]; then
             echo "::error::tag $TAG doesn't match workspace version $cargo_version in Cargo.toml"; exit 1
           fi
           git fetch --no-tags origin main

@@ -105,6 +105,8 @@ pub(crate) struct Bottleneck {
     last_relief: Option<Instant>,
     relief_after: Option<Duration>,
     current: Limiter,
+    /// What the last step down was for.
+    relief_cause: Limiter,
     /// Last report sent, to send changes only.
     sent: Option<(Limiter, usize)>,
     detail: String,
@@ -227,6 +229,7 @@ impl Bottleneck {
                         self.relief_after = Some(wait.min(MAX_RELIEF_AFTER));
                     }
                     self.step = at + 1;
+                    self.relief_cause = current;
                     changed = Some(self.step);
                     self.stepped(now);
                 }
@@ -238,13 +241,22 @@ impl Bottleneck {
                 if self.step > 0 && cooled && now.saturating_duration_since(quiet) >= after {
                     let (w0, h0) = scale::size(width, height, self.step);
                     let (w1, h1) = scale::size(width, height, self.step - 1);
-                    let grow =
-                        (f64::from(w1) * f64::from(h1) / (f64::from(w0) * f64::from(h0))) as f32;
+                    // Decode and encode time grow with the pixels, but slower:
+                    // a real run (software decode, 2026-11-13) took 5.5 ms at
+                    // 1280x720 and about 8 ms at 2560x1440, a quarter of the
+                    // pixels' worth. Square root errs high and still lets a
+                    // size that holds come back; one that doesn't is caught by
+                    // the doubled wait.
+                    let grow = (f64::from(w1) * f64::from(h1) / (f64::from(w0) * f64::from(h0)))
+                        .sqrt() as f32;
                     let budget = 1000.0 / host.fps_target.max(1) as f32;
                     let holds = self.last_encode_ms * grow < ENCODE_LIMIT * RELIEF_MARGIN * budget
                         && self.last_decode_ms * grow < DECODE_LIMIT * RELIEF_MARGIN * budget;
                     if holds {
                         self.step -= 1;
+                        if self.step == 0 {
+                            self.relief_cause = Limiter::None;
+                        }
                         self.last_relief = Some(now);
                         changed = Some(self.step);
                         self.stepped(now);
@@ -279,6 +291,11 @@ impl Bottleneck {
             detail: self.detail.clone(),
             scale_percent: (u64::from(w) * 100 / u64::from(width.max(1))) as u32,
             relieving: self.step > 0,
+            relieving_for: if self.step > 0 {
+                self.relief_cause
+            } else {
+                Limiter::None
+            },
         })
     }
 }
@@ -478,5 +495,42 @@ mod tests {
         assert!(steps(&o).is_empty());
         let o = r.seconds(40, host(10.0), Some(client(3.0)));
         assert_eq!(steps(&o), vec![0]);
+    }
+
+    #[test]
+    fn software_decode_that_scales_slowly_comes_back_to_native() {
+        // Measured on the PC with software decode: 5.5 ms at half size, about
+        // 8 ms at native; the budget at 60 fps is 16.7 ms.
+        let mut r = Run::new();
+        r.seconds(30, host(8.0), Some(client(14.0)));
+        assert!(r.b.step() >= 2);
+        for _ in 0..400 {
+            let decode = match r.b.step() {
+                0 => 8.0,
+                1 => 7.0,
+                _ => 5.5,
+            };
+            r.second(host(8.0), Some(client(decode)));
+        }
+        assert_eq!(r.b.step(), 0);
+    }
+
+    #[test]
+    fn the_report_says_what_the_size_is_held_down_for() {
+        let mut r = Run::new();
+        let mut reports: Vec<BottleneckReport> = Vec::new();
+        for _ in 0..4 {
+            reports.extend(r.second(host(8.0), Some(client(15.0))).report);
+        }
+        assert_eq!(reports[0].limiter, Limiter::ClientDecode);
+        assert_eq!(reports[0].relieving_for, Limiter::ClientDecode);
+        // The limiter clears but the size stays down: still blamed on decode.
+        for _ in 0..8 {
+            reports.extend(r.second(host(8.0), Some(client(3.0))).report);
+        }
+        let rep = reports.last().unwrap();
+        assert_eq!(rep.limiter, Limiter::None);
+        assert!(rep.relieving);
+        assert_eq!(rep.relieving_for, Limiter::ClientDecode);
     }
 }

@@ -408,6 +408,9 @@ pub struct BottleneckReport {
     /// Of that, how much is lost to relieving the limiter above (the host
     /// would otherwise run larger).
     pub relieving: bool,
+    /// What the size is being held down for (`None` when it isn't).
+    #[serde(default)]
+    pub relieving_for: Limiter,
 }
 
 #[cfg(test)]

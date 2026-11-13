@@ -105,7 +105,13 @@ everyone else:
   signaling socket, the peer connection's DTLS, SRTP and data channels,
   cloudflared) runs as LocalService with every privilege removed but one
   (it can't impersonate other accounts, which would be a way back to
-  SYSTEM), and can only read and write its own data folder. A bug there
+  SYSTEM), and can only read and write its own data folder. Its token is
+  also write-restricted (a write must be allowed to LocalService itself, not
+  merely to every user or service) and runs at low integrity, so it can't
+  write to anything at medium integrity or above; its data folder is
+  labelled low so it can still keep its certificate and paired browsers.
+  If that label can't be applied the network side starts without low
+  integrity rather than not at all. A bug there
   gives an attacker that process: they could stream the screen and send
   input, as a paired browser can, but not write to System32 or the registry
   or install a service.

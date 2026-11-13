@@ -64,6 +64,7 @@ defined in `ws-proto`, and the browser and the host change together.
 
 Installed as a service, the host runs as two processes: the screen side
 (capture, encoding, input, audio) as SYSTEM, and the network side (HTTPS,
-signaling, the peer connection) as LocalService with no privileges. The
+signaling, the peer connection) as LocalService with no privileges, a write-restricted token and low
+integrity. The
 screen side accepts only what a browser could send. See
 [Security](../guide/windows-service.md#security).

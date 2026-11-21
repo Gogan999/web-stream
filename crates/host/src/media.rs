@@ -40,8 +40,10 @@ use crate::uploads::{self, UploadMsg, UploadSession};
 /// more). A full channel makes the encoder drop the frame and skip over it
 /// next, or send a keyframe.
 const FRAME_QUEUE: usize = 1;
-/// About 40 ms of 10 ms Opus packets.
-const AUDIO_QUEUE: usize = 4;
+/// About 320 ms of 10 ms Opus packets. Audio is tiny; a queue shorter than a
+/// scheduling hiccup turns each hiccup into an audible dropout, while the
+/// browser's jitter buffer absorbs a burst far better than a gap.
+const AUDIO_QUEUE: usize = 32;
 const CONTROL_QUEUE: usize = 64;
 /// A pipeline that stopped by itself is restarted after this pause.
 const VIDEO_RESTART_DELAY: Duration = Duration::from_secs(1);

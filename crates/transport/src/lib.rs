@@ -30,7 +30,7 @@ pub use remote::{Remote, RemoteCmd};
 
 use std::collections::{HashSet, VecDeque};
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -377,6 +377,7 @@ struct Shared {
     notify: Notify,
     connected: AtomicBool,
     trouble: TroubleCounts,
+    audio_drops: AtomicU64,
     events: mpsc::UnboundedSender<TransportEvent>,
     /// Data events sent and not yet taken by [`Events`].
     queued_data: Arc<AtomicUsize>,
@@ -667,14 +668,16 @@ impl Transport {
         let (cmds, cmd_rx) = mpsc::channel(CMD_QUEUE);
         let (events_tx, events) = mpsc::unbounded_channel();
         let queued_data = Arc::new(AtomicUsize::new(0));
-        // About 80 ms of 10 ms Opus packets; beyond that, old audio is useless.
-        let (audio, audio_rx) = mpsc::channel(8);
+        // About 320 ms of 10 ms Opus packets: long enough to ride out a late
+        // run-loop turn (a big keyframe) without a hole in the sound.
+        let (audio, audio_rx) = mpsc::channel(32);
         let (exit_tx, exit_rx) = oneshot::channel();
         let shared = Arc::new(Shared {
             lanes: Default::default(),
             notify: Notify::new(),
             connected: AtomicBool::new(false),
             trouble: TroubleCounts::default(),
+            audio_drops: AtomicU64::new(0),
             events: events_tx,
             queued_data: queued_data.clone(),
             input: Mutex::default(),
@@ -913,7 +916,12 @@ impl Transport {
 
     /// Queue one Opus packet of game audio. Dropped if the queue is full.
     pub fn send_audio(&self, packet: AudioPacket) {
-        let _ = self.audio.try_send(packet);
+        if self.audio.try_send(packet).is_err() {
+            let n = self.shared.audio_drops.fetch_add(1, Ordering::Relaxed) + 1;
+            if n.is_power_of_two() {
+                tracing::warn!(dropped = n, "audio packets dropped: transport loop is behind");
+            }
+        }
     }
 
     /// Write to a data channel by label (see [`ws_proto::channels`]).

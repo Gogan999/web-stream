@@ -1,0 +1,59 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Stream benchmark clock</title>
+<!-- Open this on the host PC, full screen (F11), on the display being streamed. Works from file://.
+     A camera that sees the PC screen and the phone showing the stream reads the same counter twice;
+     the difference is glass-to-glass latency. See README.md. -->
+<style>
+  html, body { margin: 0; height: 100%; background: #000; color: #fff; font: 700 14vh/1 ui-monospace, Consolas, monospace; overflow: hidden; user-select: none; }
+  #wrap { position: absolute; inset: 0; }
+  #ms { position: absolute; left: 3vw; top: 3vh; font-size: 22vh; letter-spacing: -0.02em; }
+  #frame { position: absolute; left: 3vw; top: 30vh; font-size: 12vh; color: #9cf; }
+  #hz { position: absolute; left: 3vw; top: 45vh; font-size: 6vh; color: #aaa; }
+  #bar { position: absolute; bottom: 14vh; height: 8vh; width: 6vw; background: #fc0; }
+  #bar2 { position: absolute; bottom: 4vh; left: 0; right: 0; height: 8vh; display: flex; }
+  #bar2 i { flex: 1; }
+  #flip { position: absolute; right: 3vw; top: 3vh; width: 12vh; height: 12vh; }
+  #hint { position: absolute; right: 3vw; bottom: 25vh; font-size: 3vh; color: #777; text-align: right; font-weight: 400; }
+  body.flash #wrap { background: #fff; color: #000; }
+  body.flash #frame, body.flash #hz { color: #036; }
+</style>
+<div id="wrap">
+  <div id="ms">0</div>
+  <div id="frame">f 0</div>
+  <div id="hz"></div>
+  <div id="flip"></div>
+  <div id="hint">click / any key / tap = flash<br>(input-latency test)</div>
+  <div id="bar"></div>
+  <div id="bar2"></div>
+</div>
+<script>
+  const $ = (id) => document.getElementById(id);
+  const strip = $('bar2');
+  for (let i = 0; i < 10; i++) strip.appendChild(document.createElement('i'));
+  const cells = [...strip.children];
+  const t0 = performance.now();
+  let n = 0, last = t0, gaps = [];
+  function tick(now) {
+    const t = Math.round(now - t0);
+    $('ms').textContent = String(t).padStart(6, '0');   // ms since load, changes every frame
+    $('frame').textContent = 'f ' + String(n).padStart(6, '0');
+    $('flip').style.background = n % 2 ? '#0f0' : '#f0f'; // alternates every frame: a repeated or skipped frame is visible
+    $('bar').style.left = ((n * 7) % 94) + 'vw';          // 7 vw per frame: judder shows as uneven steps
+    cells.forEach((c, i) => { c.style.background = i === n % 10 ? '#fff' : '#222'; });
+    gaps.push(now - last); last = now; if (gaps.length > 120) gaps.shift();
+    if (n % 30 === 0) {
+      const avg = gaps.reduce((a, b) => a + b, 0) / gaps.length;
+      $('hz').textContent = 'display ' + (1000 / avg).toFixed(1) + ' Hz  (rAF)';
+    }
+    n++;
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+  const flash = (on) => document.body.classList.toggle('flash', on);
+  addEventListener('pointerdown', () => flash(true));
+  addEventListener('pointerup', () => flash(false));
+  addEventListener('keydown', () => flash(true));
+  addEventListener('keyup', () => flash(false));
+</script>

@@ -19,7 +19,7 @@ jobs:
       fail-fast: false
       matrix:
         # Windows is the host platform; Linux covers the signaling server.
-        os: [windows-latest, ubuntu-latest]
+        os: [windows-latest, ubuntu-24.04]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -35,11 +35,11 @@ jobs:
         run: cargo test --workspace
       # The browser client against the real host: shared files reach the browser's downloads.
       - uses: actions/setup-node@v4
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-24.04'
         with:
           node-version: 22
       - name: web client with the host
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-24.04'
         working-directory: web
         run: |
           cargo build -p ws-host --example test-host
@@ -68,7 +68,7 @@ jobs:
   # Headless Chromium against the transport's test pattern host: UDP, forced
   # ICE-TCP, and UDP firewalled so the browser has to fall back by itself.
   transport-e2e:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

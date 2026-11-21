@@ -919,7 +919,10 @@ impl Transport {
         if self.audio.try_send(packet).is_err() {
             let n = self.shared.audio_drops.fetch_add(1, Ordering::Relaxed) + 1;
             if n.is_power_of_two() {
-                tracing::warn!(dropped = n, "audio packets dropped: transport loop is behind");
+                tracing::warn!(
+                    dropped = n,
+                    "audio packets dropped: transport loop is behind"
+                );
             }
         }
     }

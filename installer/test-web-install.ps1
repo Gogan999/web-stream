@@ -83,20 +83,20 @@ try {
     $installed = if ($item -and $item.PSObject.Properties['DisplayVersion']) { $item.DisplayVersion } else { $null }
     Check ($installed -eq $version) "the one-liner installs $version ($installed)"
     Check (Wait-Host) 'the one-liner starts the host'
-    $before = Host-Ids
+    $before = @(Host-Ids)
     Check ($before.Count -eq 1) "one host app is running ($($before.Count))"
 
     # Already current: nothing happens.
     $out = Invoke-OneLiner
     Check ($out -match 'already installed') 'a current install is left alone'
-    Check (@(Compare-Object $before (Host-Ids)).Count -eq 0) 'the running host is untouched'
+    Check (@(Compare-Object $before @(Host-Ids)).Count -eq 0) 'the running host is untouched'
 
     # Update over the running host: it quits and comes back.
     $env:WEB_STREAM_REINSTALL = '1'
     Invoke-OneLiner | Out-Null
     Remove-Item Env:WEB_STREAM_REINSTALL
     Check (Wait-Host) 'the host answers after the update'
-    $after = Host-Ids
+    $after = @(Host-Ids)
     Check ($after.Count -eq 1 -and $before -notcontains $after[0]) 'the update restarts the running host'
 
     # A bad download is refused.

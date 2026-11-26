@@ -62,6 +62,14 @@ jobs:
         if: matrix.os == 'windows-latest'
         shell: pwsh
         run: ./installer/test-web-install.ps1 -Setup target/installer/web-stream-setup-0.0.0-ci.exe
+      - name: keep the installer
+        if: matrix.os == 'windows-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-stream-setup-ci
+          path: target/installer/web-stream-setup-0.0.0-ci.exe
+          if-no-files-found: error
+          retention-days: 14
 
   transport-e2e:
     runs-on: ubuntu-24.04

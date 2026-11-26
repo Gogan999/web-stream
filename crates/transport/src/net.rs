@@ -14,8 +14,7 @@ use str0m::net::Protocol;
 
 /// Most ICE-TCP connections a browser will reasonably open at once.
 const MAX_TCP_CONNS: usize = 8;
-/// ICE-TCP connections from one IP, so a single host cannot hold every permit while it stalls
-/// through the first-check deadline.
+/// ICE-TCP connections from one IP.
 const MAX_TCP_PER_IP: usize = 2;
 /// RFC 4571 frames are length-prefixed with a u16.
 const MAX_FRAME: usize = u16::MAX as usize;
@@ -49,8 +48,7 @@ pub struct Filter {
     ufrag: Option<Vec<u8>>,
     /// Admitted sources, and whether str0m has answered them.
     peers: HashMap<SocketAddr, bool>,
-    /// Unconfirmed peers, oldest first: evicted to make room, so spoofed checks cannot fill the
-    /// table.
+    /// Unconfirmed peers, oldest first: evicted to make room.
     unconfirmed: VecDeque<SocketAddr>,
     /// Bumped on every reset; ICE-TCP connections of an older session close.
     epoch: watch::Sender<u64>,
@@ -78,7 +76,7 @@ impl Filter {
         self.epoch.send_modify(|e| *e += 1);
     }
 
-    /// str0m sent to `addr`, which it only does for a source whose check it validated: keep it.
+    /// str0m sent to `addr`.
     pub fn confirm(&mut self, addr: SocketAddr) {
         if let Some(confirmed) = self.peers.get_mut(&addr) {
             *confirmed = true;

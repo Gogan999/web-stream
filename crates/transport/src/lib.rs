@@ -51,7 +51,7 @@ pub struct TransportConfig {
     pub extra_udp_ports: Vec<u16>,
     /// ICE-TCP port, or `None` to disable the TCP fallback.
     pub tcp_port: Option<u16>,
-    /// Don't resend packets older than this; a keyframe repairs the loss instead.
+    /// Don't resend packets older than this.
     pub max_resend_age: Duration,
     /// Drop a (non-key) frame instead of queueing it when the oldest unsent video packet has waited
     /// longer than this.
@@ -311,7 +311,7 @@ struct Shared {
     /// Data events sent and not yet taken by [`Events`].
     queued_data: Arc<AtomicUsize>,
     input: Mutex<InputRoute>,
-    /// Woken when a lane's backlog changes, so a watcher need not poll it.
+    /// Woken when a lane's backlog changes.
     backlog_changed: Notify,
     /// The next offer starts from the configured estimate.
     forget_estimate: AtomicBool,
@@ -614,7 +614,7 @@ impl Transport {
     }
 
     /// Like [`Transport::offer`], also advertising `public`: addresses this browser reached the
-    /// host at, which forward the media ports here.
+    /// host at.
     pub async fn offer_reachable_at(&self, public: Vec<IpAddr>) -> Result<String, Error> {
         let (tx, rx) = oneshot::channel();
         self.cmds

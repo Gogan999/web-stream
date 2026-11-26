@@ -148,8 +148,7 @@ impl Drop for Stream {
     }
 }
 
-/// Asks the engine to convert to 48 kHz stereo float; falls back to the mix format, which
-/// [`Converter`] then handles.
+/// Asks the engine to convert to 48 kHz stereo float; falls back to the mix format.
 fn init_client(device: &IMMDevice) -> Result<(IAudioClient, InputFormat)> {
     let flags = AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
     let native = native_format();

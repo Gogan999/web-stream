@@ -13,8 +13,7 @@ pub use consts::*;
 pub type NvEncodeAPICreateInstanceFn =
     unsafe extern "C" fn(function_list: *mut NV_ENCODE_API_FUNCTION_LIST) -> NVENCSTATUS;
 
-/// `NVENCSTATUS NvEncodeAPIGetMaxSupportedVersion(uint32_t*)`, which reports `(major << 4) |
-/// minor`.
+/// `NVENCSTATUS NvEncodeAPIGetMaxSupportedVersion(uint32_t*)`.
 pub type NvEncodeAPIGetMaxSupportedVersionFn =
     unsafe extern "C" fn(version: *mut u32) -> NVENCSTATUS;
 

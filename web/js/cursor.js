@@ -60,8 +60,7 @@ function toDataUrl({ width, height, rgba }) {
 }
 
 export class CursorView {
-  // `shift`: () => { x, y } added to the host's positions, which are from the main display's
-  // corner, to make them from the corner of the display this video shows (the second monitor's).
+  // `shift`: () => { x, y } added to the host's positions.
   constructor({ video, overlay, displaySize, onPlace = null, shift = null }) {
     this.video = video;
     this.overlay = overlay; // an <img> over the video

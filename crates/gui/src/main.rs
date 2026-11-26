@@ -148,8 +148,7 @@ fn init_logging(data_dir: &std::path::Path, file: &str) {
     }
 }
 
-/// After a browser-started update has built a new version: starts the new build, which waits for
-/// this process to exit, then stops the host and exits.
+/// After a browser-started update has built a new version: starts the new build.
 pub fn restart_after_update(host: &host::Host) {
     let exe = match std::env::current_exe() {
         Ok(exe) => exe,

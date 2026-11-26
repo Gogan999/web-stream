@@ -119,8 +119,7 @@ export function screenPixels(win = globalThis) {
   return { width: Math.round(win.screen.width * dpr), height: Math.round(win.screen.height * dpr) };
 }
 
-// Each stored field is checked and falls back to its default: a bad value would build a config the
-// host rejects.
+// Each stored field is checked and falls back to its default.
 export function sanitize(saved) {
   const v = saved && typeof saved === 'object' ? saved : {};
   const kbps = Number(v.bitrate);

@@ -34,7 +34,7 @@ pub struct Remote {
     shared: Arc<Shared>,
     /// Frames taken from the queue, not yet handed out.
     frames: VecDeque<EncodedFrame>,
-    /// Dropped with this, which ends [`Transport::shutdown`]'s wait.
+    /// Dropped with this.
     _exit: oneshot::Sender<()>,
 }
 

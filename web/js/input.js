@@ -16,8 +16,7 @@ const CTRL_L = hidUsage('ControlLeft');
 const CTRL_R = hidUsage('ControlRight');
 // Once the pointer has rested this long, its last absolute position is re-sent reliably.
 export const ABS_SETTLE_MS = 100;
-// Chrome reads gamepads every 4 ms; polling only once per animation frame would leave a press
-// waiting up to a display frame before it is even seen.
+// Gamepad poll interval, Chrome's own read rate.
 export const GAMEPAD_POLL_MS = 4;
 // Mouse motion goes out at most this often.
 export const MOTION_GAP_MS = 2;
@@ -28,8 +27,7 @@ export function wheelToDelta(e) {
   return { dx: Math.round(e.deltaX * scale), dy: Math.round(-e.deltaY * scale) };
 }
 
-// Picture pixels per CSS pixel of the letterboxed video, so a trackpad drag across the picture
-// moves the host cursor across the display.
+// Picture pixels per CSS pixel of the letterboxed video.
 export function pictureScale(rect, videoW, videoH) {
   if (!videoW || !videoH || !rect.width || !rect.height) return 1;
   return Math.max(videoW / rect.width, videoH / rect.height);
@@ -124,7 +122,7 @@ export class InputCapture {
       (!!this.keyTarget && document.activeElement === this.keyTarget);
   }
 
-  // Pending motion goes first, so a click, wheel or key lands where the pointer just moved.
+  // Pending motion goes first.
   rel(buf) {
     this.flushMotion();
     this.session.sendInput(CHANNELS.INPUT, buf);
@@ -134,14 +132,12 @@ export class InputCapture {
     const opt = { signal: this.abort.signal };
     const v = this.video;
 
-    // Mouse events are taken at the document so they are seen once whether or not the pointer is
-    // locked; ours() keeps toolbar clicks out of the stream.
+    // Mouse events are taken at the document; ours() keeps toolbar clicks out of the stream.
     const fromTouch = (e) => e.sourceCapabilities?.firesTouchEvents === true;
     const ours = (e) => (this.locked || e.target === v || (!!this.video2 && e.target === this.video2)) && !fromTouch(e);
     document.addEventListener('mousedown', (e) => { if (ours(e)) this.onMouseDown(e); }, opt);
     document.addEventListener('mouseup', (e) => { if (ours(e)) this.onMouseUp(e); }, opt);
-    // Chrome holds mousemove back to the next animation frame, up to a display frame late;
-    // pointerrawupdate fires as soon as the mouse reports, so motion uses it where it exists.
+    // Motion uses pointerrawupdate where it exists.
     const raw = 'onpointerrawupdate' in window;
     if (raw) {
       document.addEventListener('pointerrawupdate', (e) => {
@@ -182,8 +178,7 @@ export class InputCapture {
       }, opt);
       v.addEventListener('pointermove', (e) => {
         if (!touch(e)) return;
-        // Coalesced events keep a fast swipe's full path; the sum is the same, but the hold/tap
-        // slop check sees every step.
+        // Coalesced events keep a fast swipe's full path.
         const steps = e.getCoalescedEvents?.();
         const t = performance.now();
         this.batchTouch(() => {
@@ -354,7 +349,7 @@ export class InputCapture {
   }
 
   touchMove(dx, dy) {
-    // Relative motion is in host display pixels, so scale CSS px -> video px -> display px.
+    // Scales relative motion CSS px -> video px -> host display px.
     const vw = this.video.videoWidth;
     const d = this.displaySize?.();
     const pic = pictureRect(vw, this.video.videoHeight, d);
@@ -373,7 +368,7 @@ export class InputCapture {
   }
 
   // `reliable`: where a click is about to land, the position goes on the ordered reliable channel
-  // ahead of the button, so a lost or held motion packet can't misplace it.
+  // ahead of the button.
   touchMoveTo(x, y, reliable) {
     const p = videoPoint(x, y, this.video.getBoundingClientRect(), this.video.videoWidth, this.video.videoHeight,
       true, this.displaySize?.());
@@ -486,8 +481,8 @@ export class InputCapture {
       const last = this.pads[i];
       if (!sameState(s, last) || now - this.padSentAt[i] >= GAMEPAD_KEEPALIVE_MS) {
         const seq = (this.padSeq[i] + 1) & 0xffff;
-        // Button changes go on the reliable channel so a quick tap is never lost; stick and trigger
-        // moves and keepalives on the unordered one.
+        // Button changes go on the reliable channel; stick and trigger moves and keepalives on the
+        // unordered one.
         const sent = !last || s.buttons !== last.buttons
           ? this.session.sendInput(CHANNELS.INPUT, P.gamepadButtons(i, s, seq))
           : this.session.sendInput(CHANNELS.INPUT_RT, P.gamepad(i, s, seq));

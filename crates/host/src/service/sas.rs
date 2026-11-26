@@ -28,7 +28,8 @@ pub fn new_event() -> anyhow::Result<usize> {
     Ok(event.0 as usize)
 }
 
-/// In the session host: asks the service for Ctrl+Alt+Del.
+/// In the session host: asks the service for Ctrl+Alt+Del: the host asks Windows for the secure
+/// attention sequence.
 pub fn request(event: usize) -> Result<(), String> {
     // SAFETY: an event handle the service handed down.
     unsafe { SetEvent(HANDLE(event as *mut _)) }

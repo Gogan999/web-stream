@@ -283,7 +283,7 @@ pub fn updates_dir(data_dir: &Path) -> PathBuf {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Prefs {
-    /// Check once when the app opens and say so if there is a newer version.
+    /// Check once when the app opens for a newer version.
     pub notify_on_start: bool,
 }
 

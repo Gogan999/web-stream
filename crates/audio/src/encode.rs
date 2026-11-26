@@ -20,7 +20,7 @@ pub const FRAME_MS: [u32; 2] = [10, 20];
 const RESYNC_MICROS: u64 = 80_000;
 
 /// Converts an [`Instant`] to [`MicrosMono`], on the same clock as video frames
-/// ([`ws_proto::mono_micros`]), so audio and video times compare.
+/// ([`ws_proto::mono_micros`]).
 pub fn micros_mono(at: Instant) -> MicrosMono {
     ws_proto::mono_micros(at)
 }

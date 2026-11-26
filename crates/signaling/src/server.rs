@@ -22,8 +22,7 @@ use crate::store::DeviceStore;
 use crate::{Error, tls};
 use ws_proto::{ByeReason, ClientSignal, HostSignal, PairConfirm, PairLink, PairStart};
 
-/// `__Host-` makes the browser refuse the cookie unless it is Secure, has `Path=/` and no `Domain`,
-/// so a sibling subdomain cannot plant one.
+/// `__Host-` makes the browser refuse the cookie unless it is Secure, has `Path=/` and no `Domain`.
 const COOKIE: &str = "__Host-ws_device";
 /// Set by Cloudflare on every request it passes through a tunnel.
 const CF_CONNECTING_IP: &str = "cf-connecting-ip";
@@ -314,7 +313,7 @@ fn router(shared: Arc<Shared>) -> Router {
         ))
 }
 
-/// `?autoconnect` connects as soon as the page loads, which replaces the live session.
+/// `?autoconnect` connects as soon as the page loads.
 async fn no_cross_site_autoconnect(req: Request, next: Next) -> Response {
     if is_cross_site_autoconnect(req.headers(), req.uri()) {
         return (StatusCode::SEE_OTHER, [(header::LOCATION, "/")]).into_response();
@@ -361,8 +360,7 @@ fn err(status: StatusCode, body: serde_json::Value) -> Response {
     (status, axum::Json(body)).into_response()
 }
 
-/// Accept only requests from the host's own origin (or configured extras), which blocks cross-site
-/// form posts and cross-site WebSocket hijacking.
+/// Accept only requests from the host's own origin (or configured extras).
 fn origin_ok(shared: &Shared, headers: &HeaderMap) -> bool {
     let Some(origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) else {
         return false;
@@ -885,8 +883,7 @@ async fn run_socket(
     shared.notify(Notice::SessionEnded { device_name });
 }
 
-/// A handed-off session stays the live one, so a new connection, a revoke or a drop still ends it,
-/// until the host drops it.
+/// A handed-off session stays the live one.
 async fn run_handed_off(
     kick: oneshot::Receiver<ByeReason>,
     events: &mpsc::Sender<SessionEvent>,

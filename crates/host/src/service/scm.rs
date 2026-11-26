@@ -52,8 +52,7 @@ fn known_folder(id: &GUID) -> anyhow::Result<PathBuf> {
     Ok(path?)
 }
 
-/// Where the service's copy of the host lives: under Program Files, so only administrators can
-/// replace what runs as SYSTEM.
+/// Where the service's copy of the host lives: under Program Files.
 fn install_dir() -> anyhow::Result<PathBuf> {
     Ok(known_folder(&FOLDERID_ProgramFiles)?.join("web-stream"))
 }
@@ -64,8 +63,7 @@ pub fn data_dir() -> anyhow::Result<PathBuf> {
         .join(r"System32\config\systemprofile\AppData\Local\web-stream"))
 }
 
-/// The network host's data (certificate, paired browsers), which it can read and write as
-/// LocalService: a folder in [`data_dir`], with its own permissions.
+/// The network host's data (certificate, paired browsers).
 pub fn network_dir() -> anyhow::Result<PathBuf> {
     Ok(data_dir()?.join("network"))
 }
@@ -232,8 +230,7 @@ pub fn query() -> anyhow::Result<Option<bool>> {
 }
 
 /// The host reads `--cert` and `--key` as LocalService (or SYSTEM): copies them into the network
-/// host's data folder, which only administrators (and that host) can change, so a user who can
-/// write where they came from can't swap them later.
+/// host's data folder.
 fn copy_certificate(
     args: &[String],
     opts: &crate::options::ServeOptions,
@@ -714,12 +711,10 @@ impl Supervisor {
     }
 }
 
-/// STATUS_DLL_INIT_FAILED: a process that died before any of its own code ran, which for the
-/// network host means Windows wouldn't give it a window station.
+/// STATUS_DLL_INIT_FAILED: a process that died before any of its own code ran.
 const STARTUP_FAILED: u32 = 0xC000_0142;
 
-/// Waits for the network host to stop, which it does once the session host is gone (its link
-/// closes), and kills it if it doesn't: the next one needs its ports.
+/// Waits for the network host to stop.
 fn stop_network(
     Network {
         child: network,

@@ -58,8 +58,7 @@ impl DisplayRect {
     }
 }
 
-/// Makes the process per-monitor DPI aware (v2), so system metrics are in the same physical pixels
-/// as DXGI's display coordinates.
+/// Makes the process per-monitor DPI aware (v2).
 pub(crate) fn ensure_dpi_aware() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
@@ -162,8 +161,7 @@ impl WindowsInput {
         }
     }
 
-    /// Call when the streamed display changes so absolute mouse positions land on the display the
-    /// client is looking at.
+    /// Call when the streamed display changes.
     pub fn set_display_rect(&mut self, display: DisplayRect) {
         self.display = display;
     }

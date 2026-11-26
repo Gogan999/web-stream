@@ -344,7 +344,7 @@ async fn offer_advertises_public_addresses() {
     );
 }
 
-/// The browser's bitrate setting in the timed tests, which also caps the encoder there.
+/// The browser's bitrate setting in the timed tests.
 const PEER_VIDEO_BPS: u64 = 8_000_000;
 /// The transport's ceiling for [`PEER_VIDEO_BPS`], as the host sets it.
 const PEER_MAX_BPS: u64 = PEER_VIDEO_BPS * 100 / 75 + 500_000;
@@ -358,8 +358,7 @@ fn sized_frame(index: u64, keyframe: bool, bytes: usize) -> EncodedFrame {
     f
 }
 
-/// The real-time tests stream at full rate for seconds and check timing, so each runs alone: with
-/// any other test in this file running, they get too little CPU on a small CI runner.
+/// The real-time tests stream at full rate for seconds and check timing.
 static REAL_TIME: tokio::sync::RwLock<()> = tokio::sync::RwLock::const_new(());
 
 /// Heavy motion: a constant-bitrate encoder fills every frame to its budget (bitrate / fps),

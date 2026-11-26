@@ -1,4 +1,4 @@
-// The second monitor's video in a window of its own, so each host monitor can fill a client screen.
+// The second monitor's video in a window of its own.
 
 // Opens the window; null if the browser blocked it.
 export function openPopout({ input, onClose }) {

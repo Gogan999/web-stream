@@ -438,8 +438,7 @@ impl Host {
             .take();
     }
 
-    /// Stops the host and waits for it, so capture is stopped and a changed display resolution put
-    /// back before the app exits.
+    /// Stops the host and waits for it.
     pub fn stop_and_wait(&self, timeout: Duration) {
         self.stop();
         let end = Instant::now() + timeout;

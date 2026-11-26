@@ -64,8 +64,7 @@ fn mic_driver() -> anyhow::Result<String> {
     bail!("Windows only")
 }
 
-/// Bounded, so a slow router can't hold up the uninstaller; whatever is left expires within the
-/// hour anyway.
+/// Bounded.
 fn upnp_remove() -> anyhow::Result<String> {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::Builder::new()

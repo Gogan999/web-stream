@@ -1,6 +1,4 @@
-//! The session host's console, on a named pipe only SYSTEM and elevated administrators can open:
-//! whoever can open pairing can let a browser drive the sign-in screen and UAC prompts, so a
-//! program running as a normal user must not be able to.
+//! The session host's console, on a named pipe only SYSTEM and elevated administrators can open.
 
 use std::ffi::c_void;
 use std::io::Write;
@@ -162,8 +160,7 @@ fn current_pipe() -> anyhow::Result<(String, u32)> {
         .with_context(|| format!("{} does not name a control pipe", file.display()))
 }
 
-/// Fails unless process `pid` serves the pipe `handle` is connected to: a pipe name can be seen by
-/// anyone, and taken by anyone once its host is gone.
+/// Fails unless process `pid` serves the pipe `handle` is connected to.
 fn check_server(handle: HANDLE, name: &str, pid: u32) -> anyhow::Result<()> {
     let mut server = 0u32;
     // SAFETY: a valid pipe handle.

@@ -10,7 +10,7 @@ pub(crate) struct Rect {
 }
 
 /// Largest rectangle with the source's aspect ratio that fits centered in `dst_w` x `dst_h`, with
-/// even edges so NV12 chroma lines up.
+/// even edges.
 pub(crate) fn letterbox(src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) -> Rect {
     let full = Rect {
         left: 0,

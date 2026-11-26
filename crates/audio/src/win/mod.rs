@@ -34,8 +34,8 @@ impl From<windows::core::Error> for AudioError {
     }
 }
 
-/// Per-thread setup for an audio thread: COM, 1 ms timer resolution so short waits are accurate,
-/// and the MMCSS "Pro Audio" scheduling class.
+/// Per-thread setup for an audio thread: COM, 1 ms timer resolution, and the MMCSS "Pro Audio"
+/// scheduling class.
 pub(crate) struct AudioThread {
     mmcss: Option<HANDLE>,
 }

@@ -1,5 +1,4 @@
-//! The host as a Windows service, so a browser can also use the sign-in and lock screens, UAC
-//! prompts and programs running as administrator.
+//! The host as a Windows service.
 
 #![cfg_attr(not(windows), allow(dead_code))]
 
@@ -109,14 +108,13 @@ pub fn init_logging(args: &[String]) {
     logs.init();
 }
 
-/// Whether the service is installed, and if so whether it runs.
+/// Whether the service is installed and running.
 pub fn query() -> anyhow::Result<Option<bool>> {
     imp::query()
 }
 
 /// The control pipe's name starts with this; the rest is random, picked by the service each time it
-/// starts the host and written to [`PIPE_FILE`] in its data folder, which only administrators can
-/// read.
+/// starts the host and written to [`PIPE_FILE`] in its data folder.
 pub const PIPE_PREFIX: &str = r"\\.\pipe\web-stream-host-";
 pub const PIPE_FILE: &str = "control-pipe.txt";
 
@@ -238,8 +236,7 @@ fn parse_handle(text: &str) -> anyhow::Result<usize> {
         .map_err(|_| anyhow::anyhow!("bad handle {text:?}"))
 }
 
-/// Files the network host keeps, which the service kept in its own data folder before the host was
-/// split: moved into the network host's folder.
+/// Files the network host keeps.
 pub const NETWORK_FILES: &[&str] = &[
     "tls-cert.pem",
     "tls-key.pem",
@@ -295,8 +292,7 @@ pub fn replace_value(args: &[String], flag: &str, value: &str) -> Vec<String> {
     out
 }
 
-/// What [`PIPE_FILE`] holds: the pipe's name and the host process serving it, so a console can
-/// check it talks to the host itself.
+/// What [`PIPE_FILE`] holds: the pipe's name and the host process serving it.
 pub fn pipe_file_contents(pipe: &str, pid: u32) -> String {
     format!("{pipe}\n{pid}\n")
 }
@@ -318,7 +314,7 @@ pub fn check_install_args(args: &[String]) -> anyhow::Result<ServeOptions> {
     ServeOptions::parse(args)
 }
 
-/// Checks the options the service hands the session host, which adds `--data-dir` itself.
+/// Checks the options the service hands the session host.
 pub fn check_session_host_options(opts: &ServeOptions) -> anyhow::Result<()> {
     if opts.web_root.is_some() || opts.media.upload_dir.is_some() {
         bail!("the service's host never serves a web root or receives files");

@@ -1,7 +1,7 @@
 //! NVENC encoder session on a D3D11 device, configured for interactive streaming: ultra-low-latency
 //! tuning at the preset [`crate::tuning`] picks for the config's quality, CBR with a VBV of about
 //! one frame and a quarter-resolution first pass, no B-frames, an infinite GOP, and parameter sets
-//! repeated on every IDR so a decoder can join at any keyframe.
+//! repeated on every IDR.
 
 use std::ffi::{CStr, c_void};
 use std::ptr;
@@ -109,7 +109,7 @@ pub(crate) const SLOTS: usize = 2;
 const FRAME_TIMEOUT: Duration = Duration::from_secs(2);
 /// How long after the completion event the lock is retried by yielding rather than sleeping.
 const LOCK_SPIN_WINDOW: Duration = Duration::from_micros(500);
-/// The sleep between attempts once the spin window has passed, so a long wait does not burn a core.
+/// The sleep between attempts once the spin window has passed.
 const LOCK_SLEEP: Duration = Duration::from_millis(1);
 
 /// What to do after the lock answered `NV_ENC_ERR_LOCK_BUSY`.

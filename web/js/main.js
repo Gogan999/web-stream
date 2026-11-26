@@ -59,8 +59,7 @@ const zoom = new ZoomView({
   el: ui.view, stage: ui.stage,
   onChange: (on) => { ui.zoomReset.hidden = ui.zoomPan.hidden = !on; },
 });
-// iOS Safari zooms the whole page on a pinch whatever the viewport meta says, and touch-action
-// alone doesn't always stop it; the page zoomed in breaks the layout and steals the stream's pinch.
+// Blocks Safari's whole-page pinch zoom.
 for (const ev of ['gesturestart', 'gesturechange', 'gestureend']) {
   document.addEventListener(ev, (e) => e.preventDefault(), { passive: false });
 }
@@ -114,7 +113,7 @@ function setSasVisible(visible) {
   ui.sas.hidden = !visible;
   $('keys-sas').hidden = !visible;
 }
-// Shown on the not-connected screen and in the title, so two hosts are told apart.
+// Shown on the not-connected screen and in the title.
 function setHostName(name) {
   ui.stageHost.textContent = name ?? '';
   ui.stageHost.hidden = !name;
@@ -982,7 +981,7 @@ const queueFiles = () => {
 };
 files.addEventListener('change', queueFiles);
 uploads.addEventListener('change', queueFiles);
-// Rows are updated in place, so a click isn't lost to a row redrawn under the pointer.
+// Rows are updated in place.
 const fileRows = new Map();
 const uploadRows = new Map();
 function showFiles() {
@@ -1099,8 +1098,7 @@ document.addEventListener('pointerdown', (e) => { if (e.pointerType === 'touch')
 for (const el of [$('touchbar'), ui.keys]) {
   for (const ev of ['pointerdown', 'mousedown']) el.addEventListener(ev, (e) => e.preventDefault());
 }
-// Opening the keyboard has to happen on click: phones show it only for a focus() inside a tap's
-// user activation, which a touch pointerdown doesn't give.
+// Opens the keyboard on click, inside the tap's user activation.
 let kbdWasOpen = false;
 ui.kbdToggle.addEventListener('pointerdown', () => { kbdWasOpen = softKeys.open; });
 ui.kbdToggle.addEventListener('click', () => {

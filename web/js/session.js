@@ -25,7 +25,7 @@ export function minimizePlayout(receiver) {
   try { receiver.jitterBufferTarget = 0; } catch { /* unsupported */ }
 }
 
-// The host sends stereo Opus, but Chrome decodes Opus as mono unless its own answer says stereo=1.
+// Marks the answer's Opus as stereo.
 export function withStereoOpus(sdp) {
   const pts = [...sdp.matchAll(/^a=rtpmap:(\d+) opus\/48000\/2\r?$/gim)].map((m) => m[1]);
   let out = sdp;

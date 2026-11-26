@@ -62,7 +62,7 @@ impl SyncState {
 }
 
 /// Whether the program that copied asked for the text to stay out of clipboard monitoring, history
-/// or the cloud, which is how password managers mark what they copy.
+/// or the cloud.
 pub fn marked_private(
     monitor_excluded: bool,
     include_in_history: Option<u32>,
@@ -392,7 +392,7 @@ mod imp {
         /// No text, or the program that copied it asked not to be monitored (password managers do).
         NoText,
         Text(String),
-        /// Over the cap, so not even copied out.
+        /// Over the cap.
         TooLarge,
     }
 

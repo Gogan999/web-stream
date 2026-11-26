@@ -4,7 +4,7 @@ import { HID } from './keymap.js';
 
 const SHIFT = HID.ShiftLeft;
 
-// Character -> { usage, shift } on a US layout, which is what the host's scan codes assume.
+// Character -> { usage, shift } on a US layout.
 const CHARS = (() => {
   const m = new Map();
   for (let i = 0; i < 26; i++) {
@@ -45,7 +45,7 @@ export function diffText(before, after) {
   return { backspaces: before.length - p, text: after.slice(p) };
 }
 
-// Kept in the textarea so Backspace always has something to delete.
+// Text kept in the textarea for Backspace.
 export const SENTINEL = '\u200b'.repeat(16);
 
 // Key presses for a diff.
@@ -79,8 +79,7 @@ const MODIFIERS = new Set([HID.ControlLeft, HID.AltLeft, HID.ShiftLeft, HID.Meta
 
 // The hidden textarea plus the row of extra keys.
 export class SoftKeyboard {
-  // sendText(text) types Unicode text on the host; onPaste(text) gets text pasted into the field,
-  // which is then not typed here: the owner decides.
+  // sendText(text) types Unicode text on the host; onPaste(text) gets text pasted into the field.
   constructor({ textarea, keys, send, sendText = null, onPaste = null }) {
     this.ta = textarea;
     this.keys = keys;

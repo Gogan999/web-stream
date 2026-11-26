@@ -34,7 +34,7 @@ pub struct CursorReader {
     /// The system cursors' handles.
     standard: Vec<(usize, CursorKind)>,
     ids: ImageIds,
-    /// The handle last read and what it looked like, so an unchanged pointer costs one call.
+    /// The handle last read and what it looked like.
     last: Option<(usize, Instant, CursorLook)>,
     desktop_checked: Option<Instant>,
 }

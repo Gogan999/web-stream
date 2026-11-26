@@ -19,7 +19,7 @@ let host = null;
 let lastCode = null;
 let client = null;
 
-// Plain HTTP: no Secure or __Host- prefix, which WebKit refuses without TLS.
+// Plain HTTP: no Secure or __Host- prefix.
 const COOKIE = 'ws_device';
 const cookieToken = (req) => new RegExp(`(?:^|;\\s*)${COOKIE}=([^;]+)`).exec(req.headers.cookie || '')?.[1];
 const bearerToken = (req) => /^Bearer (.+)$/.exec(req.headers.authorization || '')?.[1];

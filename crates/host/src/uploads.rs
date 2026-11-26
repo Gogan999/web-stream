@@ -20,8 +20,7 @@ const ACK_EVERY: u64 = 256 * 1024;
 const _: () = assert!(ACK_EVERY <= FILE_WINDOW);
 /// Chunks waiting to be written; the browser's window keeps it at about 64.
 const QUEUE: usize = 256;
-/// Files one browser session may send, and their total size: a paired browser can't fill the host's
-/// disk with a stream of files.
+/// Files one browser session may send, and their total size.
 const SESSION_FILES: u32 = 500;
 const SESSION_BYTES: u64 = 32 << 30;
 /// Longest name kept, in UTF-16 units.
@@ -32,8 +31,7 @@ const RESERVED: &[&str] = &[
     "COM5", "COM6", "COM7", "COM8", "COM9", "COM¹", "COM²", "COM³", "LPT0", "LPT1", "LPT2", "LPT3",
     "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9", "LPT¹", "LPT²", "LPT³",
 ];
-/// Kinds of file Explorer reads by itself when it shows the folder, which can make it fetch an icon
-/// from a remote share and hand over the user's credentials.
+/// Kinds of file Explorer reads by itself when it shows the folder.
 const INERT_EXTENSIONS: &[&str] = &["url", "lnk", "scf", "library-ms", "searchconnector-ms"];
 const INERT_NAMES: &[&str] = &["desktop.ini"];
 

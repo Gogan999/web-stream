@@ -1,4 +1,4 @@
-//! Ctrl+Alt+Del.
+//! Ctrl+Alt+Del: the host asks Windows for the secure attention sequence.
 
 use std::sync::OnceLock;
 

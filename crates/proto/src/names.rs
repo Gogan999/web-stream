@@ -1,7 +1,6 @@
 //! Names that cross the wire: what to keep of them.
 
-/// Neither a control character nor an invisible formatting one, which can make `exe.txt` show as
-/// something else.
+/// Neither a control character nor an invisible formatting one.
 pub fn printable(c: char) -> bool {
     !c.is_control() && !is_format(c)
 }

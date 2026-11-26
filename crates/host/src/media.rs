@@ -328,11 +328,11 @@ struct Media {
     /// Desktop position of the streamed display's top-left corner; pointer positions are sent
     /// relative to it.
     display_origin: (i32, i32),
-    /// Bumped on every disconnect, so late results for a browser that left are recognised.
+    /// Bumped on every disconnect.
     session: u64,
     /// `config` changed while the last rebuild was too recent; rebuild on [`Later::Rebuild`].
     rebuild_pending: bool,
-    /// Bumped for every pipeline started, so a stale "stopped" is ignored.
+    /// Bumped for every pipeline started.
     generation: u64,
     /// Latest bandwidth estimate of this connection, in bits per second.
     last_bwe: Option<u64>,
@@ -1587,7 +1587,7 @@ impl Media {
     }
 
     /// Applies a change of stream size alone to the running pipeline without restarting it: no new
-    /// capture thread, device or encoder session, so no stall, and this loop isn't held up.
+    /// capture thread, device or encoder session.
     fn resize_in_place(&mut self) -> bool {
         let codec = self.streaming_codec();
         let (width, height) = scale::size(self.config.width, self.config.height, self.scale_step());

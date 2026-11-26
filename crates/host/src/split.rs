@@ -364,8 +364,7 @@ fn state_change(
 /// How far behind each video stream's send queue is.
 type Backlog = [Duration; LANES];
 
-/// What the network side last told the media side, and when, so backlog changes can be sent
-/// promptly without exceeding [`BACKLOG_SPACING`].
+/// What the network side last told the media side, and when.
 struct StateReporter {
     sent: (bool, Backlog),
     last_send: Option<tokio::time::Instant>,

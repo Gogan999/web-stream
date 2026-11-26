@@ -38,8 +38,7 @@ const MAX_INVALIDATE: u64 = 16;
 const HOLD_POLL_MS: u32 = 2;
 
 pub(crate) struct PipelineHandle {
-    /// The only strong reference: dropping it closes the channel, which tells the thread to exit,
-    /// however many [`Control`]s are around.
+    /// The only strong reference: dropping it closes the channel.
     commands: Option<Arc<std_mpsc::Sender<Command>>>,
     thread: Option<JoinHandle<()>>,
 }
@@ -250,8 +249,7 @@ struct Session {
     backlog: SendBacklog,
     backpressure: Backpressure,
     frame_index: u64,
-    /// The next frame must not reference frames from this index on, which were invalidated: it is
-    /// tagged.
+    /// The next frame must not reference frames from this index on.
     recovers_from: Option<u64>,
     /// Every reference the encoder kept was invalidated.
     intra_next: bool,
@@ -467,9 +465,7 @@ impl Session {
         }
     }
 
-    /// Lets every frame still in the encoder finish, so each one about to be invalidated has its
-    /// reconstructed picture: a driver may ignore an invalidation for a frame it hasn't finished,
-    /// and the next frame would then still predict from it.
+    /// Lets every frame still in the encoder finish.
     fn settle_for_invalidate(&mut self) -> bool {
         match self.enc.encoder.drain() {
             Ok(()) => true,

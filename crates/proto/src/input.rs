@@ -77,8 +77,7 @@ pub enum InputEvent {
         dx: i16,
         dy: i16,
     },
-    /// USB HID usage on the Keyboard page (0x07), i.e. the physical key, so mapping is layout
-    /// independent.
+    /// USB HID usage on the Keyboard page (0x07), i.e. the physical key.
     Key {
         usage: u16,
         down: bool,
@@ -90,8 +89,7 @@ pub enum InputEvent {
         state: GamepadState,
         seq: Option<u16>,
     },
-    /// Full state sent on the reliable `input` channel whenever the buttons change, so a press or
-    /// release is never lost.
+    /// Full state sent on the reliable `input` channel whenever the buttons change.
     GamepadButtons {
         index: u8,
         state: GamepadState,

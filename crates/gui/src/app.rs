@@ -31,7 +31,7 @@ pub struct App {
     settings_error: Option<String>,
     #[cfg(windows)]
     autostart: bool,
-    /// The web-stream service, which hosts instead of this app while it is installed.
+    /// The web-stream service.
     #[cfg(windows)]
     service: crate::service_watch::Watcher,
     first_run: FirstRun,
@@ -591,8 +591,7 @@ impl App {
         }
     }
 
-    /// Hands over to a copy of this app run as administrator (a UAC prompt), which attaches to the
-    /// service's host; with `pair`, it opens pairing once attached.
+    /// Hands over to a copy of this app run as administrator (a UAC prompt).
     #[cfg(windows)]
     fn hand_over(&mut self, pair: bool) {
         let mut args = vec!["--after".to_string(), std::process::id().to_string()];
@@ -624,8 +623,8 @@ impl App {
         }
     }
 
-    /// Hands over to the downloaded setup: stops the host, lets go of the single-instance lock the
-    /// installer checks, starts the installer and exits; setup relaunches the app when it is done.
+    /// Hands over to the downloaded setup: stops the host, lets go of the single-instance lock,
+    /// starts the installer and exits.
     #[cfg(windows)]
     fn install_update(&mut self, release: &update_check::Release, setup: &std::path::Path) {
         let _locked = match update_check::open_verified(release, setup) {
@@ -1392,7 +1391,7 @@ impl App {
         }
     }
 
-    /// Reinstalls the service with the saved settings, which restarts it.
+    /// Reinstalls the service with the saved settings.
     #[cfg(windows)]
     fn apply_to_service(&mut self) {
         match self.settings.service_args() {
@@ -1818,12 +1817,11 @@ struct PairingView {
     countdown: Option<u64>,
     /// Codes are locked after wrong guesses.
     locked: bool,
-    /// Whether the QR code is offered: only with a link, which exists only while pairing is open.
+    /// Whether the QR code is offered: only with a link.
     offer_qr: bool,
 }
 
-/// The code is minted per request and bound to the asking device, so until a device asks there is
-/// none to show; the window says where to ask instead.
+/// The code is minted per request and bound to the asking device.
 fn pairing_view(
     pairing_until: Option<Instant>,
     code: Option<&PairingCode>,

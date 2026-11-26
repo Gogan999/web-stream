@@ -103,7 +103,7 @@ export class ClipboardSync {
     return true;
   }
 
-  // Any tap or click: a user gesture, which iOS wants for a write.
+  // Any tap or click: a user gesture.
   async onGesture() {
     if (this.pending != null) await this.writePending();
   }

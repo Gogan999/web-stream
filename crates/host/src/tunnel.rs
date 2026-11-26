@@ -1,5 +1,4 @@
-//! A Cloudflare Tunnel for the web page and signaling: the host runs cloudflared, which connects
-//! out to Cloudflare and passes the browser's HTTPS requests back to the host's own port.
+//! A Cloudflare Tunnel for the web page and signaling: the host runs cloudflared.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::process::Stdio;

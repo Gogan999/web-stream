@@ -1,5 +1,4 @@
-//! Opt-in UPnP port mapping: asks the router to forward the host's ports to this PC, so a friend
-//! doesn't have to find the router's forwarding page.
+//! Opt-in UPnP port mapping: asks the router to forward the host's ports to this PC.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -9,7 +8,7 @@ use std::time::Duration;
 use anyhow::Context;
 use igd_next::{AddPortError, Gateway, PortMappingProtocol, SearchOptions};
 
-/// How the mappings are marked on the router, so only ours are removed.
+/// How the mappings are marked on the router.
 pub const DESCRIPTION: &str = "web-stream host";
 const LEASE_SECS: u32 = 3600;
 const RENEW: Duration = Duration::from_secs(20 * 60);

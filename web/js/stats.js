@@ -145,8 +145,7 @@ export function assess(s, host, config, bottleneck = null) {
     add('limiter', 'warn', `Limited by ${who}: ${bottleneck.detail}${act}`);
   }
   if (s.width && s.height && config?.width && config?.height && s.width * s.height < 0.9 * config.width * config.height) {
-    // The host also shrinks the picture for its encoder or this decoder; say which, not always the
-    // network.
+    // Names the end that limits the picture: the network, the host's encoder or this decoder.
     const cause = bottleneck?.relieving ? LIMITERS[bottleneck.relievingFor] : null;
     add('resolution', 'warn', `Reduced resolution ${s.width}x${s.height} (asked ${config.width}x${config.height}): host scaled down for ${cause ?? 'the network'}`);
   }
@@ -168,8 +167,7 @@ export function assess(s, host, config, bottleneck = null) {
   if (hostDropped > 0) add('host-dropped', 'warn', `Host dropped ${hostDropped} frame${hostDropped > 1 ? 's' : ''} (network fell behind)`);
   if (s.pliDelta > 0 || host?.keyframeRequests > 0) add('keyframe', 'warn', 'Keyframe needed to repair the picture (brief stutter)');
   if (host?.sendDrops > 0) add('send-drops', 'warn', `Host socket full: ${host.sendDrops} packets refused`);
-  // A still screen sends few frames, so a low rate only counts when the host sends more than is
-  // shown.
+  // A low frame rate counts only when the host sends more than is shown.
   if (s.fps != null && host?.fps > 10 && s.fps < 0.8 * host.fps) {
     add('fps', 'warn', `Showing ${s.fps.toFixed(0)} of ${host.fps.toFixed(0)} fps the host sends`);
   }
@@ -178,8 +176,7 @@ export function assess(s, host, config, bottleneck = null) {
   return out.sort((a, b) => (a.sev === b.sev ? 0 : a.sev === 'bad' ? -1 : 1));
 }
 
-// Keeps each warning on screen for `holdMs` after it was last seen, so a one-off drop can still be
-// read.
+// Keeps each warning on screen for `holdMs` after it was last seen.
 export class Alerts {
   constructor(holdMs = 4000) {
     this.holdMs = holdMs;

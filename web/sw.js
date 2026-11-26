@@ -1,5 +1,4 @@
-// App shell cache: the page opens from cache when its own PC is off, so another saved PC can be
-// used.
+// App shell cache: the page opens from cache when its own PC is off.
 
 const CACHE = 'web-stream-shell-v1';
 const NETWORK_TIMEOUT_MS = 4000;
@@ -29,7 +28,7 @@ function withTimeout(promise, ms) {
   });
 }
 
-// Network first, so an updated host serves its own client; the cache when the host doesn't answer.
+// Network first; the cache when the host doesn't answer.
 async function shell(request) {
   const cache = await caches.open(CACHE);
   try {

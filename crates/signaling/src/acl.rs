@@ -126,9 +126,7 @@ pub fn restrict_to_owner(_path: &Path) -> std::io::Result<()> {
 
 #[cfg(all(test, windows))]
 mod tests {
-    /// Run by the service the host is SYSTEM, so a DACL naming only "this user" and SYSTEM came out
-    /// as SYSTEM alone: the folder held the control pipe's name, and the tray app, however
-    /// elevated, could no longer read it to attach to the service's host.
+    /// The data folder stays readable by the tray app when the host runs as SYSTEM.
     #[test]
     fn a_system_host_leaves_the_folder_readable_by_administrators() {
         let sddl = super::dacl_sddl("S-1-5-18");

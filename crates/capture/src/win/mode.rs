@@ -1,5 +1,5 @@
 //! Changes a display's desktop resolution, temporarily (`CDS_FULLSCREEN`): the change is never
-//! written to the registry, so restoring or a reboot puts the user's own setting back.
+//! written to the registry.
 
 use windows::Win32::Graphics::Gdi::{
     CDS_FULLSCREEN, CDS_TYPE, ChangeDisplaySettingsExW, DEVMODEW, DISP_CHANGE,

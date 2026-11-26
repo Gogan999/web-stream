@@ -32,8 +32,7 @@ pub(crate) fn list_displays() -> Result<Vec<DisplayInfo>> {
     Ok(display::enumerate()?.into_iter().map(|o| o.info).collect())
 }
 
-/// Desktop Duplication reports scaled coordinates and can refuse to start for DPI-unaware
-/// processes, so opt in once before touching DXGI.
+/// Opts the process into per-monitor DPI awareness, once, before DXGI is used.
 fn init_process() {
     use windows::Win32::System::Threading::{
         GetCurrentProcess, PROCESS_POWER_THROTTLING_CURRENT_VERSION,
@@ -77,7 +76,7 @@ fn win_err(what: &'static str) -> impl Fn(windows::core::Error) -> CaptureError 
 }
 
 /// A D3D11 device on the adapter that owns the captured output; capture, conversion and NVENC all
-/// share it so frames never leave the GPU.
+/// share it.
 pub(crate) struct Gpu {
     pub device: ID3D11Device,
     pub context: ID3D11DeviceContext,

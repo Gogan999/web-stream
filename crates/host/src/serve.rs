@@ -250,8 +250,7 @@ impl Network {
         self.transport.close();
     }
 
-    /// Closes the sockets, on the transport's own thread: waits for it, so a host started right
-    /// after can bind the same ports.
+    /// Closes the sockets, on the transport's own thread: waits for it.
     pub async fn shutdown(self) {
         if tokio::time::timeout(Duration::from_secs(2), self.transport.shutdown())
             .await
@@ -279,8 +278,7 @@ pub(crate) async fn unpair_all(signaling: &SignalingHandle, events: &mpsc::Unbou
     });
 }
 
-/// Access denied on the data dir usually means the host once ran as administrator, which left files
-/// this user can't open; say how to fix it.
+/// Hint for an access-denied data dir.
 fn data_dir_error(e: ws_signaling::Error, data_dir: &std::path::Path) -> anyhow::Error {
     let denied = matches!(&e, ws_signaling::Error::Io(io)
         if io.kind() == std::io::ErrorKind::PermissionDenied);

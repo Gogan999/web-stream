@@ -29,7 +29,7 @@ export function followView(v, px, py, w, h, margin = FOLLOW_MARGIN) {
 }
 
 export class ZoomView {
-  // el: the transformed element; it fills `stage`, which clips it.
+  // el: the transformed element; it fills `stage`.
   constructor({ el, stage, onChange }) {
     this.el = el;
     this.stage = stage;

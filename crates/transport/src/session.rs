@@ -18,15 +18,13 @@ use crate::{Error, TransportConfig, TransportEvent, TransportStats};
 
 /// RTP header extension id for playout-delay.
 const PLAYOUT_DELAY_EXT_ID: u8 = 5;
-/// The file channel may hold at most this much unsent data, so transfers leave room in the shared
-/// SCTP buffer (128 KiB) for control and input.
+/// The file channel may hold at most this much unsent data.
 const FILE_MAX_BUFFERED: usize = 64 * 1024;
 /// Longest the frames behind a keyframe (or a repair) are exempt from the late-frame drop.
 const KEYFRAME_DRAIN_MAX: Duration = Duration::from_millis(250);
 /// Timeouts due within this are run at once rather than slept for (see [`Session::poll`]).
 const TIMER_SLACK: Duration = Duration::from_millis(1);
-/// Most timeouts [`Session::poll`] runs early before it returns, so a busy pacer can't hold up the
-/// rest of the run loop.
+/// Most timeouts [`Session::poll`] runs early before it returns.
 const MAX_EARLY_TIMEOUTS: usize = 256;
 /// When the file channel drains below this, [`TransportEvent::ChannelLow`].
 const FILE_LOW: usize = 16 * 1024;
@@ -180,7 +178,7 @@ impl Session {
         }
     }
 
-    /// The local ICE ufrag, which the browser's checks must name.
+    /// The local ICE ufrag.
     pub fn local_ufrag(&mut self) -> String {
         self.rtc.direct_api().local_ice_credentials().ufrag
     }

@@ -1,5 +1,4 @@
-//! Input injection on its own thread, so a slow `SendInput` or a ViGEm plug-in never holds up the
-//! media loop.
+//! Input injection on its own thread.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError, channel};
@@ -13,7 +12,7 @@ use ws_proto::{GamepadState, HostControl, InputEvent, MAX_GAMEPADS, seq_newer};
 use crate::platform;
 
 /// Input events waiting for the thread before more are refused: motion is dropped, and a refused
-/// press or release makes the thread release everything once it catches up, so nothing stays held.
+/// press or release makes the thread release everything once it catches up.
 const MAX_BACKLOG: usize = 4096;
 /// How often stale gamepads are centred.
 const TICK: Duration = Duration::from_millis(100);

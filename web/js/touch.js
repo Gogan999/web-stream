@@ -20,8 +20,7 @@ const RIGHT = 2;
 const MIDDLE = 1;
 
 export class TouchGestures {
-  // Times are ms on one clock (performance.now() in input.js); move's `t` may be left out, which
-  // counts as late enough for anything.
+  // Times are ms on one clock (performance.now() in input.js); move's `t` may be left out.
   constructor(out, mode = 'trackpad') {
     this.out = out;
     this.mode = mode; // 'trackpad' or 'direct'
@@ -177,8 +176,7 @@ export class TouchGestures {
     this.state = this.points.size ? 'done' : 'idle';
   }
 
-  // Called while a finger is down so a waiting drag starts and a hold fires without the finger
-  // moving.
+  // Called while a finger is down.
   tick(t) {
     if (this.state !== 'pending') return;
     if (this.slid) {
@@ -219,8 +217,7 @@ export class TouchGestures {
     this.out.button(LEFT, false);
   }
 
-  // Finger down (+dy) drags the page down, which is wheel up (+ on Windows); finger left (-dx)
-  // reveals what is to the right, which is horizontal wheel right (+).
+  // Finger down (+dy) is wheel up (+ on Windows); finger left (-dx) is horizontal wheel right (+).
   scroll(dx, dy) {
     const r = this.wheelRest;
     r.x += -dx * WHEEL_PER_PX;

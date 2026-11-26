@@ -8,7 +8,7 @@ use crate::{ByeReason, CursorShape, DisplayId, DisplayInfo, VideoConfig};
 pub struct FileId(pub u64);
 
 impl FileId {
-    /// Ids stay below 2^53 so they survive as JSON numbers in the browser.
+    /// Ids stay below 2^53.
     pub const MAX: u64 = (1 << 53) - 1;
 }
 
@@ -107,8 +107,7 @@ pub enum ClientControl {
     },
     /// How the browser is coping, about once a second while video runs.
     ClientStats(ClientStats),
-    /// Ctrl+Alt+Del, which no browser can send as keys: the host asks Windows for the secure
-    /// attention sequence.
+    /// Ctrl+Alt+Del: the host asks Windows for the secure attention sequence.
     SecureAttention,
     /// Update the host to the latest `main` and restart it, as `scripts\update.ps1` on the host
     /// would.
@@ -215,7 +214,7 @@ pub enum HostControl {
         text: String,
     },
     /// Answer to [`ClientControl::SetClipboard`]: the host has written the text (`ok`), or could
-    /// not, after which it is safe to send the paste keys.
+    /// not.
     ClipboardSet {
         ok: bool,
     },
@@ -279,7 +278,7 @@ pub struct VideoStats {
     pub sent_kbps: u32,
     /// Average capture-to-encoded time.
     pub encode_ms: f32,
-    /// Keyframes asked for in the interval: each is a stall or a soft picture, so fewer is better.
+    /// Keyframes asked for in the interval.
     pub keyframe_requests: u32,
     /// Fraction of packets the browser reports lost, 0..=1.
     pub loss: Option<f32>,

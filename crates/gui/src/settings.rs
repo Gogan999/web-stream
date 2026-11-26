@@ -261,7 +261,7 @@ impl Settings {
     }
 
     /// The options for `service install`: these settings without what belongs to the tray app's own
-    /// host, which the service refuses.
+    /// host.
     #[cfg_attr(not(windows), allow(dead_code))]
     pub fn service_args(&self) -> anyhow::Result<Vec<String>> {
         const WITH_VALUE: &[&str] = &["--web-root", "--data-dir", "--upload-dir"];

@@ -61,7 +61,7 @@ export class AutoTune {
 
   // Resolves to { config, summary }.
   async run() {
-    // Bitrate first, at the fastest encoder setting so encode time doesn't cloud the network test.
+    // Bitrate first, at the fastest encoder setting.
     let best = null;
     for (const kbps of LADDER_KBPS) {
       if (!(await this.trial({ ...this.base, bitrateKbps: kbps, quality: 'speed' }, mbps(kbps), { encode: false }))) break;

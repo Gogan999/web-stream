@@ -18,7 +18,7 @@ export class StallWatchdog {
   }
 
   // `video` is the receiver's inbound-rtp stats (or null); `now` in ms; `hidden` is a background
-  // tab, where the browser throttles decoding and a stall is expected.
+  // tab.
   update(video, now, hidden = false) {
     if (!video || hidden) {
       this.reset();

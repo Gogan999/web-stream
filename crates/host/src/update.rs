@@ -88,7 +88,7 @@ pub fn start(
     }
 }
 
-/// `scripts\update.ps1` of the checkout that built `exe`, which lives in its `target\release`.
+/// `scripts\update.ps1` of the checkout that built `exe`.
 fn script_for(exe: &Path) -> Result<PathBuf, String> {
     let not_checkout = || {
         format!(
@@ -153,8 +153,7 @@ fn spawn(script: &Path, log: &Path) -> Result<std::process::Child, String> {
         .map_err(|e| format!("couldn't start update.ps1: {e}"))
 }
 
-/// System32, from the shell rather than `%SystemRoot%`, which the environment could point
-/// elsewhere.
+/// System32, from the shell rather than `%SystemRoot%`.
 #[cfg(windows)]
 fn system_dir() -> Result<PathBuf, String> {
     use windows::Win32::System::Com::CoTaskMemFree;
@@ -179,8 +178,7 @@ fn wait(mut child: std::process::Child) -> Option<i32> {
     child.wait().ok().and_then(|s| s.code())
 }
 
-/// How a script that exited went: its last line of output, which says why it didn't restart the
-/// host.
+/// How a script that exited went: its last line of output.
 fn outcome(code: Option<i32>, log: &Path) -> (UpdateState, String) {
     let lines: Vec<String> = std::fs::File::open(log)
         .map(|f| {

@@ -20,8 +20,7 @@ use crate::Error;
 pub const MAX_CONNECTIONS: usize = 64;
 pub const MAX_CONNECTIONS_PER_IP: usize = 8;
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
-/// Applies to every request on a connection, so an idle keep-alive connection is closed once it
-/// passes this long without a new request.
+/// Applies to every request on a connection.
 const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub async fn serve(

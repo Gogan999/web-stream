@@ -125,8 +125,7 @@ pub fn default_cloudflared() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(name))
 }
 
-/// `args` without the flags of the DuckDNS / Let's Encrypt certificate, which the Cloudflare Tunnel
-/// replaced: a service installed with them still starts.
+/// `args` without the flags of the DuckDNS / Let's Encrypt certificate.
 pub fn drop_retired_flags(args: &[String]) -> Vec<String> {
     const WITH_VALUE: &[&str] = &["--duckdns", "--duckdns-token-file", "--acme-email"];
     const ALONE: &[&str] = &["--no-duckdns-address", "--acme-staging"];

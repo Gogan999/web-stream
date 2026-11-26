@@ -111,8 +111,7 @@ impl Pacer {
 }
 
 /// Send queue age past which a due frame is held back instead of encoded: under half the
-/// transport's late cutoff (50 ms), so a frame encoded now still goes out in time, and well above
-/// the zero a healthy link shows.
+/// transport's late cutoff (50 ms).
 pub(crate) const HOLD_BACKLOG: Duration = Duration::from_millis(20);
 /// Longest a frame is held back while the send queue stays behind.
 pub(crate) const MAX_HOLD: Duration = Duration::from_millis(100);
@@ -212,8 +211,7 @@ pub(crate) struct RateBudget {
     submitted_at: Option<Instant>,
 }
 
-/// A frame still in the encoder after this long is taken as lost, so a missing completion can't
-/// stall the stream.
+/// A frame still in the encoder after this long is taken as lost.
 const IN_FLIGHT_MAX: Duration = Duration::from_millis(250);
 
 impl RateBudget {
@@ -287,7 +285,7 @@ pub(crate) struct EncodeJob {
     pub idr: bool,
 }
 
-/// The capture thread's encode decisions, kept free of GPU calls so they can be tested.
+/// The capture thread's encode decisions, kept free of GPU calls.
 #[derive(Debug)]
 pub(crate) struct Scheduler {
     pacer: Pacer,

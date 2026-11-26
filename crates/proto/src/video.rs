@@ -36,15 +36,13 @@ pub enum VideoQuality {
     /// keyframes) to take longer than one frame time.
     Clarity,
     /// For reading and working: every frame is coded as close to the desktop as the encoder allows,
-    /// and the frame rate falls as needed to stay within the bitrate: a still or slowly changing
-    /// screen stays sharp at a high frame rate, fast motion drops frames instead of going soft.
+    /// and the frame rate falls as needed to stay within the bitrate.
     #[serde(alias = "text")]
     Source,
 }
 
 /// How long the oldest video packet has waited in the transport's send queue, shared with the
-/// encoder: a frame encoded while the queue is behind would only be dropped as late, and the frames
-/// repairing that drop cost more bits still.
+/// encoder.
 #[derive(Debug, Clone, Default)]
 pub struct SendBacklog(std::sync::Arc<std::sync::atomic::AtomicU64>);
 

@@ -41,8 +41,7 @@ pub(crate) fn size(width: u32, height: u32, step: usize) -> (u32, u32) {
     }
 }
 
-/// The size to encode a second monitor at, so both streams look alike: the scale the main stream
-/// runs at (`main_encoded` of `main_native`) applied to `other_native`.
+/// The size to encode a second monitor at.
 pub(crate) fn follow_size(
     main_encoded: (u32, u32),
     main_native: (u32, u32),
@@ -91,7 +90,7 @@ pub(crate) struct Load {
 }
 
 impl Load {
-    /// Whether the stream used its bitrate, so a low estimate is real.
+    /// Whether the stream used its bitrate.
     fn busy(&self) -> bool {
         self.dropped || f64::from(self.sent_kbps) >= f64::from(self.kbps) * BUSY_SHARE
     }

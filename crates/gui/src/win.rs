@@ -133,8 +133,7 @@ fn take_instance_mutex() -> bool {
     true
 }
 
-/// Lets go of the single-instance mutex, which the installer's `AppMutex` checks, before it is
-/// started.
+/// Lets go of the single-instance mutex.
 pub fn release_instance() {
     let h = INSTANCE.swap(0, Ordering::Relaxed);
     if h != 0 {
@@ -206,7 +205,7 @@ pub fn wait_for_exit(pid: u32, timeout: Duration) {
     }
 }
 
-/// Whether this process runs as an elevated administrator, which the service's control pipe takes.
+/// Whether this process runs as an elevated administrator.
 pub fn is_elevated() -> bool {
     let mut token = Default::default();
     if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) }.is_err() {
@@ -391,7 +390,7 @@ pub fn quit(host: &Host) -> ! {
 }
 
 /// Exits for an elevated copy of this app to take over: like [`quit`], but the router keeps
-/// forwarding the ports, which the new copy goes on renewing.
+/// forwarding the ports.
 pub fn hand_over(host: &Host) -> ! {
     hide_window();
     host.stop_and_wait(Duration::from_secs(15));

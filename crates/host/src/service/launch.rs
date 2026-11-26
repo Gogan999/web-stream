@@ -80,9 +80,7 @@ pub const DATA_FILE_SDDL: &str = "D:P(A;;FA;;;SY)(A;;FA;;;BA)";
 /// inherited by what is created inside; nothing from the folder above.
 pub const NETWORK_DIR_SDDL: &str = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;LS)";
 
-/// Low integrity, inherited by what is created in the network host's folder: the network host runs
-/// at low integrity, which can't write to anything labelled higher, so its folder is the one place
-/// it can change.
+/// Low integrity, inherited by what is created in the network host's folder.
 pub const NETWORK_DIR_LABEL_SDDL: &str = "S:(ML;OICI;NW;;;LW)";
 /// The same for a file created there before the label was set.
 pub const NETWORK_FILE_LABEL_SDDL: &str = "S:(ML;;NW;;;LW)";
@@ -661,8 +659,7 @@ pub fn secure_dir(path: &Path, sddl: &str) -> anyhow::Result<()> {
     set_dacl(path, sddl, true)
 }
 
-/// The same for a plain file, which may be open elsewhere: a log the service or one of its hosts is
-/// writing.
+/// The same for a plain file.
 pub fn secure_file(path: &Path, sddl: &str) -> anyhow::Result<()> {
     set_dacl(path, sddl, false)
 }

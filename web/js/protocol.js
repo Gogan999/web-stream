@@ -74,7 +74,7 @@ export function gamepad(index, s, seq) {
 }
 
 // The same snapshot for the reliable channel, sent when the buttons change: its buttons always
-// apply on the host, so a press or release is never lost.
+// apply on the host.
 export function gamepadButtons(index, s, seq) {
   return padState(MSG.GAMEPAD_BUTTONS, index, s, seq);
 }

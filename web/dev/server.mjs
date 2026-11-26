@@ -21,12 +21,18 @@ const types = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/ja
 const devices = new Map(); // cookie token -> device name
 const pairings = new Map(); // pairing_id -> { code, name, expires, attempts }
 let host = null;
+let lastCode = null;
 let client = null;
 
 const cookieToken = (req) => /(?:^|;\s*)__Host-ws_device=([^;]+)/.exec(req.headers.cookie || '')?.[1];
-const paired = (req) => devices.has(cookieToken(req));
+const bearerToken = (req) => /^Bearer (.+)$/.exec(req.headers.authorization || '')?.[1];
+const protocolToken = (req) => (req.headers['sec-websocket-protocol'] || '').split(',').map((p) => p.trim())
+  .find((p) => p.startsWith('web-stream.auth.'))?.slice('web-stream.auth.'.length);
+const requestToken = (req) => bearerToken(req) ?? protocolToken(req) ?? cookieToken(req);
+const paired = (req) => devices.has(requestToken(req));
+let corsHeaders = {};
 const json = (res, status, body, headers = {}) => {
-  res.writeHead(status, { 'content-type': 'application/json', ...headers });
+  res.writeHead(status, { 'content-type': 'application/json', ...corsHeaders, ...headers });
   res.end(JSON.stringify(body));
 };
 const readBody = async (req) => {
@@ -37,8 +43,13 @@ const readBody = async (req) => {
 const toHost = (msg) => host?.send(JSON.stringify(msg));
 
 async function api(req, res, url) {
+  corsHeaders = req.headers.origin ? { 'access-control-allow-origin': req.headers.origin, vary: 'origin' } : {};
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204, { ...corsHeaders, 'access-control-allow-methods': 'GET, POST', 'access-control-allow-headers': 'content-type, authorization', 'access-control-max-age': '600' });
+    return res.end();
+  }
   if (req.method === 'GET' && url.pathname === '/api/session') {
-    return paired(req) ? json(res, 200, { paired: true, device: devices.get(cookieToken(req)) }) : json(res, 401, { paired: false });
+    return paired(req) ? json(res, 200, { paired: true, device: devices.get(requestToken(req)) }) : json(res, 401, { paired: false });
   }
   if (req.method !== 'POST') return json(res, 405, { error: 'method' });
   const body = await readBody(req);
@@ -46,6 +57,7 @@ async function api(req, res, url) {
     const id = crypto.randomUUID();
     const code = String(crypto.randomInt(0, 1e6)).padStart(6, '0');
     pairings.set(id, { code, name: String(body.device_name || 'unknown'), expires: Date.now() + 120000, attempts: 3 });
+    lastCode = code;
     console.log(`pairing code for "${body.device_name}": ${code}`);
     toHost({ type: 'dev-pairing-code', code });
     return json(res, 200, { pairing_id: id, expires_in: 120 });
@@ -61,10 +73,11 @@ async function api(req, res, url) {
     pairings.delete(body.pairing_id);
     const token = crypto.randomBytes(24).toString('base64url');
     devices.set(token, p.name);
+    if (body.want_token) return json(res, 200, { paired: true, token });
     return json(res, 200, { paired: true }, { 'set-cookie': `__Host-ws_device=${token}; HttpOnly; Secure; SameSite=Strict; Path=/` });
   }
   if (url.pathname === '/api/unpair') {
-    devices.delete(cookieToken(req));
+    devices.delete(requestToken(req));
     return json(res, 200, {}, { 'set-cookie': '__Host-ws_device=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0' });
   }
   return json(res, 404, { error: 'not_found' });
@@ -73,6 +86,10 @@ async function api(req, res, url) {
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x');
   if (url.pathname.startsWith('/api/')) return api(req, res, url);
+  if (url.pathname === '/dev/last-code') {
+    res.writeHead(200, { 'content-type': 'text/plain', 'access-control-allow-origin': '*' });
+    return res.end(lastCode ?? '');
+  }
   const rel = url.pathname === '/' ? 'index.html' : decodeURIComponent(url.pathname).replace(/^\/+/, '');
   const file = path.resolve(root, rel);
   if (!file.startsWith(root + path.sep) || file.includes(`${path.sep}node_modules${path.sep}`)) {
@@ -80,7 +97,9 @@ const server = http.createServer(async (req, res) => {
     return;
   }
   try {
-    const body = await fs.readFile(file);
+    let body = await fs.readFile(file);
+    // Plain-HTTP dev servers stand in for other PCs.
+    if (rel === 'index.html') body = Buffer.from(body.toString().replace("connect-src 'self' https: wss:", "connect-src 'self' https: wss: http: ws:"));
     res.writeHead(200, { 'content-type': types[path.extname(file)] || 'application/octet-stream', 'cache-control': 'no-store' });
     res.end(body);
   } catch {
@@ -88,7 +107,7 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-const wss = new WebSocketServer({ noServer: true });
+const wss = new WebSocketServer({ noServer: true, handleProtocols: (protocols) => (protocols.has('web-stream') ? 'web-stream' : false) });
 server.on('upgrade', (req, socket, head) => {
   const url = new URL(req.url, 'http://x');
   const isHost = url.searchParams.get('role') === 'host';

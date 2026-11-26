@@ -84,6 +84,9 @@ pub struct SessionStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PairStart {
     pub device_name: String,
+    /// Pairing from a page on another origin (a saved-PC list).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub want_token: bool,
 }
 
 /// `POST /api/pair/start` 200 response. The host shows a 6-digit code.
@@ -99,6 +102,9 @@ pub struct PairStarted {
 pub struct PairConfirm {
     pub pairing_id: String,
     pub code: String,
+    /// Return the device token in the body instead of a cookie.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub want_token: bool,
 }
 
 /// `POST /api/pair/link` body: the secret from the pairing link (QR code)
@@ -107,12 +113,18 @@ pub struct PairConfirm {
 pub struct PairLink {
     pub link: String,
     pub device_name: String,
+    /// Return the device token in the body instead of a cookie.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub want_token: bool,
 }
 
 /// `POST /api/pair/confirm` (and `/api/pair/link`) 200 response; the `__Host-ws_device` cookie is set.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PairConfirmed {
     pub paired: bool,
+    /// The device token, when the request asked for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
 }
 
 /// Error body on 403/410/429 from the pairing API.

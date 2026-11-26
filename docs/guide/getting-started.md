@@ -9,6 +9,18 @@ phone or computer with Chrome, Edge or Safari.
 
 ## 1. Install the host
 
+**One step:** open PowerShell on the PC and paste:
+
+```
+irm https://github.com/Gogan999/web-stream/releases/latest/download/web-stream-install.ps1 | iex
+```
+
+Approve the administrator prompt. It downloads the latest release, checks it,
+installs it with the defaults and starts the app. Run the same line again any
+time to update; a running host is closed and started again by itself.
+
+**Or by hand:**
+
 1. Download **web-stream-setup-X.Y.Z.exe** from the
    [latest release](https://github.com/Gogan999/web-stream/releases/latest).
 2. Run it. Windows warns you because the program is not signed by a
@@ -54,7 +66,29 @@ paired browser connects automatically (turn that off under **Settings >
 Host > Connect automatically** on the page). In Chrome on Android,
 **Install app** does the same. If the home-screen icon asks to pair again,
 iOS kept its cookies apart from Safari: open the QR link from the icon
-itself, or pair once more. Each host you use needs its own icon.
+itself, or pair once more.
+
+### More than one PC in one app
+
+One home-screen icon can hold all your PCs. On the not-connected screen,
+press **Add a PC**, type the other PC's address from its web-stream window
+(for example `192.168.1.30:8443`) or paste its pairing link, press
+**Request code** and type the code that PC shows. The app remembers each PC
+and its pairing; tap a PC in the list to connect, or switch with the PC menu
+in the toolbar. The app also opens when the PC it was saved from is off.
+
+The phone has to trust each PC's certificate for this. In each PC's window,
+under the QR code, open **install this PC's certificate** on the phone:
+
+- **iPhone:** open the link in Safari, tap **Allow**, then **Settings >
+  Profile Downloaded > Install**, then **Settings > General > About >
+  Certificate Trust Settings** and turn on **web-stream host CA**.
+- **Android:** download it, then **Settings > Security > Encryption &
+  credentials > Install a certificate > CA certificate**.
+
+This also ends the "connection isn't private" warning for that PC, and it
+keeps working when the PC's address changes. A PC reached through a
+[Cloudflare Tunnel](cloudflare-tunnel.md) needs no certificate.
 
 **Using it away from home too?** If you were sent a Cloudflare Tunnel token,
 open **Settings**, set **Cloudflare Tunnel** to **Named (token)**, paste it

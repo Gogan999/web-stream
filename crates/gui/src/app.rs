@@ -82,6 +82,7 @@ impl App {
         #[cfg(windows)]
         {
             crate::win::set_window(cc);
+            crate::win::listen_for_quit(host.clone());
             if let Err(e) = crate::win::create_tray(host.clone(), cc.egui_ctx.clone()) {
                 host.log(format!("could not add the tray icon: {e:#}"));
             }
@@ -470,6 +471,11 @@ impl App {
              start {} and end {}.",
             hint.start, hint.end
         ));
+        ui.horizontal_wrapped(|ui| {
+            ui.weak("To stop the warning and save this PC in the iPhone app:");
+            ui.hyperlink_to("install this PC's certificate", format!("{host}/ca.crt"));
+        });
+        ui.weak(CA_INSTALL_TEXT);
     }
 
     /// First run: open pairing once, as soon as the host is up, so the window
@@ -1892,6 +1898,10 @@ fn pairing_view(
 
 /// What the pairing card tells a friend about the browser's certificate
 /// warning (the host's certificate is self-signed).
+const CA_INSTALL_TEXT: &str = "iPhone: open that link in Safari, Allow, then Settings > \
+     Profile Downloaded > Install, then Settings > General > About > Certificate Trust Settings > \
+     turn on web-stream host CA. Android: Settings > Security > Install a certificate > CA certificate.";
+
 const CERT_WARNING_TEXT: &str = "Your phone will warn that the connection isn't private. That \
      is expected the first time. Tap Show Details > visit this website (iPhone) or Advanced > \
      Proceed (Chrome).";

@@ -28,6 +28,10 @@ const COOKIE: &str = "__Host-ws_device";
 /// Set by Cloudflare on every request it passes through a tunnel.
 const CF_CONNECTING_IP: &str = "cf-connecting-ip";
 const COOKIE_MAX_AGE_SECS: u64 = 365 * 24 * 3600;
+/// The signaling subprotocol the browser asks for and the host selects.
+const WS_PROTOCOL: &str = "web-stream";
+/// Subprotocol prefix carrying a device token, for pages on another origin.
+const WS_AUTH_PREFIX: &str = "web-stream.auth.";
 const MAX_WS_MESSAGE: usize = 64 * 1024;
 const MAX_API_BODY: usize = 4 * 1024;
 /// Every HTTP request, including the `/ws` upgrade, must finish in this time.
@@ -37,7 +41,7 @@ const WS_PING_EVERY: Duration = Duration::from_secs(15);
 const WS_IDLE: Duration = Duration::from_secs(45);
 /// A browser that stops reading must not stall the session loop.
 const WS_SEND_TIMEOUT: Duration = Duration::from_secs(5);
-const CSP: &str = "default-src 'self'; connect-src 'self'; img-src 'self' data: blob:; \
+const CSP: &str = "default-src 'self'; connect-src 'self' https: wss:; img-src 'self' data: blob:; \
                    media-src 'self' blob:; style-src 'self' 'unsafe-inline'; object-src 'none'; \
                    base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
 /// The page asks only for the microphone; nothing it embeds or a script
@@ -147,6 +151,8 @@ struct Shared {
     next_id: AtomicU64,
     sessions: mpsc::Sender<SignalingSession>,
     notices: mpsc::UnboundedSender<Notice>,
+    /// The host CA certificate (DER) offered at `/ca.crt`.
+    ca_der: Option<Vec<u8>>,
 }
 
 impl Shared {
@@ -242,6 +248,7 @@ impl SignalingServer {
             next_id: AtomicU64::new(1),
             sessions: sessions_tx,
             notices: notices_tx,
+            ca_der: tls.certs.ca_der().map(<[u8]>::to_vec),
         });
         Ok((Self { shared, tls }, SignalingEvents { sessions, notices }))
     }
@@ -279,7 +286,9 @@ fn router(shared: Arc<Shared>) -> Router {
         .route("/api/pair/link", post(pair_link))
         .route("/api/unpair", post(unpair))
         .route("/ws", get(ws_upgrade))
+        .route("/ca.crt", get(ca_cert))
         .layer(DefaultBodyLimit::max(MAX_API_BODY))
+        .layer(axum::middleware::from_fn(cors))
         .with_state(shared.clone());
 
     let embedded = shared.config.embedded_web;
@@ -394,18 +403,112 @@ fn origin_ok(shared: &Shared, headers: &HeaderMap) -> bool {
     origin.strip_prefix("https://") == Some(host)
 }
 
-/// POSTs must be same-origin JSON. A JSON content type cannot be sent
-/// cross-origin without a CORS preflight, which this server never approves.
-fn post_ok(shared: &Shared, headers: &HeaderMap) -> bool {
-    let json = headers
+/// CORS for the API: any HTTPS origin may call it, without credentials. Cookies are never sent
+/// cross-origin, so only token requests succeed from another origin.
+async fn cors(req: Request, next: Next) -> Response {
+    let origin = req
+        .headers()
+        .get(header::ORIGIN)
+        .filter(|o| o.as_bytes().starts_with(b"https://"))
+        .cloned();
+    let api = req.uri().path().starts_with("/api/");
+    let (Some(origin), true) = (origin, api) else {
+        return next.run(req).await;
+    };
+    let mut res = if req.method() == axum::http::Method::OPTIONS {
+        let mut res = StatusCode::NO_CONTENT.into_response();
+        let h = res.headers_mut();
+        h.insert(
+            header::ACCESS_CONTROL_ALLOW_METHODS,
+            HeaderValue::from_static("GET, POST"),
+        );
+        h.insert(
+            header::ACCESS_CONTROL_ALLOW_HEADERS,
+            HeaderValue::from_static("content-type, authorization"),
+        );
+        h.insert(
+            header::ACCESS_CONTROL_MAX_AGE,
+            HeaderValue::from_static("600"),
+        );
+        if req
+            .headers()
+            .contains_key("access-control-request-private-network")
+        {
+            h.insert(
+                HeaderName::from_static("access-control-allow-private-network"),
+                HeaderValue::from_static("true"),
+            );
+        }
+        res
+    } else {
+        next.run(req).await
+    };
+    let h = res.headers_mut();
+    h.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
+    h.append(header::VARY, HeaderValue::from_static("origin"));
+    res
+}
+
+/// The host CA certificate, for a device to install and trust.
+async fn ca_cert(State(shared): State<Arc<Shared>>) -> Response {
+    match &shared.ca_der {
+        Some(der) => (
+            [
+                (header::CONTENT_TYPE, "application/x-x509-ca-cert"),
+                (
+                    header::CONTENT_DISPOSITION,
+                    "attachment; filename=\"web-stream-host.crt\"",
+                ),
+            ],
+            der.clone(),
+        )
+            .into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+fn is_json(headers: &HeaderMap) -> bool {
+    headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .is_some_and(|v| {
             v.split(';')
                 .next()
                 .is_some_and(|t| t.trim().eq_ignore_ascii_case("application/json"))
-        });
-    json && origin_ok(shared, headers)
+        })
+}
+
+/// The device token from `Authorization: Bearer`.
+fn bearer_token(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(header::AUTHORIZATION)?
+        .to_str()
+        .ok()?
+        .strip_prefix("Bearer ")
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
+}
+
+/// The device token from the WebSocket subprotocol list.
+fn protocol_token(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get_all(header::SEC_WEBSOCKET_PROTOCOL)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .find_map(|p| p.trim().strip_prefix(WS_AUTH_PREFIX).map(str::to_string))
+        .filter(|t| !t.is_empty())
+}
+
+/// Cookie POSTs must be same-origin JSON.
+fn post_ok(shared: &Shared, headers: &HeaderMap) -> bool {
+    is_json(headers) && origin_ok(shared, headers)
+}
+
+/// Pairing POSTs: same-origin JSON, or JSON from any origin asking for a token.
+fn pair_post_ok(shared: &Shared, headers: &HeaderMap, want_token: bool) -> bool {
+    is_json(headers) && (want_token || origin_ok(shared, headers))
 }
 
 fn cookie_token(headers: &HeaderMap) -> Option<String> {
@@ -432,7 +535,8 @@ fn set_cookie(token: &str, max_age: u64) -> HeaderValue {
 
 async fn session_status(State(shared): State<Arc<Shared>>, headers: HeaderMap) -> Response {
     let store = shared.store.lock().await;
-    match cookie_token(&headers).and_then(|t| store.check(&t, SystemTime::now()).cloned()) {
+    let token = bearer_token(&headers).or_else(|| cookie_token(&headers));
+    match token.and_then(|t| store.check(&t, SystemTime::now()).cloned()) {
         Some(dev) => axum::Json(json!({"paired": true, "device": dev.name})).into_response(),
         None => err(StatusCode::UNAUTHORIZED, json!({"paired": false})),
     }
@@ -443,12 +547,12 @@ async fn pair_start(
     headers: HeaderMap,
     body: String,
 ) -> Response {
-    if !post_ok(&shared, &headers) {
-        return err(StatusCode::FORBIDDEN, json!({"error": "bad_origin"}));
-    }
     let Ok(req) = serde_json::from_str::<PairStart>(&body) else {
         return err(StatusCode::BAD_REQUEST, json!({"error": "bad_request"}));
     };
+    if !pair_post_ok(&shared, &headers, req.want_token) {
+        return err(StatusCode::FORBIDDEN, json!({"error": "bad_origin"}));
+    }
     let started = shared
         .pairing
         .lock()
@@ -490,12 +594,12 @@ async fn pair_confirm(
     headers: HeaderMap,
     body: String,
 ) -> Response {
-    if !post_ok(&shared, &headers) {
-        return err(StatusCode::FORBIDDEN, json!({"error": "bad_origin"}));
-    }
     let Ok(req) = serde_json::from_str::<PairConfirm>(&body) else {
         return err(StatusCode::BAD_REQUEST, json!({"error": "bad_request"}));
     };
+    if !pair_post_ok(&shared, &headers, req.want_token) {
+        return err(StatusCode::FORBIDDEN, json!({"error": "bad_origin"}));
+    }
     let result = shared
         .pairing
         .lock()
@@ -512,7 +616,7 @@ async fn pair_confirm(
         }
     };
     match result {
-        Ok(device_name) => paired(&shared, device_name).await,
+        Ok(device_name) => paired(&shared, device_name, req.want_token).await,
         Err(ConfirmError::BadCode { attempts_left }) => {
             tracing::warn!(attempts_left, "wrong pairing code");
             shared.notify(Notice::PairingFailed { attempts_left });
@@ -538,12 +642,12 @@ async fn pair_link(
     headers: HeaderMap,
     body: String,
 ) -> Response {
-    if !post_ok(&shared, &headers) {
-        return err(StatusCode::FORBIDDEN, json!({"error": "bad_origin"}));
-    }
     let Ok(req) = serde_json::from_str::<PairLink>(&body) else {
         return err(StatusCode::BAD_REQUEST, json!({"error": "bad_request"}));
     };
+    if !pair_post_ok(&shared, &headers, req.want_token) {
+        return err(StatusCode::FORBIDDEN, json!({"error": "bad_origin"}));
+    }
     // The link is used up here, before the device is saved: if saving
     // fails, the host user opens pairing again for a new one.
     let redeemed =
@@ -553,7 +657,7 @@ async fn pair_link(
             .await
             .redeem_link(&req.link, &req.device_name, Instant::now());
     match redeemed {
-        Some(device_name) => paired(&shared, device_name).await,
+        Some(device_name) => paired(&shared, device_name, req.want_token).await,
         None => {
             // Debug only: anyone can send these, and they mean nothing.
             tracing::debug!("pairing link refused (closed, used or wrong)");
@@ -562,8 +666,8 @@ async fn pair_link(
     }
 }
 
-/// Saves the newly paired device and hands the browser its cookie.
-async fn paired(shared: &Shared, device_name: String) -> Response {
+/// Saves the newly paired device and hands the browser its cookie, or its token.
+async fn paired(shared: &Shared, device_name: String, want_token: bool) -> Response {
     let token = match shared
         .store
         .lock()
@@ -581,6 +685,9 @@ async fn paired(shared: &Shared, device_name: String) -> Response {
     };
     tracing::info!(device = %device_name, "device paired");
     shared.notify(Notice::Paired { device_name });
+    if want_token {
+        return axum::Json(json!({"paired": true, "token": token})).into_response();
+    }
     (
         [(header::SET_COOKIE, set_cookie(&token, COOKIE_MAX_AGE_SECS))],
         axum::Json(json!({"paired": true})),
@@ -589,10 +696,11 @@ async fn paired(shared: &Shared, device_name: String) -> Response {
 }
 
 async fn unpair(State(shared): State<Arc<Shared>>, headers: HeaderMap) -> Response {
-    if !post_ok(&shared, &headers) {
+    let bearer = bearer_token(&headers);
+    if bearer.is_some() && !is_json(&headers) || bearer.is_none() && !post_ok(&shared, &headers) {
         return err(StatusCode::FORBIDDEN, json!({"error": "bad_origin"}));
     }
-    if let Some(token) = cookie_token(&headers) {
+    if let Some(token) = bearer.clone().or_else(|| cookie_token(&headers)) {
         if let Err(e) = shared.store.lock().await.revoke(&token) {
             tracing::error!("revoking device failed: {e}");
             return err(
@@ -609,6 +717,9 @@ async fn unpair(State(shared): State<Arc<Shared>>, headers: HeaderMap) -> Respon
                 .send(ByeReason::Revoked);
         }
     }
+    if bearer.is_some() {
+        return axum::Json(json!({"paired": false})).into_response();
+    }
     (
         [(header::SET_COOKIE, set_cookie("", 0))],
         axum::Json(json!({"paired": false})),
@@ -621,10 +732,15 @@ async fn ws_upgrade(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
-    if !origin_ok(&shared, &headers) {
-        return err(StatusCode::FORBIDDEN, json!({"error": "bad_origin"}));
-    }
-    let Some(token) = cookie_token(&headers) else {
+    // A token in the subprotocol list needs no origin check: another site cannot know it.
+    let token = match protocol_token(&headers) {
+        Some(t) => Some(t),
+        None if !origin_ok(&shared, &headers) => {
+            return err(StatusCode::FORBIDDEN, json!({"error": "bad_origin"}));
+        }
+        None => cookie_token(&headers),
+    };
+    let Some(token) = token else {
         return err(StatusCode::UNAUTHORIZED, json!({"error": "not_paired"}));
     };
     let device = match shared
@@ -650,7 +766,8 @@ async fn ws_upgrade(
     } else {
         request_host(&headers)
     };
-    ws.max_message_size(MAX_WS_MESSAGE)
+    ws.protocols([WS_PROTOCOL])
+        .max_message_size(MAX_WS_MESSAGE)
         .max_frame_size(MAX_WS_MESSAGE)
         .on_upgrade(move |socket| run_socket(shared, socket, token, device.name, host))
 }

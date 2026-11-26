@@ -10,12 +10,46 @@ pub(crate) struct FineTimer(());
 impl FineTimer {
     pub(crate) fn new() -> Self {
         #[cfg(windows)]
-        // SAFETY: no pointer arguments; undone in Drop.
-        unsafe {
-            windows::Win32::Media::timeBeginPeriod(1);
+        {
+            unthrottle_process();
+            // SAFETY: no pointer arguments; undone in Drop.
+            unsafe {
+                windows::Win32::Media::timeBeginPeriod(1);
+            }
         }
         Self(())
     }
+}
+
+/// Opts the process out of EcoQoS and timer-resolution throttling.
+#[cfg(windows)]
+pub fn unthrottle_process() {
+    use windows::Win32::System::Threading::{
+        GetCurrentProcess, PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+        PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION,
+        PROCESS_POWER_THROTTLING_STATE, ProcessPowerThrottling, SetProcessInformation,
+    };
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let state = PROCESS_POWER_THROTTLING_STATE {
+            Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+            ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED
+                | PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION,
+            StateMask: 0,
+        };
+        // SAFETY: `state` outlives the call and its size is passed with it.
+        let result = unsafe {
+            SetProcessInformation(
+                GetCurrentProcess(),
+                ProcessPowerThrottling,
+                std::ptr::from_ref(&state).cast(),
+                std::mem::size_of_val(&state) as u32,
+            )
+        };
+        if let Err(e) = result {
+            tracing::debug!("power throttling opt-out refused: {e}");
+        }
+    });
 }
 
 impl Drop for FineTimer {

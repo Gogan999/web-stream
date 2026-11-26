@@ -20,8 +20,8 @@ use windows::Win32::System::Registry::{
     HKEY_CURRENT_USER, REG_SZ, RRF_RT_REG_SZ, RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW,
 };
 use windows::Win32::System::Threading::{
-    CreateMutexW, GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_SYNCHRONIZE,
-    WaitForSingleObject,
+    CreateEventW, CreateMutexW, GetCurrentProcess, INFINITE, OpenProcess, OpenProcessToken,
+    PROCESS_SYNCHRONIZE, WaitForSingleObject,
 };
 use windows::Win32::UI::Shell::{
     FOLDERID_ProgramFilesCommonX86, KF_FLAG_DEFAULT, SHGetKnownFolderPath, ShellExecuteW,
@@ -45,6 +45,32 @@ static WINDOW: AtomicIsize = AtomicIsize::new(0);
 /// Set by the tray's "Check for updates"; the window takes it on its next
 /// frame (see [`take_update_request`]).
 static UPDATE_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// The named event setup and uninstall signal to make the app quit cleanly.
+const QUIT_EVENT: windows::core::PCWSTR = w!("Local\\web-stream-host-gui-quit");
+
+/// Quits like the tray's Quit when setup or uninstall signals the quit event. Runs on a
+/// thread of its own, since a hidden window runs no frames.
+pub fn listen_for_quit(host: Host) {
+    let event = match unsafe { CreateEventW(None, true, false, QUIT_EVENT) } {
+        Ok(h) => h.0 as isize,
+        Err(e) => return tracing::debug!("quit event: {e}"),
+    };
+    let spawned = std::thread::Builder::new()
+        .name("ws-quit-event".into())
+        .spawn(move || {
+            let event = windows::Win32::Foundation::HANDLE(event as *mut _);
+            unsafe { WaitForSingleObject(event, INFINITE) };
+            tracing::info!("quitting for the installer");
+            hide_window();
+            host.stop_and_wait(Duration::from_secs(15));
+            crate::upnp::shutdown();
+            std::process::exit(0)
+        });
+    if let Err(e) = spawned {
+        tracing::debug!("quit event thread: {e}");
+    }
+}
 
 thread_local! {
     /// Kept on the UI thread; dropped before exiting so the icon goes away.

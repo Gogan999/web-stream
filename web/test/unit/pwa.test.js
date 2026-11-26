@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 const web = (p) => fileURLToPath(new URL(`../../${p}`, import.meta.url));
@@ -28,4 +28,13 @@ test('the home-screen shortcut opens connected, and iOS has its icon and metas',
   assert.deepEqual(pngSize(web('icons/apple-touch-icon.png')), [180, 180]);
   assert.match(html, /apple-mobile-web-app-capable/);
   assert.match(html, /apple-mobile-web-app-title/);
+});
+
+test('the service worker precaches every client module and skips the API', () => {
+  const sw = readFileSync(web('sw.js'), 'utf8');
+  for (const f of readdirSync(web('js'))) {
+    if (f.endsWith('.js')) assert.match(sw, new RegExp(`'js/${f.replace('.', '\\.')}'`), f);
+  }
+  assert.match(sw, /api\\\//);
+  assert.match(html, /connect-src 'self' https: wss:/);
 });

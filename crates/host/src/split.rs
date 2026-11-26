@@ -29,7 +29,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
 use tokio::sync::{mpsc, oneshot, watch};
 use ws_proto::{
     AudioDirection, AudioPacket, DisplayId, EncodedFrame, VideoCodec, channels, mono_now,
@@ -50,6 +50,8 @@ const MAX_DOWN: usize = 4 << 20;
 /// Frames read but not yet handled. Past this the reader stops reading,
 /// so a flood from the other side waits in the pipe, not in memory.
 const READ_QUEUE: usize = 256;
+/// Buffer size for each direction of the bridge pipe.
+const PIPE_BUFFER: usize = 64 * 1024;
 /// The longest the network side goes without checking the connection state.
 /// A backlog change is sent as it happens (the encoder reads it to hold
 /// frames back), so this only has to catch connection changes and keep
@@ -290,10 +292,11 @@ async fn read_frame<H: DeserializeOwned>(
 /// are unhandled. Each side handles what it reads without waiting on its
 /// own writes, so neither can stall the other.
 fn spawn_reader<H: DeserializeOwned + Send + 'static>(
-    mut read: impl AsyncRead + Unpin + Send + 'static,
+    read: impl AsyncRead + Unpin + Send + 'static,
     max: usize,
 ) -> mpsc::Receiver<(H, Vec<u8>)> {
     let (tx, rx) = mpsc::channel(READ_QUEUE);
+    let mut read = BufReader::with_capacity(PIPE_BUFFER, read);
     tokio::spawn(async move {
         loop {
             match read_frame(&mut read, max).await {
@@ -335,8 +338,9 @@ impl Out {
 
 /// Writes queued frames until the queue closes or the stream breaks.
 fn spawn_writer(
-    mut write: impl AsyncWrite + Unpin + Send + 'static,
+    write: impl AsyncWrite + Unpin + Send + 'static,
 ) -> (Out, tokio::task::JoinHandle<()>) {
+    let mut write = BufWriter::with_capacity(PIPE_BUFFER, write);
     let (tx, mut rx) = mpsc::unbounded_channel::<Frame>();
     let queued = Arc::new(AtomicUsize::new(0));
     let out = Out {
@@ -344,15 +348,24 @@ fn spawn_writer(
         queued: queued.clone(),
     };
     let task = tokio::spawn(async move {
-        while let Some(frame) = rx.recv().await {
-            // Only this task writes, so the two writes stay one run of bytes.
-            let mut result = write.write_all(&frame.head).await;
-            let payload = frame.payload.as_ref().as_ref();
-            if result.is_ok() && !payload.is_empty() {
-                result = write.write_all(payload).await;
+        while let Some(mut frame) = rx.recv().await {
+            // Batch everything already queued into one flush.
+            loop {
+                let mut result = write.write_all(&frame.head).await;
+                let payload = frame.payload.as_ref().as_ref();
+                if result.is_ok() && !payload.is_empty() {
+                    result = write.write_all(payload).await;
+                }
+                queued.fetch_sub(frame.len(), Ordering::Relaxed);
+                if let Err(e) = result {
+                    return tracing::debug!("bridge: {e}");
+                }
+                match rx.try_recv() {
+                    Ok(next) => frame = next,
+                    Err(_) => break,
+                }
             }
-            queued.fetch_sub(frame.len(), Ordering::Relaxed);
-            if let Err(e) = result {
+            if let Err(e) = write.flush().await {
                 return tracing::debug!("bridge: {e}");
             }
         }

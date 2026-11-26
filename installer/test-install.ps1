@@ -126,6 +126,28 @@ foreach ($i in 1..60) {
 }
 Check ($session -eq '401') "the host answers, unpaired (/api/session: $session)"
 Check ((Status '/') -eq '200') 'the host serves the web client'
+Check ((Status '/ca.crt') -eq '200') 'the host offers its CA certificate'
+
+# An update while the app runs (a double-clicked setup or the one-line installer): setup quits
+# the app by itself and starts it again.
+$before = (Get-Process -Name 'ws-host-gui').Id
+$log = Join-Path $env:RUNNER_TEMP 'setup-running.log'
+$p = Start-Process -FilePath $Setup -PassThru -ArgumentList @(
+    '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/LOG=`"$log`"")
+if (-not $p.WaitForExit(300000)) { throw 'setup over the running app did not finish in 5 minutes' }
+if ($p.ExitCode -ne 0) {
+    Get-Content $log -Tail 40
+    throw "setup over the running app exited with $($p.ExitCode)"
+}
+$session = ''
+foreach ($i in 1..60) {
+    $session = Status '/api/session'
+    if ($session -eq '401') { break }
+    Start-Sleep -Seconds 1
+}
+$after = Get-Process -Name 'ws-host-gui' -ErrorAction SilentlyContinue
+Check ($null -ne $after -and @($after.Id) -notcontains $before) 'setup quits the running app and starts it again'
+Check ($session -eq '401') "the restarted app hosts (/api/session: $session)"
 if ($Failures.Count) { Show-Logs }
 Stop-Process -Name 'ws-host-gui' -Force -ErrorAction SilentlyContinue
 Start-Sleep -Seconds 2

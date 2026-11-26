@@ -120,6 +120,7 @@ jobs:
           ./installer/fetch-redist.ps1
           ./installer/build.ps1 -Version $env:VERSION
           Copy-Item "target/installer/web-stream-setup-$env:VERSION.exe" dist/
+          Copy-Item installer/web-stream-install.ps1 dist/
       - name: installer works
         shell: pwsh
         run: ./installer/test-install.ps1 -Setup "dist/web-stream-setup-$env:VERSION.exe"
@@ -181,7 +182,7 @@ jobs:
             --arg notes "$notes" --argjson files "$files" \
             '{product: "web-stream-host", version: $version, released: $released, files: $files, notes: $notes}' \
             > manifest.json
-          sha256sum *.zip *.exe manifest.json > SHA256SUMS.txt
+          sha256sum *.zip *.exe *.ps1 manifest.json > SHA256SUMS.txt
           cat manifest.json
       - name: publish
         env:

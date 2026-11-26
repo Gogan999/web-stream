@@ -67,7 +67,7 @@ impl PipelineHandle {
             .name("ws-capture".into())
             .spawn(move || {
                 let _ = unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST) };
-                // The session may start on the lock screen.
+                super::enter_mmcss();
                 ws_desktop::follow_input_desktop();
                 let mut session = match Session::open(display, config, max, frames, backlog) {
                     Ok(s) => {

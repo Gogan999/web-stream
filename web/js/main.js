@@ -6,6 +6,7 @@ import { CursorView } from './cursor.js';
 import { openPopout } from './popout.js';
 import { snapshot, compute, assess, render, Alerts, FrameTimer } from './stats.js';
 import * as pairing from './pairing.js';
+import * as hosts from './hosts.js';
 import * as settingsStore from './settings.js';
 import { AutoTune, Cancelled } from './autotune.js';
 import { SoftKeyboard } from './softkeys.js';
@@ -40,6 +41,10 @@ const ui = {
   filesToggle: $('files-toggle'), files: $('files'), fileList: $('file-list'), fromHost: $('from-host'),
   toHost: $('to-host'), uploadPick: $('upload-pick'), uploadInput: $('upload-input'), uploadList: $('upload-list'),
   diagSave: $('diag-save'), clipboard: $('clipboard'), clipEnabled: $('clip-enabled'), touchPaste: $('touch-paste'),
+  pcQuick: $('pc-quick'), pcList: $('pc-list'), pcAdd: $('pc-add'), pairOther: $('pair-other'),
+  addPc: $('add-pc'), addAddress: $('add-address'), addDeviceName: $('add-device-name'), addStart: $('add-start'),
+  addCode: $('add-code'), addConfirm: $('add-confirm'), addCancel: $('add-cancel'), addMsg: $('add-msg'),
+  addTrust: $('add-trust'), addTrustHost: $('add-trust-host'), addTrustCa: $('add-trust-ca'), addTrustOpen: $('add-trust-open'),
 };
 
 const params = new URLSearchParams(location.search);
@@ -66,7 +71,13 @@ ui.zoomPan.addEventListener('click', () => {
 });
 
 let session = null;
+let soundBlocked = false;
+let userClosed = true;
+let wakeLock = null;
 let input = null;
+let savedPcs = hosts.loadHosts();
+let localPaired = false;
+let target = null;
 let cursor = null;
 let cursor2 = null; // the pointer on the second monitor's video
 let popout = null; // the second monitor's window, while it has one
@@ -108,6 +119,7 @@ function setHostName(name) {
   ui.stageHost.textContent = name ?? '';
   ui.stageHost.hidden = !name;
   document.title = name ? `${name} - web-stream` : 'web-stream';
+  if (name && target) rememberName(target, name);
 }
 // The "page vX, host vY" line in Settings > Advanced.
 function setHostVersion(version) {
@@ -115,13 +127,28 @@ function setHostVersion(version) {
   ui.version.hidden = !version;
 }
 
-async function connect() {
+async function connect(next = target) {
+  if (!next) {
+    showAddPc();
+    return;
+  }
   disconnect();
-  session = new Session({ signalUrl, video: ui.video, video2: ui.video2 });
+  userClosed = false;
+  target = next;
+  hosts.setLastHost(target.id);
+  renderPcs();
+  const remote = isRemote(target);
+  session = new Session({
+    signalUrl: remote ? hosts.signalUrlFor(target.origin) : signalUrl,
+    token: remote ? target.token : null,
+    video: ui.video, video2: ui.video2,
+  });
   session.addEventListener('status', (e) => setStatus(e.detail.text, e.detail.state));
+  session.addEventListener('muted', () => { soundBlocked = true; });
   session.addEventListener('control', (e) => onControl(e.detail));
   session.addEventListener('file-chunk', (e) => files.onChunk(e.detail));
   session.addEventListener('control-open', () => {
+    keepAwake();
     // A new connection: the host offers its files afresh, and says whether it takes any.
     files.clear();
     uploads.clear();
@@ -134,6 +161,7 @@ async function connect() {
     session.sendControl(settingsStore.audioConfig(settings));
   });
   session.addEventListener('closed', () => {
+    releaseWakeLock();
     reporter.stop();
     setRemoteUpdate(false);
     clip.reset();
@@ -149,7 +177,7 @@ async function connect() {
   host = { displays: [], active: null, second: null, config: null, stats: null, matched: false, awaitingMatch: false };
   lastSent = null;
   // The host sends "bye" with reason "revoked" when this browser is unpaired.
-  session.addEventListener('status', (e) => { if (/unpaired/.test(e.detail.text)) checkPairing(); });
+  session.addEventListener('status', (e) => { if (/unpaired/.test(e.detail.text)) recheck(target); });
   input = new InputCapture({
     session, video: ui.video, video2: ui.video2, stage: ui.stage, onHotkey,
     keyTarget: ui.kbdInput, onKeySent: (usage, down) => softKeys.keySent(usage, down),
@@ -173,12 +201,12 @@ async function connect() {
     await session.start();
   } catch (err) {
     session.fail(err.message);
-    // A refused upgrade usually means the pairing was revoked; show the pairing screen if so.
-    checkPairing();
+    recheck(target);
   }
 }
 
 function disconnect() {
+  userClosed = true;
   reporter.stop();
   diag?.stop();
   if (input) input.stop();
@@ -1118,18 +1146,186 @@ ui.keysToggle.addEventListener('click', () => {
   if (ui.keys.hidden) softKeys.releaseSticky();
 });
 
-// Pairing: the host sets an HttpOnly cookie once the code shown on the host is confirmed.
+// Mobile: sound after a tap, screen kept on, recovery after the app was in the background.
+function unmute() {
+  if (!soundBlocked) return;
+  soundBlocked = false;
+  for (const v of [ui.video, ui.video2]) {
+    v.muted = false;
+    if (v.srcObject && v.paused) v.play().catch(() => {});
+  }
+}
+for (const ev of ['pointerup', 'touchend', 'keydown']) document.addEventListener(ev, unmute, { capture: true });
+
+async function keepAwake() {
+  if (document.hidden || wakeLock || !navigator.wakeLock) return;
+  try {
+    wakeLock = await navigator.wakeLock.request('screen');
+    wakeLock.addEventListener('release', () => { wakeLock = null; });
+  } catch { /* refused or unsupported */ }
+}
+
+function releaseWakeLock() {
+  wakeLock?.release().catch(() => {});
+  wakeLock = null;
+}
+
+function resumed() {
+  if (document.hidden) return;
+  if (session && !session.closed) {
+    for (const v of [ui.video, ui.video2]) if (v.srcObject && v.paused) v.play().catch(() => {});
+    keepAwake();
+  } else if (!userClosed && target && ui.addPc.hidden && ui.pair.hidden) {
+    connect();
+  }
+}
+document.addEventListener('visibilitychange', resumed);
+window.addEventListener('pageshow', (e) => { if (e.persisted) resumed(); });
+
+// iOS keyboards cover the page instead of resizing it: fit the page to what is visible.
+const vv = window.visualViewport;
+if (vv) {
+  const fit = () => {
+    const covered = Math.abs(vv.scale - 1) < 0.01 && window.innerHeight - vv.height > 80;
+    document.documentElement.style.setProperty('--app-height', covered ? `${Math.round(vv.height)}px` : '');
+    if (covered && (window.scrollY || vv.offsetTop)) window.scrollTo(0, 0);
+  };
+  vv.addEventListener('resize', fit);
+  vv.addEventListener('scroll', fit);
+}
+
+// Saved PCs and the page's own host.
+
+const isRemote = (t) => !!t && t.id !== hosts.LOCAL;
+const remoteOf = (t) => (isRemote(t) ? { origin: t.origin, token: t.token } : undefined);
+const localTarget = () => ({ id: hosts.LOCAL, origin: location.origin, token: null, name: hosts.localName() || hosts.hostLabel(location.origin) });
+
+function pickTarget(id) {
+  if (id === hosts.LOCAL) return localPaired ? localTarget() : null;
+  return savedPcs.find((h) => h.id === id && h.token) ?? null;
+}
+
+function targets() {
+  return [...(localPaired ? [localTarget()] : []), ...savedPcs.filter((h) => h.token)];
+}
+
+function defaultTarget() {
+  return pickTarget(hosts.lastHost()) ?? targets()[0] ?? null;
+}
+
+function storePcs(list) {
+  savedPcs = list;
+  hosts.saveHosts(savedPcs);
+}
+
+function rememberName(t, name) {
+  if (t.id === hosts.LOCAL) hosts.setLocalName(name);
+  else storePcs(hosts.renameHost(savedPcs, t.id, name));
+  t.name = name;
+  renderPcs();
+}
+
+function renderPcs() {
+  const list = targets();
+  if (target && !list.some((t) => t.id === target.id)) target = null;
+  ui.pcList.replaceChildren(...list.map((t) => {
+    const li = document.createElement('li');
+    if (target?.id === t.id) li.setAttribute('aria-current', 'true');
+    const go = document.createElement('button');
+    go.type = 'button';
+    go.className = 'pc-connect';
+    const name = document.createElement('b');
+    name.textContent = t.name;
+    const where = document.createElement('small');
+    where.textContent = hosts.hostLabel(t.origin);
+    go.append(name, where);
+    go.addEventListener('click', () => connect(t));
+    li.append(go);
+    if (isRemote(t)) {
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'pc-remove';
+      del.textContent = '×';
+      del.title = `Forget ${t.name}`;
+      del.setAttribute('aria-label', `Forget ${t.name}`);
+      del.addEventListener('click', () => forgetPc(t));
+      li.append(del);
+    }
+    return li;
+  }));
+  if (!localPaired && savedPcs.length) {
+    const li = document.createElement('li');
+    const pair = document.createElement('button');
+    pair.type = 'button';
+    pair.className = 'pc-connect';
+    pair.textContent = `Pair ${hosts.localName() || hosts.hostLabel(location.origin)}`;
+    pair.addEventListener('click', () => setPairForm(true));
+    li.append(pair);
+    ui.pcList.append(li);
+  }
+  ui.pcQuick.replaceChildren(...list.map((t) => {
+    const o = document.createElement('option');
+    o.value = t.id;
+    o.textContent = t.name;
+    return o;
+  }));
+  ui.pcQuick.hidden = list.length < 2;
+  if (target) ui.pcQuick.value = target.id;
+  ui.connectBig.textContent = target && list.length > 1 ? `Connect to ${target.name}` : 'Connect';
+  ui.unpair.hidden = !target;
+}
+
+async function forgetPc(t) {
+  if (!confirm(`Forget ${t.name}? You will need a new code from it to connect again.`)) return;
+  if (target?.id === t.id) disconnect();
+  pairing.unpair(remoteOf(t)).catch(() => {});
+  storePcs(hosts.removeHost(savedPcs, t.id));
+  if (target?.id === t.id) target = defaultTarget();
+  renderPcs();
+}
+
+// After a failed connection: tells an unreachable PC from one that no longer knows this device.
+async function recheck(t) {
+  if (!isRemote(t)) return checkPairing();
+  try {
+    const s = await pairing.getSession(remoteOf(t));
+    if (s.paired) return;
+    storePcs(hosts.forgetToken(savedPcs, t.id));
+    renderPcs();
+    showAddPc(t.origin, `${t.name} no longer knows this device. Pair it again.`);
+  } catch {
+    setStatus(`Can't reach ${t.name}`, 'failed');
+    showTrust(t.origin);
+  }
+}
+
+ui.pcQuick.addEventListener('change', () => {
+  const t = pickTarget(ui.pcQuick.value);
+  if (t && t.id !== target?.id) connect(t);
+});
+
+// Pairing this page's own host: the host sets an HttpOnly cookie once the code is confirmed.
 let pairingId = null;
 
-function showPairing(paired) {
-  document.body.classList.toggle('unpaired', !paired);
-  ui.pair.hidden = paired;
-  ui.unpair.hidden = !paired;
-  if (!paired) {
-    disconnect();
+function setPairForm(on) {
+  if (on) hideAddPc();
+  document.body.classList.toggle('unpaired', on);
+  ui.pair.hidden = !on;
+  if (on) {
     setStatus('Not paired', 'idle');
     if (!ui.deviceName.value) ui.deviceName.value = pairing.defaultDeviceName();
   }
+}
+
+function showPairing(paired) {
+  localPaired = paired;
+  if (!paired && target?.id === hosts.LOCAL) {
+    disconnect();
+    target = null;
+  }
+  setPairForm(!paired && savedPcs.length === 0);
+  if (!target) target = defaultTarget();
+  renderPcs();
 }
 
 async function checkPairing() {
@@ -1139,6 +1335,8 @@ async function checkPairing() {
     return s.paired;
   } catch {
     setStatus('Host unreachable', 'failed');
+    if (!target) target = defaultTarget();
+    renderPcs();
     return false;
   }
 }
@@ -1167,39 +1365,169 @@ ui.pair.addEventListener('submit', async (e) => {
     ui.pairCode.disabled = true;
     ui.pairConfirm.disabled = true;
     ui.pairMsg.textContent = '';
+    target = localTarget();
     showPairing(true);
-    connect();
+    connect(localTarget());
   } catch (err) {
     ui.pairMsg.textContent = err.message;
   }
 });
 
 ui.unpair.addEventListener('click', async () => {
+  if (isRemote(target)) {
+    forgetPc(target);
+    return;
+  }
   if (!confirm('Unpair this browser? You will need a new code from the host to connect again.')) return;
   disconnect();
   await pairing.unpair().catch(() => {});
   showPairing(false);
 });
 
-// A pairing link (the host's QR code) pairs this browser without a code.
+ui.pairOther.addEventListener('click', () => showAddPc());
+
 async function pairFromLink(link) {
   try {
     await pairing.pairWithLink(link, ui.deviceName.value.trim() || pairing.defaultDeviceName());
+    target = localTarget();
     showPairing(true);
     return true;
   } catch (err) {
-    // fetch's own TypeError means the host didn't answer at all; checkPairing has said so.
     if (!(err instanceof TypeError)) ui.pairMsg.textContent = err.message;
     return false;
   }
 }
 
+// Adding another PC: pairs with it from this page and keeps its device token.
+let adding = null;
+
+function showAddPc(address = '', message = '') {
+  setPairForm(false);
+  document.body.classList.add('adding');
+  ui.addPc.hidden = false;
+  ui.addAddress.value = address ? hosts.hostLabel(address) : ui.addAddress.value;
+  if (!ui.addDeviceName.value) ui.addDeviceName.value = pairing.defaultDeviceName();
+  ui.addMsg.textContent = message;
+  ui.addTrust.hidden = true;
+  resetAddCode();
+  ui.addAddress.focus();
+}
+
+function hideAddPc() {
+  document.body.classList.remove('adding');
+  ui.addPc.hidden = true;
+  adding = null;
+}
+
+function resetAddCode() {
+  adding = null;
+  ui.addCode.value = '';
+  ui.addCode.disabled = true;
+  ui.addConfirm.disabled = true;
+  syncAddStart();
+}
+
+function syncAddStart() {
+  ui.addStart.textContent = hosts.parseTarget(ui.addAddress.value)?.link ? 'Pair with link' : 'Request code';
+}
+
+function showTrust(origin) {
+  ui.addTrustHost.textContent = hosts.hostLabel(origin);
+  ui.addTrustCa.href = `${origin}/ca.crt`;
+  ui.addTrustOpen.href = `${origin}/`;
+  if (!ui.addPc.hidden) ui.addTrust.hidden = false;
+  else setStatus(`Can't reach ${hosts.hostLabel(origin)}: is it on, and does this device trust its certificate?`, 'failed');
+}
+
+function addFailed(err, origin) {
+  if (err instanceof TypeError) {
+    ui.addMsg.textContent = '';
+    showTrust(origin);
+  } else {
+    ui.addMsg.textContent = err.message;
+  }
+}
+
+async function finishAdd(origin, token) {
+  const [list, entry] = hosts.upsertHost(savedPcs, { origin, token });
+  storePcs(list);
+  hideAddPc();
+  if (!localPaired && !savedPcs.some((h) => h.id !== entry.id)) setPairForm(false);
+  await connect(entry);
+}
+
+ui.addAddress.addEventListener('input', () => {
+  ui.addTrust.hidden = true;
+  resetAddCode();
+});
+
+ui.addStart.addEventListener('click', async () => {
+  ui.addMsg.textContent = '';
+  ui.addTrust.hidden = true;
+  const t = hosts.parseTarget(ui.addAddress.value);
+  if (!t) {
+    ui.addMsg.textContent = 'That is not an address. Type it as shown in the PC\'s web-stream window, like 192.168.1.20:8443.';
+    return;
+  }
+  const name = ui.addDeviceName.value.trim() || pairing.defaultDeviceName();
+  if (t.origin === location.origin) {
+    hideAddPc();
+    if (t.link) await pairFromLink(t.link).then((ok) => ok && connect(localTarget()));
+    else setPairForm(true);
+    return;
+  }
+  try {
+    if (t.link) {
+      const token = await pairing.pairWithLink(t.link, name, { origin: t.origin });
+      await finishAdd(t.origin, token);
+      return;
+    }
+    const r = await pairing.startPairing(name, { origin: t.origin });
+    adding = { origin: t.origin, pairingId: r.pairingId };
+    ui.addCode.disabled = false;
+    ui.addConfirm.disabled = false;
+    ui.addCode.focus();
+    ui.addMsg.textContent = `Enter the code shown on ${hosts.hostLabel(t.origin)} (valid ${r.expiresIn ?? 120} s).`;
+  } catch (err) {
+    addFailed(err, t.origin);
+  }
+});
+
+ui.addPc.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  if (!adding) {
+    ui.addStart.click();
+    return;
+  }
+  const { origin, pairingId: id } = adding;
+  try {
+    const token = await pairing.confirmPairing(id, ui.addCode.value.trim(), { origin });
+    await finishAdd(origin, token);
+  } catch (err) {
+    addFailed(err, origin);
+  }
+});
+
+ui.addCancel.addEventListener('click', () => {
+  hideAddPc();
+  if (!localPaired && !savedPcs.length) checkPairing();
+});
+
+ui.pcAdd.addEventListener('click', () => showAddPc());
+
+if ('serviceWorker' in navigator && window.isSecureContext) {
+  navigator.serviceWorker.register('sw.js').catch(() => {});
+}
+navigator.storage?.persist?.().catch(() => {});
+
+target = pickTarget(hosts.lastHost());
 checkPairing().then(async (paired) => {
   if (!paired && pairingLink === '') {
     ui.pairMsg.textContent = 'That pairing link was damaged. Scan the QR code on the host again.';
   }
   if (!paired && pairingLink) paired = await pairFromLink(pairingLink);
-  // A paired page connects by itself unless "Connect automatically" is off (a pairing link always does).
-  // `?autoconnect` stays in the manifest for home-screen icons saved before the setting existed.
-  if (paired && (pairingLink || settings.autoconnect)) connect();
+  if (!target) target = defaultTarget();
+  renderPcs();
+  if (pairingLink && paired) connect(localTarget());
+  else if (target && settings.autoconnect) connect();
 });

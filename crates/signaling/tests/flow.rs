@@ -471,3 +471,118 @@ async fn pairing_link_pairs_once() {
     let r = request(addr, "POST", "/api/pair/link", origin, None, &body(&link)).await;
     assert_eq!(r.status, 403);
 }
+
+#[tokio::test]
+async fn another_origin_pairs_for_a_token_and_signals_with_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = SignalingConfig::new("127.0.0.1:0".parse().unwrap(), dir.path().to_path_buf());
+    let (server, mut events) = SignalingServer::new(config).unwrap();
+    let router = server.router();
+    let handle = server.handle();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let other = Some("https://other-pc.example:8443");
+
+    let r = request(addr, "OPTIONS", "/api/pair/start", other, None, "").await;
+    assert_eq!(r.status, 204);
+    let lower = r.headers.to_lowercase();
+    assert!(lower.contains("access-control-allow-origin: https://other-pc.example:8443"));
+    assert!(lower.contains("access-control-allow-headers: content-type, authorization"));
+    assert!(!lower.contains("access-control-allow-credentials"));
+
+    handle.open_pairing().await.unwrap();
+    let r = request(
+        addr,
+        "POST",
+        "/api/pair/start",
+        other,
+        None,
+        r#"{"device_name":"iPhone","want_token":true}"#,
+    )
+    .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let pairing_id = body_json(&r)["pairing_id"].as_str().unwrap().to_string();
+    let Some(Notice::PairingCode { code, .. }) = events.notices.recv().await else {
+        panic!("no pairing code");
+    };
+    let r = request(
+        addr,
+        "POST",
+        "/api/pair/confirm",
+        other,
+        None,
+        &format!(r#"{{"pairing_id":"{pairing_id}","code":"{code}","want_token":true}}"#),
+    )
+    .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert!(!r.headers.to_lowercase().contains("set-cookie"));
+    let token = body_json(&r)["token"].as_str().unwrap().to_string();
+
+    // A cookie from another origin is still refused.
+    let mut req = format!("ws://{addr}/ws").into_client_request().unwrap();
+    req.headers_mut()
+        .insert("Origin", "https://evil.example".parse().unwrap());
+    req.headers_mut().insert(
+        "Cookie",
+        format!("__Host-ws_device={token}").parse().unwrap(),
+    );
+    match tokio_tungstenite::connect_async(req).await {
+        Err(tokio_tungstenite::tungstenite::Error::Http(resp)) => assert_eq!(resp.status(), 403),
+        other => panic!("expected 403, got {:?}", other.map(|_| ())),
+    }
+
+    // The token in the subprotocol list works from any origin.
+    let mut req = format!("ws://{addr}/ws").into_client_request().unwrap();
+    req.headers_mut()
+        .insert("Origin", "https://other-pc.example:8443".parse().unwrap());
+    req.headers_mut().insert(
+        "Sec-WebSocket-Protocol",
+        format!("web-stream, web-stream.auth.{token}")
+            .parse()
+            .unwrap(),
+    );
+    let (mut ws, resp) = tokio_tungstenite::connect_async(req).await.unwrap();
+    assert_eq!(
+        resp.headers().get("sec-websocket-protocol").unwrap(),
+        "web-stream"
+    );
+    let session = events.sessions.recv().await.unwrap();
+    assert_eq!(session.device_name, "iPhone");
+    session
+        .send(HostSignal::Welcome {
+            ice_servers: vec![],
+        })
+        .await;
+    assert!(matches!(
+        next_host_msg(&mut ws).await,
+        HostSignal::Welcome { .. }
+    ));
+
+    // Session status and unpair take the bearer token.
+    let status = bearer(addr, "GET", "/api/session", &token, "").await;
+    assert_eq!(status.status, 200, "{}", status.body);
+    let r = bearer(addr, "POST", "/api/unpair", &token, "{}").await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(
+        bearer(addr, "GET", "/api/session", &token, "").await.status,
+        401
+    );
+}
+
+async fn bearer(addr: SocketAddr, method: &str, path: &str, token: &str, body: &str) -> Http {
+    let mut s = TcpStream::connect(addr).await.unwrap();
+    let req = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\nOrigin: https://other-pc.example:8443\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    s.write_all(req.as_bytes()).await.unwrap();
+    let mut raw = String::new();
+    s.read_to_string(&mut raw).await.unwrap();
+    let (head, body) = raw.split_once("\r\n\r\n").unwrap();
+    Http {
+        status: head[9..12].parse().unwrap(),
+        headers: head.to_string(),
+        body: body.to_string(),
+    }
+}

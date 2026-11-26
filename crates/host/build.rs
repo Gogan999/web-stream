@@ -1,6 +1,5 @@
-//! Embeds the web client (`web/index.html`, `style.css`, the manifest,
-//! `icons/*.png` and `js/`) in the binary, so the client served is always the one this host
-//! was built with. `--web-root` still overrides it.
+//! Embeds the web client (`web/index.html`, `style.css`, the manifest, `sw.js`,
+//! `icons/*.png` and `js/`) in the binary.
 
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
@@ -8,7 +7,7 @@ use std::path::{Path, PathBuf};
 fn main() {
     let web = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../web");
     let mut files: Vec<(String, PathBuf)> = Vec::new();
-    for name in ["index.html", "style.css", "manifest.webmanifest"] {
+    for name in ["index.html", "style.css", "manifest.webmanifest", "sw.js"] {
         files.push((name.to_string(), web.join(name)));
     }
     let js = web.join("js");

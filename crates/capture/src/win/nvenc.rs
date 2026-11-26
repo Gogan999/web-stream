@@ -369,6 +369,7 @@ impl<M: Send + 'static> NvEncoder<M> {
                 .spawn(move || {
                     let _ =
                         unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST) };
+                    super::enter_mmcss();
                     output_loop(session, pending, returned_tx, failed, on_output)
                 })
                 .map_err(|e| CaptureError::Platform(format!("spawn encoder output thread: {e}")))?,

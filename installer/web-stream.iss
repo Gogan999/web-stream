@@ -69,18 +69,15 @@ SolidCompression=yes
 UninstallDisplayIcon={app}\{#AppExe}
 UninstallDisplayName={#AppName}
 SetupLogging=yes
-; The tray app's single-instance mutex: setup and uninstall ask to quit it
-; from the tray first, so it can put back a changed resolution and remove
-; its router forwards.
-AppMutex=Local\web-stream-host-gui
 CloseApplications=no
 RestartIfNeededByRun=no
 
 [Messages]
 SelectTasksLabel2=Choose what to set up, then click Install.
 WizardSelectTasks=Set up web-stream host
-SetupAppRunningError=web-stream host is running. Quit it from its tray icon (right-click, Quit), then click OK.
-UninstallAppRunningError=web-stream host is running. Quit it from its tray icon (right-click, Quit), then click OK.
+
+[CustomMessages]
+AppStillRunning=web-stream host is still running. Quit it from its tray icon (right-click, Quit), then click Retry.
 
 [Tasks]
 Name: "gamepad"; Description: "Gamepad driver (ViGEmBus), so controllers in the browser work in games"
@@ -110,7 +107,8 @@ Filename: "{app}\{#AppExe}"; Parameters: "setup mic-driver"; Tasks: mic; Flags: 
 ; settings), installed with the defaults if newly asked for.
 Filename: "{app}\{#AppExe}"; Parameters: "service update --quiet"; Check: ServiceInstalled; Flags: runhidden; StatusMsg: "Updating the service..."
 Filename: "{app}\{#AppExe}"; Parameters: "service install --quiet"; Tasks: service; Check: not ServiceInstalled; Flags: runhidden; StatusMsg: "Installing the service..."
-Filename: "{app}\{#AppExe}"; Description: "Open web-stream host"; Flags: postinstall nowait runasoriginaluser skipifsilent; Check: not HasParam('/RELAUNCH')
+Filename: "{app}\{#AppExe}"; Description: "Open web-stream host"; Flags: postinstall nowait runasoriginaluser skipifsilent; Check: not HasParam('/RELAUNCH') and not AppWasRunning
+Filename: "{app}\{#AppExe}"; Parameters: "--hidden"; Flags: nowait runasoriginaluser; Check: AppWasRunning and not HasParam('/RELAUNCH')
 ; The tray app's own updater runs this setup with /SILENT /RELAUNCH: start the
 ; app again, as the user who clicked Update (not the administrator UAC
 ; elevated to), once everything is installed.
@@ -131,6 +129,27 @@ Type: dirifempty; Name: "{app}"
 [Code]
 const
   RunKey = 'Software\Microsoft\Windows\CurrentVersion\Run';
+  UninstallKey = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{918435C9-8423-4488-9252-A4724B1CB18E}_is1';
+  InstanceMutex = 'Local\web-stream-host-gui';
+  QuitEvent = 'Local\web-stream-host-gui-quit';
+  EVENT_MODIFY_STATE = $0002;
+  QuitTimeoutMs = 20000;
+
+var
+  WasInstalled: Boolean;
+  AppRunningAtStart: Boolean;
+
+function OpenEvent(DesiredAccess: DWORD; InheritHandle: BOOL; Name: String): THandle;
+  external 'OpenEventW@kernel32.dll stdcall';
+function SetEvent(Event: THandle): BOOL;
+  external 'SetEvent@kernel32.dll stdcall';
+function CloseHandle(Handle: THandle): BOOL;
+  external 'CloseHandle@kernel32.dll stdcall';
+
+function AppWasRunning: Boolean;
+begin
+  Result := AppRunningAtStart;
+end;
 
 function SteamMicAvailable: Boolean;
 begin
@@ -155,6 +174,70 @@ begin
   for I := 1 to ParamCount do
     if CompareText(ParamStr(I), Name) = 0 then
       Result := True;
+end;
+
+function IsSilentRun: Boolean;
+begin
+  Result := HasParam('/SILENT') or HasParam('/VERYSILENT');
+end;
+
+// Signals the tray app's quit event and waits for its single-instance mutex to go.
+function QuitRunningApp: Boolean;
+var
+  Event: THandle;
+  Waited: Integer;
+begin
+  Result := not CheckForMutexes(InstanceMutex);
+  if Result then
+    Exit;
+  AppRunningAtStart := True;
+  Event := OpenEvent(EVENT_MODIFY_STATE, False, QuitEvent);
+  if Event <> 0 then
+  begin
+    SetEvent(Event);
+    CloseHandle(Event);
+  end;
+  Waited := 0;
+  while CheckForMutexes(InstanceMutex) and (Waited < QuitTimeoutMs) do
+  begin
+    Sleep(250);
+    Waited := Waited + 250;
+  end;
+  Result := not CheckForMutexes(InstanceMutex);
+end;
+
+// Closes the tray app; asks the user only if it does not quit by itself.
+function EnsureAppClosed(Silent: Boolean): Boolean;
+begin
+  Result := QuitRunningApp;
+  while not Result do
+  begin
+    if Silent then
+    begin
+      Log('web-stream host did not quit');
+      Exit;
+    end;
+    if MsgBox(CustomMessage('AppStillRunning'), mbError, MB_RETRYCANCEL) = IDCANCEL then
+      Exit;
+    Result := QuitRunningApp;
+  end;
+end;
+
+function InitializeSetup: Boolean;
+begin
+  WasInstalled := RegValueExists(HKLM, UninstallKey, 'UninstallString');
+  Result := EnsureAppClosed(IsSilentRun);
+end;
+
+function InitializeUninstall: Boolean;
+begin
+  Result := EnsureAppClosed(UninstallSilent);
+end;
+
+// Updating an installed copy is one click: the previous choices are kept.
+function ShouldSkipPage(PageID: Integer): Boolean;
+begin
+  Result := WasInstalled and ((PageID = wpSelectTasks) or ((PageID = wpFinished) and AppRunningAtStart));
 end;
 
 // "Start with Windows" belongs to the user who ran setup, not to the

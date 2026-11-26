@@ -44,9 +44,10 @@ export function withStereoOpus(sdp) {
 
 export class Session extends EventTarget {
   // `video2` shows the host's second video track, the second monitor, when it has one.
-  constructor({ signalUrl, video, video2 = null }) {
+  constructor({ signalUrl, token = null, video, video2 = null }) {
     super();
     this.signalUrl = signalUrl;
+    this.token = token;
     this.signal = null;
     this.handedOff = false; // the WebSocket is closed and the session runs on the peer connection
     this.video = video;
@@ -70,7 +71,7 @@ export class Session extends EventTarget {
 
   // A fresh WebSocket; the host answers it with welcome and a new offer.
   async openSignal() {
-    const signal = new Signaling(this.signalUrl);
+    const signal = new Signaling(this.signalUrl, this.token);
     this.signal = signal;
     signal.addEventListener('close', (e) => {
       if (this.closed || signal !== this.signal || this.handedOff) return;
@@ -131,7 +132,12 @@ export class Session extends EventTarget {
       if (lane > 1) return;
       s.addTrack(e.track);
       if (video.srcObject !== s) video.srcObject = s;
-      video.play().catch(() => {});
+      video.play().catch(() => {
+        // Autoplay with sound refused (iOS without a tap): play muted until the next tap.
+        video.muted = true;
+        video.play().catch(() => {});
+        this.dispatchEvent(new Event('muted'));
+      });
     };
     pc.ondatachannel = ({ channel }) => this.onChannel(channel);
     pc.onicecandidate = (e) => {

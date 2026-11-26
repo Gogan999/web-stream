@@ -3,9 +3,9 @@
 * { touch-action: pan-x pan-y; }
 [hidden] { display: none !important; }
 html, body { margin: 0; height: 100%; background: #000; color: #ddd; font: 13px system-ui, sans-serif; }
-body { display: flex; flex-direction: column; height: 100dvh; overscroll-behavior: none; }
+body { display: flex; flex-direction: column; height: 100vh; height: var(--app-height, 100dvh); overscroll-behavior: none; }
 
-#bar { position: relative; z-index: 2; display: flex; align-items: center; gap: 8px; padding: 4px 8px; background: #1b1b1b; border-bottom: 1px solid #333; }
+#bar { position: relative; z-index: 2; display: flex; align-items: center; gap: 8px; padding: max(4px, env(safe-area-inset-top)) 8px 4px; background: #1b1b1b; border-bottom: 1px solid #333; }
 #bar button, #bar select { font: inherit; color: #eee; background: #2b2b2b; border: 1px solid #444; padding: 2px 8px; }
 #bar select { max-width: 160px; text-overflow: ellipsis; }
 #bar button:hover:not(:disabled) { background: #383838; }
@@ -75,13 +75,30 @@ body.dual #video, body.dual #video2 { flex: 1 1 0; min-width: 0; width: auto; }
 #stats .warn { color: #fd5; }
 #stats .bad { color: #f77; font-weight: bold; }
 
-#pair { margin: 32px auto; max-width: 420px; display: flex; flex-direction: column; gap: 10px; }
-#pair h1 { font-size: 18px; margin: 0; }
-#pair label { display: flex; flex-direction: column; gap: 4px; }
-#pair input, #pair button { font: inherit; color: #eee; background: #2b2b2b; border: 1px solid #444; padding: 6px 8px; }
-#pair-code { font-size: 20px; letter-spacing: 6px; }
-#pair-msg { color: #e77; min-height: 1em; margin: 0; }
-body.unpaired #stage, body.unpaired #bar > :not(#status) { display: none; }
+#pair, #add-pc { margin: max(32px, env(safe-area-inset-top)) auto 32px; padding: 0 max(16px, env(safe-area-inset-right)) 0 max(16px, env(safe-area-inset-left)); max-width: 452px; width: 100%; display: flex; flex-direction: column; gap: 10px; overflow-y: auto; }
+#pair h1, #add-pc h1 { font-size: 18px; margin: 0; }
+#pair label, #add-pc label { display: flex; flex-direction: column; gap: 4px; }
+#pair input, #pair button, #add-pc input, #add-pc button { font: inherit; color: #eee; background: #2b2b2b; border: 1px solid #444; padding: 6px 8px; }
+#pair-code, #add-code { font-size: 20px; letter-spacing: 6px; }
+#pair-msg, #add-msg { color: #e77; min-height: 1em; margin: 0; }
+#add-pc .row { display: flex; gap: 8px; }
+#add-pc .row button { flex: 1; }
+.hint-block { margin: 0; padding: 8px; border: 1px solid #5a4a20; background: #2a2414; color: #ddc; line-height: 1.4; }
+.hint-block a, #add-pc a { color: #8bb4ff; }
+#pair button.link { background: none; border: 0; color: #8bb4ff; text-decoration: underline; padding: 0; align-self: flex-start; }
+body.unpaired #stage, body.unpaired #bar > :not(#status), body.adding #stage, body.adding #bar > :not(#status) { display: none; }
+
+/* Saved PCs, under the Connect button. */
+#pcs { display: flex; flex-direction: column; align-items: stretch; gap: 8px; width: min(360px, 100%); }
+#pc-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+#pc-list:empty { display: none; }
+#pc-list li { display: flex; gap: 6px; }
+#pc-list .pc-connect { flex: 1; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; min-height: 48px; padding: 6px 12px; font: 15px system-ui, sans-serif; color: #eee; background: #222; border: 1px solid #444; border-radius: 6px; text-align: left; }
+#pc-list .pc-connect small { color: #999; font-size: 12px; }
+#pc-list li[aria-current="true"] .pc-connect { border-color: #5d7399; background: #263045; }
+#pc-list .pc-remove { flex: 0 0 48px; font-size: 20px; color: #bbb; background: #222; border: 1px solid #444; border-radius: 6px; }
+#pc-add { align-self: center; font: 14px system-ui, sans-serif; color: #ccc; background: none; border: 1px dashed #555; border-radius: 6px; padding: 8px 16px; min-height: 40px; }
+#stage-connect { overflow-y: auto; }
 
 /* Touch: overlay buttons on the stream (they stay in fullscreen), the extra keys row and the hidden
    textarea the phone keyboard types into. */
@@ -112,9 +129,9 @@ body.fake-fs #bar { display: none; }
 }
 @media (pointer: coarse) {
   .hint { display: none; }
-  #bar { gap: 6px; padding: 6px max(8px, env(safe-area-inset-right)) 6px max(8px, env(safe-area-inset-left)); }
+  #bar { gap: 6px; padding: max(6px, env(safe-area-inset-top)) max(8px, env(safe-area-inset-right)) 6px max(8px, env(safe-area-inset-left)); }
   #bar button, #bar select { font-size: 15px; min-height: 36px; padding: 4px 10px; }
   #bar input[type="checkbox"] { width: 20px; height: 20px; }
-  #pair { margin: 16px; }
-  #pair input, #pair button { font-size: 16px; min-height: 40px; }
+  #pair, #add-pc { margin-top: max(16px, env(safe-area-inset-top)); }
+  #pair input, #pair button, #add-pc input, #add-pc button { font-size: 16px; min-height: 44px; }
 }

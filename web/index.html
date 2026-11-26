@@ -10,8 +10,9 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="web-stream">
-<meta name="apple-mobile-web-app-status-bar-style" content="black">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="format-detection" content="telephone=no">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self' https: wss:; worker-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'">
 <title>web-stream</title>
 <link rel="stylesheet" href="style.css">
 <script type="module" src="js/main.js"></script>
@@ -19,14 +20,13 @@
 <body>
 <header id="bar">
   <button id="connect" type="button">Connect</button>
+  <select id="pc-quick" aria-label="PC" title="Switch to another saved PC" hidden></select>
   <span id="status" data-state="idle">Not connected</span>
   <span class="spacer"></span>
   <button id="clipboard" type="button" hidden title="Send this device's clipboard to the host. When the host has copied something new that this browser could not store yet, it reads Copy from PC: press it to store it here.">Clipboard</button>
-  <!-- Quick switch, shown when the host has 2+ displays (the same choice as Settings > Display). -->
   <select id="display-quick" aria-label="Display" title="Switch the host display (Ctrl+Alt+Shift+1-9)" hidden></select>
   <button id="mouse-toggle" type="button" title="Mouse mode (Ctrl+Alt+Shift+M)"><span class="lead">Mouse: </span><span id="mouse-label">Game</span></button>
   <button id="mic-toggle" type="button" aria-pressed="false" title="Send this browser's microphone to the host">Mic</button>
-  <!-- Hidden until the host's capabilities message says Ctrl+Alt+Del works (service mode). -->
   <button id="sas" type="button" hidden title="Sends Ctrl+Alt+Del to the host, for its sign-in and lock screen. Needs the host to run as the web-stream service.">Ctrl+Alt+Del</button>
   <button id="fullscreen" type="button">Fullscreen</button>
   <button id="files-toggle" type="button" aria-expanded="false" aria-controls="files" aria-haspopup="true" hidden>Files</button>
@@ -44,7 +44,6 @@
   </div>
   <button id="more-toggle" type="button" aria-expanded="false" aria-controls="more" aria-haspopup="true">Settings ▾</button>
   <div id="more" class="panel" role="group" aria-label="Settings">
-    <!-- Settings: what a user changes now and then. Everything set-once is under Advanced (folded; main.js remembers it). -->
     <div class="group">
       <label>Display <select id="display" disabled></select></label>
       <label title="Show a second host display next to the first, each at its own full detail. It is another video stream, so it uses more bandwidth.">Second monitor <select id="display2" disabled></select></label>
@@ -93,7 +92,6 @@
           <button id="unpair" type="button" hidden>Unpair this browser</button>
           <button id="reset-settings" type="button" title="Put every setting on this page back to its default. The host and the pairing are untouched.">Reset to defaults</button>
         </div>
-        <!-- HOOK (Capabilities message): main.js setHostVersion() fills and shows this once the host reports its version. -->
         <p id="version" class="note" hidden></p>
         <p class="hint note shortcuts">Shortcuts, Ctrl+Alt+Shift with: 1–9 display · S stats · L stats level · F fullscreen · M mouse mode · Q release mouse · E send Esc</p>
       </div>
@@ -109,12 +107,30 @@
   <label>Code <input id="pair-code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" disabled></label>
   <button id="pair-confirm" type="submit" disabled>Pair</button>
   <p id="pair-msg" role="status"></p>
+  <button id="pair-other" type="button" class="link">Add a different PC instead</button>
+</form>
+<form id="add-pc" hidden>
+  <h1>Add a PC</h1>
+  <p>Type the PC's address from its web-stream window, or paste its pairing link. Press <b>Pair a device</b> on that PC first.</p>
+  <label>Address or pairing link <input id="add-address" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="192.168.1.20:8443" required></label>
+  <label>Device name <input id="add-device-name" maxlength="64" required></label>
+  <button id="add-start" type="button">Request code</button>
+  <label>Code <input id="add-code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" disabled></label>
+  <div class="row">
+    <button id="add-confirm" type="submit" disabled>Pair and save</button>
+    <button id="add-cancel" type="button">Cancel</button>
+  </div>
+  <p id="add-msg" role="status"></p>
+  <p id="add-trust" class="hint-block" hidden>This device can't reach <span id="add-trust-host"></span>. If the PC is on and the address is right, this device has to trust the PC's certificate once: <a id="add-trust-ca" target="_blank" rel="noopener">install the certificate</a>, then on iPhone turn it on in Settings &gt; General &gt; About &gt; Certificate Trust Settings. <a id="add-trust-open" target="_blank" rel="noopener">Open the PC's page</a> to check it answers.</p>
 </form>
 <main id="stage" tabindex="-1">
-  <!-- Not connected: one large button in the middle. HOOK (Capabilities message): #stage-host gets the host's name. -->
   <div id="stage-connect">
     <button id="connect-big" type="button">Connect</button>
     <p id="stage-host" hidden></p>
+    <section id="pcs" aria-label="Saved PCs">
+      <ul id="pc-list"></ul>
+      <button id="pc-add" type="button">Add a PC</button>
+    </section>
   </div>
   <div id="view">
     <video id="video" autoplay playsinline disablepictureinpicture disableremoteplayback></video>

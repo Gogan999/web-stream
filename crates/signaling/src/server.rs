@@ -35,16 +35,15 @@ const MAX_WS_MESSAGE: usize = 64 * 1024;
 const MAX_API_BODY: usize = 4 * 1024;
 /// Every HTTP request, including the `/ws` upgrade, must finish in this time.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
-/// Server pings keep NATs open; a socket silent for `WS_IDLE` is dropped.
+/// Server ping interval; a socket silent for `WS_IDLE` is dropped.
 const WS_PING_EVERY: Duration = Duration::from_secs(15);
 const WS_IDLE: Duration = Duration::from_secs(45);
-/// A browser that stops reading must not stall the session loop.
+/// Send timeout on the signaling socket.
 const WS_SEND_TIMEOUT: Duration = Duration::from_secs(5);
 const CSP: &str = "default-src 'self'; connect-src 'self' https: wss:; img-src 'self' data: blob:; \
                    media-src 'self' blob:; style-src 'self' 'unsafe-inline'; object-src 'none'; \
                    base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
-/// The page asks only for the microphone; nothing it embeds or a script injected into it may reach
-/// the rest.
+/// Permissions-Policy: the microphone only.
 const PERMISSIONS_POLICY: &str = "microphone=(self), camera=(), geolocation=(), payment=(), \
                                   usb=(), serial=(), hid=(), display-capture=()";
 

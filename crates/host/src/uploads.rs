@@ -18,7 +18,7 @@ pub const MAX_SIZE: u64 = 4 << 30;
 /// Written bytes between acks.
 const ACK_EVERY: u64 = 256 * 1024;
 const _: () = assert!(ACK_EVERY <= FILE_WINDOW);
-/// Chunks waiting to be written; the browser's window keeps it at about 64.
+/// Chunks waiting to be written.
 const QUEUE: usize = 256;
 /// Files one browser session may send, and their total size.
 const SESSION_FILES: u32 = 500;

@@ -5,7 +5,7 @@ import { LIMITS, lossLevel, bandwidthShort, decodeSlow, encodeSlow, moving as is
 
 export const LADDER_KBPS = Object.freeze([10000, 20000, 30000, 50000, 80000, 120000, 150000]);
 export const FLOOR_KBPS = 5000;
-// Keep this much below the highest bitrate that passed, for the network's bad moments.
+// Keep this much below the highest bitrate that passed.
 export const HEADROOM = 0.85;
 const SETTLE_MS = 3000;
 const MEASURE_MS = 4000;
@@ -27,7 +27,7 @@ export function problem(m, config, { encode = true } = {}) {
   return null;
 }
 
-// Whether the picture was moving: the host encodes at the full frame rate only then.
+// Whether the picture was moving.
 export function moving(m, config) {
   return isMoving(m.hostFps, config.fps);
 }

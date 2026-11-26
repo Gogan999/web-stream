@@ -49,7 +49,7 @@ pub const LANES: usize = 2;
 /// What a session tracks for one video stream.
 #[derive(Default)]
 struct LaneState {
-    /// When the last keyframe went into the send queue, while the queue has not emptied.
+    /// When the last keyframe went into the send queue, while the queue has not emptied since.
     keyframe_draining: Option<Instant>,
     /// `frame_index` a non-keyframe must have to be sent: the one right after the last frame sent.
     next_index: Option<u64>,
@@ -67,7 +67,7 @@ pub struct Session {
     /// Media can flow: DTLS is up and ICE is not disconnected.
     connected: bool,
     dtls_up: bool,
-    /// Disconnected has been reported.
+    /// Disconnected has been reported since the last Connected.
     down: bool,
     max_resend_age: Duration,
     max_send_delay: Duration,
@@ -356,8 +356,7 @@ impl Session {
         }
     }
 
-    /// The first frame the browser has not been sent, once a keyframe has gone out: a frame after a
-    /// gap must not build on it or anything later.
+    /// The first frame the browser has not been sent, once a keyframe has gone out.
     pub fn next_index(&self, lane: usize) -> Option<u64> {
         self.lanes[lane].next_index
     }

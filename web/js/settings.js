@@ -6,9 +6,8 @@ export const PRIORITIES = Object.freeze(['smooth', 'balanced', 'sharp', 'source'
 export const PRIORITY_QUALITY = Object.freeze({ smooth: 'speed', balanced: 'balanced', sharp: 'clarity', source: 'source' });
 export const QUALITY_PRIORITY = Object.freeze({ speed: 'smooth', balanced: 'balanced', clarity: 'sharp', source: 'source' });
 
-// What choosing Source sets besides the preset: host-native pixels (no scaling blur), no automatic
-// shrinking, and a bitrate with room for it; the host keeps each frame sharp and lowers the frame
-// rate, up to the one chosen, to fit the bitrate.
+// What choosing Source sets besides the preset: host-native pixels, no automatic shrinking, and a
+// bitrate with room for it.
 export const SOURCE_PRESET = Object.freeze({ resolution: 'native', fps: 60, minScale: 100, bitrate: 'auto' });
 // Video codecs the host encodes, as VideoConfig names them, with the browser's MIME type for each.
 export const CODECS = Object.freeze({ h264: 'video/H264', h265: 'video/H265', av1: 'video/AV1' });

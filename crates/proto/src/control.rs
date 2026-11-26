@@ -96,9 +96,7 @@ pub enum ClientControl {
     CancelUpload {
         id: FileId,
     },
-    /// Whether to send [`HostControl::CursorPosition`]: the browser draws the host pointer itself
-    /// in relative mouse mode, while in absolute mode its own pointer is already where the host's
-    /// is.
+    /// Whether to send [`HostControl::CursorPosition`].
     SetCursorPositions {
         enabled: bool,
     },
@@ -312,8 +310,7 @@ pub struct ClientStats {
     /// Times the picture froze in the interval.
     #[serde(default)]
     pub freezes: u32,
-    /// The page is in the background, where browsers throttle video: the numbers say nothing about
-    /// the PC.
+    /// The page is in the background.
     #[serde(default)]
     pub hidden: bool,
 }

@@ -9,15 +9,14 @@ use anyhow::{Context, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-/// Where the newest non-pre-release's manifest is; GitHub redirects to the asset, and `latest`
-/// skips pre-releases.
+/// Where the newest non-pre-release's manifest is.
 pub const MANIFEST_URL: &str =
     "https://github.com/Gogan999/web-stream/releases/latest/download/manifest.json";
 const DOWNLOAD_BASE: &str = "https://github.com/Gogan999/web-stream/releases/download";
 const PRODUCT: &str = "web-stream-host";
-/// The manifest is a few KiB; refuse anything absurd.
+/// Largest manifest accepted.
 const MAX_MANIFEST: u64 = 1 << 20;
-/// Setup is tens of MiB; a manifest claiming more than this is wrong.
+/// Largest installer size a manifest may claim.
 const MAX_INSTALLER: u64 = 1 << 30;
 const TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -217,8 +216,7 @@ fn fetch_to(
     Ok(())
 }
 
-/// Opens the downloaded installer and checks its size and SHA-256 again, right before it is run: it
-/// sits in a folder the user can write to.
+/// Opens the downloaded installer and checks its size and SHA-256 again, right before it is run.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub fn open_verified(release: &Release, path: &Path) -> anyhow::Result<std::fs::File> {
     let mut opts = std::fs::OpenOptions::new();

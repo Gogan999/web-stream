@@ -24,9 +24,9 @@ use crate::convert::{Converter, InputFormat, SAMPLE_RATE, SampleFormat};
 use crate::encode::{FRAME_DURATION, FRAME_SAMPLES, OpusFrameEncoder};
 use crate::{AudioError, LoopbackConfig, Result};
 
-/// 20 ms of engine buffer: enough headroom for a 5 ms polling loop.
+/// 20 ms of engine buffer.
 const BUFFER_HNS: i64 = 200_000;
-/// With nothing playing, loopback delivers no packets at all.
+/// Silence is sent after this long without packets.
 const SILENCE_AFTER: Duration = Duration::from_millis(30);
 /// At most 100 ms of silence per fill.
 const MAX_SILENCE_FRAMES: usize = 10;

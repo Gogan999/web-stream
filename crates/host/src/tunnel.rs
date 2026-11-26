@@ -58,8 +58,7 @@ impl Tunnel {
         }
     }
 
-    /// The public IPv4 address, once known: the browser's way in through a tunnel says nothing
-    /// about it.
+    /// The public IPv4 address, once known.
     pub fn public_ip(&self) -> watch::Receiver<Option<IpAddr>> {
         self.public_ip.clone()
     }
@@ -273,8 +272,7 @@ fn mapped_address(msg: &[u8], id: &[u8; 12]) -> Option<Ipv4Addr> {
     plain
 }
 
-/// cloudflared is ended with the host even when the host is killed: on Windows it goes in a job
-/// that closes with this process.
+/// cloudflared is ended with the host even when the host is killed.
 #[cfg(windows)]
 mod job {
     use windows::Win32::Foundation::{CloseHandle, HANDLE};

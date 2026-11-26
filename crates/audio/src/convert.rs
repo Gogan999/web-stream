@@ -89,7 +89,7 @@ pub struct Converter {
 }
 
 impl Converter {
-    /// `input.rate` must be non-zero; the WASAPI layer rejects 0 before here.
+    /// `input.rate` must be non-zero.
     pub fn new(input: InputFormat) -> Self {
         assert!(input.rate > 0, "sample rate must be non-zero");
         Self {

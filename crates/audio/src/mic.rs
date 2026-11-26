@@ -47,8 +47,7 @@ const RESET_AFTER_LATE: u32 = 8;
 /// Pulls in a row with the backlog above target before one packet is left out: about a second of 20
 /// ms packets.
 const DRIFT_PULLS: u32 = 50;
-/// Frames (per channel) crossfaded over the cut where a packet is left out: 5 ms, long enough not
-/// to click.
+/// Frames (per channel) crossfaded over the cut where a packet is left out: 5 ms.
 const DRIFT_FADE_FRAMES: usize = 240;
 
 #[derive(Debug, PartialEq, Eq)]

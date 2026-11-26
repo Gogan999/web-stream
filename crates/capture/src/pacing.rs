@@ -147,8 +147,7 @@ impl Backpressure {
 
 /// Least time between two bitrate changes to the encoder.
 pub(crate) const BITRATE_MIN_GAP: Duration = Duration::from_millis(250);
-/// A cut at least this deep goes through at once: an encoder above the send rate backs the queue
-/// up, and frames then go out late.
+/// A cut at least this deep goes through at once.
 pub(crate) const BITRATE_URGENT_CUT: f64 = 0.85;
 
 /// Coalesces bitrate changes.
@@ -182,7 +181,7 @@ impl BitrateGate {
         (urgent || rested).then(|| self.pending.take()).flatten()
     }
 
-    /// Any waiting change, due or not: the encoder is being reconfigured anyway.
+    /// Any waiting change, due or not.
     pub(crate) fn take_now(&mut self) -> Option<u32> {
         self.pending.take()
     }

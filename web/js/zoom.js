@@ -43,7 +43,7 @@ export class ZoomView {
     return this.v.s > 1;
   }
 
-  // Two-finger drags pan only while zoomed in; at fit there is nothing to pan.
+  // Two-finger drags pan only while zoomed in.
   get pans() {
     return this.panMode && this.zoomed;
   }

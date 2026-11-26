@@ -18,8 +18,7 @@ use crate::serve::Event;
 const READ_BLOCK: usize = 256 * 1024;
 /// Share of the bandwidth estimate a file may use.
 const BWE_SHARE: f64 = 0.25;
-/// Least a file is paced to, in bits per second: enough to finish a small file on a link too weak
-/// to spare a quarter of itself.
+/// Least a file is paced to, in bits per second.
 const MIN_RATE_BPS: f64 = 100_000.0;
 /// Bytes the pacer lets out in one burst.
 const BURST: f64 = 64.0 * 1024.0;
@@ -84,8 +83,7 @@ pub enum FileMsg {
     Cancel(FileId),
     /// The `file` channel drained.
     ChannelLow,
-    /// Bandwidth estimate, bits per second, while video streams; `None` without video, when there
-    /// is nothing to leave room for.
+    /// Bandwidth estimate, bits per second, while video streams; `None` without video.
     Bitrate(Option<u64>),
     /// The same browser is on a new peer connection: what was being sent went with the old one's
     /// channel.

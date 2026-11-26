@@ -27,8 +27,7 @@ pub fn available() -> bool {
     RESTART.get().is_some()
 }
 
-/// Whether the running program was built in a git clone that has `scripts\update.ps1`: the only
-/// kind of install that can update from the browser.
+/// Whether the running program was built in a git clone that has `scripts\update.ps1`.
 pub fn can_update_from_source() -> bool {
     std::env::current_exe().is_ok_and(|exe| script_for(&exe).is_ok())
 }

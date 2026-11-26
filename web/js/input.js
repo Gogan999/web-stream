@@ -155,9 +155,7 @@ export class InputCapture {
     }, opt);
 
     if ('ontouchstart' in window) {
-      // Touch events where there are any: in WebKit (every iOS browser) only a non-passive
-      // touchstart/touchmove that cancels stops the page's own pinch, and its touch pointer events
-      // get cancelled when a second finger lands.
+      // Touch events where there are any.
       const each = (e, fn) => {
         e.preventDefault();
         const t = performance.now();
@@ -301,8 +299,7 @@ export class InputCapture {
     }
   }
 
-  // input-motion may lose the last position before the pointer stops, leaving the host cursor short
-  // of it.
+  // Re-sends the resting position on the reliable channel.
   settleAbs() {
     clearTimeout(this.absSettleTimer);
     this.absSettleTimer = setTimeout(() => {

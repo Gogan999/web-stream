@@ -20,7 +20,7 @@ const MAX_TCP_PER_IP: usize = 2;
 const MAX_FRAME: usize = u16::MAX as usize;
 /// An ICE-TCP connection must open with a STUN check this soon.
 const TCP_FIRST_STUN: Duration = Duration::from_secs(2);
-/// Browsers send consent checks every few seconds; silence this long means the peer is gone.
+/// Silence this long on an ICE-TCP connection means the peer is gone.
 const TCP_IDLE: Duration = Duration::from_secs(30);
 /// Queued outgoing frames per ICE-TCP connection.
 const TCP_WRITE_QUEUE: usize = 16;

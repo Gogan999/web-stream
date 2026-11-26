@@ -632,7 +632,7 @@ pub fn link_pipe() -> anyhow::Result<(Owned, Owned)> {
 }
 
 /// A pipe the network host writes one byte to as the first thing its own code does, before it
-/// touches the network:.
+/// touches the network.
 pub fn alive_pipe() -> anyhow::Result<(Owned, Owned)> {
     let sa = SECURITY_ATTRIBUTES {
         nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,

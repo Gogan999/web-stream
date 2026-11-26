@@ -112,8 +112,7 @@ export class Session extends EventTarget {
     const pc = new RTCPeerConnection({ iceServers: this.iceServers, bundlePolicy: 'max-bundle', rtcpMuxPolicy: 'require' });
     this.pc = pc;
 
-    // One stream and video element per video track: a video element plays only one video track of
-    // its stream.
+    // One stream and video element per video track.
     const stream = new MediaStream();
     const stream2 = new MediaStream();
     pc.ontrack = (e) => {

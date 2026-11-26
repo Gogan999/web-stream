@@ -219,7 +219,7 @@ test('client streams from mock host, sends input and switches display', { timeou
       await client.waitForTimeout(100);
     }
   };
-  // Close it again if it is open: Escape can be taken by the select that was just used.
+  // Close it again if it is open.
   const closeSettings = async () => {
     for (let i = 0; i < 3 && (await client.isVisible('#more')); i++) {
       await client.click('#more-toggle');

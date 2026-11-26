@@ -139,7 +139,7 @@ mod imp {
     const CF_UNICODETEXT: u32 = 13;
     const WM_WORK: u32 = WM_APP + 1;
     const DEBOUNCE_TIMER: usize = 1;
-    /// The clipboard is open in another program for a moment after a copy.
+    /// Tries to open the clipboard while another program holds it.
     const OPEN_TRIES: u32 = 20;
     const OPEN_WAIT: Duration = Duration::from_millis(10);
 
@@ -389,7 +389,7 @@ mod imp {
     }
 
     enum Read {
-        /// No text, or the program that copied it asked not to be monitored (password managers do).
+        /// No text, or the program that copied it asked not to be monitored.
         NoText,
         Text(String),
         /// Over the cap.

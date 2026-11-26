@@ -49,8 +49,7 @@ pub fn describe(e: Event) -> Option<String> {
     })
 }
 
-/// The pairing link's secret as a line for a console the host user reads directly, never for a log:
-/// it pairs a browser without a code while pairing is open.
+/// The pairing link's secret as a line for a console the host user reads directly, never for a log.
 pub fn pairing_link_line(e: &Event) -> Option<String> {
     match e {
         Event::PairingOpened { link, .. } => Some(format!(

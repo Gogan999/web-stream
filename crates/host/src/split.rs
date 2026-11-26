@@ -25,8 +25,7 @@ use crate::serve::{self, Command, Event, Network};
 
 /// The largest frame the network side accepts: well above any keyframe.
 const MAX_UP: usize = 64 << 20;
-/// The largest frame the media side accepts from the network process: a data channel message or a
-/// mic packet, never anywhere near this.
+/// The largest frame the media side accepts from the network process.
 const MAX_DOWN: usize = 4 << 20;
 /// Frames read but not yet handled.
 const READ_QUEUE: usize = 256;
@@ -287,8 +286,7 @@ impl Out {
         }
     }
 
-    /// Bytes not yet written: a network process that stops reading must not make this one queue
-    /// video without bound.
+    /// Bytes not yet written.
     fn queued(&self) -> usize {
         self.queued.load(Ordering::Relaxed)
     }

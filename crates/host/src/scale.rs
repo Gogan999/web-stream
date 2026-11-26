@@ -12,7 +12,7 @@ const MIN_BITS_PER_PIXEL: f64 = 0.04;
 /// How long the bitrate must stay too low before stepping down.
 const DOWN_AFTER: Duration = Duration::from_secs(2);
 /// Without dropped frames, a step down also needs the bitrate to have been too low for all of this
-/// long: longer than the estimate's sawtooth.
+/// long.
 const LOOKBACK: Duration = Duration::from_secs(15);
 /// How long the bitrate must stay comfortably above the next size up's need before stepping up.
 const UP_AFTER: Duration = Duration::from_secs(10);
@@ -26,8 +26,7 @@ const BUSY_SHARE: f64 = 0.5;
 const FLAP_WINDOW: Duration = Duration::from_secs(30);
 /// The longest that doubling makes the wait for a step up.
 const MAX_UP_AFTER: Duration = Duration::from_secs(80);
-/// No step down this soon after a connection starts or the size changes: the bandwidth estimate
-/// starts at 10 Mb/s and takes a moment to climb.
+/// No step down this soon after a connection starts or the size changes.
 const SETTLE: Duration = Duration::from_secs(5);
 
 /// The size to encode at `step` of `width` x `height`: scaled, rounded down to a multiple of 8.
@@ -99,7 +98,7 @@ impl Load {
 #[derive(Debug, Default)]
 pub(crate) struct AutoScale {
     step: usize,
-    /// The first update.
+    /// The first update since the last reset or size change.
     since_change: Option<Instant>,
     low_since: Option<Instant>,
     /// Frames were dropped.

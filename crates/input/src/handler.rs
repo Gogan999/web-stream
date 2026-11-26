@@ -46,8 +46,7 @@ pub enum HandleError {
     Sink(#[from] SinkError),
 }
 
-/// The client resends gamepad state every 100 ms; this many missed resends means the client is gone
-/// and a held stick must not keep the game moving.
+/// Missed 100 ms gamepad resends after which the client counts as gone and its pads are centred.
 pub const GAMEPAD_STALE_AFTER: Duration = Duration::from_millis(500);
 
 /// After a disconnect, gamepad state still in flight on the unordered channel is ignored for this

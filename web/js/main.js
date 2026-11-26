@@ -817,7 +817,7 @@ function sendCursorMode() {
   session?.sendControl({ type: 'setCursorPositions', enabled: ui.mouseMode.value === 'relative' });
 }
 
-// In a window the browser keeps Esc to free the mouse and never passes it on; say how to send one.
+// Tells how to send Esc while windowed.
 let releasingMouse = false;
 let escHintShown = false;
 document.addEventListener('pointerlockchange', () => {
@@ -898,7 +898,7 @@ function setFilesOpen(open) {
   document.body.classList.toggle('files-open', open);
   ui.filesToggle.setAttribute('aria-expanded', String(open));
 }
-// Whether Advanced is unfolded is remembered per browser; storage may be unavailable.
+// Whether Advanced is unfolded is remembered per browser.
 const FOLDS_KEY = 'ws-settings-open';
 try {
   const open = JSON.parse(localStorage.getItem(FOLDS_KEY) ?? 'null');

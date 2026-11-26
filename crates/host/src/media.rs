@@ -42,7 +42,7 @@ const VIDEO_RESTART_DELAY: Duration = Duration::from_secs(1);
 const BWE_HEADROOM: f64 = 0.75;
 /// Increases smaller than this fraction are not passed to the encoder.
 const BITRATE_STEP_UP: f64 = 0.1;
-/// Decreases follow sooner: an encoder above the send rate backs up the queue.
+/// Decreases follow sooner.
 const BITRATE_STEP_DOWN: f64 = 0.02;
 const MIN_KBPS: u32 = 500;
 /// Room above the video ceiling the bandwidth estimate may probe for, for game audio and data
@@ -246,7 +246,7 @@ enum Later {
     /// The connection has been down for [`TRANSFER_GRACE`]: end `peer`'s file transfers if it
     /// hasn't come back.
     TransfersExpire { peer: u64 },
-    /// The connection has been down for [`PARK_FOR`].
+    /// The connection has been down for [`PARK_FOR`] since `session` ended.
     ParkExpire { session: u64 },
 }
 
@@ -355,9 +355,9 @@ struct Media {
     /// Capture and game audio of the last connection, kept running for [`PARK_FOR`] after it
     /// dropped.
     parked: Option<Parked>,
-    /// Frames handed to the transport.
+    /// Frames handed to the transport since the last stats report.
     sent: Arc<Mutex<SentFrames>>,
-    /// Keyframe requests passed to the encoder.
+    /// Keyframe requests passed to the encoder since the last stats report.
     keyframe_requests: Arc<AtomicU32>,
     /// When the browser last asked for a keyframe itself.
     browser_asks: Vec<Instant>,
@@ -740,7 +740,7 @@ impl Media {
         if device != self.transfer_device {
             self.transfer_device = device;
             self.transfers = None;
-            // Nor does another device start from this one's bandwidth.
+            // Another device does not start from this one's bandwidth.
             self.previous_bwe = None;
         } else if self.transfers.is_some() {
             self.to_files(FileMsg::Reconnected);

@@ -12,8 +12,7 @@ use windows::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RRF_RT_REG_DWORD, Reg
 use windows::Win32::System::Threading::{CreateEventW, INFINITE, SetEvent, WaitForSingleObject};
 use windows::core::{s, w};
 
-/// Requests closer together than this are one request: a double click shouldn't open and close the
-/// Ctrl+Alt+Del screen.
+/// Requests closer together than this are one request.
 const MIN_INTERVAL: Duration = Duration::from_secs(2);
 
 /// An auto-reset event the session host can inherit.
@@ -28,8 +27,7 @@ pub fn new_event() -> anyhow::Result<usize> {
     Ok(event.0 as usize)
 }
 
-/// In the session host: asks the service for Ctrl+Alt+Del: the host asks Windows for the secure
-/// attention sequence.
+/// In the session host: asks the service for Ctrl+Alt+Del.
 pub fn request(event: usize) -> Result<(), String> {
     // SAFETY: an event handle the service handed down.
     unsafe { SetEvent(HANDLE(event as *mut _)) }

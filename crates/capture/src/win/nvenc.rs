@@ -125,7 +125,8 @@ enum LockBackoff {
     GiveUp,
 }
 
-/// The retry policy for a busy lock, given the time.
+/// The retry policy for a busy lock, given the time since the completion event and how many retries
+/// have been made.
 fn lock_backoff(since_completed: Duration, retries: u32) -> LockBackoff {
     if since_completed >= FRAME_TIMEOUT {
         LockBackoff::GiveUp
@@ -1064,8 +1065,7 @@ fn apply_rate(
     rc.vbvInitialDelay = rc.vbvBufferSize;
 }
 
-/// The fixed quantizer for the Source quality: low enough that text and thin lines come out as
-/// sharp as 4:2:0 allows.
+/// The fixed quantizer for the Source quality.
 fn source_qp(codec: VideoCodec) -> u32 {
     match codec {
         VideoCodec::H264 | VideoCodec::H265 => 18,

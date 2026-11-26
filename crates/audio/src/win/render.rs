@@ -18,7 +18,7 @@ use crate::convert::CHANNELS;
 use crate::mic::{MicSource, mic_channel};
 use crate::{AudioError, MicConfig, MicReceiver, Result};
 
-/// 10 ms requested; the engine rounds up to what the device needs.
+/// 10 ms requested.
 const BUFFER_HNS: i64 = 100_000;
 
 /// Plays mic audio from a [`MicReceiver`] into the configured device until dropped.

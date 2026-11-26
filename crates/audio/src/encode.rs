@@ -15,8 +15,8 @@ pub const FRAME_DURATION: Duration = Duration::from_millis(10);
 pub const DEFAULT_BITRATE: u32 = 128_000;
 /// Frame lengths the encoder accepts, in milliseconds.
 pub const FRAME_MS: [u32; 2] = [10, 20];
-/// Packet timestamps follow the sample count, not the jittery time each buffer was read; they jump
-/// forward to the wall clock only when it gets this far ahead, never back.
+/// Packet timestamps follow the sample count; they jump forward to the wall clock only when it gets
+/// this far ahead, never back.
 const RESYNC_MICROS: u64 = 80_000;
 
 /// Converts an [`Instant`] to [`MicrosMono`], on the same clock as video frames

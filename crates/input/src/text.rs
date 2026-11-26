@@ -5,7 +5,7 @@
 pub enum TextKey {
     /// A UTF-16 code unit, sent as a `KEYEVENTF_UNICODE` press and release.
     Unit(u16),
-    /// Enter: most programs ignore a Unicode line feed.
+    /// Enter, sent as the key.
     Enter,
     Tab,
 }

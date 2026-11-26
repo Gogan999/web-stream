@@ -36,7 +36,7 @@ const RECOVERY_WAIT: Duration = Duration::from_millis(150);
 /// A new peer connection this soon after the last estimate starts from that estimate rather than
 /// from [`TransportConfig::initial_bitrate_bps`].
 pub const ESTIMATE_KEPT_FOR: Duration = Duration::from_secs(60);
-/// It starts a little under it: the path may have changed.
+/// It starts a little under it.
 pub const KEPT_ESTIMATE_SHARE: f64 = 0.8;
 
 #[derive(Debug, Clone)]
@@ -112,7 +112,7 @@ pub struct TransportStats {
     pub egress_loss: Option<f32>,
     pub bwe: Option<u64>,
     pub bytes_tx: u64,
-    /// What went wrong.
+    /// What went wrong since the last stats.
     pub trouble: Trouble,
 }
 
@@ -775,7 +775,7 @@ impl Transport {
             .clone()
     }
 
-    /// Resolve when the send backlog has changed.
+    /// Resolve when the send backlog has changed since the last time this returned.
     pub async fn backlog_changed(&self) {
         self.shared.backlog_changed.notified().await;
     }

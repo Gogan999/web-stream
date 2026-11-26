@@ -19,8 +19,7 @@ use ws_proto::{CursorImage, CursorKind, MAX_CURSOR_SIDE};
 
 /// Largest pointer bitmap read; it is scaled to [`MAX_CURSOR_SIDE`].
 const MAX_READ_SIDE: u32 = 512;
-/// An unchanged handle is read again this often: a handle can be destroyed and reused for another
-/// image, and an animated cursor keeps its handle.
+/// An unchanged handle is read again this often.
 const REREAD: Duration = Duration::from_secs(1);
 /// How often the reader checks it is on the desktop that shows.
 const DESKTOP_CHECK: Duration = Duration::from_millis(250);

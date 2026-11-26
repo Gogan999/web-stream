@@ -4,8 +4,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-/// Largest pointer image the host sends, per side: Chrome ignores bigger CSS cursors, and the
-/// base64 of one this size (about 87 KB) still fits the data channels' shared 128 KiB send buffer.
+/// Largest pointer image the host sends, per side.
 pub const MAX_CURSOR_SIDE: u32 = 128;
 
 /// One [`crate::HostControl::CursorShape`] message.

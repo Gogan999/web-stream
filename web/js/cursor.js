@@ -5,7 +5,7 @@ import { pictureRect } from './picture.js';
 const CSS_KINDS = new Set(['default', 'pointer', 'text', 'wait', 'progress', 'crosshair', 'move', 'ew-resize',
   'ns-resize', 'nwse-resize', 'nesw-resize', 'not-allowed', 'help', 'none']);
 const MAX_SIDE = 128;
-// The host's id table holds as many and never reuses an id.
+// Cursor images kept, as many as the host's id table.
 const MAX_IMAGES = 256;
 
 // The image of a cursorShape message as { width, height, hotX, hotY, rgba }, or null if malformed.

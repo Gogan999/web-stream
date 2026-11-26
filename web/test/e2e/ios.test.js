@@ -23,10 +23,27 @@ async function mockHost(ctx, base) {
   return page;
 }
 
-const streaming = (page) => page.waitForFunction(() => {
-  const v = document.getElementById('video');
-  return document.getElementById('status').dataset.state === 'connected' && v.videoWidth > 0 && !v.paused;
-}, null, { timeout: 30000 });
+async function streaming(page) {
+  try {
+    await page.waitForFunction(() => {
+      const v = document.getElementById('video');
+      return document.getElementById('status').dataset.state === 'connected' && v.videoWidth > 0 && !v.paused;
+    }, null, { timeout: 30000 });
+  } catch (e) {
+    const state = await page.evaluate(() => {
+      const v = document.getElementById('video');
+      return {
+        status: document.getElementById('status').textContent,
+        state: document.getElementById('status').dataset.state,
+        videoWidth: v.videoWidth, paused: v.paused, muted: v.muted, readyState: v.readyState,
+        tracks: v.srcObject?.getTracks().map((t) => `${t.kind}:${t.readyState}`) ?? null,
+        rtc: typeof RTCPeerConnection, pair: document.getElementById('pair-msg')?.textContent,
+      };
+    }).catch((err) => ({ evaluate: err.message }));
+    throw new Error(`${e.message}\nclient: ${JSON.stringify(state)}\nconsole: ${logs.slice(-20).join(' | ')}`);
+  }
+}
+const logs = [];
 
 test('iPhone (WebKit): saved PCs, streaming, swapping and offline start', { skip, timeout: 180000 }, async (t) => {
   const portA = 20000 + Math.floor(Math.random() * 500);
@@ -46,6 +63,8 @@ test('iPhone (WebKit): saved PCs, streaming, swapping and offline start', { skip
   t.after(() => browser.close());
   const ctx = await browser.newContext({ ...devices['iPhone 13 landscape'] });
   const client = await ctx.newPage();
+  client.on('console', (m) => logs.push(`${m.type()}: ${m.text()}`));
+  hostA.on('console', (m) => logs.push(`hostA ${m.type()}: ${m.text()}`));
   const errors = [];
   client.on('pageerror', (e) => errors.push(e.message));
   await client.goto(`${baseA}/`);

@@ -19,7 +19,9 @@ let host = null;
 let lastCode = null;
 let client = null;
 
-const cookieToken = (req) => /(?:^|;\s*)__Host-ws_device=([^;]+)/.exec(req.headers.cookie || '')?.[1];
+// Plain HTTP: no Secure or __Host- prefix, which WebKit refuses without TLS.
+const COOKIE = 'ws_device';
+const cookieToken = (req) => new RegExp(`(?:^|;\\s*)${COOKIE}=([^;]+)`).exec(req.headers.cookie || '')?.[1];
 const bearerToken = (req) => /^Bearer (.+)$/.exec(req.headers.authorization || '')?.[1];
 const protocolToken = (req) => (req.headers['sec-websocket-protocol'] || '').split(',').map((p) => p.trim())
   .find((p) => p.startsWith('web-stream.auth.'))?.slice('web-stream.auth.'.length);
@@ -69,11 +71,11 @@ async function api(req, res, url) {
     const token = crypto.randomBytes(24).toString('base64url');
     devices.set(token, p.name);
     if (body.want_token) return json(res, 200, { paired: true, token });
-    return json(res, 200, { paired: true }, { 'set-cookie': `__Host-ws_device=${token}; HttpOnly; Secure; SameSite=Strict; Path=/` });
+    return json(res, 200, { paired: true }, { 'set-cookie': `${COOKIE}=${token}; HttpOnly; SameSite=Strict; Path=/` });
   }
   if (url.pathname === '/api/unpair') {
     devices.delete(requestToken(req));
-    return json(res, 200, {}, { 'set-cookie': '__Host-ws_device=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0' });
+    return json(res, 200, {}, { 'set-cookie': `${COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0` });
   }
   return json(res, 404, { error: 'not_found' });
 }

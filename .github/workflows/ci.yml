@@ -18,7 +18,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest]
+        os: [windows-latest, ubuntu-24.04]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -33,11 +33,11 @@ jobs:
       - name: test
         run: cargo test --workspace
       - uses: actions/setup-node@v4
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-24.04'
         with:
           node-version: 22
       - name: web client with the host
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-24.04'
         working-directory: web
         run: |
           cargo build -p ws-host --example test-host
@@ -64,7 +64,7 @@ jobs:
         run: ./installer/test-web-install.ps1 -Setup target/installer/web-stream-setup-0.0.0-ci.exe
 
   transport-e2e:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

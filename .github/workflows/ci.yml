@@ -58,6 +58,10 @@ jobs:
           ./installer/fetch-redist.ps1
           ./installer/build.ps1 -Version 0.0.0-ci
           ./installer/test-install.ps1 -Setup target/installer/web-stream-setup-0.0.0-ci.exe
+      - name: one-line installer
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: ./installer/test-web-install.ps1 -Setup target/installer/web-stream-setup-0.0.0-ci.exe
 
   transport-e2e:
     runs-on: ubuntu-latest

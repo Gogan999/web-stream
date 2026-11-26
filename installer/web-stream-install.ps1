@@ -14,7 +14,7 @@ function Install-WebStream {
     $ProgressPreference = 'SilentlyContinue'
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
-    $repo = 'https://github.com/Gogan999/web-stream/releases'
+    $repo = if ($env:WEB_STREAM_RELEASES) { $env:WEB_STREAM_RELEASES.TrimEnd('/') } else { 'https://github.com/Gogan999/web-stream/releases' }
     $uninstallKey = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\{918435C9-8423-4488-9252-A4724B1CB18E}_is1'
 
     if ([Environment]::OSVersion.Version.Major -lt 10 -or -not [Environment]::Is64BitOperatingSystem) {
@@ -23,7 +23,7 @@ function Install-WebStream {
 
     Write-Host 'Checking the latest web-stream host release...'
     $manifest = Invoke-RestMethod -UseBasicParsing -Uri "$repo/latest/download/manifest.json"
-    if ($manifest.product -ne 'web-stream-host' -or $manifest.version -notmatch '^\d+\.\d+\.\d+$') {
+    if ($manifest.product -ne 'web-stream-host' -or $manifest.version -notmatch '^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$') {
         throw 'The release manifest is not a web-stream host release.'
     }
     $version = $manifest.version

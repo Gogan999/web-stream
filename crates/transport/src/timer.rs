@@ -96,3 +96,54 @@ impl Drop for Mmcss {
         }
     }
 }
+
+#[cfg(all(test, windows))]
+mod tests {
+    use windows::Win32::System::Threading::{
+        GetCurrentProcess, GetProcessInformation, PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+        PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION,
+        PROCESS_POWER_THROTTLING_STATE, ProcessPowerThrottling,
+    };
+
+    #[test]
+    fn the_process_opts_out_of_timer_and_speed_throttling() {
+        super::unthrottle_process();
+        let mut state = PROCESS_POWER_THROTTLING_STATE {
+            Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+            ..Default::default()
+        };
+        // SAFETY: `state` outlives the call and its size is passed with it.
+        unsafe {
+            GetProcessInformation(
+                GetCurrentProcess(),
+                ProcessPowerThrottling,
+                std::ptr::from_mut(&mut state).cast(),
+                std::mem::size_of_val(&state) as u32,
+            )
+        }
+        .expect("GetProcessInformation(ProcessPowerThrottling)");
+        let both = PROCESS_POWER_THROTTLING_EXECUTION_SPEED
+            | PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION;
+        assert_eq!(
+            state.ControlMask & both,
+            both,
+            "control mask {:#x}",
+            state.ControlMask
+        );
+        assert_eq!(
+            state.StateMask & both,
+            0,
+            "state mask {:#x}",
+            state.StateMask
+        );
+    }
+
+    #[test]
+    fn mmcss_games_class_is_granted() {
+        let mmcss = super::Mmcss::enter();
+        assert!(
+            mmcss.task.is_some(),
+            "AvSetMmThreadCharacteristicsW(\"Games\") refused"
+        );
+    }
+}

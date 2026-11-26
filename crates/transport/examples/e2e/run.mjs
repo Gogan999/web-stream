@@ -1,10 +1,5 @@
-// Drives headless Chromium against the test_pattern example and checks that
-// pairing, signaling, video decode and every data channel work, over UDP and
-// then ICE-TCP. Usage: node run.mjs <port> (needs the `playwright` package).
-// TEST_ORIGIN_HOST connects through another address (say one forwarded to
-// 127.0.0.1, standing in for a router's WAN address). TEST_BLOCK_UDP=1 also
-// firewalls the media UDP port with iptables (as root, or through sudo -n)
-// and checks the browser falls back to ICE-TCP on its own.
+// Drives headless Chromium against the test_pattern example and checks that pairing, signaling,
+// video decode and every data channel work, over UDP and then ICE-TCP.
 import { execFileSync, spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 
@@ -13,7 +8,7 @@ const { chromium } = require(process.env.PLAYWRIGHT_PATH || 'playwright');
 const port = process.argv[2] || '18443';
 const origin = `https://${process.env.TEST_ORIGIN_HOST || '127.0.0.1'}:${port}`;
 
-// Blocking needs a known media port (UDP n, ICE-TCP n+1).
+// Blocking needs a known media port.
 const blockUdp = !!process.env.TEST_BLOCK_UDP;
 const mediaPort = process.env.TEST_MEDIA_PORT || (blockUdp ? String(Number(port) + 1000) : '');
 const iptables = (op) => {
@@ -50,8 +45,8 @@ if (!codes.length) fail('no pairing code printed');
 const status = await page.evaluate(([id, code]) => window.confirmPair(id, code), [id, codes[0]]);
 if (status !== 200) fail('pairing confirm returned ' + status);
 
-// `tcpOnly` drops the UDP candidates from the offer; `want` is the transport
-// the browser should end up on.
+// `tcpOnly` drops the UDP candidates from the offer; `want` is the transport the browser should end
+// up on.
 async function check(tcpOnly, want = tcpOnly ? 'tcp' : 'udp') {
   await page.evaluate((t) => window.connect(t), tcpOnly);
   let s;
@@ -78,8 +73,6 @@ async function check(tcpOnly, want = tcpOnly ? 'tcp' : 'udp') {
 await check(false);
 await check(true);
 if (blockUdp) {
-  // A full offer, as on a network that drops UDP: the browser must find the
-  // ICE-TCP candidate by itself.
   iptables('-I');
   blocked = true;
   await check(false, 'tcp');

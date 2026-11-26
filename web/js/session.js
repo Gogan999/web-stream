@@ -1,8 +1,4 @@
 // One streaming session: signaling + RTCPeerConnection + data channels.
-// The host is the offerer and opens the data channels. See docs/dev/signaling.md.
-// Once the connection is up and `control` is open, signaling is handed off: the WebSocket closes
-// and everything, `bye` included, goes over the peer connection. Recovering from a failed
-// connection then takes a new WebSocket.
 
 import { Signaling } from './signaling.js';
 
@@ -23,9 +19,7 @@ const BYE_TEXT = {
   revoked: 'Disconnected: this browser was unpaired',
 };
 
-// Play video frames as soon as they decode instead of smoothing with a jitter buffer. Audio keeps
-// Chrome's adaptive buffer: forced to zero it constantly speeds up and stretches the sound to keep up,
-// which is audible as warble.
+// Play video frames as soon as they decode instead of smoothing with a jitter buffer.
 export function minimizePlayout(receiver) {
   if (receiver.track?.kind !== 'video') return;
   try { receiver.jitterBufferTarget = 0; } catch { /* unsupported */ }
@@ -49,7 +43,7 @@ export class Session extends EventTarget {
     this.signalUrl = signalUrl;
     this.token = token;
     this.signal = null;
-    this.handedOff = false; // the WebSocket is closed and the session runs on the peer connection
+    this.handedOff = false;
     this.video = video;
     this.video2 = video2;
     this.pc = null;
@@ -57,7 +51,7 @@ export class Session extends EventTarget {
     this.channels = {};
     this.closed = false;
     this.restarts = 0;
-    this.micTrack = null; // sent on the audio transceiver while set
+    this.micTrack = null;
   }
 
   status(text, state) {
@@ -75,19 +69,18 @@ export class Session extends EventTarget {
     this.signal = signal;
     signal.addEventListener('close', (e) => {
       if (this.closed || signal !== this.signal || this.handedOff) return;
-      // Unauthenticated upgrades are refused before the socket opens; the page re-checks pairing.
-      if (this.pc?.connectionState === 'connected') return; // media no longer needs signaling
+      if (this.pc?.connectionState === 'connected') return;
       this.fail(e.detail?.code === 1006 && !this.pc ? 'Could not reach host (or not paired)' : 'Signaling closed');
     });
     signal.addEventListener('message', (e) => {
       if (signal === this.signal) this.onSignal(e.detail).catch((err) => this.fail(err.message));
     });
     await signal.open();
-    this.handedOff = false; // signaling is back on the socket until the next handoff
+    this.handedOff = false;
   }
 
-  // Once the connection is up and `control` is open, the WebSocket isn't needed: tell the host
-  // and let it close the socket.
+  // Once the connection is up and `control` is open, the WebSocket isn't needed: tell the host and
+  // let it close the socket.
   maybeHandOff() {
     if (this.handedOff || this.pc?.connectionState !== 'connected') return;
     if (this.channels[CHANNELS.CONTROL]?.readyState !== 'open' || !this.signal?.isOpen) return;
@@ -120,7 +113,7 @@ export class Session extends EventTarget {
     this.pc = pc;
 
     // One stream and video element per video track: a video element plays only one video track of
-    // its stream. The audio goes with the first.
+    // its stream.
     const stream = new MediaStream();
     const stream2 = new MediaStream();
     pc.ontrack = (e) => {
@@ -133,7 +126,6 @@ export class Session extends EventTarget {
       s.addTrack(e.track);
       if (video.srcObject !== s) video.srcObject = s;
       video.play().catch(() => {
-        // Autoplay with sound refused (iOS without a tap): play muted until the next tap.
         video.muted = true;
         video.play().catch(() => {});
         this.dispatchEvent(new Event('muted'));
@@ -159,8 +151,7 @@ export class Session extends EventTarget {
     await pc.setRemoteDescription({ type: 'offer', sdp });
     for (const t of pc.getTransceivers()) {
       minimizePlayout(t.receiver);
-      // Audio is always answered sendrecv so the mic can come and go with replaceTrack, without a new
-      // offer; with no track the browser sends nothing.
+      // Audio is always answered sendrecv.
       if (t.receiver.track.kind === 'audio') {
         t.direction = 'sendrecv';
         await t.sender.replaceTrack(this.micTrack);
@@ -171,11 +162,11 @@ export class Session extends EventTarget {
     this.signal.send({ type: 'answer', sdp: pc.localDescription.sdp });
   }
 
-  // Sends `track` (or nothing, for null) as the mic, now and on any later peer connection.
+  // Sends `track` as the mic, now and on any later peer connection.
   async setMicTrack(track) {
     this.micTrack = track;
     const t = this.pc?.getTransceivers().find((x) => x.receiver.track.kind === 'audio');
-    if (t) await t.sender.replaceTrack(track).catch(() => {}); // a closed connection gets it on the next one
+    if (t) await t.sender.replaceTrack(track).catch(() => {});
   }
 
   restart() {
@@ -190,8 +181,6 @@ export class Session extends EventTarget {
       this.signal.send({ type: 'restart' });
       return;
     }
-    // Signaling was handed off, so the failed connection was the only way to the host. Drop it
-    // first, so a late `bye` on it can't end the new one, and ask for a new offer on a new socket.
     this.closePeer();
     this.openSignal().catch(() => setTimeout(() => this.restart(), 1000));
   }
@@ -221,8 +210,7 @@ export class Session extends EventTarget {
     }
   }
 
-  // True when a message on this channel would be sent now. The motion channel reports
-  // false when its queue is backed up so the caller can coalesce instead.
+  // True when a message on this channel would be sent now.
   canSend(label) {
     const ch = this.channels[label];
     if (!ch || ch.readyState !== 'open') return false;

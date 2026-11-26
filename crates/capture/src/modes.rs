@@ -1,5 +1,4 @@
-//! Picks a desktop resolution for "match the host to the browser", kept
-//! free of OS calls so it can be tested.
+//! Picks a desktop resolution for "match the host to the browser", kept free of OS calls.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Mode {
@@ -9,8 +8,8 @@ pub(crate) struct Mode {
     pub bits_per_pixel: u32,
 }
 
-/// The largest true-colour mode that fits in `width` x `height`, preferring
-/// the current refresh rate, then the highest. `None` if nothing fits.
+/// The largest true-colour mode that fits in `width` x `height`, preferring the current refresh
+/// rate, then the highest.
 pub(crate) fn pick_mode(modes: &[Mode], width: u32, height: u32, current_hz: u32) -> Option<Mode> {
     modes
         .iter()
@@ -47,7 +46,6 @@ mod tests {
             m(1920, 1080, 120),
         ];
         assert_eq!(pick_mode(&modes, 1920, 1080, 144), Some(m(1920, 1080, 144)));
-        // The current rate isn't offered at this size: take the highest.
         assert_eq!(pick_mode(&modes, 1920, 1080, 165), Some(m(1920, 1080, 144)));
     }
 

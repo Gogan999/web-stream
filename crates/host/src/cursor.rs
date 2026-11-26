@@ -1,11 +1,4 @@
-//! The host pointer, for the browser to draw (the video carries none).
-//!
-//! While a browser is connected a thread polls the pointer and keeps only
-//! the newest reading in a `watch` channel, and a task of its own sends the
-//! browser what changed. The media loop only tells that task where the
-//! streamed display is and whether the `control` channel is open, so a
-//! slow or full channel never holds up input or other control traffic, and
-//! never builds a backlog of old positions.
+//! The host pointer, for the browser to draw.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -21,27 +14,22 @@ use ws_transport::{Error, Transport};
 
 use crate::platform;
 
-/// About two polls per 60 Hz frame; one `GetCursorInfo` call when the
-/// pointer hasn't changed.
+/// About two polls per 60 Hz frame; one `GetCursorInfo` call when the pointer hasn't changed.
 const POLL: Duration = Duration::from_millis(8);
-/// After the channel refused a write, nothing more is tried for this long
-/// (the newest state is sent then).
+/// After the channel refused a write, nothing more is tried for this long.
 const RETRY: Duration = Duration::from_millis(100);
 
 /// What the sender needs from the media loop.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CursorTarget {
-    /// The streamed display's top-left in desktop pixels, while the
-    /// `control` channel is open; `None` sends nothing, and everything is
-    /// sent afresh when it is set again.
+    /// The streamed display's top-left in desktop pixels, while the `control` channel is open;
+    /// `None` sends nothing, and everything is sent afresh when it is set again.
     pub origin: Option<(i32, i32)>,
-    /// The browser draws the pointer itself (relative mouse mode) and wants
-    /// positions. In absolute mode its own pointer is where the host's is.
+    /// The browser draws the pointer itself (relative mouse mode) and wants positions.
     pub positions: bool,
 }
 
-/// The cursor thread and sender of one browser session; dropping it stops
-/// both.
+/// The cursor thread and sender of one browser session; dropping it stops both.
 pub struct CursorSession {
     _thread: Option<CursorThread>,
     task: AbortHandle,
@@ -78,7 +66,6 @@ impl CursorThread {
         let thread = std::thread::Builder::new()
             .name("ws-cursor".into())
             .spawn(move || {
-                // None where the platform can't read the pointer.
                 let Some(mut reader) = platform::cursor_reader() else {
                     return;
                 };
@@ -118,7 +105,7 @@ impl Drop for CursorThread {
 struct Sent {
     look: Option<CursorLook>,
     position: Option<(i32, i32)>,
-    /// Image ids the browser has (it caches them by id).
+    /// Image ids the browser has.
     images: HashSet<u32>,
 }
 
@@ -141,10 +128,8 @@ impl Sent {
     }
 }
 
-/// The messages that bring the browser up to date with `state`: the shape
-/// if it changed (with its image if the browser lacks it), and the position
-/// if it changed, the pointer shows and the browser wants positions. Each
-/// stands alone, so a refused shape doesn't hold back the position.
+/// The messages that bring the browser up to date with `state`: the shape if it changed, and the
+/// position if it changed, the pointer shows and the browser wants positions.
 fn updates(sent: &Sent, state: &CursorState, target: CursorTarget) -> Vec<(HostControl, Commit)> {
     let Some((ox, oy)) = target.origin else {
         return Vec::new();
@@ -168,8 +153,8 @@ fn updates(sent: &Sent, state: &CursorState, target: CursorTarget) -> Vec<(HostC
     out
 }
 
-/// The `cursorShape` message for `look`; the image goes along only if the
-/// browser doesn't have it yet.
+/// The `cursorShape` message for `look`; the image goes along only if the browser doesn't have it
+/// yet.
 fn shape_message(look: &CursorLook, images: &HashSet<u32>) -> CursorShape {
     CursorShape {
         kind: look.kind,
@@ -191,7 +176,6 @@ async fn send_loop(
     loop {
         let t = *target.borrow_and_update();
         if t.origin.is_none() {
-            // A browser that (re)opens the channel is told everything.
             sent = Sent::default();
         }
         let state = cursor.borrow_and_update().clone();
@@ -215,8 +199,6 @@ async fn send_loop(
             }
         }
         if refused {
-            // Pointer changes meanwhile wait in the watch; only the newest
-            // is sent.
             tokio::select! {
                 _ = tokio::time::sleep(RETRY) => {}
                 r = target.changed() => if r.is_err() { return },
@@ -224,8 +206,6 @@ async fn send_loop(
             continue;
         }
         tokio::select! {
-            // An error: the thread is gone (or never ran), nothing more
-            // to send.
             r = cursor.changed() => if r.is_err() { return },
             r = target.changed() => if r.is_err() { return },
         }
@@ -286,7 +266,6 @@ mod tests {
         assert!(shape.image.is_some());
         assert_eq!(msgs[1], HostControl::CursorPosition { x: 80, y: 30 });
 
-        // Unchanged: nothing. Back to a known image: id only.
         assert!(send_all(&mut sent, &s, OPEN).is_empty());
         send_all(
             &mut sent,
@@ -334,7 +313,6 @@ mod tests {
         let s = state(look(CursorKind::Custom, Some(1)), 2000, 30);
         let out = updates(&sent, &s, OPEN);
         assert_eq!(out.len(), 2);
-        // Only the position went out: the shape is still pending next time.
         let mut sent = Sent::default();
         let (_, commit) = out.into_iter().nth(1).unwrap();
         sent.apply(commit);

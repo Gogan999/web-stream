@@ -25,7 +25,6 @@ test('client streams from mock host, sends input and switches display', { timeou
 
   const client = await ctx.newPage();
   client.on('pageerror', (e) => errors.push('client: ' + e.message));
-  // Keep a handle on the client's peer connections so the test can inspect them.
   await client.addInitScript(() => {
     const Orig = window.RTCPeerConnection;
     window.__pcs = [];
@@ -35,12 +34,10 @@ test('client streams from mock host, sends input and switches display', { timeou
     window.__sockets = [];
     window.WebSocket = function (...a) { const ws = new OrigWs(...a); window.__sockets.push(ws); return ws; };
     Object.assign(window.WebSocket, { CONNECTING: 0, OPEN: 1, CLOSING: 2, CLOSED: 3, prototype: OrigWs.prototype });
-    // No save dialog in a headless test: files take the in-memory path to downloads.
     window.showSaveFilePicker = undefined;
   });
   await client.goto(`${base}/?autoconnect`);
 
-  // Unpaired: pairing screen, wrong code rejected, right code pairs and connects.
   await client.waitForSelector('#pair:not([hidden])');
   assert.equal(await client.isVisible('#video'), false);
   await client.click('#pair-start');
@@ -56,7 +53,7 @@ test('client streams from mock host, sends input and switches display', { timeou
 
   const hostLog = () => host.evaluate(() => window.mockLog);
 
-  // Low-latency playout on every receiver; audio is answered sendrecv so the mic can be added later.
+  // Low-latency playout on every receiver; audio is answered sendrecv.
   const pcInfo = await client.evaluate(() => {
     const pc = window.__pcs.at(-1);
     return {
@@ -65,7 +62,6 @@ test('client streams from mock host, sends input and switches display', { timeou
       audioDir: pc.getTransceivers().find((t) => t.receiver.track.kind === 'audio').direction,
     };
   });
-  // Video plays with no jitter buffer; audio keeps Chrome's adaptive one, and asks for stereo.
   assert.equal(pcInfo.jbt.video, 0);
   assert.equal(pcInfo.jbt.audio, null);
   assert.ok(pcInfo.stereo);
@@ -78,23 +74,18 @@ test('client streams from mock host, sends input and switches display', { timeou
   assert.equal(channels['input-motion'].ordered, false);
   assert.equal(channels['input-motion'].maxRetransmits, 0);
 
-  // Once connected with control open, signaling is handed off and the WebSocket closes; everything
-  // below runs over the peer connection alone.
   await host.waitForFunction(() => window.mockLog.some((e) => e.ev === 'handoff'));
   await client.waitForFunction(() => window.__sockets.at(-1)?.readyState === 3, null, { timeout: 5000 });
   assert.equal(await client.evaluate(() => document.getElementById('status').dataset.state), 'connected');
   assert.equal(channels.input.ordered, true);
   assert.equal(channels.input.maxRetransmits, null);
 
-  // Display list arrives and populates the picker, and the toolbar's quick switch (2+ displays).
   await client.waitForFunction(() => document.getElementById('display').options.length === 2);
   assert.equal(await client.isVisible('#display-quick'), true);
   assert.equal(await client.locator('#display-quick option').count(), 2);
-  // Connected: the big Connect button is gone and the toolbar one says Disconnect.
   assert.equal(await client.isVisible('#connect-big'), false);
   assert.equal(await client.textContent('#connect'), 'Disconnect');
 
-  // Toolbar toggles: Mouse switches Game/Desktop (the same setting as in Settings), Mic mirrors the checkbox.
   assert.equal(await client.textContent('#mouse-label'), 'Game');
   await client.click('#mouse-toggle');
   assert.equal(await client.textContent('#mouse-label'), 'Desktop');
@@ -103,8 +94,6 @@ test('client streams from mock host, sends input and switches display', { timeou
   assert.equal(await client.inputValue('#mouse-mode'), 'relative');
   assert.equal(await client.getAttribute('#mic-toggle', 'aria-pressed'), 'false');
 
-  // Once the host says what it streams, the client asks for its settings: the screen size fitted
-  // to the 1280x720 display, at the matching auto bitrate.
   await host.waitForFunction(() => window.mockLog.some((e) => e.ev === 'control' && e.type === 'setVideoConfig'));
   const asked = (await hostLog()).find((e) => e.type === 'setVideoConfig').config;
   assert.deepEqual(
@@ -112,22 +101,18 @@ test('client streams from mock host, sends input and switches display', { timeou
     [1280, 720, 60, 'balanced', 'h264'],
   );
   assert.ok(asked.bitrateKbps > 5000 && asked.bitrateKbps < 20000, String(asked.bitrateKbps));
-  // Settings live in one dropdown; a bitrate pick goes straight to the host.
   assert.equal(await client.isVisible('#bitrate'), false);
   await client.click('#more-toggle');
-  // Max bitrate is under Advanced, folded by default; Priority and the caps are one level up.
   assert.equal(await client.isVisible('#priority'), true);
   assert.equal(await client.isVisible('#resolution'), true);
   await client.click('#set-advanced > summary');
   await client.selectOption('#bitrate', '30000');
   await host.waitForFunction(() => window.mockLog.some((e) => e.type === 'setVideoConfig' && e.config.bitrateKbps === 30000));
-  // Matching the host resolution asks the host, which refuses unless allowed; the refusal shows.
   await client.check('#match-host');
   await host.waitForFunction(() => window.mockLog.some((e) => e.type === 'setHostResolution'));
   await client.waitForFunction(() => /allow-resolution-change/.test(document.getElementById('status').textContent));
   await client.uncheck('#match-host');
 
-  // Mic: off by default (the host is told so), on sends audio and tells the host.
   await host.waitForFunction(() => window.mockLog.some((e) => e.type === 'setMicEnabled' && e.enabled === false));
   assert.equal(await host.evaluate(() => window.mockMicPackets()), 0);
   await client.check('#mic');
@@ -138,7 +123,6 @@ test('client streams from mock host, sends input and switches display', { timeou
   await host.waitForFunction(() => window.mockLog.filter((e) => e.type === 'setMicEnabled' && e.enabled === false).length === 2);
   assert.equal(await client.getAttribute('#mic-toggle', 'aria-pressed'), 'false');
   assert.equal(await client.evaluate(() => window.__pcs.at(-1).getSenders().find((x) => x.track)?.track ?? null), null);
-  // Audio quality: the host's own setting at first, then what is picked.
   assert.ok((await hostLog()).some((e) => e.type === 'setAudioConfig' && e.bitrateKbps === null && e.frameMs === null));
   // Audio quality is under Advanced (opened above).
   assert.equal(await client.isVisible('#audio-kbps'), true);
@@ -146,9 +130,7 @@ test('client streams from mock host, sends input and switches display', { timeou
   await client.selectOption('#audio-frame', '20');
   await host.waitForFunction(() => window.mockLog.some((e) => e.type === 'setAudioConfig' && e.bitrateKbps === 256 && e.frameMs === 20));
 
-  // A host that refuses the mic stops it: the box unticks and nothing is sent.
   await host.evaluate(() => { window.mockNoMic = true; });
-  // click, not check: the refusal can untick the box before check() looks at it.
   await client.click('#mic');
   await client.waitForFunction(() => !document.getElementById('mic').checked && /--no-mic/.test(document.getElementById('status').textContent));
   await client.waitForFunction(() => !window.__pcs.at(-1).getSenders().some((x) => x.track?.kind === 'audio'));
@@ -172,9 +154,6 @@ test('client streams from mock host, sends input and switches display', { timeou
   assert.ok(inputs.some((e) => e.type === 'key' && e.usage === 0x1a && !e.down));
   assert.ok(inputs.some((e) => e.type === 'wheel' && e.dy === -120));
 
-  // Clipboard: the host offers it when the control channel opens, so the button shows. Text from the
-  // host lands on this browser's clipboard; Ctrl+V sends this browser's clipboard first and presses
-  // the keys only once the host has answered.
   await ctx.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: base });
   await client.bringToFront();
   await client.waitForSelector('#clipboard', { state: 'visible' });
@@ -222,11 +201,10 @@ test('client streams from mock host, sends input and switches display', { timeou
   };
   await mouseMode('relative');
   await host.waitForFunction(() => window.mockLog.some((e) => e.type === 'setCursorPositions' && e.enabled));
-  await sendHost({ type: 'cursorShape', kind: 'ew-resize', id: 1 }); // image already sent: id only
+  await sendHost({ type: 'cursorShape', kind: 'ew-resize', id: 1 });
   await client.waitForSelector('#cursor', { state: 'visible' });
   assert.equal(await cursorStyle(), '');
   const overlay = await client.locator('#cursor').boundingBox();
-  // The hotspot (2,2 of a 4x4 image) sits on the middle of the picture.
   assert.ok(Math.abs(overlay.x + overlay.width / 2 - (box.x + box.width / 2)) < 2, JSON.stringify({ overlay, box }));
   assert.ok(Math.abs(overlay.y + overlay.height / 2 - (box.y + box.height / 2)) < 2, JSON.stringify({ overlay, box }));
   await sendHost({ type: 'cursorShape', kind: 'none' });
@@ -234,7 +212,7 @@ test('client streams from mock host, sends input and switches display', { timeou
   await mouseMode('absolute');
   await client.waitForFunction(() => document.getElementById('video').style.cursor === 'none');
 
-  // Open the settings dropdown unless it already is (a window opening or closing can leave it either way).
+  // Open the settings dropdown unless it already is.
   const openSettings = async () => {
     for (let i = 0; i < 3 && !(await client.isVisible('#more')); i++) {
       await client.click('#more-toggle');
@@ -249,8 +227,6 @@ test('client streams from mock host, sends input and switches display', { timeou
     }
     await client.waitForSelector('#more', { state: 'hidden' });
   };
-  // Second monitor: choosing one plays a second video beside the first, and a click on it says which
-  // monitor it was on. Off again puts the layout back.
   await openSettings();
   await client.selectOption('#display2', '1');
   await client.keyboard.press('Escape');
@@ -267,11 +243,8 @@ test('client streams from mock host, sends input and switches display', { timeou
   await host.waitForFunction(() => window.mockLog.some((e) => e.ev === 'input' && e.type === 'mouse-abs' && e.lane === 1));
   const onSecond = (await hostLog()).filter((e) => e.type === 'mouse-abs' && e.lane === 1).at(-1);
   assert.ok(Math.abs(onSecond.x - 16384) < 1500 && Math.abs(onSecond.y - 32768) < 1500, JSON.stringify(onSecond));
-  // Back across to the first monitor: positions there carry no lane.
   await client.mouse.move(box1.x + box1.width / 2, box1.y + box1.height / 2);
   await host.waitForFunction(() => window.mockLog.filter((e) => e.type === 'mouse-abs').at(-1)?.lane === undefined);
-  // In a window of its own: the page goes back to one video, the window plays the second, and a click
-  // in it is still on the second monitor.
   await openSettings();
   const [popup] = await Promise.all([client.waitForEvent('popup'), client.click('#popout')]);
   await client.keyboard.press('Escape');
@@ -286,7 +259,6 @@ test('client streams from mock host, sends input and switches display', { timeou
   await host.waitForFunction((n) => window.mockLog.slice(n).some((e) => e.type === 'mouse-abs' && e.lane === 1)
     && window.mockLog.slice(n).some((e) => e.type === 'key' && e.usage === 0x1a), loggedBefore);
   assert.ok((await hostLog()).slice(loggedBefore).some((e) => e.type === 'mouse-button' && e.button === 0 && e.down));
-  // Closing the window puts the video back beside the first.
   await popup.close();
   await client.waitForFunction(() => document.body.classList.contains('dual') && !document.getElementById('video2').hidden);
   await client.waitForFunction(() => document.getElementById('video2').videoWidth === 1920);
@@ -296,8 +268,7 @@ test('client streams from mock host, sends input and switches display', { timeou
   await client.waitForFunction(() => !document.body.classList.contains('dual') && document.getElementById('video2').hidden);
   await closeSettings();
 
-  // Tab never lands in the hidden on-screen keyboard textarea.
-  await client.mouse.move(1, 1); // off the stream, so Tab moves focus instead of going to the host
+  await client.mouse.move(1, 1);
   await client.focus('#connect');
   let tabbed = false;
   for (let i = 0; i < 20; i++) {
@@ -306,7 +277,6 @@ test('client streams from mock host, sends input and switches display', { timeou
   }
   assert.ok(!tabbed);
 
-  // Hotkey switches display without forwarding the digit, and the stream changes resolution.
   await client.keyboard.down('Control');
   await client.keyboard.down('Alt');
   await client.keyboard.down('Shift');
@@ -319,8 +289,6 @@ test('client streams from mock host, sends input and switches display', { timeou
   assert.ok(after.some((e) => e.ev === 'control' && e.type === 'selectDisplay' && e.id === 1));
   assert.ok(!after.some((e) => e.type === 'key' && e.usage === 0x1f), 'Digit2 must not reach the host');
 
-  // Ctrl+Alt+Shift+E sends an Esc press and release (the browser keeps a real Esc in a window),
-  // with the hotkey's modifiers let go first. The pointer is on the stream, so they reach the host.
   await client.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
   const before = (await hostLog()).length;
   await client.keyboard.down('Control');
@@ -352,7 +320,6 @@ test('client streams from mock host, sends input and switches display', { timeou
   await client.waitForFunction(() => /host enc 30\.0\/30\.0 Mb\/s/.test(document.getElementById('stats').textContent), null, { timeout: 5000 });
   console.log(await client.textContent('#stats'));
 
-  // A shared file: the Files button appears with a count, Save downloads it, and the status says so.
   assert.equal(await client.isVisible('#files-toggle'), false);
   const text = 'hello from the host\n'.repeat(2000); // 40 KB: three chunks
   await host.evaluate((t) => window.mockShareFile(4242, 'notes.txt', t), text);
@@ -370,7 +337,6 @@ test('client streams from mock host, sends input and switches display', { timeou
   await sendHost({ type: 'fileWithdrawn', id: 4242 });
   await client.waitForSelector('#files-toggle', { state: 'hidden' });
 
-  // A host that takes files: Send files… sends one, and the row says where it went.
   await sendHost({ type: 'uploads', enabled: true, maxSize: 1 << 30 });
   await client.waitForSelector('#files-toggle:has-text("Files")');
   await client.click('#files-toggle');
@@ -381,7 +347,6 @@ test('client streams from mock host, sends input and switches display', { timeou
   await client.waitForSelector('#upload-list li:has-text("On the host as up.txt")');
   await client.keyboard.press('Escape');
 
-  // Update host: off until the host allows it, asks first, then waits for the restart.
   await client.click('#more-toggle');
   assert.equal(await client.isDisabled('#update-host'), true);
   await sendHost({ type: 'remoteUpdate', enabled: true });
@@ -400,11 +365,9 @@ test('client streams from mock host, sends input and switches display', { timeou
   assert.equal(await client.isDisabled('#update-host'), false);
   await client.keyboard.press('Escape');
 
-  // With no socket, the host's bye comes over control.
   await sendHost({ type: 'bye', reason: 'host_shutdown' });
   await client.waitForFunction(() => /host shut down/.test(document.getElementById('status').textContent));
 
-  // Reload: the pairing cookie persists, so it connects straight away.
   await client.reload();
   await client.waitForFunction(() => document.getElementById('status').dataset.state === 'connected', null, { timeout: 15000 });
   assert.equal(await client.isVisible('#pair'), false);

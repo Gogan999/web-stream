@@ -1,4 +1,5 @@
-// App shell cache: the page opens from cache when its own PC is off, so another saved PC can be used.
+// App shell cache: the page opens from cache when its own PC is off, so another saved PC can be
+// used.
 
 const CACHE = 'web-stream-shell-v1';
 const NETWORK_TIMEOUT_MS = 4000;

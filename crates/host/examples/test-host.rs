@@ -1,15 +1,5 @@
-//! A headless host for tests and development: the host with commands typed
-//! on stdin (`pair`, `drop`, `unpair-all`, `send <path>`, `quit`) and its
-//! events printed on stdout. CI's browser tests drive it on Linux. People
-//! run the tray app (`ws-host-gui`) instead.
-//!
-//! ```text
-//! cargo run -p ws-host --example test-host -- [--split] [serve options, see --help]
-//! ```
-//!
-//! `--split` (Unix) runs it as the Windows service does: the network side
-//! (signaling, the transport) in a child process, linked to the media side
-//! in this one (see `ws_host::split`).
+//! A headless host for tests and development: the host with commands typed on stdin and its events
+//! printed on stdout.
 
 use std::io::{BufRead, IsTerminal};
 
@@ -54,8 +44,8 @@ fn main() -> anyhow::Result<()> {
 /// The child's first argument under `--split`.
 const NETWORK_HALF: &str = "network-half";
 
-/// Runs the host, or with `split` (the serve arguments) its media side,
-/// with the network side in a child process.
+/// Runs the host, or with `split` (the serve arguments) its media side, with the network side in a
+/// child process.
 async fn run(opts: ServeOptions, split: Option<Vec<String>>) -> anyhow::Result<()> {
     let (commands, commands_rx) = mpsc::channel(8);
     let (events_tx, events) = mpsc::unbounded_channel();
@@ -81,8 +71,8 @@ mod split {
     use ws_host::options::ServeOptions;
     use ws_host::serve::{Command, Event};
 
-    /// Starts the network side as a child, its stdin one end of a socket
-    /// pair, and serves the media side on the other.
+    /// Starts the network side as a child, its stdin one end of a socket pair, and serves the media
+    /// side on the other.
     pub async fn media_half(
         opts: ServeOptions,
         args: &[String],
@@ -99,14 +89,13 @@ mod split {
         ours.set_nonblocking(true)?;
         let link = tokio::net::UnixStream::from_std(ours)?;
         let result = ws_host::split::serve_media(opts, link, commands, events).await;
-        // It stops once the link closes.
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await;
         result
     }
 
     pub async fn network_half(opts: ServeOptions) -> anyhow::Result<()> {
-        // SAFETY: stdin is the socket the parent handed over, and nothing
-        // else in this process uses it.
+        // SAFETY: stdin is the socket the parent handed over, and nothing else in this process uses
+        // it.
         let link = unsafe { UnixStream::from_raw_fd(0) };
         link.set_nonblocking(true)?;
         let link = tokio::net::UnixStream::from_std(link)?;
@@ -145,9 +134,7 @@ async fn print_events(mut events: mpsc::UnboundedReceiver<Event>) {
     }
 }
 
-/// Reads commands typed on stdin. A thread, since tokio's stdin would block
-/// shutdown. When stdin closes the host keeps serving: `commands` lives on
-/// in the ctrl-c task.
+/// Reads commands typed on stdin.
 fn console(commands: mpsc::Sender<Command>) {
     std::thread::Builder::new()
         .name("ws-console".into())

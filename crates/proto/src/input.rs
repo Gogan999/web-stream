@@ -1,10 +1,4 @@
 //! Input from the browser, injected on the host by `ws-input`.
-//!
-//! Binary on the wire: one data channel message per event, little-endian,
-//! first byte is the type. Motion and gamepad state ride the unordered,
-//! unreliable [`crate::channels::INPUT_MOTION`] channel; everything else rides
-//! the reliable [`crate::channels::INPUT`] one. The byte layouts are the table
-//! in `docs/dev/protocol.md`.
 
 use std::fmt;
 
@@ -65,16 +59,13 @@ pub enum InputEvent {
         dx: i16,
         dy: i16,
     },
-    /// Absolute position, 0..=65535 across the active display. `seq` (on
-    /// `input-motion`) counts up per position sent, so the host can ignore
-    /// one that arrives after a newer one; `None` (on `input`, ahead of a
-    /// touch click) is always applied.
+    /// Absolute position, 0..=65535 across the active display.
     MouseAbs {
         x: u16,
         y: u16,
         seq: Option<u16>,
-        /// Which video stream's display `x` and `y` are across: 0 is the
-        /// main one, 1 the second monitor.
+        /// Which video stream's display `x` and `y` are across: 0 is the main one, 1 the second
+        /// monitor.
         lane: u8,
     },
     MouseButton {
@@ -86,26 +77,21 @@ pub enum InputEvent {
         dx: i16,
         dy: i16,
     },
-    /// USB HID usage on the Keyboard page (0x07), i.e. the physical key, so
-    /// mapping is layout independent.
+    /// USB HID usage on the Keyboard page (0x07), i.e. the physical key, so mapping is layout
+    /// independent.
     Key {
         usage: u16,
         down: bool,
     },
-    /// Full state on every change and every 100 ms, on `input-motion`; the
-    /// first state for an index plugs in a virtual pad. `seq` counts up per
-    /// pad across this and [`Self::GamepadButtons`], so the host ignores a
-    /// snapshot older than one it already applied. `None` from clients
-    /// that don't number them: always applied.
+    /// Full state on every change and every 100 ms, on `input-motion`; the first state for an index
+    /// plugs in a virtual pad.
     Gamepad {
         index: u8,
         state: GamepadState,
         seq: Option<u16>,
     },
-    /// Full state sent on the reliable `input` channel whenever the buttons
-    /// change, so a press or release is never lost. Its buttons always
-    /// apply (they arrive in order); its sticks and triggers only if `seq`
-    /// is newer than the last state applied.
+    /// Full state sent on the reliable `input` channel whenever the buttons change, so a press or
+    /// release is never lost.
     GamepadButtons {
         index: u8,
         state: GamepadState,
@@ -114,23 +100,20 @@ pub enum InputEvent {
     GamepadDisconnect {
         index: u8,
     },
-    /// Release every held key and button (focus lost, tab hidden).
+    /// Release every held key and button.
     ReleaseAll,
-    /// Type this text as Unicode characters, whatever the host's keyboard
-    /// layout, as `SendInput` with `KEYEVENTF_UNICODE`. For text a phone
-    /// keyboard or a paste produced that has no key on a US layout. On the
-    /// reliable `input` channel, so it stays in order with key presses.
-    /// At most [`TEXT_MAX`] bytes of UTF-8.
+    /// Type this text as Unicode characters, whatever the host's keyboard layout, as `SendInput`
+    /// with `KEYEVENTF_UNICODE`.
     Text {
         text: String,
     },
 }
 
-/// Most bytes of UTF-8 in one [`InputEvent::Text`]; the browser splits
-/// longer text into several events.
+/// Most bytes of UTF-8 in one [`InputEvent::Text`]; the browser splits longer text into several
+/// events.
 pub const TEXT_MAX: usize = 4096;
 
-/// How many video streams (and so displays input can address) there are.
+/// How many video streams there are.
 pub const MAX_LANES: u8 = 2;
 
 pub mod wire {
@@ -143,11 +126,9 @@ pub mod wire {
     pub const GAMEPAD_DISCONNECT: u8 = 0x07;
     pub const RELEASE_ALL: u8 = 0x08;
     pub const GAMEPAD_BUTTONS: u8 = 0x09;
-    /// [`MOUSE_ABS`] for a display other than the main one: a lane byte
-    /// follows the type.
+    /// [`MOUSE_ABS`] for a display other than the main one: a lane byte follows the type.
     pub const MOUSE_ABS_ON: u8 = 0x0a;
-    /// Unicode text: the type byte, then up to [`super::TEXT_MAX`] bytes of
-    /// UTF-8 (so, unlike the others, a variable length).
+    /// Unicode text: the type byte, then up to [`super::TEXT_MAX`] bytes of UTF-8.
     pub const TEXT: u8 = 0x0b;
 }
 
@@ -240,8 +221,7 @@ pub fn seq_newer(a: u16, b: u16) -> bool {
 }
 
 impl InputEvent {
-    /// Decodes one data channel message. Anything malformed is rejected
-    /// whole; the host never injects a partial event.
+    /// Decodes one data channel message.
     pub fn decode(msg: &[u8]) -> Result<Self, InputDecodeError> {
         let &kind = msg.first().ok_or(InputDecodeError::Empty)?;
         if kind == wire::TEXT {
@@ -253,8 +233,6 @@ impl InputEvent {
                 .map_err(|_| InputDecodeError::Invalid("text is not UTF-8"))?;
             return Ok(Self::Text { text: text.into() });
         }
-        // Absolute moves and gamepad state may carry a trailing sequence
-        // number.
         let (expected, with_seq) = match kind {
             wire::MOUSE_MOVE | wire::WHEEL => (5, None),
             wire::MOUSE_ABS => (5, Some(7)),
@@ -551,7 +529,6 @@ mod tests {
             Err(Invalid(_))
         ));
         assert!(matches!(InputEvent::decode(&[0x07, 4]), Err(Invalid(_))));
-        // Only the lanes there are.
         assert!(matches!(
             InputEvent::decode(&[0x0a, 2, 0, 0, 0, 0]),
             Err(Invalid(_))
@@ -572,7 +549,6 @@ mod tests {
                 text: String::new()
             })
         );
-        // Not UTF-8, or too long: rejected whole.
         assert!(matches!(
             InputEvent::decode(&[0x0b, 0xff, 0xfe]),
             Err(InputDecodeError::Invalid(_))

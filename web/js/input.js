@@ -16,30 +16,27 @@ const CTRL_L = hidUsage('ControlLeft');
 const CTRL_R = hidUsage('ControlRight');
 // Once the pointer has rested this long, its last absolute position is re-sent reliably.
 export const ABS_SETTLE_MS = 100;
-// Chrome reads gamepads every 4 ms; polling only once per animation frame would leave a press waiting
-// up to a display frame (16 ms at 60 Hz) before it is even seen.
+// Chrome reads gamepads every 4 ms; polling only once per animation frame would leave a press
+// waiting up to a display frame before it is even seen.
 export const GAMEPAD_POLL_MS = 4;
-// Mouse motion goes out at most this often. Raw pointer updates arrive as fast as the mouse reports
-// (up to 8 kHz); faster than this they are summed, so a gaming mouse can't flood the channel.
+// Mouse motion goes out at most this often.
 export const MOTION_GAP_MS = 2;
 
 // Chrome reports ~100 px per wheel notch; Windows expects 120 per notch.
 export function wheelToDelta(e) {
   const scale = e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? 120 : 1.2;
-  // DOM: +deltaY scrolls down. Windows: +delta scrolls up (away from user).
   return { dx: Math.round(e.deltaX * scale), dy: Math.round(-e.deltaY * scale) };
 }
 
-// Picture pixels per CSS pixel of the letterboxed video, so a trackpad drag across the picture moves
-// the host cursor across the display.
+// Picture pixels per CSS pixel of the letterboxed video, so a trackpad drag across the picture
+// moves the host cursor across the display.
 export function pictureScale(rect, videoW, videoH) {
   if (!videoW || !videoH || !rect.width || !rect.height) return 1;
   return Math.max(videoW / rect.width, videoH / rect.height);
 }
 
-// Map a client point to 0..1 over the host display inside a letterboxed (object-fit: contain) video,
-// leaving out both the page's bars and any the host drew into the frame (see pictureRect).
-// With `clamp`, points in the black bars snap to the nearest edge instead of being dropped.
+// Map a client point to 0..1 over the host display inside a letterboxed (object-fit: contain)
+// video, leaving out both the page's bars and any the host drew into the frame (see pictureRect).
 export function videoPoint(clientX, clientY, rect, videoW, videoH, clamp = false, display = null) {
   if (!videoW || !videoH) return null;
   const scale = Math.min(rect.width / videoW, rect.height / videoH);
@@ -59,20 +56,20 @@ export class InputCapture {
   constructor({ session, video, video2 = null, stage, onHotkey, keyTarget = null, onKeySent = null, onReleaseAll = null, displaySize = null, displaySize2 = null, zoom = null, onBeforePaste = null }) {
     this.session = session;
     this.video = video;
-    this.video2 = video2; // the second monitor's stream, when one is shown (mouse and wheel only)
+    this.video2 = video2;
     this.stage = stage;
     this.onHotkey = onHotkey;
-    this.keyTarget = keyTarget; // the on-screen keyboard's textarea (softkeys.js)
+    this.keyTarget = keyTarget;
     this.onKeySent = onKeySent;
-    this.onBeforePaste = onBeforePaste; // () => promise to wait for before Ctrl+V reaches the host, or null
+    this.onBeforePaste = onBeforePaste;
     this.keyGate = null; // pending key sends behind a paste's wait
     this.releaseEpoch = 0; // counts releaseAll()s
-    this.onReleaseAll = onReleaseAll; // softkeys: forget sticky modifiers the host just let go
-    this.displaySize = displaySize; // () => { width, height } of the host display, for trackpad scaling
-    this.displaySize2 = displaySize2; // the same for the second monitor's display
-    this.zoom = zoom; // ZoomView: pinches zoom and pan the stream in the page
-    this.touchActive = false; // the stream was touched last, so keys from a paired keyboard go to it
-    this.touchRest = { x: 0, y: 0 }; // sub-pixel trackpad motion not yet sent
+    this.onReleaseAll = onReleaseAll;
+    this.displaySize = displaySize;
+    this.displaySize2 = displaySize2;
+    this.zoom = zoom;
+    this.touchActive = false;
+    this.touchRest = { x: 0, y: 0 };
     this.holdTimer = 0;
     this.slideTimer = 0;
     this.gestures = new TouchGestures({
@@ -98,11 +95,11 @@ export class InputCapture {
     this.mode = 'relative'; // 'relative' (pointer lock) or 'absolute'
     this.heldKeys = new Set();
     this.pads = new Array(MAX_PADS).fill(null); // last sent state per slot
-    this.motion = { dx: 0, dy: 0, abs: null }; // not yet sent because input-motion was backed up
+    this.motion = { dx: 0, dy: 0, abs: null };
     this.padSentAt = new Array(MAX_PADS).fill(0);
-    this.padSeq = new Array(MAX_PADS).fill(0); // numbers each pad's snapshots for the host
-    this.absSeq = 0; // numbers absolute positions on input-motion
-    this.absLast = null; // last absolute position sent, re-sent reliably once the pointer rests
+    this.padSeq = new Array(MAX_PADS).fill(0);
+    this.absSeq = 0;
+    this.absLast = null;
     this.absSettleTimer = 0;
     this.abort = new AbortController();
     this.rafId = 0;
@@ -112,7 +109,6 @@ export class InputCapture {
   }
 
   get locked() {
-    // The second monitor's video may be in a window of its own, with a document of its own.
     return document.pointerLockElement === this.video ||
       (!!this.video2 && this.video2.ownerDocument.pointerLockElement === this.video2);
   }
@@ -138,9 +134,8 @@ export class InputCapture {
     const opt = { signal: this.abort.signal };
     const v = this.video;
 
-    // Mouse events are taken at the document so they are seen once whether or not the
-    // pointer is locked; ours() keeps toolbar clicks out of the stream.
-    // Mouse events a touch screen synthesizes are skipped; touch goes through the pointer handlers below.
+    // Mouse events are taken at the document so they are seen once whether or not the pointer is
+    // locked; ours() keeps toolbar clicks out of the stream.
     const fromTouch = (e) => e.sourceCapabilities?.firesTouchEvents === true;
     const ours = (e) => (this.locked || e.target === v || (!!this.video2 && e.target === this.video2)) && !fromTouch(e);
     document.addEventListener('mousedown', (e) => { if (ours(e)) this.onMouseDown(e); }, opt);
@@ -156,13 +151,9 @@ export class InputCapture {
     document.addEventListener('mousemove', (e) => { if (!raw && ours(e)) this.onMouseMove(e); }, opt);
     document.addEventListener('wheel', (e) => { if (ours(e)) this.onWheel(e); }, { ...opt, passive: false });
     v.addEventListener('contextmenu', (e) => e.preventDefault(), opt);
-    // The stage, not a video: with two monitors side by side, crossing from one to the other must not
-    // let go of a held button (a drag between them) or the keys.
     this.stage.addEventListener('mouseenter', (e) => { if (!fromTouch(e)) this.stageFocused = true; }, opt);
     this.stage.addEventListener('mouseleave', (e) => {
       if (fromTouch(e)) return;
-      // A touch-driven session has no mouse to leave: a leave after the layout moved under a resting
-      // pointer must not let go of keys held with the on-screen Keys row.
       if (this.mode === 'absolute' && !this.touchActive) this.releaseAll();
       this.stageFocused = false;
     }, opt);
@@ -170,9 +161,9 @@ export class InputCapture {
     if ('ontouchstart' in window) {
       // Touch events where there are any: in WebKit (every iOS browser) only a non-passive
       // touchstart/touchmove that cancels stops the page's own pinch, and its touch pointer events
-      // get cancelled when a second finger lands. Each touch keeps its target, so no capture is needed.
+      // get cancelled when a second finger lands.
       const each = (e, fn) => {
-        e.preventDefault(); // no page zoom or scroll, no synthesized mouse events, no focus change
+        e.preventDefault();
         const t = performance.now();
         this.batchTouch(() => { for (const c of e.changedTouches) fn(c, t); });
       };
@@ -185,7 +176,7 @@ export class InputCapture {
       const touch = (e) => e.pointerType === 'touch';
       v.addEventListener('pointerdown', (e) => {
         if (!touch(e)) return;
-        e.preventDefault(); // no synthesized mouse events, no focus change
+        e.preventDefault();
         this.video.setPointerCapture?.(e.pointerId);
         this.batchTouch(() => this.onTouchDown(e.pointerId, e.clientX, e.clientY, performance.now()));
       }, opt);
@@ -204,7 +195,6 @@ export class InputCapture {
       }, opt);
       v.addEventListener('pointercancel', (e) => { if (touch(e)) this.gestures.cancel(); }, opt);
     }
-    // Touching anything outside the stream (toolbar, settings) hands keys back to the page.
     document.addEventListener('pointerdown', (e) => {
       if (!this.stage.contains(e.target) && e.target !== this.keyTarget) this.touchActive = false;
     }, { ...opt, capture: true });
@@ -254,14 +244,12 @@ export class InputCapture {
     try {
       await video.requestPointerLock({ unadjustedMovement: true });
     } catch {
-      // Raw input unsupported on this platform; fall back to OS-accelerated movement.
       try { await video.requestPointerLock(); } catch { /* user gesture missing */ }
     }
   }
 
   onMouseDown(e) {
     if (this.mode === 'relative' && !this.locked) {
-      // First click only grabs the pointer; it is not forwarded.
       e.preventDefault();
       this.lockPointer(this.laneOf(e) ? this.video2 : this.video);
       return;
@@ -296,9 +284,7 @@ export class InputCapture {
     }
   }
 
-  // Sends pending motion if the channel has room. When it is backed up, relative deltas
-  // keep accumulating and absolute keeps only the latest point; the next flush (next
-  // event or next animation frame) sends the sum, so no movement is lost or delayed in a queue.
+  // Sends pending motion if the channel has room.
   flushMotion() {
     const m = this.motion;
     if (!m.abs && !m.dx && !m.dy) return;
@@ -320,9 +306,8 @@ export class InputCapture {
     }
   }
 
-  // input-motion may lose the last position before the pointer stops, leaving the host
-  // cursor short of it. Once it has rested a moment, send that position again on the
-  // reliable channel, numbered so nothing older can move it afterwards.
+  // input-motion may lose the last position before the pointer stops, leaving the host cursor short
+  // of it.
   settleAbs() {
     clearTimeout(this.absSettleTimer);
     this.absSettleTimer = setTimeout(() => {
@@ -337,7 +322,7 @@ export class InputCapture {
 
   onTouchDown(id, x, y, t) {
     this.touchActive = true;
-    if (this.video.paused) this.video.play().catch(() => {}); // autoplay refused (iOS): a touch starts it
+    if (this.video.paused) this.video.play().catch(() => {});
     this.gestures.down(id, x, y, t);
     clearTimeout(this.holdTimer);
     clearTimeout(this.slideTimer);
@@ -347,7 +332,6 @@ export class InputCapture {
   }
 
   onTouchUp(id, t) {
-    // WebKit counts only the end of a touch as the user's go-ahead to play.
     if (this.video.paused) this.video.play().catch(() => {});
     this.gestures.up(id, t);
     if (!this.gestures.points.size) {
@@ -388,15 +372,13 @@ export class InputCapture {
     if (!this.touchBatch) this.flushMotion();
   }
 
-  // `reliable`: where a click is about to land (touch down, drag start), the position goes on the
-  // ordered reliable channel ahead of the button, so a lost or held motion packet can't misplace it.
+  // `reliable`: where a click is about to land, the position goes on the ordered reliable channel
+  // ahead of the button, so a lost or held motion packet can't misplace it.
   touchMoveTo(x, y, reliable) {
     const p = videoPoint(x, y, this.video.getBoundingClientRect(), this.video.videoWidth, this.video.videoHeight,
       true, this.displaySize?.());
     if (!p) return;
     if (reliable) {
-      // Numbered and newest: no lossy position still in flight, nor a pending re-send of
-      // one, can move the pointer off it afterwards.
       this.motion.abs = null;
       this.absLast = null;
       clearTimeout(this.absSettleTimer);
@@ -417,16 +399,12 @@ export class InputCapture {
   }
 
   onKey(e, down) {
-    // Client hotkeys: Ctrl+Alt+Shift+<key>. Never forwarded.
     if (down && e.ctrlKey && e.altKey && e.shiftKey && this.onHotkey && this.onHotkey(e.code)) {
       e.preventDefault();
       e.stopPropagation();
       return;
     }
     if (!this.active) return;
-    // From the on-screen keyboard, characters are read from the text it types (softkeys.js);
-    // only named keys with a real key code are taken here. 229 is "the IME has it".
-    // Shortcuts (Ctrl/Alt/Win + key) from a hardware keyboard are still taken here.
     if (e.target === this.keyTarget &&
         (e.keyCode === 229 || (e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey))) return;
     const usage = hidUsage(e.code);
@@ -434,17 +412,14 @@ export class InputCapture {
     e.preventDefault();
     e.stopPropagation();
     if (down) this.heldKeys.add(usage);
-    else if (!this.heldKeys.delete(usage)) return; // key went down before we had focus
+    else if (!this.heldKeys.delete(usage)) return;
     this.sendKey(usage, down);
   }
 
-  // Sends a key. Ctrl/Win+V first waits for onBeforePaste() (clipboard.js: the host must have this
-  // browser's clipboard before it sees the paste); keys after it queue behind it, so order holds.
+  // Sends a key.
   sendKey(usage, down) {
     const epoch = this.releaseEpoch;
     const send = () => {
-      // Everything was released (focus lost) while waiting: the host was told, so a late press
-      // must not follow. (A key let go normally, by the user, still goes: its release queues behind.)
       if (down && epoch !== this.releaseEpoch) return;
       this.rel(P.key(usage, down));
       this.onKeySent?.(usage, down);
@@ -466,8 +441,7 @@ export class InputCapture {
     }
   }
 
-  // A full press and release of one key, for keys the browser keeps for itself (Esc in a window).
-  // Modifiers still held from the hotkey are let go around it, so the host sees the key alone.
+  // A full press and release of one key, for keys the browser keeps for itself.
   tapKey(usage) {
     const mods = [...this.heldKeys].filter((u) => u >= 0xe0 && u <= 0xe7);
     for (const u of mods) this.rel(P.key(u, false));
@@ -492,7 +466,6 @@ export class InputCapture {
     if (this.padTimer || this.abort.signal.aborted) return;
     if (![...(navigator.getGamepads?.() ?? [])].some((p) => p?.connected)) return;
     this.padTimer = setInterval(() => {
-      // A hidden tab gets no input; gamepadconnected restarts polling.
       if (document.hidden || !this.pollGamepads()) {
         clearInterval(this.padTimer);
         this.padTimer = 0;
@@ -513,8 +486,8 @@ export class InputCapture {
       const last = this.pads[i];
       if (!sameState(s, last) || now - this.padSentAt[i] >= GAMEPAD_KEEPALIVE_MS) {
         const seq = (this.padSeq[i] + 1) & 0xffff;
-        // Button changes go on the reliable channel so a quick tap is never lost;
-        // stick and trigger moves and keepalives on the unordered one.
+        // Button changes go on the reliable channel so a quick tap is never lost; stick and trigger
+        // moves and keepalives on the unordered one.
         const sent = !last || s.buttons !== last.buttons
           ? this.session.sendInput(CHANNELS.INPUT, P.gamepadButtons(i, s, seq))
           : this.session.sendInput(CHANNELS.INPUT_RT, P.gamepad(i, s, seq));
@@ -536,7 +509,6 @@ export class InputCapture {
     const strong = Math.max(0, Math.min(1, +msg.strong || 0));
     const weak = Math.max(0, Math.min(1, +msg.weak || 0));
     if (!strong && !weak) act.reset?.();
-    // Host sends a new value on every change and 0/0 to stop; the long duration just bridges gaps.
     else act.playEffect('dual-rumble', { duration: 5000, strongMagnitude: strong, weakMagnitude: weak }).catch(() => {});
   }
 }

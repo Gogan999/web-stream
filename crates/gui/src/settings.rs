@@ -1,7 +1,4 @@
-//! What the settings window edits, saved as JSON in the data dir. The host
-//! is started from the equivalent host options (`ws_host::options`), so the
-//! window, its "More options" field and the service check exactly the same
-//! things.
+//! What the settings window edits, saved as JSON in the data dir.
 
 use std::path::Path;
 
@@ -28,27 +25,25 @@ pub struct Settings {
     pub ice_tcp: bool,
     /// `None`: the port after `port`.
     pub ice_tcp_port: Option<u16>,
-    /// More UDP media ports, separated by spaces or commas (443 for clients
-    /// on networks that block the main port).
+    /// More UDP media ports, separated by spaces or commas.
     pub extra_udp_ports: String,
     /// Public addresses that forward to this PC, separated by spaces or commas.
     pub public_ips: String,
-    /// Names or IPs browsers reach this PC by (a DDNS name), for the
-    /// self-signed certificate; separated like `public_ips`.
+    /// Names or IPs browsers reach this PC by (a DDNS name), for the self-signed certificate;
+    /// separated like `public_ips`.
     pub hostnames: String,
-    /// One of [`TUNNELS`]: serve the web page through a Cloudflare Tunnel
-    /// (`--tunnel`).
+    /// One of [`TUNNELS`]: serve the web page through a Cloudflare Tunnel (`--tunnel`).
     pub tunnel: String,
-    /// A newly typed tunnel token, until saved to its own file in the data
-    /// folder ([`ws_host::options::TUNNEL_TOKEN_FILE`]); never in the JSON.
+    /// A newly typed tunnel token, until saved to its own file in the data folder
+    /// ([`ws_host::options::TUNNEL_TOKEN_FILE`]); never in the JSON.
     #[serde(skip)]
     pub tunnel_token: String,
     /// The named tunnel's public name; empty: the one cloudflared reports.
     pub tunnel_hostname: String,
     /// A paired browser unused for this many days is unpaired.
     pub forget_after_days: u32,
-    /// Other origins (`https://name`) allowed to open the web client, for a
-    /// reverse proxy or another front door; separated like `public_ips`.
+    /// Other origins (`https://name`) allowed to open the web client, for a reverse proxy or
+    /// another front door; separated like `public_ips`.
     pub allow_origins: String,
     /// Empty: the web client built into the host.
     pub web_root: String,
@@ -61,11 +56,9 @@ pub struct Settings {
     pub kbps: u32,
     pub quality: String,
     pub game_audio: bool,
-    /// Output device game audio is captured from; empty: the Windows
-    /// default output.
+    /// Output device game audio is captured from; empty: the Windows default output.
     pub audio_device: String,
-    /// Game audio Opus bitrate (kb/s) and frame length (10 or 20 ms). A
-    /// browser can override both from its own settings.
+    /// Game audio Opus bitrate (kb/s) and frame length.
     pub audio_kbps: u32,
     pub audio_frame_ms: u32,
     pub mic: bool,
@@ -73,24 +66,22 @@ pub struct Settings {
     /// One of [`GAMEPADS`].
     pub gamepad: String,
     pub allow_resolution_change: bool,
-    /// Share the clipboard's text with the connected browser, both ways
-    /// (default on; `--no-clipboard` when off).
+    /// Share the clipboard's text with the connected browser, both ways.
     pub clipboard: bool,
     /// Let the browser send files to this PC.
     pub allow_upload: bool,
     /// Where they go; empty: `Downloads\web-stream`.
     pub upload_dir: String,
-    /// Let a paired browser update the host to the latest `main` and
-    /// restart it (`scripts\update.ps1`).
+    /// Let a paired browser update the host to the latest `main` and restart it
+    /// (`scripts\update.ps1`).
     pub allow_remote_update: bool,
     /// More host options, for what the window has no field for.
     pub extra_args: String,
     /// Start hosting as soon as the app opens.
     pub start_hosting: bool,
-    /// Ask the router to forward the ports (UPnP). Off unless the user
-    /// turns it on.
+    /// Ask the router to forward the ports (UPnP).
     pub upnp: bool,
-    /// First-run pairing was opened (the window opens on a QR code once).
+    /// First-run pairing was opened.
     pub setup_done: bool,
 }
 
@@ -253,8 +244,7 @@ impl Settings {
         !matches!(self.tunnel.as_str(), "" | "off")
     }
 
-    /// The ports a router forwards to this PC, for UPnP. With a tunnel the
-    /// web page comes through Cloudflare, so only the media's.
+    /// The ports a router forwards to this PC, for UPnP.
     pub fn forwarded_ports(&self) -> Vec<crate::upnp::Port> {
         let ice_tcp = self
             .ice_tcp
@@ -270,9 +260,8 @@ impl Settings {
         ServeOptions::parse(&self.to_args()?)
     }
 
-    /// The options for `service install`: these settings without what
-    /// belongs to the tray app's own host (its web root, data folder,
-    /// uploads and updates from the browser), which the service refuses.
+    /// The options for `service install`: these settings without what belongs to the tray app's own
+    /// host, which the service refuses.
     #[cfg_attr(not(windows), allow(dead_code))]
     pub fn service_args(&self) -> anyhow::Result<Vec<String>> {
         const WITH_VALUE: &[&str] = &["--web-root", "--data-dir", "--upload-dir"];
@@ -295,8 +284,7 @@ fn list(s: &str) -> impl Iterator<Item = &str> {
     s.split([' ', ',', ';']).filter(|s| !s.is_empty())
 }
 
-/// Splits on whitespace, keeping "double quoted" parts (paths with spaces)
-/// together.
+/// Splits on whitespace, keeping "double quoted" parts (paths with spaces) together.
 fn split_args(s: &str) -> anyhow::Result<Vec<String>> {
     let mut args = Vec::new();
     let mut current = String::new();
@@ -375,7 +363,6 @@ mod tests {
         );
         assert_eq!((o.media.audio_kbps, o.media.audio_frame_ms), (256, 20));
         assert!(o.media.update_log.is_some());
-        // Shared unless turned off, and the service gets the choice too.
         assert!(o.media.clipboard);
         assert!(Settings::default().serve_options().unwrap().media.clipboard);
         let off = Settings {
@@ -406,7 +393,6 @@ mod tests {
         assert_eq!(o.media.gamepad, ws_input::GamepadKind::DualShock4);
         assert_eq!(o.data_dir, std::path::PathBuf::from(r"C:\some dir"));
 
-        // What the service may run with.
         let service = s.service_args().unwrap();
         let o = ws_host::service::check_install_args(&service).unwrap();
         assert_eq!((o.port, o.ice_tcp_port), (9000, None));
@@ -444,7 +430,6 @@ mod tests {
             quick.serve_options().unwrap().tunnel.unwrap().kind,
             ws_host::options::TunnelKind::Quick
         );
-        // Only the media's ports are forwarded with a tunnel.
         assert_eq!(quick.forwarded_ports().len(), 2);
         assert_eq!(Settings::default().forwarded_ports().len(), 3);
     }
@@ -525,7 +510,6 @@ mod tests {
         };
         s.save(&dir).unwrap();
         assert_eq!(Settings::load(&dir).unwrap(), s);
-        // Fields added later fall back to their defaults.
         std::fs::write(dir.join(FILE_NAME), r#"{"port": 9200}"#).unwrap();
         let loaded = Settings::load(&dir).unwrap();
         assert_eq!((loaded.port, loaded.fps), (9200, 60));

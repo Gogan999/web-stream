@@ -1,32 +1,4 @@
 //! Lowers the encode resolution while the bitrate is too low for it.
-//!
-//! An encoder can only make a frame so small: in a real run over cellular
-//! (1 to 3 Mb/s) a still 2560x1440 desktop still came out at about 16 KB a
-//! frame, many times its budget, so the send queue backed up whatever the
-//! bitrate was set to. Encoding fewer pixels lets the frames fit; the
-//! browser scales the picture back up. The step goes down soon after the
-//! bitrate falls and back up only once it has stayed well above what the
-//! larger size needs, since every change restarts the encoder (a keyframe
-//! and a short pause).
-//!
-//! A low bandwidth estimate alone is not enough to step down. The estimate
-//! only grows to about 1.5 times what the stream actually sends, and on a
-//! loss or delay spike it drops to 0.85 times that. A still desktop sends
-//! almost nothing (a tiny repeat frame ten times a second), so after a
-//! minute of it the estimate sits far below the link's real capacity, and
-//! stepping down on it shrank the picture again and again with nothing on
-//! screen. So a step down also needs the stream to be using its bitrate, or
-//! frames to be dropping for lack of it: then the bitrate really is too
-//! small for the size.
-//!
-//! Nor is a short dip. Over Wi-Fi the estimate saws up and down every 5 to
-//! 10 seconds even on a healthy link: a probe finds 50 Mb/s or more, a
-//! delay spike puts it back to 0.85 times what was sent, and it climbs
-//! again (a real run, 2026-10-22: 49 -> 11 -> 57 -> 17 -> 10 -> 49 -> 3 Mb/s,
-//! with no frame dropped or packet lost). Stepping down on a 2 second dip
-//! shrank the picture for nothing. So a step down needs either frames
-//! dropping, or the estimate to have stayed under what the size needs for
-//! the whole [`LOOKBACK`].
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -36,35 +8,29 @@ const STEPS: [f64; 4] = [1.0, 0.75, 0.5, 0.375];
 /// Never encode fewer lines than this.
 const MIN_HEIGHT: u32 = 360;
 /// Bits per pixel per frame below which a size is too big for the bitrate.
-/// From the run above: about 0.035 was the least the encoder managed at
-/// 1440p, so frames under this mostly overrun their budget.
 const MIN_BITS_PER_PIXEL: f64 = 0.04;
 /// How long the bitrate must stay too low before stepping down.
 const DOWN_AFTER: Duration = Duration::from_secs(2);
-/// Without dropped frames, a step down also needs the bitrate to have
-/// been too low for all of this long: longer than the estimate's sawtooth.
+/// Without dropped frames, a step down also needs the bitrate to have been too low for all of this
+/// long: longer than the estimate's sawtooth.
 const LOOKBACK: Duration = Duration::from_secs(15);
-/// How long the bitrate must stay comfortably above the next size up's
-/// need before stepping up.
+/// How long the bitrate must stay comfortably above the next size up's need before stepping up.
 const UP_AFTER: Duration = Duration::from_secs(10);
 /// "Comfortably": this many times what the next size up needs.
 const UP_MARGIN: f64 = 1.5;
-/// A second in which the stream sent at least this share of the encoder's
-/// target counts as using it. A still desktop sends a few percent; moving
-/// content near 100%, and more when its frames overrun.
+/// A second in which the stream sent at least this share of the encoder's target counts as using
+/// it.
 const BUSY_SHARE: f64 = 0.5;
-/// A step down this soon after a step up means the larger size didn't hold:
-/// wait twice as long before trying it again.
+/// A step down this soon after a step up means the larger size didn't hold: wait twice as long
+/// before trying it again.
 const FLAP_WINDOW: Duration = Duration::from_secs(30);
 /// The longest that doubling makes the wait for a step up.
 const MAX_UP_AFTER: Duration = Duration::from_secs(80);
-/// No step down this soon after a connection starts or the size changes:
-/// the bandwidth estimate starts at 10 Mb/s (a 7.5 Mb/s target, under what
-/// 1440p60 needs) and takes a moment to climb.
+/// No step down this soon after a connection starts or the size changes: the bandwidth estimate
+/// starts at 10 Mb/s and takes a moment to climb.
 const SETTLE: Duration = Duration::from_secs(5);
 
-/// The size to encode at `step` of `width` x `height`: scaled, rounded down
-/// to a multiple of 8 (the encoder needs even sizes).
+/// The size to encode at `step` of `width` x `height`: scaled, rounded down to a multiple of 8.
 pub(crate) fn size(width: u32, height: u32, step: usize) -> (u32, u32) {
     let f = STEPS[step.min(STEPS.len() - 1)];
     let round = |v: u32| (((f64::from(v) * f) as u32) / 8 * 8).max(8);
@@ -75,10 +41,8 @@ pub(crate) fn size(width: u32, height: u32, step: usize) -> (u32, u32) {
     }
 }
 
-/// The size to encode a second monitor at, so both streams look alike: the
-/// scale the main stream runs at (`main_encoded` of `main_native`) applied to
-/// `other_native`. Never above the monitor's own size, and in the multiples of
-/// 8 [`size`] uses once it is scaled.
+/// The size to encode a second monitor at, so both streams look alike: the scale the main stream
+/// runs at (`main_encoded` of `main_native`) applied to `other_native`.
 pub(crate) fn follow_size(
     main_encoded: (u32, u32),
     main_native: (u32, u32),
@@ -100,8 +64,8 @@ pub(crate) fn min_kbps(width: u32, height: u32, fps: u32) -> f64 {
     f64::from(width) * f64::from(height) * f64::from(fps) * MIN_BITS_PER_PIXEL / 1000.0
 }
 
-/// The smallest step allowed for a configured size, and for the browser's
-/// floor (see [`ws_proto::VideoConfig::min_scale_percent`]).
+/// The smallest step allowed for a configured size, and for the browser's floor (see
+/// [`ws_proto::VideoConfig::min_scale_percent`]).
 fn last_step(width: u32, height: u32, min_percent: u8) -> usize {
     let floor = f64::from(min_percent.min(100)) / 100.0;
     (0..STEPS.len())
@@ -136,20 +100,17 @@ impl Load {
 #[derive(Debug, Default)]
 pub(crate) struct AutoScale {
     step: usize,
-    /// The first update since the last reset or size change.
+    /// The first update.
     since_change: Option<Instant>,
-    /// Since when the bitrate has been too low for the current step.
     low_since: Option<Instant>,
-    /// Frames were dropped since `low_since`.
+    /// Frames were dropped.
     dropped_while_low: bool,
     /// The bitrate each second over the last [`LOOKBACK`].
     recent: VecDeque<(Instant, u32)>,
-    /// Since when it has been enough for the step above.
     high_since: Option<Instant>,
     /// The last step up, to spot a size that doesn't hold.
     last_up: Option<Instant>,
-    /// How long the headroom must last before a step up; [`UP_AFTER`]
-    /// until a step up fails.
+    /// How long the headroom must last before a step up; [`UP_AFTER`] until a step up fails.
     up_after: Option<Duration>,
 }
 
@@ -158,14 +119,12 @@ impl AutoScale {
         self.step
     }
 
-    /// Back to the configured size (a new connection, or the browser chose
-    /// another size).
+    /// Back to the configured size.
     pub(crate) fn reset(&mut self) {
         *self = Self::default();
     }
 
-    /// Steps back up to the browser's floor if the current step is below
-    /// it. Returns the new step when the encode size should change.
+    /// Steps back up to the browser's floor if the current step is below it.
     pub(crate) fn limit(
         &mut self,
         now: Instant,
@@ -182,8 +141,7 @@ impl AutoScale {
         Some(last)
     }
 
-    /// Takes the last second's [`Load`], once a second. Returns the new
-    /// step when the encode size should change.
+    /// Takes the last second's [`Load`], once a second.
     pub(crate) fn update(
         &mut self,
         now: Instant,
@@ -214,8 +172,6 @@ impl AutoScale {
             now.saturating_duration_since(*self.since_change.get_or_insert(now)) >= SETTLE;
         if self.step < last && kbps < need(self.step) {
             self.high_since = None;
-            // Too low, but the stream isn't using what it has: the estimate
-            // says nothing about the link, so wait for a busy stretch.
             if !settled || !load.busy() {
                 self.low_since = None;
                 self.dropped_while_low = false;
@@ -223,13 +179,9 @@ impl AutoScale {
             }
             let since = *self.low_since.get_or_insert(now);
             self.dropped_while_low |= load.dropped;
-            // The most the bitrate reached lately: a dip that the estimate
-            // climbs back out of says nothing about the link.
             let peak = f64::from(self.recent.iter().map(|&(_, k)| k).max().unwrap_or(0));
             let real = self.dropped_while_low || peak < need(self.step);
             if real && now.saturating_duration_since(since) >= DOWN_AFTER {
-                // Straight to the largest size the bitrate holds up: the
-                // current one if frames are dropping, else the recent best.
                 let basis = if self.dropped_while_low { kbps } else { peak };
                 self.step = (self.step + 1..=last)
                     .find(|&s| basis >= need(s))
@@ -332,17 +284,14 @@ mod tests {
 
     #[test]
     fn the_second_monitor_follows_the_main_streams_scale() {
-        // Native stays native, whatever the second monitor's size.
         assert_eq!(
             follow_size((2560, 1440), (2560, 1440), (1920, 1080)),
             (1920, 1080)
         );
-        // Scaled down by a step: the same fraction of the other monitor.
         assert_eq!(
             follow_size((1920, 1080), (2560, 1440), (1920, 1080)),
             (1440, 808)
         );
-        // Never upscaled: a main stream larger than its monitor.
         assert_eq!(
             follow_size((3840, 2160), (2560, 1440), (1366, 768)),
             (1366, 768)
@@ -368,7 +317,6 @@ mod tests {
         assert_eq!(last_step(2560, 1440, 60), 1);
         assert_eq!(last_step(2560, 1440, 50), 2);
         assert_eq!(last_step(2560, 1440, 1), 3);
-        // The 360-line limit still applies under a low floor.
         assert_eq!(last_step(1280, 720, 1), 2);
     }
 
@@ -376,11 +324,9 @@ mod tests {
     fn steps_down_once_the_bitrate_stays_low_for_the_lookback() {
         let t = Instant::now();
         let mut a = settled(t);
-        // 1440p60 needs about 8.8 Mb/s.
         for i in 0..15 {
             assert_eq!(up(&mut a, t + S * i, busy(3000)), None, "second {i}");
         }
-        // 3 Mb/s holds up 720p60 (about 2.2 Mb/s) but not 1080p60.
         assert_eq!(up(&mut a, t + S * 15, busy(3000)), Some(2));
         assert_eq!(a.step(), 2);
         assert_eq!(up(&mut a, t + S * 16, busy(3000)), None);
@@ -388,8 +334,6 @@ mod tests {
 
     #[test]
     fn a_sawtooth_estimate_does_not_step_down() {
-        // The Wi-Fi run: a probe finds 50 Mb/s, a delay spike drops the
-        // estimate under what 1440p needs, it climbs, and again.
         let t = Instant::now();
         let mut a = settled(t);
         for i in 0..120 {
@@ -403,8 +347,6 @@ mod tests {
     fn steps_down_from_the_recent_best_bitrate() {
         let t = Instant::now();
         let mut a = settled(t);
-        // 6 Mb/s a while ago holds up 1080p (about 5 Mb/s) even though the
-        // estimate is lower now.
         up(&mut a, t, busy(6000));
         for i in 1..15 {
             up(&mut a, t + S * i, busy(2000));
@@ -414,8 +356,6 @@ mod tests {
 
     #[test]
     fn a_still_desktop_never_steps_down() {
-        // The estimate collapses to a fraction of the tiny repeat frames'
-        // rate; nothing moves, so it says nothing about the link.
         let t = Instant::now();
         let mut a = settled(t);
         for i in 0..120 {
@@ -450,8 +390,6 @@ mod tests {
 
     #[test]
     fn dropped_frames_count_as_busy() {
-        // Frames held back or dropped: the queue is full even if what got
-        // out was under half the target.
         let t = Instant::now();
         let mut a = settled(t);
         let held = Load {
@@ -485,7 +423,6 @@ mod tests {
             a.update(t + S * 10, dropping(200), 2560, 1440, 60, 75),
             None
         );
-        // Off: never scales.
         let mut a = settled(t);
         a.update(t, dropping(200), 2560, 1440, 60, 100);
         assert_eq!(
@@ -512,10 +449,8 @@ mod tests {
         let mut a = settled(t);
         up(&mut a, t, dropping(1000));
         assert_eq!(up(&mut a, t + S * 2, dropping(1000)), Some(3));
-        // Enough for 720p, but not with margin: stay.
         assert_eq!(up(&mut a, t + S * 3, busy(2500)), None);
         assert_eq!(up(&mut a, t + S * 20, busy(2500)), None);
-        // Plenty: up one step after ten seconds.
         assert_eq!(up(&mut a, t + S * 21, busy(30_000)), None);
         assert_eq!(up(&mut a, t + S * 30, busy(30_000)), None);
         assert_eq!(up(&mut a, t + S * 31, busy(30_000)), Some(2));
@@ -532,10 +467,8 @@ mod tests {
         assert_eq!(up(&mut a, t + S * 2, dropping(3000)), Some(2));
         up(&mut a, t + S * 3, busy(30_000));
         assert_eq!(up(&mut a, t + S * 13, busy(30_000)), Some(1));
-        // Down again within half a minute of going up.
         up(&mut a, t + S * 18, dropping(3000));
         assert_eq!(up(&mut a, t + S * 20, dropping(3000)), Some(2));
-        // Now twenty seconds of headroom before the next try.
         up(&mut a, t + S * 21, busy(30_000));
         assert_eq!(up(&mut a, t + S * 31, busy(30_000)), None);
         assert_eq!(up(&mut a, t + S * 40, busy(30_000)), None);
@@ -544,8 +477,6 @@ mod tests {
 
     #[test]
     fn the_starting_estimate_does_not_step_down() {
-        // A new connection's 7.5 Mb/s target, under 1440p60's need, while
-        // the estimate climbs.
         let t = Instant::now();
         let mut a = AutoScale::default();
         assert_eq!(up(&mut a, t, busy(7500)), None);
@@ -553,7 +484,6 @@ mod tests {
         assert_eq!(up(&mut a, t + S * 5, busy(30_000)), None);
         assert_eq!(up(&mut a, t + S * 30, busy(30_000)), None);
         assert_eq!(a.step(), 0);
-        // Low from then on: step down once 30 Mb/s is out of the lookback.
         for i in 31..46 {
             assert_eq!(up(&mut a, t + S * i, busy(3000)), None, "second {i}");
         }
@@ -566,7 +496,6 @@ mod tests {
         let mut a = settled(t);
         up(&mut a, t, dropping(3000));
         assert_eq!(up(&mut a, t + S * 2, dropping(3000)), Some(2));
-        // The new size needs a moment too.
         up(&mut a, t + S * 3, dropping(200));
         assert_eq!(up(&mut a, t + S * 6, dropping(200)), None);
         assert_eq!(up(&mut a, t + S * 7, dropping(200)), None);

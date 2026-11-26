@@ -1,7 +1,4 @@
-//! The host: the signaling server, the transport and the media side wired
-//! together. A front end (the tray app in `ws-host-gui`, the service's
-//! control pipe, the test host in `examples`) drives it with [`Command`]s
-//! and shows its [`Event`]s.
+//! The host: the signaling server, the transport and the media side wired together.
 
 use std::net::IpAddr;
 use std::path::PathBuf;
@@ -23,8 +20,7 @@ use crate::options::ServeOptions;
 use crate::tunnel::Tunnel;
 pub use ws_proto::FileId;
 
-/// How long opening pairing lets a browser pair: the signaling server's own
-/// window, so that every countdown built on it agrees with the real one.
+/// How long opening pairing lets a browser pair: the signaling server's own window.
 pub use ws_signaling::DEFAULT_WINDOW as PAIRING_WINDOW;
 
 /// What the host user asks for.
@@ -44,8 +40,7 @@ pub enum Command {
     Quit,
 }
 
-/// What the host user should see. Serialized for the service's control
-/// pipe, which carries it to the tray app.
+/// What the host user should see.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Event {
     /// Everything is listening.
@@ -54,23 +49,15 @@ pub enum Event {
         /// LAN addresses the host listens on.
         ips: Vec<IpAddr>,
         fingerprint: String,
-        /// Browsers warn about the certificate until the user accepts it
-        /// (no `--cert`). Through a Cloudflare Tunnel they see Cloudflare's.
+        /// Browsers warn about the certificate until the user accepts it (no `--cert`).
         self_signed: bool,
         web_root: Option<PathBuf>,
         data_dir: PathBuf,
     },
-    /// Pairing is open for two minutes. `link` is the secret of the pairing
-    /// link (`#pair=` on the client's URL), which pairs once without a code;
-    /// show it only to the host user (as a QR code), never log it.
+    /// Pairing is open for two minutes.
     PairingOpened {
         link: String,
-        /// Seconds left in the window. A console that attaches late is
-        /// replayed this event with what remains, since a receiver counts
-        /// the window from when it hears of it. `None` is "no information"
-        /// (the two sides of the service's link can be different builds, so
-        /// a missing value must not read as an expired window): the
-        /// receiver assumes a full [`PAIRING_WINDOW`].
+        /// Seconds left in the window.
         #[serde(default)]
         remaining_secs: Option<u64>,
     },
@@ -81,14 +68,12 @@ pub enum Event {
     File(FileEvent),
     /// A command failed.
     Error(String),
-    /// A browser started, or the host finished, an update
-    /// (`--allow-remote-update`).
+    /// A browser started, or the host finished, an update (`--allow-remote-update`).
     Update(String),
 }
 
-/// Runs the host until [`Command::Quit`], until every command sender is
-/// dropped, or until the signaling server fails. Shutting down drops the
-/// session and stops capture, which puts back a changed display resolution.
+/// Runs the host until [`Command::Quit`], until every command sender is dropped, or until the
+/// signaling server fails.
 pub async fn serve(
     opts: ServeOptions,
     mut commands: mpsc::Receiver<Command>,
@@ -143,10 +128,8 @@ pub async fn serve(
     result
 }
 
-/// The network-facing half of the host: the signaling server (HTTPS and
-/// the signaling socket) and the transport (the peer connection), with
-/// signaling driving the transport. The Windows service runs it in a
-/// process of its own, with almost no rights ([`crate::split`]).
+/// The network-facing half of the host: the signaling server and the transport (the peer
+/// connection), with signaling driving the transport.
 pub(crate) struct Network {
     pub signaling: SignalingHandle,
     pub server_task: tokio::task::JoinHandle<Result<(), ws_signaling::Error>>,
@@ -250,11 +233,10 @@ impl Network {
         })
     }
 
-    /// Ends the session (a handed-off browser hears why) and stops
-    /// listening; the transport keeps its sockets until [`Network::shutdown`].
+    /// Ends the session and stops listening; the transport keeps its sockets until
+    /// [`Network::shutdown`].
     pub async fn close(&mut self) {
         self.signaling.drop_session().await;
-        // Lets a handed-off browser hear the `bye` over `control`.
         if let Some(stop) = self.signaling_stop.take() {
             let _ = stop.send(());
         }
@@ -268,8 +250,8 @@ impl Network {
         self.transport.close();
     }
 
-    /// Closes the sockets, on the transport's own thread: waits for it, so
-    /// a host started right after can bind the same ports.
+    /// Closes the sockets, on the transport's own thread: waits for it, so a host started right
+    /// after can bind the same ports.
     pub async fn shutdown(self) {
         if tokio::time::timeout(Duration::from_secs(2), self.transport.shutdown())
             .await
@@ -297,8 +279,8 @@ pub(crate) async fn unpair_all(signaling: &SignalingHandle, events: &mpsc::Unbou
     });
 }
 
-/// Access denied on the data dir usually means the host once ran as
-/// administrator, which left files this user can't open; say how to fix it.
+/// Access denied on the data dir usually means the host once ran as administrator, which left files
+/// this user can't open; say how to fix it.
 fn data_dir_error(e: ws_signaling::Error, data_dir: &std::path::Path) -> anyhow::Error {
     let denied = matches!(&e, ws_signaling::Error::Io(io)
         if io.kind() == std::io::ErrorKind::PermissionDenied);
@@ -337,19 +319,14 @@ async fn forward_notices(
     }
 }
 
-/// How long a `bye` sent over `control` gets to reach the browser before
-/// the peer connection closes.
+/// How long a `bye` sent over `control` gets to reach the browser before the peer connection
+/// closes.
 const BYE_GRACE: Duration = Duration::from_millis(250);
-/// A handed-off session whose peer connection has been down this long is
-/// over. Without a socket nothing else says the browser left.
+/// A handed-off session whose peer connection has been down this long is over.
 const HANDED_OFF_DOWN_LIMIT: Duration = Duration::from_secs(20);
 
-/// Signaling for one browser at a time: offer on connect, apply the answer,
-/// pass candidates through, re-offer on restart. A new session replaces the
-/// current one (the server has already told the old browser, unless it had
-/// handed signaling off: then it hears it over `control`). A handed-off
-/// session ends when the server says so, or when its peer connection stays
-/// down.
+/// Signaling for one browser at a time: offer on connect, apply the answer, pass candidates
+/// through, re-offer on restart.
 async fn run_signaling(
     mut sessions: mpsc::Receiver<SignalingSession>,
     transport: Transport,
@@ -379,13 +356,10 @@ async fn run_signaling(
                 }
                 let device = s.device_id.clone();
                 if peers.borrow().device != device {
-                    // The last connection's bandwidth says nothing about
-                    // this device's path.
                     transport.forget_estimate();
                 }
                 current = Some(s);
                 handed_off = false;
-                // Until this browser answers, its codecs are unknown.
                 codecs.send_replace(None);
                 peers.send_modify(|p| {
                     p.count += 1;
@@ -461,8 +435,8 @@ async fn run_signaling(
     }
 }
 
-/// Tells a handed-off browser why its session ends, and gives the message a
-/// moment to arrive before the caller closes the peer connection.
+/// Tells a handed-off browser why its session ends, and gives the message a moment to arrive before
+/// the caller closes the peer connection.
 async fn say_bye(transport: &Transport, reason: ByeReason) {
     let text = serde_json::to_vec(&HostControl::Bye { reason }).expect("bye serializes");
     if matches!(
@@ -480,9 +454,8 @@ async fn next_signal(session: &mut Option<SignalingSession>) -> Option<SessionEv
     }
 }
 
-/// Starts a fresh peer connection and sends its offer, reachable at the
-/// address the browser used and at `public_ip` (learned over STUN when a
-/// tunnel hides the first). False if the browser is gone.
+/// Starts a fresh peer connection and sends its offer, reachable at the address the browser used
+/// and at `public_ip`.
 async fn send_offer(
     transport: &Transport,
     session: Option<&SignalingSession>,
@@ -509,9 +482,7 @@ async fn send_offer(
     }
 }
 
-/// The IPv4 addresses behind the host name the browser used (an address
-/// already, or a DDNS name to resolve), so the offer advertises where the
-/// browser can actually reach us. The transport skips local ones.
+/// The IPv4 addresses behind the host name the browser used.
 async fn reachable_at(host: Option<&str>) -> Vec<std::net::IpAddr> {
     let Some(host) = host else {
         return Vec::new();
@@ -544,8 +515,7 @@ async fn send(session: Option<&SignalingSession>, msg: HostSignal) -> bool {
     }
 }
 
-/// The video codecs in an SDP answer's video section (empty if the browser
-/// rejected video).
+/// The video codecs in an SDP answer's video section.
 fn answer_video_codecs(sdp: &str) -> Vec<VideoCodec> {
     let mut codecs = Vec::new();
     let mut in_video = false;

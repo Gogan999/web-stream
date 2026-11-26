@@ -1,7 +1,4 @@
-// On-screen keyboard for touch devices. Phone keyboards mostly don't report real key codes
-// (Android sends keyCode 229 for nearly everything), so typed text is read from a hidden textarea
-// and turned back into key presses on a US layout. Named keys that do arrive as real key events
-// (Enter, Backspace, arrows on some keyboards) are left to input.js.
+// On-screen keyboard for touch devices.
 
 import { HID } from './keymap.js';
 
@@ -39,8 +36,8 @@ export function charKey(ch) {
   return CHARS.get(ch) ?? null;
 }
 
-// What changed between two textarea values, assuming edits happen at the end (the caret is
-// kept there): how many characters were deleted, then what was typed.
+// What changed between two textarea values, assuming edits happen at the end: how many characters
+// were deleted, then what was typed.
 export function diffText(before, after) {
   let p = 0;
   const max = Math.min(before.length, after.length);
@@ -48,13 +45,10 @@ export function diffText(before, after) {
   return { backspaces: before.length - p, text: after.slice(p) };
 }
 
-// Kept in the textarea so Backspace always has something to delete (keyboards send nothing on
-// an empty field). Zero-width, so it shows nothing and isn't a word for autocorrect.
+// Kept in the textarea so Backspace always has something to delete.
 export const SENTINEL = '\u200b'.repeat(16);
 
-// Key presses for a diff. send(usage, down); `shiftHeld` is true when a sticky Shift is already down.
-// Characters no US key types (accents, symbols, other scripts) go to sendText(text) instead, in
-// order with the key presses, as Unicode; without it they are dropped.
+// Key presses for a diff.
 export function typeDiff({ backspaces, text }, send, shiftHeld = false, sendText = null) {
   for (let i = 0; i < backspaces; i++) {
     send(HID.Backspace, true);
@@ -68,7 +62,6 @@ export function typeDiff({ backspaces, text }, send, shiftHeld = false, sendText
   for (const ch of text) {
     const k = charKey(ch);
     if (!k) {
-      // Nothing on a US keyboard types it. Control and zero-width characters are not text.
       if (sendText && !/[\p{Cc}\u200b-\u200d\ufeff]/u.test(ch)) run += ch;
       continue;
     }
@@ -84,14 +77,13 @@ export function typeDiff({ backspaces, text }, send, shiftHeld = false, sendText
 
 const MODIFIERS = new Set([HID.ControlLeft, HID.AltLeft, HID.ShiftLeft, HID.MetaLeft]);
 
-// The hidden textarea plus the row of extra keys (Esc, Tab, Ctrl, Alt, Win, arrows, F1-F12, Ctrl+C/V/Z...).
-// Ctrl, Alt, Shift and Win are sticky: one tap holds them until the next other key.
+// The hidden textarea plus the row of extra keys.
 export class SoftKeyboard {
-  // sendText(text) types Unicode text on the host; onPaste(text) gets text pasted into the field
-  // (the keyboard's own Paste), which is then not typed here: the owner decides.
+  // sendText(text) types Unicode text on the host; onPaste(text) gets text pasted into the field,
+  // which is then not typed here: the owner decides.
   constructor({ textarea, keys, send, sendText = null, onPaste = null }) {
     this.ta = textarea;
-    this.keys = keys; // container of <button data-key="Escape"> etc.
+    this.keys = keys;
     this.send = send;
     this.sendText = sendText;
     this.onPaste = onPaste;
@@ -105,16 +97,15 @@ export class SoftKeyboard {
     this.ta.addEventListener('blur', () => this.releaseSticky(), opt);
     this.ta.addEventListener('paste', (e) => {
       const text = e.clipboardData?.getData('text/plain');
-      if (!text || !this.onPaste) return; // without an owner, the textarea takes it and onInput types it
+      if (!text || !this.onPaste) return;
       e.preventDefault();
       this.onPaste(text);
     }, opt);
-    // Keep the caret at the end, where diffText expects edits.
     this.ta.addEventListener('select', () => this.caretToEnd(), opt);
     this.keys?.addEventListener('pointerdown', (e) => {
       const b = e.target.closest('button[data-key], button[data-chord]');
       if (!b) return;
-      e.preventDefault(); // keeps focus (and the phone keyboard) where it is
+      e.preventDefault();
       if (b.dataset.chord) this.chord(b.dataset.chord);
       else this.press(b);
     }, opt);
@@ -176,8 +167,7 @@ export class SoftKeyboard {
     this.releaseSticky();
   }
 
-  // A shortcut such as 'ctrl+c': modifiers down, the key pressed, modifiers up. A sticky modifier
-  // that is already held is left to the usual release afterwards.
+  // A shortcut such as 'ctrl+c': modifiers down, the key pressed, modifiers up.
   chord(spec) {
     const names = spec.split('+');
     const code = names.pop();
@@ -192,7 +182,7 @@ export class SoftKeyboard {
     this.releaseSticky();
   }
 
-  // A key sent some other way (input.js forwards named keys with real codes) also ends a sticky press.
+  // A key sent some other way also ends a sticky press.
   keySent(usage, down) {
     if (!down && !MODIFIERS.has(usage) && this.sticky.size) this.releaseSticky();
   }

@@ -26,15 +26,13 @@ use crate::{AudioError, LoopbackConfig, Result};
 
 /// 20 ms of engine buffer: enough headroom for a 5 ms polling loop.
 const BUFFER_HNS: i64 = 200_000;
-/// With nothing playing, loopback delivers no packets at all. After this long
-/// without data the encoder is fed silence so packets keep flowing at 10 ms.
+/// With nothing playing, loopback delivers no packets at all.
 const SILENCE_AFTER: Duration = Duration::from_millis(30);
 /// At most 100 ms of silence per fill.
 const MAX_SILENCE_FRAMES: usize = 10;
 const DEFAULT_DEVICE_CHECK: Duration = Duration::from_secs(1);
 
 /// Captures what the host is playing and sends it as 10 or 20 ms Opus packets.
-/// Dropping it stops the capture thread.
 pub struct LoopbackCapture {
     stop: Arc<AtomicBool>,
     bitrate: Arc<AtomicU32>,
@@ -43,10 +41,7 @@ pub struct LoopbackCapture {
 }
 
 impl LoopbackCapture {
-    /// Opens the device and starts capturing. Packets are sent with
-    /// `try_send`; a full channel drops the packet. If the device goes away
-    /// later the thread keeps retrying, following the default device when
-    /// `config.device` is `None`.
+    /// Opens the device and starts capturing.
     pub fn start(config: LoopbackConfig, packets: mpsc::Sender<AudioPacket>) -> Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         let bitrate = Arc::new(AtomicU32::new(config.bitrate));
@@ -85,8 +80,7 @@ impl LoopbackCapture {
         self.bitrate.store(bits_per_second, Ordering::Relaxed);
     }
 
-    /// Changes the Opus frame length (one of [`crate::FRAME_MS`]) from the
-    /// next frame on.
+    /// Changes the Opus frame length (one of [`crate::FRAME_MS`]) from the next frame on.
     pub fn set_frame_ms(&self, ms: u32) {
         self.frame_ms.store(ms, Ordering::Relaxed);
     }
@@ -129,8 +123,6 @@ impl Stream {
         let (client, input) = init_client(device)?;
         // SAFETY: COM calls on an initialised client.
         let capture = unsafe {
-            // Loopback ignores the event on some Windows builds; the 5 ms
-            // wait timeout in the loop covers that case.
             let _ = client.SetEventHandle(event.0);
             let capture: IAudioCaptureClient = client.GetService()?;
             client.Start()?;
@@ -156,8 +148,8 @@ impl Drop for Stream {
     }
 }
 
-/// Asks the engine to convert to 48 kHz stereo float; falls back to the mix
-/// format, which [`Converter`] then handles.
+/// Asks the engine to convert to 48 kHz stereo float; falls back to the mix format, which
+/// [`Converter`] then handles.
 fn init_client(device: &IMMDevice) -> Result<(IAudioClient, InputFormat)> {
     let flags = AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
     let native = native_format();
@@ -182,7 +174,6 @@ fn init_client(device: &IMMDevice) -> Result<(IAudioClient, InputFormat)> {
         return Ok((client, f));
     }
     debug!("engine conversion unavailable, capturing the mix format");
-    // A client cannot be initialised twice, so start over.
     let client = activate(device)?;
     let (input, raw) = mix_format(&client)?;
     // SAFETY: `raw` holds the device's own mix format.
@@ -275,7 +266,6 @@ fn capture(
     let mut samples = Vec::with_capacity(SAMPLE_RATE as usize / 50 * 2);
     let mut current_bitrate = tuning.bitrate.load(Ordering::Relaxed);
     let mut current_frame_ms = tuning.frame_ms.load(Ordering::Relaxed);
-    // End of the audio handed to the encoder so far, on the wall clock.
     let mut audio_end = Instant::now();
     let mut last_default_check = Instant::now();
 
@@ -296,8 +286,8 @@ fn capture(
 
         let mut got_data = false;
         loop {
-            // SAFETY: COM calls on a started capture client; the buffer is
-            // valid for `frames * frame_bytes` bytes until ReleaseBuffer.
+            // SAFETY: COM calls on a started capture client; the buffer is valid for `frames *
+            // frame_bytes` bytes until ReleaseBuffer.
             let (frames, flags, buffer) = unsafe {
                 let next = match stream.capture.GetNextPacketSize() {
                     Ok(n) => n,
@@ -339,9 +329,6 @@ fn capture(
 
         let now = Instant::now();
         if !got_data && now.duration_since(audio_end) >= SILENCE_AFTER {
-            // Fill the gap up to one frame behind now, in whole frames. After a
-            // stall or sleep, send at most MAX_SILENCE and resync to now
-            // rather than replaying minutes of silence.
             let gap = now.duration_since(audio_end) - FRAME_DURATION;
             let frames = (gap.as_micros() / FRAME_DURATION.as_micros()) as usize;
             let capped = frames.min(MAX_SILENCE_FRAMES);

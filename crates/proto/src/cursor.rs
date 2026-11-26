@@ -1,25 +1,19 @@
-//! The host pointer's shape, for the browser to show (DXGI leaves the
-//! pointer out of the video).
+//! The host pointer's shape, for the browser to show.
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-/// Largest pointer image the host sends, per side: Chrome ignores bigger
-/// CSS cursors, and the base64 of one this size (about 87 KB) still fits
-/// the data channels' shared 128 KiB send buffer. Bigger ones (very large
-/// accessibility sizes) are scaled down.
+/// Largest pointer image the host sends, per side: Chrome ignores bigger CSS cursors, and the
+/// base64 of one this size (about 87 KB) still fits the data channels' shared 128 KiB send buffer.
 pub const MAX_CURSOR_SIDE: u32 = 128;
 
-/// One [`crate::HostControl::CursorShape`] message. Standard shapes carry the
-/// host's image too when it could be read, for a browser that draws the
-/// pointer itself (pointer lock hides its own).
+/// One [`crate::HostControl::CursorShape`] message.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CursorShape {
     pub kind: CursorKind,
     /// Names the host's image of this pointer for the rest of the session.
-    /// Always set for [`CursorKind::Custom`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<u32>,
     /// The image, sent only the first time its `id` is used in a session.
@@ -27,8 +21,7 @@ pub struct CursorShape {
     pub image: Option<CursorImage>,
 }
 
-/// The standard Windows pointers, named as their CSS `cursor` keyword so the
-/// browser shows its own native version.
+/// The standard Windows pointers, named as their CSS `cursor` keyword.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CursorKind {
@@ -45,7 +38,7 @@ pub enum CursorKind {
     NeswResize,
     NotAllowed,
     Help,
-    /// The pointer is hidden (games, video players, typing).
+    /// The pointer is hidden.
     #[serde(rename = "none")]
     Hidden,
     /// Anything else: see [`CursorShape::id`] and [`CursorShape::image`].
@@ -61,8 +54,7 @@ pub struct CursorImage {
     /// The click point, from the top-left corner.
     pub hot_x: u32,
     pub hot_y: u32,
-    /// RGBA, 8 bits each, straight alpha, rows top to bottom; base64 on the
-    /// wire.
+    /// RGBA, 8 bits each, straight alpha, rows top to bottom; base64 on the wire.
     #[serde(serialize_with = "to_base64", deserialize_with = "from_base64")]
     pub rgba: Vec<u8>,
 }

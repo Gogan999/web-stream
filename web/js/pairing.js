@@ -1,5 +1,4 @@
-// Pairing API client. Same origin by cookie, or another PC's origin by device token.
-// See docs/dev/signaling.md.
+// Pairing API client.
 
 async function call(method, path, body, { origin = '', token = null } = {}) {
   const remote = !!origin;

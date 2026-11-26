@@ -1,9 +1,5 @@
 // Auto-tune (test): steps the stream through bitrates, then encoder qualities, and keeps the best
-// that streams cleanly. Run it while something is moving on screen: a still desktop needs few bits,
-// so the network is never really loaded, and the result says so.
-//
-// What counts as a problem is health.js, shared with the stats overlay.
-// The policy lives here; main.js supplies apply(config), measure(ms) and wait(ms).
+// that streams cleanly.
 
 import { LIMITS, lossLevel, bandwidthShort, decodeSlow, encodeSlow, moving as isMoving } from './health.js';
 
@@ -19,11 +15,6 @@ export class Cancelled extends Error {
 }
 
 // Why a measurement window is not good enough, or null if it is.
-// m: { freezes, keyframeRequests, loss, bweKbps, hostFps, decodeMs, encodeMs } over the window
-// (any may be null).
-// `encode` says whether encode time counts: not while stepping bitrate, since it doesn't depend on
-// bitrate (a host whose encoder is slow at any bitrate would otherwise fail every step and end on the
-// floor), only while picking the encoder quality.
 export function problem(m, config, { encode = true } = {}) {
   if (m.freezes > 0) return 'the picture froze';
   if (m.keyframeRequests > LIMITS.keyframesTolerated) return 'frames were dropped on the way';
@@ -68,7 +59,7 @@ export class AutoTune {
     return !why;
   }
 
-  // Resolves to { config, summary }. Rejects with Cancelled if cancel() was called.
+  // Resolves to { config, summary }.
   async run() {
     // Bitrate first, at the fastest encoder setting so encode time doesn't cloud the network test.
     let best = null;

@@ -41,7 +41,6 @@ test('a low bitrate target is a limit only while the encoder uses it', () => {
   assert.equal(bitrateReduced(null), null);
 });
 
-// The overlay and auto-tune must agree: the same numbers are a problem in both, or in neither.
 test('stats overlay and auto-tune use the same limits', () => {
   const config = { fps: 60, width: 1920, height: 1080, bitrateKbps: 20000 };
   const clean = { freezes: 0, keyframeRequests: 0, loss: 0, bweKbps: null, hostFps: 60, decodeMs: 2, encodeMs: 3 };

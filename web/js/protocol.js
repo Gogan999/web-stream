@@ -1,5 +1,4 @@
 // Binary input messages sent on the "input" and "input-motion" data channels.
-// Little-endian, first byte is the message type. See docs/dev/protocol.md.
 
 export const MSG = Object.freeze({
   MOUSE_REL: 0x01,
@@ -11,8 +10,8 @@ export const MSG = Object.freeze({
   GAMEPAD_DISCONNECT: 0x07,
   RELEASE_ALL: 0x08,
   GAMEPAD_BUTTONS: 0x09,
-  MOUSE_ABS_ON: 0x0a, // MOUSE_ABS for a display other than the main one
-  TEXT: 0x0b, // Unicode text to type on the host, UTF-8 up to TEXT_MAX bytes
+  MOUSE_ABS_ON: 0x0a,
+  TEXT: 0x0b,
 });
 
 // Most UTF-8 bytes the host takes in one text message.
@@ -31,10 +30,7 @@ export function mouseRel(dx, dy) {
   return b;
 }
 
-// x, y in 0..1 over the active display. `seq` (optional, u16) numbers positions sent on the
-// unordered channel so the host can ignore one overtaken by a newer one.
-// `lane` says which video stream's display the point is over: 0 the main one, 1 the second monitor
-// (which takes the longer MOUSE_ABS_ON form, with the lane after the type).
+// x, y in 0..1 over the active display.
 export function mouseAbs(x, y, seq, lane = 0) {
   const head = lane ? 2 : 1;
   const b = new ArrayBuffer(head + 4 + (seq === undefined ? 0 : 2));
@@ -47,7 +43,7 @@ export function mouseAbs(x, y, seq, lane = 0) {
   return b;
 }
 
-// DOM MouseEvent.button: 0 left, 1 middle, 2 right, 3 back, 4 forward (same numbering on the wire).
+// DOM MouseEvent.button: 0 left, 1 middle, 2 right, 3 back, 4 forward.
 export function mouseButton(button, down) {
   return new Uint8Array([MSG.MOUSE_BUTTON, button, down ? 1 : 0]).buffer;
 }
@@ -71,14 +67,14 @@ export function key(hidUsage, down) {
   return b;
 }
 
-// state: { buttons (XInput bit flags), lx, ly, rx, ry (i16, +y up), lt, rt (u8) }
-// `seq` (u16, per pad, shared with gamepadButtons) lets the host drop an overtaken snapshot.
+// state: { buttons (XInput bit flags), lx, ly, rx, ry (i16, +y up), lt, rt (u8) } `seq` lets the
+// host drop an overtaken snapshot.
 export function gamepad(index, s, seq) {
   return padState(MSG.GAMEPAD, index, s, seq);
 }
 
-// The same snapshot for the reliable channel, sent when the buttons change: its buttons
-// always apply on the host, so a press or release is never lost.
+// The same snapshot for the reliable channel, sent when the buttons change: its buttons always
+// apply on the host, so a press or release is never lost.
 export function gamepadButtons(index, s, seq) {
   return padState(MSG.GAMEPAD_BUTTONS, index, s, seq);
 }
@@ -107,9 +103,7 @@ export function releaseAll() {
   return new Uint8Array([MSG.RELEASE_ALL]).buffer;
 }
 
-// Messages that type `text` on the host as Unicode characters, whatever its keyboard layout. The
-// host takes at most TEXT_MAX bytes in one, so longer text is split between characters. Returns
-// an array of buffers, in order (empty for empty text).
+// Messages that type `text` on the host as Unicode characters, whatever its keyboard layout.
 export function text(str) {
   const enc = new TextEncoder();
   const out = [];
@@ -125,7 +119,7 @@ export function text(str) {
     chunk = '';
     bytes = 0;
   };
-  for (const ch of String(str)) { // by code point, so a surrogate pair is never split
+  for (const ch of String(str)) {
     const n = enc.encode(ch).length;
     if (bytes + n > TEXT_MAX) flush();
     chunk += ch;

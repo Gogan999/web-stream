@@ -1,16 +1,11 @@
-// Shows the host pointer; the video carries none. In absolute mode it is the video's CSS cursor, so
-// the browser draws it with no added latency: standard shapes as the browser's own, anything else as
-// the host's image. In relative mode pointer lock hides the browser's pointer, so the host's image is
-// drawn over the video where the host says its pointer is; the host sends positions only while the
-// browser asks for them (setCursorPositions).
+// Shows the host pointer; the video carries none.
 
 import { pictureRect } from './picture.js';
 
 const CSS_KINDS = new Set(['default', 'pointer', 'text', 'wait', 'progress', 'crosshair', 'move', 'ew-resize',
   'ns-resize', 'nwse-resize', 'nesw-resize', 'not-allowed', 'help', 'none']);
-const MAX_SIDE = 128; // what the host sends at most; also Chrome's limit for CSS cursor images
-// The host's id table holds as many and never reuses an id, so the newest this many are all it may
-// name without resending the image.
+const MAX_SIDE = 128;
+// The host's id table holds as many and never reuses an id.
 const MAX_IMAGES = 256;
 
 // The image of a cursorShape message as { width, height, hotX, hotY, rgba }, or null if malformed.
@@ -28,7 +23,7 @@ export function decodeImage(img) {
   return { width, height, hotX, hotY, rgba };
 }
 
-// The CSS cursor for a shape; `image` is the host's ({ url, width, height, hotX, hotY }) if known.
+// The CSS cursor for a shape; `image` is the host's if known.
 export function cssCursor(kind, image) {
   if (kind !== 'custom' && CSS_KINDS.has(kind)) return kind;
   if (image?.url && image.width <= MAX_SIDE && image.height <= MAX_SIDE) {
@@ -37,9 +32,8 @@ export function cssCursor(kind, image) {
   return 'default';
 }
 
-// Where the overlay goes inside a letterboxed (object-fit: contain) video of size `box`, in CSS px, or
-// null when the pointer is off the streamed display. `pos` is in host pixels from the display's
-// top-left; the display fills the frame except for any bars the host drew (see pictureRect).
+// Where the overlay goes inside a letterboxed (object-fit: contain) video of size `box`, in CSS px,
+// or null when the pointer is off the streamed display.
 export function overlayBox(pos, image, display, box, videoW, videoH) {
   if (!pos || !image || !display?.width || !display?.height || !videoW || !videoH) return null;
   if (pos.x < 0 || pos.y < 0 || pos.x >= display.width || pos.y >= display.height) return null;
@@ -66,15 +60,15 @@ function toDataUrl({ width, height, rgba }) {
 }
 
 export class CursorView {
-  // `shift`: () => { x, y } added to the host's positions, which are from the main display's corner,
-  // to make them from the corner of the display this video shows (the second monitor's).
+  // `shift`: () => { x, y } added to the host's positions, which are from the main display's
+  // corner, to make them from the corner of the display this video shows (the second monitor's).
   constructor({ video, overlay, displaySize, onPlace = null, shift = null }) {
     this.video = video;
     this.overlay = overlay; // an <img> over the video
-    this.displaySize = displaySize; // () => { width, height } of the streamed display
+    this.displaySize = displaySize;
     this.shift = shift;
-    this.onPlace = onPlace; // (x, y) where the overlay's hotspot was drawn, in the video's parent's px
-    this.images = new Map(); // id -> { url, width, height, hotX, hotY }, for this session
+    this.onPlace = onPlace;
+    this.images = new Map();
     this.kind = 'default';
     this.id = null;
     this.pos = null;
@@ -132,7 +126,7 @@ export class CursorView {
     if (o.getAttribute('src') !== image.url) o.src = image.url;
     o.style.width = `${box.width}px`;
     o.style.height = `${box.height}px`;
-    // Inside the zoomed element, so it zooms with the picture and stays in scale with it.
+    // Inside the zoomed element.
     const left = this.video.offsetLeft + box.left;
     const top = this.video.offsetTop + box.top;
     o.style.transform = `translate(${left}px, ${top}px)`;

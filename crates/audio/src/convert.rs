@@ -1,5 +1,5 @@
-//! Converts whatever the audio engine hands us into interleaved stereo f32
-//! at 48 kHz, the only format the Opus path uses.
+//! Converts whatever the audio engine hands us into interleaved stereo f32 at 48 kHz, the only
+//! format the Opus path uses.
 
 pub const SAMPLE_RATE: u32 = 48_000;
 pub const CHANNELS: usize = 2;
@@ -52,8 +52,7 @@ impl InputFormat {
 
 const MINUS_3DB: f32 = std::f32::consts::FRAC_1_SQRT_2;
 
-/// Folds one interleaved frame down to stereo. 5.1 and 7.1 assume the
-/// standard WAVE channel order (FL FR FC LFE BL BR [SL SR]).
+/// Folds one interleaved frame down to stereo.
 fn downmix(frame: &[f32]) -> (f32, f32) {
     match frame.len() {
         0 => (0.0, 0.0),
@@ -189,7 +188,6 @@ mod tests {
         };
         let mut c = Converter::new(input);
         let mut out = vec![];
-        // One second in ten pushes, as the capture loop would deliver it.
         let mut n = 0u32;
         for _ in 0..10 {
             let samples: Vec<f32> = (0..4410)

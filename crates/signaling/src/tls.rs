@@ -225,7 +225,6 @@ fn local_ca(data_dir: &Path) -> Result<LocalCa, Error> {
         &meta_path,
         serde_json::to_vec(&meta).expect("meta serializes"),
     )?;
-    // A new CA invalidates any server certificate issued by an earlier one.
     let _ = std::fs::remove_file(data_dir.join(META_FILE));
     tracing::info!("generated a new host certificate authority");
     Ok(LocalCa {
@@ -236,8 +235,7 @@ fn local_ca(data_dir: &Path) -> Result<LocalCa, Error> {
     })
 }
 
-/// The server certificate and its chain, issued by the host CA. Reused until the host names
-/// change or it is within 30 days of expiry.
+/// The server certificate and its chain, issued by the host CA.
 fn leaf(data_dir: &Path, hostnames: &[String], ca: &LocalCa) -> Result<(Vec<u8>, Vec<u8>), Error> {
     let cert_path = data_dir.join(CERT_FILE);
     let key_path = data_dir.join(KEY_FILE);

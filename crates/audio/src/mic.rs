@@ -1,8 +1,5 @@
-//! Client microphone path: a small jitter buffer keyed by RTP sequence number
-//! and an Opus decoder that the render thread pulls PCM from.
-//!
-//! Late packets are discarded rather than played late, and a backlog beyond
-//! `max_packets` drops the oldest audio so the mic never drifts behind.
+//! Client microphone path: a small jitter buffer keyed by RTP sequence number and an Opus decoder
+//! that the render thread pulls PCM from.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -23,7 +20,6 @@ pub struct JitterConfig {
 
 impl Default for JitterConfig {
     fn default() -> Self {
-        // Browsers send 20 ms mic packets, so this is 40 ms of cushion.
         Self {
             target_packets: 2,
             max_packets: 8,
@@ -39,20 +35,20 @@ pub struct JitterStats {
     pub overflow_dropped: u64,
     pub concealed: u64,
     pub underruns: u64,
-    /// Restarts after a run of late packets (the sender jumped backwards).
+    /// Restarts after a run of late packets.
     pub resets: u64,
     /// Packets left out to stop the client's clock drifting ahead of ours.
     pub drift_dropped: u64,
 }
 
-/// This many late packets in a row means the sequence jumped backwards
-/// (sender restarted), not ordinary reordering.
+/// This many late packets in a row means the sequence jumped backwards (sender restarted), not
+/// ordinary reordering.
 const RESET_AFTER_LATE: u32 = 8;
-/// Pulls in a row with the backlog above target before one packet is left
-/// out: about a second of 20 ms packets.
+/// Pulls in a row with the backlog above target before one packet is left out: about a second of 20
+/// ms packets.
 const DRIFT_PULLS: u32 = 50;
-/// Frames (per channel) crossfaded over the cut where a packet is left out:
-/// 5 ms, long enough not to click.
+/// Frames (per channel) crossfaded over the cut where a packet is left out: 5 ms, long enough not
+/// to click.
 const DRIFT_FADE_FRAMES: usize = 240;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -60,10 +56,7 @@ pub enum Pull {
     Packet(Vec<u8>),
     /// The next packet is missing but later ones arrived: conceal one packet.
     Lost,
-    /// Leave this packet's audio out to catch up with a client whose clock
-    /// runs fast. Still decoded, so the decoder's state stays continuous,
-    /// and crossfaded into what follows so the cut doesn't click. Empty if
-    /// the slot was missing anyway.
+    /// Leave this packet's audio out to catch up with a client whose clock runs fast.
     Skip(Vec<u8>),
     /// Nothing to play yet.
     Empty,
@@ -98,7 +91,6 @@ impl JitterBuffer {
     /// Unwraps a 16-bit RTP sequence number against the highest one seen.
     fn extend(&self, seq: u16) -> u64 {
         let Some(highest) = self.highest else {
-            // Leave room below the first packet for reordered earlier ones.
             return (1 << 32) + seq as u64;
         };
         let delta = seq.wrapping_sub(highest as u16) as i16 as i64;
@@ -153,8 +145,6 @@ impl JitterBuffer {
             return Pull::Empty;
         };
         let next = self.next.unwrap_or(first);
-        // A gap longer than the buffer means the stream restarted or a burst
-        // was lost; skip ahead instead of concealing it packet by packet.
         let next = if first - next.min(first) > self.config.max_packets as u64 {
             first
         } else {
@@ -162,9 +152,6 @@ impl JitterBuffer {
         };
         self.next = Some(next + 1);
         let pulled = self.packets.remove(&next);
-        // The client's clock runs slightly fast or slow against the render
-        // device; a backlog that stays above target is drift, so leave a
-        // packet out.
         if self.packets.len() > self.config.target_packets {
             self.over_target_pulls += 1;
             if self.over_target_pulls >= DRIFT_PULLS {
@@ -214,8 +201,8 @@ pub struct MicSource {
     scratch: Vec<f32>,
     /// Samples per channel of the last decoded packet, used to size concealment.
     last_frame: usize,
-    /// The start of a packet left out for drift (interleaved), faded out
-    /// over the start of whatever is decoded next.
+    /// The start of a packet left out for drift (interleaved), faded out over the start of whatever
+    /// is decoded next.
     fade: Option<Vec<f32>>,
 }
 
@@ -254,7 +241,6 @@ impl MicSource {
                         .decode_float(&[], &mut self.scratch[..n], false)
                 }
                 Pull::Empty => {
-                    // Silence follows: nothing to fade into.
                     self.fade = None;
                     break;
                 }
@@ -281,8 +267,7 @@ impl MicSource {
     }
 }
 
-/// Fades `from` (the audio that would have continued) out over the start of
-/// `into`, in place. Both interleaved stereo.
+/// Fades `from` out over the start of `into`, in place.
 fn crossfade(from: &[f32], into: &mut [f32]) {
     let frames = from.len().min(into.len()) / CHANNELS;
     for f in 0..frames {
@@ -328,7 +313,7 @@ mod tests {
         j.push(3, p(3));
         assert_eq!(j.pull(), Pull::Packet(p(1)));
         assert_eq!(j.pull(), Pull::Lost);
-        j.push(2, p(2)); // arrived after its slot was concealed
+        j.push(2, p(2));
         assert_eq!(j.pull(), Pull::Packet(p(3)));
         assert_eq!(j.stats().late, 1);
         assert_eq!(j.stats().concealed, 1);
@@ -362,8 +347,6 @@ mod tests {
             j.push(s, p(0));
         }
         while j.pull() != Pull::Empty {}
-        // Sender restarted at 10: the first few look like reordering and are
-        // dropped, then the buffer restarts on the new numbering.
         for s in 10..10 + RESET_AFTER_LATE as u16 + 2 {
             j.push(s, p(s as u8));
         }
@@ -382,7 +365,6 @@ mod tests {
             j.push(seq, p(0));
             seq += 1;
         }
-        // One in, one out, but 4 deep instead of 2.
         let mut skipped = 0;
         for _ in 0..DRIFT_PULLS {
             match j.pull() {
@@ -424,7 +406,6 @@ mod tests {
             let n = enc.encode_float(&tone, &mut buf).unwrap();
             rx.push(seq, &buf[..n]);
         }
-        // 3 packets of 20 ms mono decode to 2880 stereo frames; ask for more.
         let mut out = vec![1.0f32; 4000 * CHANNELS];
         src.fill(&mut out);
         assert!(out[..2880 * CHANNELS].iter().any(|s| s.abs() > 0.01));
@@ -452,7 +433,6 @@ mod tests {
         let from = vec![1.0f32; 4 * CHANNELS];
         let mut into = vec![0.0f32; 8 * CHANNELS];
         crossfade(&from, &mut into);
-        // Falls steadily from near 1 to near 0, then the next audio as is.
         let left: Vec<f32> = into.iter().step_by(CHANNELS).copied().collect();
         assert!(left[0] > 0.7 && left[3] < 0.3);
         assert!(left.windows(2).take(3).all(|w| w[0] > w[1]));

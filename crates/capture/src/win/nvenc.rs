@@ -1,24 +1,7 @@
-//! NVENC encoder session on a D3D11 device, configured for interactive
-//! streaming: ultra-low-latency tuning at the preset [`crate::tuning`] picks
-//! for the config's quality, CBR with a VBV of about one frame and a
-//! quarter-resolution first pass (so a scene cut stays near its budget), no
-//! B-frames, an infinite GOP (keyframes only on demand), and
-//! parameter sets repeated on every IDR so a decoder can join at any
-//! keyframe.
-//!
-//! Keyframes get [`VideoConfig::keyframe_scale`] frames' worth of bits, so
-//! the picture doesn't turn to mush every time the stream has to restart
-//! from one. Where the GPU supports it, a frame that never reached the
-//! browser is invalidated instead ([`NvEncoder::invalidate`]): the encoder
-//! goes back to an older reference the browser does have, and no keyframe
-//! is needed. Frames are tagged with their `frame_index` as NVENC's input
-//! timestamp so they can be named.
-//!
-//! Frames are queued ([`NvEncoder::submit`]) and come out on a thread of
-//! the encoder's own (NVENC's async mode, with completion events), so the
-//! capture thread takes and converts the next desktop image while one
-//! encodes. At most [`SLOTS`] frames are in the encoder: one encoding and
-//! one queued, never a backlog.
+//! NVENC encoder session on a D3D11 device, configured for interactive streaming: ultra-low-latency
+//! tuning at the preset [`crate::tuning`] picks for the config's quality, CBR with a VBV of about
+//! one frame and a quarter-resolution first pass, no B-frames, an infinite GOP, and parameter sets
+//! repeated on every IDR so a decoder can join at any keyframe.
 
 use std::ffi::{CStr, c_void};
 use std::ptr;
@@ -50,8 +33,8 @@ use crate::{CaptureError, Result};
 /// The NVENC entry points from the driver's DLL, loaded once per process.
 struct Api(nv::NV_ENCODE_API_FUNCTION_LIST);
 
-// SAFETY: the function list is plain function pointers filled in once by the
-// driver and never mutated afterwards; NVENC entry points are thread safe.
+// SAFETY: the function list is plain function pointers filled in once by the driver and never
+// mutated afterwards; NVENC entry points are thread safe.
 unsafe impl Send for Api {}
 unsafe impl Sync for Api {}
 
@@ -64,8 +47,6 @@ fn api() -> Result<&'static nv::NV_ENCODE_API_FUNCTION_LIST> {
 }
 
 fn load_api() -> std::result::Result<Api, String> {
-    // Only ever load the driver's copy from System32, never one planted next
-    // to the executable or on PATH.
     let lib =
         unsafe { LoadLibraryExW(w!("nvEncodeAPI64.dll"), None, LOAD_LIBRARY_SEARCH_SYSTEM32) }
             .map_err(|e| format!("NVIDIA driver not found (nvEncodeAPI64.dll): {e}"))?;
@@ -121,21 +102,14 @@ macro_rules! call {
     }};
 }
 
-/// Frames in the encoder at once: one being encoded while the next is
-/// copied in and queued behind it. More would only queue frames, which is
-/// latency.
+/// Frames in the encoder at once: one being encoded while the next is copied in and queued behind
+/// it.
 pub(crate) const SLOTS: usize = 2;
 /// A frame not out of the encoder in this long means the GPU hung.
 const FRAME_TIMEOUT: Duration = Duration::from_secs(2);
-/// How long after the completion event the lock is retried by yielding
-/// rather than sleeping. The wait that is left is expected to be a few
-/// milliseconds at most, and a flat sleep would round it up to its own
-/// granule (and `thread::sleep` on Windows is coarser than asked, since this
-/// crate never raises the timer resolution), so the lock would end up no
-/// quicker than the blocking call it replaces.
+/// How long after the completion event the lock is retried by yielding rather than sleeping.
 const LOCK_SPIN_WINDOW: Duration = Duration::from_micros(500);
-/// The sleep between attempts once the spin window has passed, so a long
-/// wait does not burn a core.
+/// The sleep between attempts once the spin window has passed, so a long wait does not burn a core.
 const LOCK_SLEEP: Duration = Duration::from_millis(1);
 
 /// What to do after the lock answered `NV_ENC_ERR_LOCK_BUSY`.
@@ -151,9 +125,7 @@ enum LockBackoff {
     GiveUp,
 }
 
-/// The retry policy for a busy lock, given the time since the completion
-/// event and how many retries have been made. Pure, so it can be tested
-/// without an encoder.
+/// The retry policy for a busy lock, given the time.
 fn lock_backoff(since_completed: Duration, retries: u32) -> LockBackoff {
     if since_completed >= FRAME_TIMEOUT {
         LockBackoff::GiveUp
@@ -168,8 +140,7 @@ fn lock_backoff(since_completed: Duration, retries: u32) -> LockBackoff {
 /// Sent in place of a slot once a frame has failed: the encoder is done for.
 const FAILED_SLOT: usize = usize::MAX;
 
-/// One frame out of the encoder, with what the capture thread tagged it
-/// with when it went in.
+/// One frame out of the encoder, with what the capture thread tagged it with when it went in.
 pub(crate) struct Encoded<M> {
     pub data: Bytes,
     pub keyframe: bool,
@@ -180,59 +151,36 @@ pub(crate) struct Encoded<M> {
     pub timing: EncodeTiming,
 }
 
-/// The instants one frame passed through the encoder, kept as plain values
-/// and only reported later, so that measuring costs the measured span
-/// nothing beyond reading the clock. They let a log line up one frame's
-/// completion against the next frame's submit.
-///
-/// Where the time shows up depends on the mode. Asynchronously the encode
-/// call returns at once and the frame is waited for on the event
-/// (`completed - wait_at`). Synchronously `nvEncEncodePicture` itself
-/// blocks, so the time lands in the submit span, the event is null and not
-/// waited on, and the bitstream lock returns almost at once: `enc_ms` is then
-/// tiny and says nothing, and the event wait carries no information. To
-/// compare modes use the time from `slot_taken` to `done` (`inenc_ms` in the
-/// log). The log prints milliseconds with two decimals, so the parts can
-/// differ from `enc_ms` by 0.01 ms there while the instants are exact.
+/// The instants one frame passed through the encoder, kept as plain values and only reported later.
 #[derive(Clone, Copy)]
 pub(crate) struct EncodeTiming {
     /// Just before a slot was asked for.
     pub before_slot: Instant,
-    /// A slot was in hand (after any wait for one to come back).
+    /// A slot was in hand.
     pub slot_taken: Instant,
     /// The encode call returned: the frame is in the encoder.
     pub submitted: Instant,
     /// The output thread got to the frame, before it waited for completion.
-    /// If this is late but `completed` follows at once, the thread was busy
-    /// with the frame before and the event had long since been signalled; if
-    /// it is early and `completed` is far after it, the signal itself was
-    /// late.
     pub wait_at: Instant,
-    /// The wait for the completion event returned, before the bitstream was
-    /// touched. That is when the wait ended, not when NVENC signalled. A
-    /// synchronous encoder has no event, so this is just the start of the
-    /// bitstream work and says nothing about the encode.
+    /// The wait for the completion event returned, before the bitstream was touched.
     pub completed: Instant,
     /// The bitstream was copied out and unlocked.
     pub done: Instant,
-    /// How many times the lock answered `NV_ENC_ERR_LOCK_BUSY` and was tried
-    /// again. Reported on the `frame` line to show whether it happens at all.
+    /// How many times the lock answered `NV_ENC_ERR_LOCK_BUSY` and was tried again.
     pub lock_retries: u32,
 }
 
 /// What the output thread hands on for each frame.
 pub(crate) type Finished<M> = std::result::Result<Encoded<M>, (M, CaptureError)>;
 
-/// An input texture registered with the encoder, and the bitstream buffer
-/// (and in async mode the event) its frame comes out through.
+/// An input texture registered with the encoder, and the bitstream buffer its frame comes out
+/// through.
 struct Slot {
-    /// NV12 at the stream size: a copy of the converter's output, so the
-    /// converter can take the next desktop image while this one encodes.
+    /// NV12 at the stream size: a copy of the converter's output.
     texture: ID3D11Texture2D,
     registered: nv::NV_ENC_REGISTERED_PTR,
     bitstream: nv::NV_ENC_OUTPUT_PTR,
-    /// Signalled when the frame is encoded; null when synchronous (the
-    /// lock then waits instead).
+    /// Signalled when the frame is encoded; null when synchronous.
     event: *mut c_void,
     /// Mapped for a frame in the encoder; unmapped once the slot is back.
     mapped: nv::NV_ENC_INPUT_PTR,
@@ -249,10 +197,7 @@ struct Pending<M> {
     meta: M,
 }
 
-// SAFETY: the pointers are NVENC and event handles. The output thread only
-// waits on the event and locks and unlocks the bitstream, which NVENC
-// allows from a thread of its own; the capture thread keeps the slot alive
-// until the slot comes back.
+// SAFETY: the pointers are NVENC and event handles.
 unsafe impl<M: Send> Send for Pending<M> {}
 
 /// The encoder session, for the output thread.
@@ -262,33 +207,27 @@ struct Session {
     encoder: *mut c_void,
 }
 
-// SAFETY: as for Pending; the session outlives the output thread (Drop
-// joins it before destroying the encoder).
+// SAFETY: as for Pending; the session outlives the output thread.
 unsafe impl Send for Session {}
 
-/// An NVENC session that encodes in the background: [`Self::submit`]
-/// returns once the frame is queued, and a thread of its own hands each
-/// finished frame to the callback given to [`Self::new`], in order. The
-/// capture thread meanwhile takes and converts the next desktop image, so
-/// capture, conversion and encoding overlap instead of running in turn.
+/// An NVENC session that encodes in the background: [`Self::submit`] returns once the frame is
+/// queued, and a thread of its own hands each finished frame to the callback given to
+/// [`Self::new`], in order.
 pub(crate) struct NvEncoder<M: Send + 'static> {
     api: &'static nv::NV_ENCODE_API_FUNCTION_LIST,
     encoder: *mut c_void,
     device: ID3D11Device,
-    // Boxed: `init.encodeConfig` points at `config`, and both are handed back
-    // to the driver on reconfigure.
     init: Box<nv::NV_ENC_INITIALIZE_PARAMS>,
     config: Box<nv::NV_ENC_CONFIG>,
     fps: u32,
     vbv_frames: f64,
     keyframe_scale: u8,
-    /// Fixed quantizer for this codec instead of a constant bitrate (the
-    /// Source quality); the pacer holds the bitrate.
+    /// Fixed quantizer for this codec instead of a constant bitrate (the Source quality); the pacer
+    /// holds the bitrate.
     fixed_qp: Option<u32>,
     /// The GPU can invalidate reference frames, and the config asks for it.
     can_invalidate: bool,
-    /// Completion events (NVENC's async mode); otherwise the output thread
-    /// waits in the bitstream lock.
+    /// Completion events (NVENC's async mode).
     async_mode: bool,
     slots: Vec<Slot>,
     /// Slots ready for a frame.
@@ -298,16 +237,12 @@ pub(crate) struct NvEncoder<M: Send + 'static> {
     returned_tx: std_mpsc::Sender<usize>,
     pending: Option<std_mpsc::Sender<Pending<M>>>,
     output: Option<JoinHandle<()>>,
-    /// What went wrong on the output thread, for the next submit to report
-    /// (the pipeline then rebuilds the encoder).
+    /// What went wrong on the output thread, for the next submit to report.
     failed: Arc<Mutex<Option<String>>>,
 }
 
 impl<M: Send + 'static> NvEncoder<M> {
-    /// Opens an encoder on `gpu` for `cfg`'s stream size. [`Self::resize`]
-    /// can later change the size in place up to `max` (width, height); at
-    /// least the stream size. `on_output` gets every frame, on the
-    /// encoder's output thread.
+    /// Opens an encoder on `gpu` for `cfg`'s stream size.
     pub(crate) fn new(
         gpu: &Gpu,
         cfg: &VideoConfig,
@@ -325,15 +260,12 @@ impl<M: Send + 'static> NvEncoder<M> {
         let mut encoder = ptr::null_mut();
         let status = unsafe { call!(api, nvEncOpenEncodeSessionEx(&mut session, &mut encoder)) };
         if status != nv::NVENCSTATUS::NV_ENC_SUCCESS {
-            // Common causes: not an NVIDIA adapter, or the consumer-GPU
-            // concurrent session limit.
             return Err(CaptureError::NoEncoder(format!(
                 "NVENC session failed to open on this adapter (NVENCSTATUS {})",
                 status.0
             )));
         }
         let (returned_tx, returned) = std_mpsc::channel();
-        // From here on Drop cleans up whatever has been created.
         let mut this = Self {
             api,
             encoder,
@@ -435,8 +367,6 @@ impl<M: Send + 'static> NvEncoder<M> {
                     nv::NV_ENC_CAPS::NV_ENC_CAPS_SUPPORT_REF_PIC_INVALIDATION,
                 )
                 .is_ok_and(|v| v > 0);
-        // With invalidation the encoder needs older pictures to fall back
-        // on; one reference (the ultra-low-latency default) leaves it none.
         let refs = if self.can_invalidate { DPB_FRAMES } else { 0 };
         self.async_mode = self
             .cap(
@@ -460,19 +390,9 @@ impl<M: Send + 'static> NvEncoder<M> {
             self.vbv_frames,
             self.fixed_qp,
         );
-        // The preset already implies these for ultra-low latency; set them
-        // so a driver default change can't add frames of delay.
         config.rcParams.set_enableLookahead(0);
         config.rcParams.lookaheadDepth = 0;
-        // A quarter-resolution first pass over each frame, so rate control
-        // knows what the frame costs before it picks a quantizer. Without
-        // it a scene cut came out at up to 20 times the frame's budget (a
-        // 449 KB frame against about 25 KB in a real run), which backed the
-        // send queue up for hundreds of milliseconds. NVIDIA recommends it
-        // for low-latency CBR with a one-frame VBV; it adds no frames of
-        // delay, only a little encode time.
         config.rcParams.multiPass = if self.fixed_qp.is_some() {
-            // A fixed quantizer needs no estimate of what a frame will cost.
             nv::NV_ENC_MULTI_PASS::NV_ENC_MULTI_PASS_DISABLED
         } else {
             nv::NV_ENC_MULTI_PASS::NV_ENC_TWO_PASS_QUARTER_RESOLUTION
@@ -550,7 +470,6 @@ impl<M: Send + 'static> NvEncoder<M> {
             )
         };
         if status != nv::NVENCSTATUS::NV_ENC_SUCCESS {
-            // An older GPU or driver may refuse the first pass: do without.
             tracing::warn!(
                 "encoder refused two-pass rate control ({}); using one pass",
                 self.last_error(status)
@@ -572,8 +491,8 @@ impl<M: Send + 'static> NvEncoder<M> {
         Ok(())
     }
 
-    /// Adds an input texture of `width` x `height`, with its bitstream
-    /// buffer and, in async mode, its completion event.
+    /// Adds an input texture of `width` x `height`, with its bitstream buffer and, in async mode,
+    /// its completion event.
     fn add_slot(&mut self, width: u32, height: u32) -> Result<()> {
         let texture = nv12_texture(&self.device, width, height)?;
         let mut bs = nv::NV_ENC_CREATE_BITSTREAM_BUFFER {
@@ -584,7 +503,6 @@ impl<M: Send + 'static> NvEncoder<M> {
             unsafe { call!(self.api, nvEncCreateBitstreamBuffer(self.encoder, &mut bs)) },
             "nvEncCreateBitstreamBuffer",
         )?;
-        // Pushed before anything else can fail, so Drop frees what was made.
         self.slots.push(Slot {
             texture,
             registered: ptr::null_mut(),
@@ -653,11 +571,7 @@ impl<M: Send + 'static> NvEncoder<M> {
         }
     }
 
-    /// Changes the encoded size in place; the next frame is an IDR. Cheaper
-    /// than a new session: no new device or encoder, so no stall. Waits for
-    /// the frames in the encoder first. Fails if the size is over the
-    /// maximum the encoder was opened for, or the driver refuses; the
-    /// encoder must then be replaced.
+    /// Changes the encoded size in place; the next frame is an IDR.
     pub(crate) fn resize(&mut self, width: u32, height: u32) -> Result<()> {
         if width > self.init.maxEncodeWidth || height > self.init.maxEncodeHeight {
             return Err(CaptureError::InvalidConfig(format!(
@@ -688,7 +602,6 @@ impl<M: Send + 'static> NvEncoder<M> {
         params.set_forceIDR(1);
         let status = unsafe { call!(self.api, nvEncReconfigureEncoder(self.encoder, &mut params)) };
         if let Err(e) = self.check(status, "nvEncReconfigureEncoder (resize)") {
-            // Keep our copy in sync with what the encoder is still running.
             (
                 self.init.encodeWidth,
                 self.init.encodeHeight,
@@ -704,8 +617,7 @@ impl<M: Send + 'static> NvEncoder<M> {
         Ok(())
     }
 
-    /// Waits until every frame in the encoder has come out (and been handed
-    /// to the callback).
+    /// Waits until every frame in the encoder has come out.
     pub(crate) fn drain(&mut self) -> Result<()> {
         while self.free.len() < self.slots.len() {
             let slot = self.returned_slot()?;
@@ -717,8 +629,7 @@ impl<M: Send + 'static> NvEncoder<M> {
         Ok(())
     }
 
-    /// A slot for the next frame, waiting for one to come back if the
-    /// encoder holds them all.
+    /// A slot for the next frame, waiting for one to come back if the encoder holds them all.
     fn take_slot(&mut self) -> Result<usize> {
         let slot = match self.free.pop() {
             Some(slot) => slot,
@@ -744,15 +655,7 @@ impl<M: Send + 'static> NvEncoder<M> {
         }
     }
 
-    /// Queues `src` (NV12, the stream size) for encoding and returns; the
-    /// frame comes out on the output thread with `meta`. `timestamp` names
-    /// the frame for [`Self::invalidate`]. `intra` says the frame will be
-    /// coded from scratch without being an IDR (every reference was
-    /// invalidated), so it gets a keyframe's budget too.
-    ///
-    /// `kbps` is a new bitrate to use from this frame on (after it, for a
-    /// keyframe, so the change shares the reconfigure that restores the
-    /// ordinary frame budget). [`Self::bitrate_kbps`] says what took.
+    /// Queues `src` for encoding and returns; the frame comes out on the output thread with `meta`.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn submit(
         &mut self,
@@ -807,12 +710,6 @@ impl<M: Send + 'static> NvEncoder<M> {
     ) -> Result<()> {
         unsafe {
             context.CopyResource(&self.slots[index].texture, src);
-            // Submit the copy now. NVENC waits for it on the GPU, but D3D11
-            // only hands queued work to the GPU when its buffer is flushed,
-            // which otherwise happens at the next desktop image: each frame
-            // then sat in the encoder for about one frame time (capture to
-            // encoded went from about 12 to 30 ms with async encoding, and
-            // the frame rate fell to about 1 / that).
             context.Flush();
         }
         let mut map = nv::NV_ENC_MAP_INPUT_RESOURCE {
@@ -824,10 +721,6 @@ impl<M: Send + 'static> NvEncoder<M> {
         self.check(status, "nvEncMapInputResource")?;
         self.slots[index].mapped = map.mappedResource;
 
-        // Let the keyframe take a few frames' worth of bits, then go back.
-        // Reconfiguring applies to the frames queued after it, so the
-        // budget goes back as soon as this one is queued. A failed change
-        // only costs keyframe sharpness.
         let big_keyframe = (force_idr || intra) && self.keyframe_scale > 1;
         if big_keyframe {
             let vbv = self.vbv_frames * f64::from(self.keyframe_scale);
@@ -865,15 +758,10 @@ impl<M: Send + 'static> NvEncoder<M> {
                 tracing::warn!("restoring the frame budget after a keyframe failed: {e}");
             }
         }
-        // No B-frames, so never NV_ENC_ERR_NEED_MORE_INPUT: every frame
-        // comes out in order.
         self.check(status, "nvEncEncodePicture")
     }
 
     /// Stops the encoder referencing the frame encoded with `timestamp`.
-    /// Only that frame: to drop a run of frames, invalidate each one. The
-    /// next frame uses an older reference, or is coded intra (but is not an
-    /// IDR) if none is left.
     pub(crate) fn invalidate(&mut self, timestamp: u64) -> Result<()> {
         if !self.can_invalidate {
             return Err(CaptureError::Platform(
@@ -900,8 +788,6 @@ impl<M: Send + 'static> NvEncoder<M> {
     fn reconfigure_rate(&mut self, kbps: u32, vbv_frames: f64, keyframe_scale: u8) -> Result<()> {
         let previous = self.config.rcParams;
         apply_rate(&mut self.config, kbps, self.fps, vbv_frames, self.fixed_qp);
-        // The ratio of keyframe to ordinary frame bits rate control aims for
-        // (ultra-low latency defaults to 1).
         self.config.rcParams.lowDelayKeyFrameScale = keyframe_scale;
         let mut params = nv::NV_ENC_RECONFIGURE_PARAMS {
             version: nv::NV_ENC_RECONFIGURE_PARAMS_VER,
@@ -911,7 +797,6 @@ impl<M: Send + 'static> NvEncoder<M> {
         let status = unsafe { call!(self.api, nvEncReconfigureEncoder(self.encoder, &mut params)) };
         let result = self.check(status, "nvEncReconfigureEncoder");
         if result.is_err() {
-            // Keep our copy in sync with what the encoder is still running.
             self.config.rcParams = previous;
         }
         result
@@ -953,7 +838,6 @@ impl<M: Send + 'static> NvEncoder<M> {
 
 impl<M: Send + 'static> Drop for NvEncoder<M> {
     fn drop(&mut self) {
-        // The output thread finishes the frames in the encoder and exits.
         self.pending.take();
         if let Some(t) = self.output.take() {
             let _ = t.join();
@@ -988,8 +872,8 @@ impl<M: Send + 'static> Drop for NvEncoder<M> {
     }
 }
 
-/// The output thread: takes each frame out of the encoder, in order, gives
-/// its slot back, and hands it on.
+/// The output thread: takes each frame out of the encoder, in order, gives its slot back, and hands
+/// it on.
 fn output_loop<M: Send>(
     session: Session,
     pending: std_mpsc::Receiver<Pending<M>>,
@@ -1009,7 +893,6 @@ fn output_loop<M: Send>(
         let encode_time = done.saturating_duration_since(p.submitted);
         match result {
             Ok((data, keyframe, completed, lock_retries)) => {
-                // Back first: the capture thread may be waiting for it.
                 let _ = returned.send(p.slot);
                 on_output(Ok(Encoded {
                     data,
@@ -1028,11 +911,6 @@ fn output_loop<M: Send>(
                 }));
             }
             Err(e) => {
-                // The slot never goes back: after a timeout the GPU may still
-                // own its texture, bitstream and event, and a late finish
-                // would signal whatever frame used the event next. Failed is
-                // set first, so the next submit stops, and a capture thread
-                // already waiting for a slot hears it at once.
                 *failed.lock().unwrap_or_else(|e| e.into_inner()) = Some(e.to_string());
                 if !broken {
                     let _ = returned.send(FAILED_SLOT);
@@ -1044,8 +922,7 @@ fn output_loop<M: Send>(
     }
 }
 
-/// Waits for one frame and copies its bitstream out. The instant the wait
-/// ended comes back with it, so the wait can be told apart from the copy.
+/// Waits for one frame and copies its bitstream out.
 fn finish<M>(session: Session, p: &Pending<M>) -> Result<(Bytes, bool, Instant, u32)> {
     let Session { api, encoder } = session;
     let asynchronous = !p.event.is_null();
@@ -1067,12 +944,6 @@ fn finish<M>(session: Session, p: &Pending<M>) -> Result<(Bytes, bool, Instant, 
             outputBitstream: p.bitstream,
             ..Default::default()
         };
-        // NVIDIA's Video Codec SDK Programming Guide documents two patterns.
-        // A synchronous client leaves `doNotWait` at 0, because the lock call
-        // is what waits for the frame (section 6.2). An asynchronous client
-        // has already waited on the completion event and locks with
-        // `doNotWait` set (section 6.1), so the lock reports the frame
-        // instead of blocking in the driver.
         if asynchronous {
             lock.set_doNotWait(1);
         }
@@ -1080,9 +951,6 @@ fn finish<M>(session: Session, p: &Pending<M>) -> Result<(Bytes, bool, Instant, 
         if status == nv::NVENCSTATUS::NV_ENC_SUCCESS {
             break lock;
         }
-        // Documented as non-fatal: try again after a few milliseconds. The
-        // sleep keeps this from spinning, and the deadline from waiting on a
-        // frame that never becomes lockable.
         if status == nv::NVENCSTATUS::NV_ENC_ERR_LOCK_BUSY {
             match lock_backoff(completed.elapsed(), lock_retries) {
                 LockBackoff::GiveUp => {
@@ -1103,8 +971,8 @@ fn finish<M>(session: Session, p: &Pending<M>) -> Result<(Bytes, bool, Instant, 
             last_error(api, encoder, status)
         )));
     };
-    // SAFETY: NVENC guarantees the pointer/size describe the locked
-    // bitstream until nvEncUnlockBitstream.
+    // SAFETY: NVENC guarantees the pointer/size describe the locked bitstream until
+    // nvEncUnlockBitstream.
     let data: &[u8] = if lock.bitstreamBufferPtr.is_null() || lock.bitstreamSizeInBytes == 0 {
         &[]
     } else {
@@ -1164,18 +1032,12 @@ fn nv12_texture(device: &ID3D11Device, width: u32, height: u32) -> Result<ID3D11
     texture.ok_or(CaptureError::Platform("no NV12 texture".into()))
 }
 
-/// Reference pictures kept when invalidation is on: how far back the encoder
-/// can reach for a picture the browser has.
+/// Reference pictures kept when invalidation is on: how far back the encoder can reach for a
+/// picture the browser has.
 pub(crate) const DPB_FRAMES: u32 = 4;
 
-/// CBR at `kbps` with a VBV of `vbv_frames` frames: every frame fits in
-/// about one frame time on the wire, so the network never has to buffer a
-/// long burst.
-///
-/// With `fixed_qp` (the Source quality) the encoder instead codes every
-/// frame at that quantizer, whatever it costs; the bitrate is still stored
-/// (it is what [`NvEncoder::bitrate_kbps`] reports) but only the capture
-/// thread's pacer enforces it, by delaying frames.
+/// CBR at `kbps` with a VBV of `vbv_frames` frames: every frame fits in about one frame time on the
+/// wire.
 fn apply_rate(
     config: &mut nv::NV_ENC_CONFIG,
     kbps: u32,
@@ -1202,9 +1064,8 @@ fn apply_rate(
     rc.vbvInitialDelay = rc.vbvBufferSize;
 }
 
-/// The fixed quantizer for the Source quality: low enough that text and
-/// thin lines come out as sharp as 4:2:0 allows. AV1's scale runs to 255
-/// where H.264's and HEVC's run to 51.
+/// The fixed quantizer for the Source quality: low enough that text and thin lines come out as
+/// sharp as 4:2:0 allows.
 fn source_qp(codec: VideoCodec) -> u32 {
     match codec {
         VideoCodec::H264 | VideoCodec::H265 => 18,

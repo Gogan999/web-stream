@@ -1,7 +1,4 @@
-//! Signaling and pairing messages, as specified in `docs/dev/signaling.md`
-//! (owned by the transport work). The host serves both itself: pairing over
-//! same-origin HTTPS under `/api`, signaling over the `/ws` WebSocket. The
-//! host is always the offerer and never trickles candidates.
+//! Signaling and pairing messages, as specified in `docs/dev/signaling.md`.
 
 use serde::{Deserialize, Serialize};
 
@@ -9,8 +6,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum HostSignal {
-    /// First message after the upgrade; `ice_servers` feeds
-    /// `RTCConfiguration.iceServers` and is usually empty.
+    /// First message after the upgrade; `ice_servers` feeds `RTCConfiguration.iceServers` and is
+    /// usually empty.
     Welcome {
         ice_servers: Vec<IceServer>,
     },
@@ -54,11 +51,8 @@ pub enum ClientSignal {
     },
     /// Ask for a fresh offer, e.g. after ICE failure.
     Restart,
-    /// The peer connection is up and its `control` channel open: the
-    /// browser is about to close this socket, and the session goes on over
-    /// the peer connection alone. A `bye` then arrives on `control` instead
-    /// ([`crate::HostControl::Bye`]); to recover from a failed connection the
-    /// browser opens a new socket.
+    /// The peer connection is up and its `control` channel open: the browser is about to close this
+    /// socket, and the session goes on over the peer connection alone.
     Handoff,
 }
 
@@ -89,7 +83,7 @@ pub struct PairStart {
     pub want_token: bool,
 }
 
-/// `POST /api/pair/start` 200 response. The host shows a 6-digit code.
+/// `POST /api/pair/start` 200 response.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PairStarted {
     pub pairing_id: String,
@@ -107,8 +101,8 @@ pub struct PairConfirm {
     pub want_token: bool,
 }
 
-/// `POST /api/pair/link` body: the secret from the pairing link (QR code)
-/// the host shows while pairing is open, instead of a code.
+/// `POST /api/pair/link` body: the secret from the pairing link (QR code) the host shows while
+/// pairing is open, instead of a code.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PairLink {
     pub link: String,
@@ -118,7 +112,8 @@ pub struct PairLink {
     pub want_token: bool,
 }
 
-/// `POST /api/pair/confirm` (and `/api/pair/link`) 200 response; the `__Host-ws_device` cookie is set.
+/// `POST /api/pair/confirm` (and `/api/pair/link`) 200 response; the `__Host-ws_device` cookie is
+/// set.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PairConfirmed {
     pub paired: bool,

@@ -9,19 +9,17 @@ pub struct SignalingConfig {
     pub bind: SocketAddr,
     /// Where the TLS certificate (when self-signed) and paired devices are kept.
     pub data_dir: PathBuf,
-    /// Directory with the web client. `None` serves `embedded_web`, or a
-    /// placeholder page when that is empty.
+    /// Directory with the web client.
     pub web_root: Option<PathBuf>,
     /// The web client built into the binary, as (path, contents).
     pub embedded_web: &'static [(&'static str, &'static [u8])],
     pub tls: TlsSource,
-    /// External TURN servers handed to the browser. Usually empty, since the
-    /// host is reachable directly.
+    /// External TURN servers handed to the browser.
     pub turn: Vec<TurnServer>,
     /// A paired device unused for this long is revoked.
     pub device_idle_expiry: Duration,
-    /// Extra origins allowed to call the API besides the host's own, for
-    /// example a name behind a reverse proxy.
+    /// Extra origins allowed to call the API besides the host's own, for example a name behind a
+    /// reverse proxy.
     pub extra_origins: Vec<String>,
 }
 
@@ -45,14 +43,12 @@ impl SignalingConfig {
 #[derive(Debug, Clone)]
 pub enum TlsSource {
     /// Generate a certificate on first run and keep it in `data_dir`.
-    /// `hostnames` are extra names or IPs to put in it besides localhost.
     SelfSigned { hostnames: Vec<String> },
     /// PEM files.
     Files { cert: PathBuf, key: PathBuf },
 }
 
-/// A TURN server using the shared-secret REST credential scheme (coturn
-/// `use-auth-secret`).
+/// A TURN server using the shared-secret REST credential scheme (coturn `use-auth-secret`).
 #[derive(Clone)]
 pub struct TurnServer {
     pub urls: Vec<String>,

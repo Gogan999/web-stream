@@ -12,7 +12,6 @@ test('problems in a measurement window', () => {
   assert.match(problem({ ...clean, loss: 0.05 }, base), /5\.0% packet loss/);
   assert.match(problem({ ...clean, bweKbps: 12000 }, base), /12 Mb\/s/);
   assert.equal(problem({ ...clean, bweKbps: 19000 }, base), null);
-  // A still screen sends little, and the estimate stays low: not a network problem.
   assert.equal(problem({ ...clean, bweKbps: 3000, hostFps: 10 }, base), null);
   assert.equal(problem({ ...clean, encodeMs: 12 }, base), null);
   assert.match(problem({ ...clean, encodeMs: 20 }, base), /encode too slow/);

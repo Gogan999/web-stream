@@ -14,7 +14,6 @@ window.confirmPair = async (pairing_id, code) => {
   return r.status;
 };
 
-// `tcpOnly` drops every UDP candidate from the offer to force ICE-TCP.
 window.connect = (tcpOnly = false) => new Promise((resolve, reject) => {
   const ws = new WebSocket(`wss://${location.host}/ws`);
   state.ws = ws;
@@ -25,7 +24,6 @@ window.connect = (tcpOnly = false) => new Promise((resolve, reject) => {
     if (msg.type === 'welcome') {
       const pc = new RTCPeerConnection({ iceServers: msg.ice_servers });
       state.pc = pc;
-      // The host offers two video tracks (the second monitor's is idle here): play the first.
       pc.ontrack = (ev) => { const v = document.getElementById('v'); if (ev.track.kind === 'video' && !v.srcObject) v.srcObject = new MediaStream([ev.track]); };
       pc.ondatachannel = (ev) => {
         const ch = ev.channel;
@@ -55,7 +53,6 @@ window.stats = async () => {
   const report = await state.pc.getStats();
   let pairId;
   report.forEach((s) => {
-    // The track with frames: the first stream's, not the idle second one's.
     if (s.type === 'inbound-rtp' && s.kind === 'video' && !(s.framesDecoded < (out.framesDecoded ?? 0))) Object.assign(out, { framesDecoded: s.framesDecoded, frameWidth: s.frameWidth, codecId: s.codecId, packetsLost: s.packetsLost, jitterBufferDelay: s.jitterBufferDelay, jitterBufferEmittedCount: s.jitterBufferEmittedCount });
     if (s.type === 'transport') pairId = s.selectedCandidatePairId;
   });

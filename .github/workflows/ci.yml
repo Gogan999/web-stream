@@ -18,7 +18,6 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Windows is the host platform; Linux covers the signaling server.
         os: [windows-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
     steps:
@@ -33,7 +32,6 @@ jobs:
         run: cargo clippy --workspace --all-targets
       - name: test
         run: cargo test --workspace
-      # The browser client against the real host: shared files reach the browser's downloads.
       - uses: actions/setup-node@v4
         if: matrix.os == 'ubuntu-latest'
         with:
@@ -49,14 +47,10 @@ jobs:
       - name: build release
         if: matrix.os == 'windows-latest'
         run: cargo build --workspace --release
-      # The service's network host: label on its folder, and what a process
-      # with its token can and can't write, run as SYSTEM.
       - name: network host sandbox
         if: matrix.os == 'windows-latest'
         shell: pwsh
         run: ./installer/test-network-sandbox.ps1 -Exe target/release/ws-host-gui.exe
-      # The installer friends download: built, installed silently, started,
-      # uninstalled, and checked for leftovers.
       - name: installer
         if: matrix.os == 'windows-latest'
         shell: pwsh
@@ -65,8 +59,6 @@ jobs:
           ./installer/build.ps1 -Version 0.0.0-ci
           ./installer/test-install.ps1 -Setup target/installer/web-stream-setup-0.0.0-ci.exe
 
-  # Headless Chromium against the transport's test pattern host: UDP, forced
-  # ICE-TCP, and UDP firewalled so the browser has to fall back by itself.
   transport-e2e:
     runs-on: ubuntu-latest
     steps:

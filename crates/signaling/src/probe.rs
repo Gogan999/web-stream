@@ -1,6 +1,5 @@
-//! Which certificate answers at an address: the first-run port test asks
-//! its own public address, to tell this host apart from, say, a router's
-//! admin page on the same port.
+//! Which certificate answers at an address: the first-run port test asks its own public address, to
+//! tell this host apart from, say, a router's admin page on the same port.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -15,9 +14,7 @@ use tokio_rustls::TlsConnector;
 
 use crate::Error;
 
-/// The SHA-256 fingerprint (as [`crate::CertInfo`] writes it) of the
-/// certificate presented at `addr`. Nothing is sent after the handshake,
-/// and the certificate isn't trusted for anything: it is only compared.
+/// The SHA-256 fingerprint of the certificate presented at `addr`.
 pub async fn certificate_at(addr: SocketAddr, timeout: Duration) -> Result<String, Error> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let config = ClientConfig::builder_with_provider(provider.clone())
@@ -44,8 +41,7 @@ pub async fn certificate_at(addr: SocketAddr, timeout: Duration) -> Result<Strin
         .map_err(|_| Error::Io(std::io::ErrorKind::TimedOut.into()))?
 }
 
-/// Accepts any certificate, still checking that the handshake was signed
-/// by its key.
+/// Accepts any certificate, still checking that the handshake was signed by its key.
 #[derive(Debug)]
 struct AnyCertificate(Arc<CryptoProvider>);
 

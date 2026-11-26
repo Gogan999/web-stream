@@ -1,44 +1,17 @@
-; The web-stream host installer (Inno Setup 6). One screen of checkboxes,
-; then the tray app opens on its first-run setup.
-;
-; Built by CI (.github/workflows/release.yml and ci.yml):
-;   powershell -File installer\fetch-redist.ps1
-;   cargo build --release --locked -p ws-host-gui
-;   iscc /DAppVersion=0.2.0 installer\web-stream.iss
-; Output: target\installer\web-stream-setup-<version>.exe
-;
-; Installs per machine into Program Files (only administrators can change
-; what may later run as SYSTEM). Settings, paired browsers and logs stay in
-; each user's %LOCALAPPDATA%\web-stream, as before.
-;
-; Silent install, as CI tests it:
-;   web-stream-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /TASKS="autostart"
-;
-; The tray app's updater (crates/gui/src/update_check.rs) runs:
-;   web-stream-setup-X.Y.Z.exe /SILENT /SUPPRESSMSGBOXES /NORESTART /RELAUNCH
-; /RELAUNCH is ours: it starts the app again when setup is done (a silent
-; run otherwise starts nothing). Setup is not signed.
-; Silent uninstall keeps settings unless /PURGE is given:
-;   "%ProgramFiles%\web-stream\unins000.exe" /VERYSILENT /SUPPRESSMSGBOXES /PURGE
-
+; web-stream host installer (Inno Setup 6).
 #ifndef AppVersion
   #define AppVersion "0.0.0-dev"
 #endif
-; Windows wants four numbers in the file's version resource.
 #ifndef AppNumericVersion
   #define AppNumericVersion "0.0.0"
 #endif
 #define AppName "web-stream host"
 #define AppExe "ws-host-gui.exe"
-; The service's copy of the host (crates/host/src/service/scm.rs).
 #define ServiceExe "ws-host.exe"
 #define ServiceName "web-stream"
 #define FirewallRule "web-stream host"
-; HKCU Run value the tray app's "Start with Windows" uses (crates/gui/src/win.rs).
 #define RunValue "web-stream host"
 #define ViGEm "ViGEmBus_1.22.0_x64_x86_arm64.exe"
-; Cloudflare Tunnel's connector, run by the host when a tunnel is on
-; (crates/host/src/tunnel.rs looks for it next to the exe).
 #define Cloudflared "cloudflared-windows-amd64.exe"
 #define SteamMicInf "Steam\drivers\Windows10\x64\SteamStreamingMicrophone.inf"
 
@@ -52,7 +25,6 @@ AppPublisherURL=https://github.com/Gogan999/web-stream
 AppSupportURL=https://github.com/Gogan999/web-stream/blob/main/docs/guide/getting-started.md
 VersionInfoVersion={#AppNumericVersion}
 DefaultDirName={autopf}\web-stream
-; Fixed: the service copy, the firewall rules and the updater expect it here.
 DisableDirPage=yes
 DisableProgramGroupPage=yes
 DisableWelcomePage=yes
@@ -95,23 +67,15 @@ Source: "redist\{#ViGEm}"; DestDir: "{tmp}"; Flags: deleteafterinstall; Tasks: g
 Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExe}"; Comment: "Stream this PC to a browser"
 
 [Run]
-; Inbound rules for the two programs that listen (the tray app, and the
-; service's copy), on any port they are set to, on every network profile:
-; a friend's home network is often marked Public. Removed on uninstall.
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""{#FirewallRule}"""; Flags: runhidden; StatusMsg: "Adding firewall rules..."
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""{#FirewallRule}"" dir=in action=allow program=""{app}\{#AppExe}"" enable=yes profile=any"; Flags: runhidden
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""{#FirewallRule}"" dir=in action=allow program=""{app}\{#ServiceExe}"" enable=yes profile=any"; Flags: runhidden
 Filename: "{tmp}\{#ViGEm}"; Parameters: "/exenoui /qn /norestart"; Tasks: gamepad; Check: not ViGEmInstalled; StatusMsg: "Installing the gamepad driver..."
 Filename: "{app}\{#AppExe}"; Parameters: "setup mic-driver"; Tasks: mic; Flags: runhidden; StatusMsg: "Installing the microphone driver..."
-; The service: updated in place if it is already installed (keeping its
-; settings), installed with the defaults if newly asked for.
 Filename: "{app}\{#AppExe}"; Parameters: "service update --quiet"; Check: ServiceInstalled; Flags: runhidden; StatusMsg: "Updating the service..."
 Filename: "{app}\{#AppExe}"; Parameters: "service install --quiet"; Tasks: service; Check: not ServiceInstalled; Flags: runhidden; StatusMsg: "Installing the service..."
 Filename: "{app}\{#AppExe}"; Description: "Open web-stream host"; Flags: postinstall nowait runasoriginaluser skipifsilent; Check: not HasParam('/RELAUNCH') and not AppWasRunning
 Filename: "{app}\{#AppExe}"; Parameters: "--hidden"; Flags: nowait runasoriginaluser; Check: AppWasRunning and not HasParam('/RELAUNCH')
-; The tray app's own updater runs this setup with /SILENT /RELAUNCH: start the
-; app again, as the user who clicked Update (not the administrator UAC
-; elevated to), once everything is installed.
 Filename: "{app}\{#AppExe}"; Flags: nowait runasoriginaluser; Check: HasParam('/RELAUNCH')
 
 [UninstallRun]
@@ -120,7 +84,6 @@ Filename: "{app}\{#AppExe}"; Parameters: "setup upnp-remove"; Flags: runhidden; 
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""{#FirewallRule}"""; Flags: runhidden; RunOnceId: "firewall"
 
 [UninstallDelete]
-; The service's copy and its leftovers from an interrupted update.
 Type: files; Name: "{app}\{#ServiceExe}"
 Type: files; Name: "{app}\{#ServiceExe}.new"
 Type: dirifempty; Name: "{app}\licenses"
@@ -181,7 +144,6 @@ begin
   Result := HasParam('/SILENT') or HasParam('/VERYSILENT');
 end;
 
-// Signals the tray app's quit event and waits for its single-instance mutex to go.
 function QuitRunningApp: Boolean;
 var
   Event: THandle;
@@ -206,7 +168,6 @@ begin
   Result := not CheckForMutexes(InstanceMutex);
 end;
 
-// Closes the tray app; asks the user only if it does not quit by itself.
 function EnsureAppClosed(Silent: Boolean): Boolean;
 begin
   Result := QuitRunningApp;
@@ -234,14 +195,11 @@ begin
   Result := EnsureAppClosed(UninstallSilent);
 end;
 
-// Updating an installed copy is one click: the previous choices are kept.
 function ShouldSkipPage(PageID: Integer): Boolean;
 begin
   Result := WasInstalled and ((PageID = wpSelectTasks) or ((PageID = wpFinished) and AppRunningAtStart));
 end;
 
-// "Start with Windows" belongs to the user who ran setup, not to the
-// administrator account UAC elevated to, so the tray app sets it as them.
 procedure SetAutostart(const On: Boolean);
 var
   Arg: String;
@@ -253,9 +211,6 @@ begin
     Log(Format('setup autostart %s failed (%d)', [Arg, Code]));
 end;
 
-// The service's network host runs cloudflared.exe while a tunnel is on,
-// which keeps the file in use: stop the service before the files are
-// replaced ("service update" below starts it again).
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   Code: Integer;
@@ -278,8 +233,6 @@ var
   Purge: Boolean;
 begin
   if CurUninstallStep = usUninstall then
-    // The uninstaller runs as the elevated user, who is almost always the
-    // one who installed it.
     RegDeleteValue(HKCU, RunKey, '{#RunValue}');
   if CurUninstallStep = usPostUninstall then
   begin
@@ -291,7 +244,6 @@ begin
     if Purge then
     begin
       DelTree(ExpandConstant('{localappdata}\web-stream'), True, True, True);
-      // The service's own data, in SYSTEM's profile (scm.rs data_dir).
       DelTree(ExpandConstant('{win}\System32\config\systemprofile\AppData\Local\web-stream'), True, True, True);
     end;
   end;

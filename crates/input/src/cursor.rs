@@ -1,6 +1,4 @@
-//! Reads the host pointer's shape and position, so the browser can show it
-//! (DXGI leaves the pointer out of the video). On Windows the reader is
-//! [`CursorReader`]; poll it every few milliseconds.
+//! Reads the host pointer's shape and position.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -22,8 +20,8 @@ pub struct CursorState {
 #[derive(Debug, Clone, PartialEq)]
 pub struct CursorLook {
     pub kind: CursorKind,
-    /// The host's image of it, when it could be read; the same id for the
-    /// same image for as long as the reader lives.
+    /// The host's image of it, when it could be read; the same id for the same image for as long as
+    /// the reader lives.
     pub image: Option<(u32, Arc<CursorImage>)>,
 }
 
@@ -34,16 +32,14 @@ impl CursorLook {
     };
 }
 
-/// Gives each distinct custom image a small id, so the browser can cache it
-/// and the host sends each image once.
+/// Gives each distinct custom image a small id.
 #[derive(Debug, Default)]
 pub struct ImageIds {
     ids: HashMap<Arc<CursorImage>, u32>,
     next: u32,
 }
 
-/// Distinct images remembered; past this the table starts over (an app
-/// animating its pointer by creating new ones).
+/// Distinct images remembered; past this the table starts over.
 const MAX_IMAGES: usize = 256;
 
 impl ImageIds {
@@ -54,8 +50,6 @@ impl ImageIds {
         if self.ids.len() >= MAX_IMAGES {
             self.ids.clear();
         }
-        // Ids keep counting up across a clear, so the browser never shows a
-        // stale image for a reused id.
         let id = self.next;
         self.next = self.next.wrapping_add(1);
         let image = Arc::new(image);
@@ -64,8 +58,8 @@ impl ImageIds {
     }
 }
 
-/// `image` scaled down (nearest pixel) to fit `max` per side, hotspot
-/// included; smaller images are returned as they are.
+/// `image` scaled down (nearest pixel) to fit `max` per side, hotspot included; smaller images are
+/// returned as they are.
 pub fn fit(image: CursorImage, max: u32) -> CursorImage {
     let side = image.width.max(image.height);
     if side <= max || max == 0 {
@@ -91,8 +85,7 @@ pub fn fit(image: CursorImage, max: u32) -> CursorImage {
     }
 }
 
-/// RGBA from a colour pointer's 32-bit BGRA pixels. Pointers without an
-/// alpha channel take it from the AND mask (also 32-bit, set = transparent).
+/// RGBA from a colour pointer's 32-bit BGRA pixels.
 pub fn rgba_from_color(bgra: &[u8], mask: Option<&[u8]>) -> Vec<u8> {
     let has_alpha = bgra.chunks_exact(4).any(|p| p[3] != 0);
     let mut out = Vec::with_capacity(bgra.len());
@@ -110,10 +103,7 @@ pub fn rgba_from_color(bgra: &[u8], mask: Option<&[u8]>) -> Vec<u8> {
     out
 }
 
-/// RGBA from a monochrome pointer's AND and XOR masks (each 32-bit, one
-/// pixel per 4 bytes). Pixels that invert the screen (the I-beam's kind)
-/// can't be drawn by the browser; they become black with a white edge so
-/// they show on any background.
+/// RGBA from a monochrome pointer's AND and XOR masks.
 pub fn rgba_from_monochrome(and: &[u8], xor: &[u8], width: usize) -> Vec<u8> {
     let bit = |m: &[u8], i: usize| m.get(i * 4).is_some_and(|&b| b != 0);
     let n = and.len().min(xor.len()) / 4;
@@ -128,7 +118,6 @@ pub fn rgba_from_monochrome(and: &[u8], xor: &[u8], width: usize) -> Vec<u8> {
         };
         out[i * 4..i * 4 + 4].copy_from_slice(&px);
     }
-    // White edge around inverting pixels, on transparent neighbours.
     if let Some(height) = n.checked_div(width) {
         for i in 0..n {
             if out[i * 4 + 3] != 0 {
@@ -212,7 +201,6 @@ mod tests {
     fn color_uses_alpha_or_falls_back_to_mask() {
         // BGRA with alpha: swizzled, alpha kept.
         assert_eq!(rgba_from_color(&[1, 2, 3, 128], None), vec![3, 2, 1, 128]);
-        // No alpha anywhere: the mask decides (set = transparent).
         let bgra = [10, 20, 30, 0, 40, 50, 60, 0];
         let mask = [255, 255, 255, 0, 0, 0, 0, 0];
         assert_eq!(
@@ -230,7 +218,6 @@ mod tests {
         let out = rgba_from_monochrome(&and, &xor, 4);
         assert_eq!(&out[0..4], &[0, 0, 0, 255]); // black
         assert_eq!(&out[4..8], &[255, 255, 255, 255]); // white
-        // Transparent, but next to an inverting pixel: white edge.
         assert_eq!(&out[8..12], &[255, 255, 255, 255]);
         assert_eq!(&out[12..16], &[0, 0, 0, 255]); // inverting: black
     }

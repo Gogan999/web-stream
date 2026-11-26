@@ -1,6 +1,4 @@
-//! The OS-specific pieces: input injection, game audio capture and the
-//! virtual mic. Off Windows they are stand-ins so the rest of the host (and
-//! its signaling and transport) still runs and can be tested.
+//! The OS-specific pieces: input injection, game audio capture and the virtual mic.
 
 use tokio::sync::mpsc;
 use ws_audio::{LoopbackConfig, MicConfig, MicReceiver};

@@ -1,32 +1,4 @@
 //! Tells which end of the stream is the bottleneck, and relieves it.
-//!
-//! The host knows its own side (how long a frame takes to encode, whether the
-//! send queue fell behind, how much was lost) and the browser reports its
-//! own (decode time, frames dropped or frozen) once a second. Together they
-//! say what is limiting the picture:
-//!
-//! * the **network**: frames are late or dropped, packets are lost. The
-//!   bandwidth estimate already moves the bitrate and [`crate::scale`]
-//!   already shrinks the picture for it, so this only reports it;
-//! * the **host encoder**: capture to encoded takes longer than a frame. A
-//!   smaller picture is cheaper to encode, so the picture is shrunk;
-//! * the **browser's decoder**: it takes most of a frame to decode, or drops
-//!   or skips frames while the network is clean. A smaller picture is cheaper
-//!   to decode too, so the picture is shrunk.
-//!
-//! Limits: with two monitors only the main stream's figures are counted (the
-//! browser's report comes from the first video, whose decode load is doubled
-//! by the second, so decode time is underestimated). A tab that is visible but
-//! occluded or on another screen reports `hidden: false` while throttled; the
-//! "showing too few frames" test could misfire there, which the 3-of-5 rule
-//! only limits.
-//!
-//! Each second is judged on its own, then a limiter has to show in 3 of the
-//! last 5 seconds before anything changes, so a single hitch does nothing.
-//! Every change restarts the wait, so a step has time to show its effect.
-//! The size comes back up after a quiet stretch, and only if the figures
-//! measured at the current size say the larger one would hold; one that
-//! doesn't hold doubles the wait next time, as [`crate::scale`] does.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -47,16 +19,14 @@ const RELIEF_AFTER: Duration = Duration::from_secs(25);
 const MAX_RELIEF_AFTER: Duration = Duration::from_secs(200);
 /// A limiter back this soon after a step up means the size didn't hold.
 const FLAP_WINDOW: Duration = Duration::from_secs(60);
-/// Browser reports older than this are ignored (it stopped sending, or the
-/// page is not running).
+/// Browser reports older than this are ignored.
 pub(crate) const CLIENT_STATS_TTL: Duration = Duration::from_secs(3);
-/// Encode (capture to encoded) over this many frame times is too slow. More
-/// than one, because a frame waits up to a frame time for its slot.
+/// Encode (capture to encoded) over this many frame times is too slow.
 const ENCODE_LIMIT: f32 = 1.5;
 /// Decode over this share of a frame time is too slow.
 const DECODE_LIMIT: f32 = 0.8;
-/// A step up is tried only if the figure, scaled by the pixels the larger
-/// size adds, stays under this share of its limit.
+/// A step up is tried only if the figure, scaled by the pixels the larger size adds, stays under
+/// this share of its limit.
 const RELIEF_MARGIN: f32 = 0.8;
 /// Packet loss above this is the network's.
 const LOSS_LIMIT: f32 = 0.02;
@@ -68,8 +38,7 @@ pub(crate) struct HostSample {
     pub fps_target: u32,
     /// Frames handed to the network per second.
     pub fps: f32,
-    /// Into the encoder to encoded, averaged: not the time the pacer held the
-    /// image first (Source quality holds one up to ~200 ms).
+    /// Into the encoder to encoded, averaged: not the time the pacer held the image first.
     pub encode_ms: f32,
     /// Frames dropped for lateness or the queue, or packets the socket refused.
     pub dropped: u32,
@@ -100,7 +69,6 @@ pub(crate) struct Bottleneck {
     last_encode_ms: f32,
     last_decode_ms: f32,
     last_step_change: Option<Instant>,
-    /// Since when nothing limited, at least.
     quiet_since: Option<Instant>,
     last_relief: Option<Instant>,
     relief_after: Option<Duration>,
@@ -138,10 +106,6 @@ fn judge(host: &HostSample, client: Option<&ClientStats>) -> (Verdict, String) {
                 format!("browser decode takes {d:.1} ms (a frame is {budget:.1} ms)"),
             );
         }
-        // The host sends frames the browser neither shows nor even decodes,
-        // with the link clean: the decoder or renderer can't keep up.
-        // Nothing decoded at all is a stalled stream, not a slow decoder:
-        // shrinking the picture can't fix it.
         let behind = host.fps >= 15.0 && c.fps >= 1.0 && c.fps < 0.7 * host.fps;
         let stalled = c.fps < 1.0;
         if !stalled && (c.dropped > 0 || c.freezes > 0 || behind) {
@@ -166,10 +130,7 @@ impl Bottleneck {
         *self = Self::default();
     }
 
-    /// Takes the last second's figures. `client` is the browser's latest
-    /// report if it is recent. `width`, `height` and `min_percent` are the
-    /// browser's asked size and scale floor; `auto_step` the bitrate-driven
-    /// scale step, which counts toward the floor.
+    /// Takes the last second's figures.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn update(
         &mut self,
@@ -182,7 +143,6 @@ impl Bottleneck {
         auto_step: usize,
     ) -> Outcome {
         let (verdict, detail) = judge(&host, client);
-        // A background tab says nothing: neither a limit nor quiet.
         let silent = client.is_some_and(|c| c.hidden) && verdict == Verdict::Ok;
         if !silent {
             self.history.push_back(verdict);
@@ -223,7 +183,6 @@ impl Bottleneck {
                 self.quiet_since = None;
                 let at = self.step.max(auto_step);
                 if cooled && at < last {
-                    // The size didn't hold if this follows a recent step up.
                     if self
                         .last_relief
                         .is_some_and(|t| now.saturating_duration_since(t) < FLAP_WINDOW)
@@ -244,12 +203,6 @@ impl Bottleneck {
                 if self.step > 0 && cooled && now.saturating_duration_since(quiet) >= after {
                     let (w0, h0) = scale::size(width, height, self.step);
                     let (w1, h1) = scale::size(width, height, self.step - 1);
-                    // Decode and encode time grow with the pixels, but slower:
-                    // a real run (software decode, 2026-11-13) took 5.5 ms at
-                    // 1280x720 and about 8 ms at 2560x1440, a quarter of the
-                    // pixels' worth. Square root errs high and still lets a
-                    // size that holds come back; one that doesn't is caught by
-                    // the doubled wait.
                     let grow = (f64::from(w1) * f64::from(h1) / (f64::from(w0) * f64::from(h0)))
                         .sqrt() as f32;
                     let budget = 1000.0 / host.fps_target.max(1) as f32;
@@ -267,8 +220,6 @@ impl Bottleneck {
                 }
             }
         }
-        // The size in force counts the bitrate's step too; the report says
-        // what the browser sees.
         let report = self.report(width, height, auto_step);
         Outcome {
             step: changed,
@@ -408,7 +359,6 @@ mod tests {
 
     #[test]
     fn dropped_frames_do_not_blame_the_decoder() {
-        // The browser's low fps with the link losing frames is the link's.
         let mut r = Run::new();
         let mut h = host(8.0);
         h.loss = Some(0.05);
@@ -478,7 +428,6 @@ mod tests {
     fn does_not_step_back_up_when_the_larger_size_would_not_hold() {
         let mut r = Run::new();
         r.seconds(4, host(40.0), Some(client(4.0)));
-        // Under the limit now (22 ms < 25 ms), but 1.78x the pixels would not be.
         let o = r.seconds(120, host(22.0), Some(client(4.0)));
         assert!(steps(&o).is_empty());
         assert_eq!(r.b.step(), 1);
@@ -493,7 +442,6 @@ mod tests {
         // Trouble returns right away.
         let o = r.seconds(3, host(40.0), Some(client(4.0)));
         assert_eq!(steps(&o), vec![1]);
-        // The wait is now twice as long: nothing at 30 s of quiet.
         let o = r.seconds(35, host(10.0), Some(client(3.0)));
         assert!(steps(&o).is_empty());
         let o = r.seconds(40, host(10.0), Some(client(3.0)));
@@ -502,8 +450,6 @@ mod tests {
 
     #[test]
     fn software_decode_that_scales_slowly_comes_back_to_native() {
-        // Measured on the PC with software decode: 5.5 ms at half size, about
-        // 8 ms at native; the budget at 60 fps is 16.7 ms.
         let mut r = Run::new();
         r.seconds(30, host(8.0), Some(client(14.0)));
         assert!(r.b.step() >= 2);
@@ -527,7 +473,6 @@ mod tests {
         }
         assert_eq!(reports[0].limiter, Limiter::ClientDecode);
         assert_eq!(reports[0].relieving_for, Limiter::ClientDecode);
-        // The limiter clears but the size stays down: still blamed on decode.
         for _ in 0..8 {
             reports.extend(r.second(host(8.0), Some(client(3.0))).report);
         }

@@ -1,6 +1,5 @@
-//! The transport against a plain str0m peer playing the browser, over real
-//! UDP on localhost: negotiation, video delivery, data channels both ways and
-//! keyframe requests.
+//! The transport against a plain str0m peer playing the browser, over real UDP on localhost:
+//! negotiation, video delivery, data channels both ways and keyframe requests.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -15,7 +14,6 @@ use ws_proto::{DisplayId, EncodedFrame, VideoCodec, channels};
 use ws_transport::{Transport, TransportConfig, TransportEvent};
 
 fn frame(index: u64, keyframe: bool) -> EncodedFrame {
-    // Annex B: SPS, PPS, then an IDR (or non-IDR) slice.
     let mut data = vec![
         0, 0, 0, 1, 0x67, 0x42, 0xe0, 0x1f, 0, 0, 0, 1, 0x68, 0xce, 0x3c, 0x80,
     ];
@@ -49,8 +47,6 @@ async fn browser_peer_gets_video_and_data() {
     .await
     .unwrap();
 
-    // Input skips the event queue: it goes to a sink set once connected
-    // (and waits for one until then).
     let sunk = Arc::new(std::sync::Mutex::new(Vec::new()));
     let sink = |into: Arc<std::sync::Mutex<Vec<Vec<u8>>>>| -> ws_transport::InputSink {
         Box::new(move |data: &[u8]| into.lock().unwrap().push(data.to_vec()))
@@ -110,7 +106,6 @@ async fn browser_peer_gets_video_and_data() {
             match ev {
                 TransportEvent::Connected => {
                     host_connected = true;
-                    // One Connected handled; a sink for before it is stale.
                     assert!(!transport.set_input_sink(sink(sunk.clone()), 0));
                     assert!(transport.set_input_sink(sink(sunk.clone()), 1));
                 }
@@ -129,7 +124,6 @@ async fn browser_peer_gets_video_and_data() {
             for (id, _) in &open {
                 rtc.channel(*id).unwrap().write(true, b"ping").unwrap();
             }
-            // Poll before the next mutation.
             continue;
         }
         if got_video > 0 && !asked_keyframe {
@@ -212,8 +206,6 @@ async fn no_keyframe_requests_without_a_session() {
     })
     .await
     .unwrap();
-    // More frames than the queue holds drop the oldest, but with nobody
-    // connected there is no one to send a keyframe to.
     for i in 0..5 {
         transport.send_video(frame(i, i == 0));
     }
@@ -260,7 +252,6 @@ async fn offers_every_extra_udp_port_and_skips_ones_in_use() {
     public.sort();
     want.sort();
     assert_eq!(public, want);
-    // A packet to the extra port reaches the transport (no panic, still responsive).
     let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let _ = sock.send_to(&[0x80; 50], ("127.0.0.1", free)).await;
     assert!(transport.offer().await.is_ok());
@@ -296,7 +287,6 @@ async fn junk_and_bad_tcp_are_ignored() {
     for _ in 0..5_000 {
         let _ = sock.send_to(&[0x80; 200], ("127.0.0.1", port("udp"))).await;
     }
-    // A TCP connection that sends junk instead of a STUN check is closed.
     let mut tcp = tokio::net::TcpStream::connect(("127.0.0.1", port("tcp")))
         .await
         .unwrap();
@@ -304,7 +294,6 @@ async fn junk_and_bad_tcp_are_ignored() {
     let mut b = [0u8; 1];
     let read = tokio::time::timeout(Duration::from_secs(1), tcp.read(&mut b)).await;
     assert!(matches!(read, Ok(Ok(0)) | Ok(Err(_))), "{read:?}");
-    // The transport is still responsive.
     assert!(transport.offer().await.is_ok());
     while let Ok(ev) = events.try_recv() {
         assert_ne!(ev, TransportEvent::Connected);
@@ -330,15 +319,12 @@ async fn offer_advertises_public_addresses() {
             .collect()
     };
     let plain = candidates(&transport.offer().await.unwrap());
-    // Host, ICE-TCP, and both again for the configured public address.
     assert_eq!(plain.len(), 4, "{plain:?}");
     assert_eq!(
         plain.iter().filter(|l| l.contains("198.51.100.7")).count(),
         2
     );
 
-    // The address the browser reached us at is added; local and duplicate
-    // ones are not.
     let offer = transport
         .offer_reachable_at(vec![
             [203, 0, 113, 9].into(),
@@ -358,18 +344,12 @@ async fn offer_advertises_public_addresses() {
     );
 }
 
-/// The browser's bitrate setting in the timed tests, which also caps the
-/// encoder there. The str0m peer only NACKs a packet while it is within 100
-/// packets of the newest (Chrome: 1000), so at higher rates a lost resend
-/// falls out of its window before it asks again, and every frame after it
-/// is held for good (a browser would ask for a keyframe). Those tests are
-/// about the send queue and resends, not throughput.
+/// The browser's bitrate setting in the timed tests, which also caps the encoder there.
 const PEER_VIDEO_BPS: u64 = 8_000_000;
-/// The transport's ceiling for [`PEER_VIDEO_BPS`], as the host sets it
-/// (media.rs set_ceiling: the setting over the headroom, plus audio).
+/// The transport's ceiling for [`PEER_VIDEO_BPS`], as the host sets it.
 const PEER_MAX_BPS: u64 = PEER_VIDEO_BPS * 100 / 75 + 500_000;
 
-/// A frame of `bytes` total (Annex B, H.264 slice) for the load test.
+/// A frame of `bytes` total for the load test.
 fn sized_frame(index: u64, keyframe: bool, bytes: usize) -> EncodedFrame {
     let mut f = frame(index, keyframe);
     let mut data = f.data.to_vec();
@@ -378,30 +358,20 @@ fn sized_frame(index: u64, keyframe: bool, bytes: usize) -> EncodedFrame {
     f
 }
 
-/// The real-time tests stream at full rate for seconds and check timing, so
-/// each runs alone: with any other test in this file running, they get too
-/// little CPU on a small CI runner. The other tests share the lock.
+/// The real-time tests stream at full rate for seconds and check timing, so each runs alone: with
+/// any other test in this file running, they get too little CPU on a small CI runner.
 static REAL_TIME: tokio::sync::RwLock<()> = tokio::sync::RwLock::const_new(());
 
-/// Heavy motion: a constant-bitrate encoder fills every frame to its budget
-/// (bitrate / fps), following the bandwidth estimate as the host does. Each keyframe request
-/// is a soft "reset" frame on screen, so a steady stream must not need more
-/// than the odd one beyond the one that starts it (at 0.9 headroom it needed
-/// 20-50). A small allowance absorbs a loaded test machine's scheduling.
-/// Once a second two frames arrive together, as after an encoder stall; when
-/// the transport kept only the newest unsent frame, each forced a keyframe.
-// Multi-threaded like the host, so the peer's loop doesn't delay the
-// transport's sends.
+/// Heavy motion: a constant-bitrate encoder fills every frame to its budget (bitrate / fps),
+/// following the bandwidth estimate as the host does.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn full_frames_at_the_target_bitrate_need_almost_no_keyframes() {
     let _alone = REAL_TIME.write().await;
-    // On failure, the transport's debug log says why each keyframe was asked for.
     let _ = tracing_subscriber::fmt()
         .with_env_filter("ws_transport=debug")
         .with_test_writer()
         .try_init();
     const FPS: u64 = 60;
-    // The host's BWE_HEADROOM. At 90 this forced 20-50 keyframes here.
     const HEADROOM_PCT: u64 = 75;
     const MAX_KEYFRAMES: u32 = 2;
     const FRAME: Duration = Duration::from_micros(1_000_000 / FPS);
@@ -430,7 +400,6 @@ async fn full_frames_at_the_target_bitrate_need_almost_no_keyframes() {
 
     let mut buf = vec![0u8; 2048];
     let mut connected_at = None;
-    // What the host's encoder would be set to: under the estimate.
     let mut encoder_bps = TransportConfig::default().initial_bitrate_bps * HEADROOM_PCT / 100;
     let mut keyframe_requests = 0u32;
     let mut index = 0u64;
@@ -455,14 +424,11 @@ async fn full_frames_at_the_target_bitrate_need_almost_no_keyframes() {
                 TransportEvent::Connected => connected_at = Some(Instant::now()),
                 TransportEvent::KeyframeNeeded(_) => {
                     keyframe_due = true;
-                    // The one that starts the stream doesn't count.
                     if connected_at.is_some_and(|t| t.elapsed() > Duration::from_millis(500)) {
                         keyframe_requests += 1;
                     }
                 }
                 TransportEvent::TargetBitrate(bps) => {
-                    // As the host (media.rs worth_changing): follow the
-                    // estimate down in steps of at least 2%, up in 10%.
                     let target = (bps * HEADROOM_PCT / 100).min(PEER_VIDEO_BPS);
                     let step = if target < encoder_bps { 50 } else { 10 };
                     if target.abs_diff(encoder_bps) * step >= encoder_bps {
@@ -473,7 +439,6 @@ async fn full_frames_at_the_target_bitrate_need_almost_no_keyframes() {
             }
         }
         let Some(started) = connected_at else {
-            // Wait for the connection first.
             let got = recv_until(&sock, &mut buf, timeout).await;
             rtc.handle_input(input(got, &buf, local)).unwrap();
             continue;
@@ -483,20 +448,12 @@ async fn full_frames_at_the_target_bitrate_need_almost_no_keyframes() {
         }
         let now = Instant::now();
         if now >= next_frame {
-            // A capture clock: never two frames back to back because this
-            // loop woke late (Windows timers are coarse). Those come only from
-            // the stalls below.
             next_frame = (next_frame + FRAME).max(now + FRAME / 2);
             let budget = (encoder_bps / FPS / 8) as usize;
-            // Constant bitrate with fast motion fills every frame; a
-            // keyframe overshoots the one-frame VBV to about twice it.
             let bytes = if keyframe_due { budget * 2 } else { budget };
             let frame = sized_frame(index, keyframe_due, bytes);
             keyframe_due = false;
             index += 1;
-            // Once a second a frame is held back and handed over with the
-            // next one, as from an encoder catching up after a stall: both
-            // must go out.
             if index % FPS == 30 {
                 held = Some(frame);
             } else {
@@ -516,18 +473,15 @@ async fn full_frames_at_the_target_bitrate_need_almost_no_keyframes() {
     );
 }
 
-/// Packet loss is repaired by resends (NACK/RTX), so it costs neither a
-/// keyframe nor a frame.
+/// Packet loss is repaired by resends (NACK/RTX).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn lost_packets_are_resent_not_keyframed() {
     let _alone = REAL_TIME.write().await;
-    // On failure, the transport's debug log says why each keyframe was asked for.
     let _ = tracing_subscriber::fmt()
         .with_env_filter("ws_transport=debug")
         .with_test_writer()
         .try_init();
     const FPS: u64 = 60;
-    // The host's BWE_HEADROOM. At 90 this forced 20-50 keyframes here.
     const HEADROOM_PCT: u64 = 75;
     const MAX_KEYFRAMES: u32 = 2;
     const FRAME: Duration = Duration::from_micros(1_000_000 / FPS);
@@ -556,7 +510,6 @@ async fn lost_packets_are_resent_not_keyframed() {
 
     let mut buf = vec![0u8; 2048];
     let mut connected_at = None;
-    // What the host's encoder would be set to: under the estimate.
     let mut encoder_bps = TransportConfig::default().initial_bitrate_bps * HEADROOM_PCT / 100;
     let mut keyframe_requests = 0u32;
     let mut index = 0u64;
@@ -567,7 +520,6 @@ async fn lost_packets_are_resent_not_keyframed() {
     let mut broken = 0usize;
     let mut dropped = 0usize;
     let mut big = 0usize;
-    // Every 50th media packet (2%) never arrives, resends included.
     let every = 50;
 
     loop {
@@ -591,14 +543,11 @@ async fn lost_packets_are_resent_not_keyframed() {
                 TransportEvent::Connected => connected_at = Some(Instant::now()),
                 TransportEvent::KeyframeNeeded(_) => {
                     keyframe_due = true;
-                    // The one that starts the stream doesn't count.
                     if connected_at.is_some_and(|t| t.elapsed() > Duration::from_millis(500)) {
                         keyframe_requests += 1;
                     }
                 }
                 TransportEvent::TargetBitrate(bps) => {
-                    // As the host (media.rs worth_changing): follow the
-                    // estimate down in steps of at least 2%, up in 10%.
                     let target = (bps * HEADROOM_PCT / 100).min(PEER_VIDEO_BPS);
                     let step = if target < encoder_bps { 50 } else { 10 };
                     if target.abs_diff(encoder_bps) * step >= encoder_bps {
@@ -609,7 +558,6 @@ async fn lost_packets_are_resent_not_keyframed() {
             }
         }
         let Some(started) = connected_at else {
-            // Wait for the connection first.
             let got = recv_until(&sock, &mut buf, timeout).await;
             rtc.handle_input(input(got, &buf, local)).unwrap();
             continue;
@@ -619,20 +567,12 @@ async fn lost_packets_are_resent_not_keyframed() {
         }
         let now = Instant::now();
         if now >= next_frame {
-            // A capture clock: never two frames back to back because this
-            // loop woke late (Windows timers are coarse). Those come only from
-            // the stalls below.
             next_frame = (next_frame + FRAME).max(now + FRAME / 2);
             let budget = (encoder_bps / FPS / 8) as usize;
-            // Constant bitrate with fast motion fills every frame; a
-            // keyframe overshoots the one-frame VBV to about twice it.
             let bytes = if keyframe_due { budget * 2 } else { budget };
             let frame = sized_frame(index, keyframe_due, bytes);
             keyframe_due = false;
             index += 1;
-            // Once a second a frame is held back and handed over with the
-            // next one, as from an encoder catching up after a stall: both
-            // must go out.
             if index % FPS == 30 {
                 held = Some(frame);
             } else {
@@ -663,13 +603,10 @@ async fn lost_packets_are_resent_not_keyframed() {
     assert!(got_video > 200, "only {got_video} frames arrived");
 }
 
-/// A frame the transport could not send is skipped over: it asks the
-/// encoder for a frame built without it ([`TransportEvent::FramesLost`]),
-/// sends that frame, and needs no keyframe. If no such frame comes, it asks
-/// for a keyframe instead.
+/// A frame the transport could not send is skipped over: it asks the encoder for a frame built
+/// without it ([`TransportEvent::FramesLost`]), sends that frame, and needs no keyframe.
 #[tokio::test]
 async fn a_dropped_frame_is_skipped_over_without_a_keyframe() {
-    // Timed: an unrepaired gap gets a keyframe after the recovery wait.
     let _alone = REAL_TIME.write().await;
     let (transport, mut events) = Transport::start(TransportConfig {
         ips: vec![[127, 0, 0, 1].into()],
@@ -693,9 +630,6 @@ async fn a_dropped_frame_is_skipped_over_without_a_keyframe() {
         .await
         .unwrap();
 
-    // Frame 10 never reaches the transport, as if dropped on the host. The
-    // encoder answers the first FramesLost by skipping the gap; frame 30 is
-    // dropped too, and that request goes unanswered.
     const SKIPPED: u64 = 10;
     const UNREPAIRED: u64 = 30;
     let mut buf = vec![0u8; 2048];
@@ -747,18 +681,14 @@ async fn a_dropped_frame_is_skipped_over_without_a_keyframe() {
     }
 
     assert_eq!(lost, [SKIPPED, UNREPAIRED], "frames lost");
-    // One to start, one once the second gap went unrepaired.
     assert_eq!(keyframe_requests, 2);
-    // Everything up to the second gap arrived but the skipped frame and the
-    // one that built on it before the repair came.
     assert!(
         got_video >= UNREPAIRED as usize - 3,
         "{got_video} frames arrived"
     );
 }
 
-/// Waits for one datagram until `timeout` (at most 2 ms) and returns its
-/// length and source.
+/// Waits for one datagram until `timeout` and returns its length and source.
 async fn recv_until(
     sock: &UdpSocket,
     buf: &mut [u8],
@@ -792,12 +722,7 @@ fn input(
     }
 }
 
-/// On a fast link the bandwidth estimate climbs well past 10 Mb/s within a
-/// few seconds. The pacer releases packets a fraction of a millisecond
-/// apart at these rates; when the run loop slept for each one (timers tick
-/// at 1 ms at best) it sent about one packet per tick, every probe measured
-/// that, and the estimate (so the encoder) stayed near 8 Mb/s whatever the
-/// bitrate setting.
+/// On a fast link the bandwidth estimate climbs well past 10 Mb/s within a few seconds.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bandwidth_estimate_climbs_past_the_timer_tick() {
     let _alone = REAL_TIME.write().await;
@@ -851,14 +776,11 @@ async fn bandwidth_estimate_climbs_past_the_timer_tick() {
             if best > WANT_BPS || t.elapsed() > Duration::from_secs(4) {
                 break;
             }
-            // A trickle of small frames, so the video stream is live.
             if index < t.elapsed().as_millis() as u64 / 100 {
                 transport.send_video(frame(index, index == 0));
                 index += 1;
             }
         }
-        // Take every waiting datagram: a peer that reads one per wakeup
-        // limits the rate itself.
         let got = recv_until(&sock, &mut buf, timeout).await;
         rtc.handle_input(input(got, &buf, local)).unwrap();
         while let Ok((n, source)) = sock.try_recv_from(&mut buf) {
@@ -873,9 +795,8 @@ async fn bandwidth_estimate_climbs_past_the_timer_tick() {
     );
 }
 
-/// The second video stream is its own track: its frames reach the peer on
-/// the second video mid and never on the first, and each stream keeps its
-/// own frame numbers (both start at 0 with a keyframe).
+/// The second video stream is its own track: its frames reach the peer on the second video mid and
+/// never on the first, and each stream keeps its own frame numbers.
 #[tokio::test]
 async fn the_second_stream_is_its_own_track() {
     let _shared = REAL_TIME.read().await;
@@ -931,7 +852,6 @@ async fn the_second_stream_is_its_own_track() {
                 connected = true;
             }
         }
-        // Only the second stream has frames.
         if connected && next[1] < 10 {
             let mut f = frame(next[1], next[1] == 0);
             f.lane = 1;

@@ -1,11 +1,6 @@
-//! Runs the media side of a connection: starts capture, game audio, the mic
-//! and input when the transport connects, stops them when it disconnects,
-//! and answers the browser's `control` messages.
-//!
-//! Everything here reacts to [`TransportEvent`]s on one task. Starting and
-//! switching the capture pipeline blocks for tens of milliseconds, which is
-//! done in place (`block_in_place`), as are the thread joins when a pipeline
-//! stops; events queue in the transport meanwhile.
+//! Runs the media side of a connection: starts capture, game audio, the mic and input when the
+//! transport connects, stops them when it disconnects, and answers the browser's `control`
+//! messages.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -36,39 +31,29 @@ use crate::serve::Event;
 use crate::update;
 use crate::uploads::{self, UploadMsg, UploadSession};
 
-/// Encoded frames waiting for the hop to the transport (which queues a few
-/// more). A full channel makes the encoder drop the frame and skip over it
-/// next, or send a keyframe.
+/// Encoded frames waiting for the hop to the transport.
 const FRAME_QUEUE: usize = 1;
 /// About 40 ms of 10 ms Opus packets.
 const AUDIO_QUEUE: usize = 4;
 const CONTROL_QUEUE: usize = 64;
 /// A pipeline that stopped by itself is restarted after this pause.
 const VIDEO_RESTART_DELAY: Duration = Duration::from_secs(1);
-/// Encode this far below the bandwidth estimate. The transport's pacer sends
-/// at 1.1x the estimate, and RTP and encryption add about 5%, so at 0.9 a
-/// fast-motion stream (every frame at its full budget) used nearly all of
-/// the send rate: any dip backed the queue up, frames went out late and
-/// were dropped, and each drop forced a keyframe. That showed as the picture
-/// going soft and sharpening again several times a second. 0.75 leaves the
-/// pacer a third more than the encoder makes.
+/// Encode this far below the bandwidth estimate.
 const BWE_HEADROOM: f64 = 0.75;
 /// Increases smaller than this fraction are not passed to the encoder.
 const BITRATE_STEP_UP: f64 = 0.1;
-/// Decreases follow sooner: an encoder above the send rate backs up the
-/// queue.
+/// Decreases follow sooner: an encoder above the send rate backs up the queue.
 const BITRATE_STEP_DOWN: f64 = 0.02;
 const MIN_KBPS: u32 = 500;
-/// Room above the video ceiling the bandwidth estimate may probe for, for
-/// game audio and data channels.
+/// Room above the video ceiling the bandwidth estimate may probe for, for game audio and data
+/// channels.
 const NON_VIDEO_BPS: u64 = 500_000;
 /// Replies kept while the `control` channel is not open yet.
 const UNSENT_MAX: usize = 16;
-/// A `setVideoConfig` that needs a new pipeline waits until the last one is
-/// at least this old.
+/// A `setVideoConfig` that needs a new pipeline waits until the last one is at least this old.
 const MIN_RESTART_GAP: Duration = Duration::from_secs(1);
-/// The browser asks for a keyframe every 2 s while its video is stalled:
-/// this many asks within this window restart the video.
+/// The browser asks for a keyframe every 2 s while its video is stalled: this many asks within this
+/// window restart the video.
 const STALL_ASKS: usize = 3;
 const STALL_WINDOW: Duration = Duration::from_secs(10);
 /// At most this many stall restarts per backoff window.
@@ -78,14 +63,13 @@ const STALL_BACKOFF: Duration = Duration::from_secs(60);
 /// Video codecs the browser's answer accepted; `None` until known.
 pub type AcceptedCodecs = watch::Receiver<Option<Vec<VideoCodec>>>;
 
-/// How many peer connections signaling has set up, and for which paired
-/// device. A count rather than an event, so a busy loop can't miss one.
+/// How many peer connections signaling has set up, and for which paired device.
 pub type PeerCount = watch::Receiver<Peer>;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Peer {
     pub count: u64,
-    /// The paired device the current one is for (its id, not its name).
+    /// The paired device the current one is for.
     pub device: String,
 }
 
@@ -95,8 +79,7 @@ pub struct Signaled {
     pub peers: PeerCount,
 }
 
-/// A control message for the log. Clipboard text is what the user copied (it
-/// may be a password), so it is never logged, only its size.
+/// A control message for the log.
 fn describe_client(msg: &ClientControl) -> String {
     match msg {
         ClientControl::SetClipboard { text } => {
@@ -114,8 +97,7 @@ fn describe_host(msg: &HostControl) -> String {
     }
 }
 
-/// Opens the clipboard sync, unless it is off or this session can't (the
-/// browser is then told it is unavailable).
+/// Opens the clipboard sync, unless it is off or this session can't.
 fn open_clipboard(
     opts: &MediaOptions,
     control_tx: &mpsc::Sender<HostControl>,
@@ -157,7 +139,6 @@ pub async fn run(
         config: opts.video.clone(),
         display: opts.display,
         second: None,
-        // Off until the browser turns it on.
         mic_enabled: false,
         audio: (opts.audio_kbps, opts.audio_frame_ms),
         opts,
@@ -204,21 +185,17 @@ pub async fn run(
         tokio::select! {
             ev = events.recv() => match ev {
                 Some(ev) => {
-                    // A new peer's events must not reach the old one's transfers.
                     media.sync_peer();
                     let down = matches!(ev, TransportEvent::Disconnected);
                     let what = event_name(&ev);
                     let started = std::time::Instant::now();
                     media.event(ev);
-                    // A slow event holds up every event behind it, keyframe
-                    // requests and repairs included.
                     if started.elapsed() > Duration::from_millis(5) {
                         ws_diag::diag!("media_slow_event", "ms={:.2} event={what}", started.elapsed().as_secs_f64() * 1000.0);
                     }
                     if down {
                         media.restore_host_resolution();
                     }
-                    // Replies meant for the browser that just left.
                     while down && control_rx.try_recv().is_ok() {}
                 }
                 None => break,
@@ -235,9 +212,6 @@ pub async fn run(
     if let Some(parked) = media.parked.take() {
         drop_blocking(parked);
     }
-    // A resolution change still running would never be put back: wait for
-    // it, so it is recorded. The tray app keeps running after the host
-    // stops, so nothing else would restore it.
     if media.mode_busy {
         let wait = tokio::time::timeout(MODE_CHANGE_WAIT, async {
             while let Some(later) = later_rx.recv().await {
@@ -253,8 +227,6 @@ pub async fn run(
             tracing::warn!("a resolution change did not finish; it may not be put back");
         }
     }
-    // Dropping `media` puts changed display resolutions back (ChangedModes),
-    // here and if this task panics.
 }
 
 /// How long stopping waits for a resolution change in progress.
@@ -271,17 +243,14 @@ enum Later {
     },
     /// A second after a resolution change, when the desktop has settled.
     ModeSettled { session: u64 },
-    /// The connection has been down for [`TRANSFER_GRACE`]: end `peer`'s
-    /// file transfers if it hasn't come back.
+    /// The connection has been down for [`TRANSFER_GRACE`]: end `peer`'s file transfers if it
+    /// hasn't come back.
     TransfersExpire { peer: u64 },
-    /// The connection has been down for [`PARK_FOR`] since `session` ended:
-    /// stop the parked capture if nobody took it.
+    /// The connection has been down for [`PARK_FOR`].
     ParkExpire { session: u64 },
 }
 
 /// How long capture and game audio keep running after a connection drops.
-/// A browser back within this (a restart after a network change, a page
-/// reload) gets a picture at once instead of waiting for a new encoder.
 const PARK_FOR: Duration = Duration::from_secs(15);
 
 /// See [`Media::parked`].
@@ -289,7 +258,7 @@ struct Parked {
     video: Video,
     /// The display it captures.
     display: DisplayId,
-    /// The rate its encoder runs at (changed in place since it started).
+    /// The rate its encoder runs at (changed in place.
     bitrate_kbps: u32,
     audio: Option<platform::Loopback>,
 }
@@ -297,15 +266,13 @@ struct Parked {
 /// How long file transfers wait for a dropped connection to come back.
 const TRANSFER_GRACE: Duration = Duration::from_secs(30);
 
-/// File transfers both ways for one peer connection. They live as long as
-/// its channels, so they carry on when ICE drops and comes back.
+/// File transfers both ways for one peer connection.
 struct Transfers {
     files: FileSession,
     uploads: UploadSession,
 }
 
-/// Displays whose resolution this host changed. Dropping it puts them back,
-/// so a panic in the media task doesn't leave the user's screen changed.
+/// Displays whose resolution this host changed.
 #[derive(Default)]
 struct ChangedModes(Vec<DisplayId>);
 
@@ -347,11 +314,10 @@ struct Media {
     /// Game audio bitrate (kb/s) and Opus frame length (ms).
     audio: (u32, u32),
     control_tx: mpsc::Sender<HostControl>,
-    /// The shared clipboard; `None` when it is off (`--no-clipboard`) or
-    /// this session cannot open the Windows clipboard.
+    /// The shared clipboard; `None` when it is off (`--no-clipboard`) or this session cannot open
+    /// the Windows clipboard.
     clipboard: Option<Clipboard>,
-    /// Replies made before the `control` channel opened (an error while
-    /// starting media, say) wait here.
+    /// Replies made before the `control` channel opened wait here.
     control_open: bool,
     unsent: Vec<HostControl>,
     stopped_tx: mpsc::Sender<u64>,
@@ -359,46 +325,41 @@ struct Media {
     later_tx: mpsc::Sender<Later>,
     /// Steers the session's cursor sender (see `cursor.rs`).
     cursor_target: watch::Sender<CursorTarget>,
-    /// Desktop position of the streamed display's top-left corner; pointer
-    /// positions are sent relative to it.
+    /// Desktop position of the streamed display's top-left corner; pointer positions are sent
+    /// relative to it.
     display_origin: (i32, i32),
-    /// Bumped on every disconnect, so late results for a browser that left
-    /// are recognised.
+    /// Bumped on every disconnect, so late results for a browser that left are recognised.
     session: u64,
-    /// `config` changed while the last rebuild was too recent; rebuild on
-    /// [`Later::Rebuild`].
+    /// `config` changed while the last rebuild was too recent; rebuild on [`Later::Rebuild`].
     rebuild_pending: bool,
     /// Bumped for every pipeline started, so a stale "stopped" is ignored.
     generation: u64,
     /// Latest bandwidth estimate of this connection, in bits per second.
     last_bwe: Option<u64>,
-    /// The last connection's final estimate and when it went down: a
-    /// connection back soon after starts from it, as the transport does.
+    /// The last connection's final estimate and when it went down: a connection back soon after
+    /// starts from it, as the transport does.
     previous_bwe: Option<(u64, Instant)>,
     last_restart: Option<Instant>,
     /// Encodes below the configured size while the bitrate is too low.
     autoscale: AutoScale,
-    /// Shrinks the picture further when the host's encoder or the browser's
-    /// decoder is what limits the stream.
+    /// Shrinks the picture further when the host's encoder or the browser's decoder is what limits
+    /// the stream.
     bottleneck: Bottleneck,
     /// The browser's latest report and when it came.
     client_stats: Option<(ClientStats, Instant)>,
     codecs: AcceptedCodecs,
-    /// Codecs this PC's encoder failed to start while H.264 then worked
-    /// (no AV1 or HEVC on the GPU): never tried again while the host runs.
+    /// Codecs this PC's encoder failed to start while H.264 then worked: never tried again while
+    /// the host runs.
     refused_codecs: Vec<VideoCodec>,
     live: Option<Live>,
-    /// Capture and game audio of the last connection, kept running for
-    /// [`PARK_FOR`] after it dropped.
+    /// Capture and game audio of the last connection, kept running for [`PARK_FOR`] after it
+    /// dropped.
     parked: Option<Parked>,
-    /// Frames handed to the transport since the last stats report.
+    /// Frames handed to the transport.
     sent: Arc<Mutex<SentFrames>>,
-    /// Keyframe requests passed to the encoder since the last stats
-    /// report; counted by the transport's video sink too.
+    /// Keyframe requests passed to the encoder.
     keyframe_requests: Arc<AtomicU32>,
-    /// When the browser last asked for a keyframe itself. It does so only
-    /// while packets arrive and nothing decodes, so repeated asks mean a
-    /// stream that stays dead, which a restart of the video fixes.
+    /// When the browser last asked for a keyframe itself.
     browser_asks: Vec<Instant>,
     /// When video was last restarted for a stall, to back off.
     stall_restarts: Vec<Instant>,
@@ -409,18 +370,14 @@ struct Media {
     last_mode_change: Option<Instant>,
     /// What the host user sees.
     host_events: mpsc::UnboundedSender<Event>,
-    /// From when the `control` channel opens until another device connects
-    /// (or the connection stays down for [`TRANSFER_GRACE`]). A new peer
-    /// connection from the same device (a restart after a network change)
-    /// keeps the offers, so it doesn't lose the files on offer.
+    /// From when the `control` channel opens until another device connects.
     transfers: Option<Transfers>,
     /// The current peer connection.
     peer: u64,
     /// The device `transfers` and `previous_bwe` belong to.
     transfer_device: String,
     peers: PeerCount,
-    /// Connected and Disconnected events handled, for
-    /// [`Transport::set_input_sink`].
+    /// Connected and Disconnected events handled, for [`Transport::set_input_sink`].
     transitions: u64,
 }
 
@@ -439,16 +396,13 @@ impl SentFrames {
         self.frames += 1;
         self.bytes += frame.data.len() as u64;
         self.encode_micros += frame.encode_done_time.saturating_sub(frame.capture_time);
-        // From going into the encoder: Source quality holds an image up to
-        // ~200 ms first, which says nothing about how fast the encoder is.
         self.encoder_micros += frame
             .encode_done_time
             .saturating_sub(frame.encode_start_time);
     }
 }
 
-/// What runs while a browser is connected. Fields drop in order: input is
-/// released first.
+/// What runs while a browser is connected.
 struct Live {
     input: Option<InputThread>,
     _cursor: CursorSession,
@@ -471,7 +425,7 @@ struct Second {
 struct Video {
     pipeline: VideoPipeline,
     generation: u64,
-    /// What it was started with (its size changes with [`Media::rebuild`]).
+    /// What it was started with.
     config: VideoConfig,
 }
 
@@ -515,8 +469,6 @@ impl Media {
             },
             TransportEvent::MicAudio(packet) => {
                 if let Some((_, rx)) = self.live.as_ref().and_then(|l| l.mic.as_ref()) {
-                    // The transport extends RTP sequence numbers; the jitter
-                    // buffer wants the wire value back.
                     rx.push(packet.sequence as u16, &packet.data);
                 }
             }
@@ -532,8 +484,6 @@ impl Media {
                 if c == channels::CONTROL {
                     self.control_open = true;
                     if self.transfers.is_some() {
-                        // The same device on a new peer connection: offer
-                        // its files again.
                         self.to_files(FileMsg::Reoffer);
                     } else {
                         self.transfers = Some(Transfers {
@@ -588,9 +538,6 @@ impl Media {
 
     fn start(&mut self) {
         if let Some(live) = &self.live {
-            // Re-established without a reported drop; just resync the decoder
-            // (and point input at the input thread again: Connected cleared
-            // it).
             if let Some(v) = &live.video {
                 v.pipeline.request_keyframe();
             }
@@ -610,8 +557,6 @@ impl Media {
         let input = InputThread::start(display_rect, self.opts.gamepad, rumble)
             .inspect_err(|e| tracing::error!("input thread: {e}"))
             .ok();
-        // Straight from the transport to the input thread: input never
-        // waits behind this loop (starting capture takes a while).
         if let Some(input) = &input {
             self.route_input(input);
         }
@@ -620,8 +565,6 @@ impl Media {
         let (parked_video, parked_audio) = match parked {
             Some(p) => {
                 let display = self.chosen_display().map(|d| d.id);
-                // Capturing some other display than this browser gets: start
-                // afresh.
                 let video = if display == Some(p.display) {
                     Some((p.video, p.bitrate_kbps))
                 } else {
@@ -658,8 +601,6 @@ impl Media {
 
         let cursor = CursorSession::start(self.transport.clone(), self.cursor_target.subscribe());
         if self.transfers.is_some() {
-            // ICE came back on the same peer connection: its channels, open
-            // before the drop, are still open.
             self.control_open = true;
         }
         self.live = Some(Live {
@@ -682,7 +623,6 @@ impl Media {
             live.bitrate_kbps = bitrate_kbps;
             live.video = Some(video);
             self.apply_bitrate(true);
-            // This browser may want another size or codec.
             if self.video_outdated() {
                 self.request_rebuild();
             }
@@ -695,9 +635,7 @@ impl Media {
         }
     }
 
-    /// Whether the running pipeline differs from what the current config
-    /// asks for (bitrate aside, which changes in place).
-    /// The capture feeding video stream `lane`.
+    /// Whether the running pipeline differs from what the current config asks for.
     fn lane_video(&self, lane: u8) -> Option<&Video> {
         let live = self.live.as_ref()?;
         match lane {
@@ -722,10 +660,8 @@ impl Media {
         wanted != video.config
     }
 
-    /// Keyframe requests and repairs go from the transport's run loop
-    /// straight to `pipeline`'s capture thread, never waiting behind this
-    /// loop (which may be busy rebuilding a pipeline). Set before its first
-    /// frame reaches the transport.
+    /// Keyframe requests and repairs go from the transport's run loop straight to `pipeline`'s
+    /// capture thread, never waiting behind this loop.
     fn attach_video(&self, lane: u8, pipeline: &VideoPipeline) {
         let control = pipeline.control();
         let requests = self.keyframe_requests.clone();
@@ -756,8 +692,6 @@ impl Media {
         self.transport.clear_video_sink(0);
         self.transport.clear_video_sink(1);
         self.cursor_target.send_replace(CursorTarget::default());
-        // The next browser turns the mic on if it wants it, and sets its
-        // own audio quality.
         self.mic_enabled = false;
         self.audio = (self.opts.audio_kbps, self.opts.audio_frame_ms);
         *self.sent.lock().expect("sent stats lock") = SentFrames::default();
@@ -766,8 +700,6 @@ impl Media {
             drop_blocking(old);
         }
         if let Some(mut live) = self.live.take() {
-            // Input, the cursor and the mic stop now; capture and game audio
-            // keep running a while for a browser that comes straight back.
             match (live.video.take(), self.display) {
                 (Some(video), Some(display)) => {
                     self.parked = Some(Parked {
@@ -796,10 +728,9 @@ impl Media {
         }
     }
 
-    /// When signaling has set up a new peer connection: for another device,
-    /// the file transfers end; for the same one, transfers in progress end
-    /// (they rode the old connection's channels) but the offers stay, and
-    /// are made again once its `control` channel opens.
+    /// When signaling has set up a new peer connection: for another device, the file transfers end;
+    /// for the same one, transfers in progress end but the offers stay, and are made again once its
+    /// `control` channel opens.
     fn sync_peer(&mut self) {
         let Peer { count, device } = self.peers.borrow().clone();
         if count == self.peer {
@@ -828,9 +759,8 @@ impl Media {
         )
     }
 
-    /// Input goes from the transport straight to `input`, unless this loop
-    /// is behind on connection changes (then the connection `input` was
-    /// started for is gone, and a later Connected sets the right one).
+    /// Input goes from the transport straight to `input`, unless this loop is behind on connection
+    /// changes.
     fn route_input(&self, input: &InputThread) {
         if !self
             .transport
@@ -864,15 +794,14 @@ impl Media {
         }
     }
 
-    /// The display to stream: the client's or configured choice if it still
-    /// exists, else the primary.
+    /// The display to stream: the client's or configured choice if it still exists, else the
+    /// primary.
     fn chosen_display(&self) -> Option<DisplayInfo> {
         let displays = ws_capture::list_displays().ok()?;
         pick_display(&displays, self.display).cloned()
     }
 
-    /// (Re)starts capture with the current config. Any running pipeline is
-    /// stopped first: two on one GPU output can fail.
+    /// (Re)starts capture with the current config.
     fn start_video(&mut self) -> anyhow::Result<()> {
         let Some(live) = &mut self.live else {
             return Ok(());
@@ -881,8 +810,6 @@ impl Media {
             self.transport.clear_video_sink(0);
             drop_blocking(video);
         }
-        // The second stream is sized from this one and shares its codec:
-        // it starts again below.
         self.stop_second();
         let displays = ws_capture::list_displays()?;
         let info = pick_display(&displays, self.display)
@@ -910,14 +837,11 @@ impl Media {
         };
         let (tx, rx) = mpsc::channel(FRAME_QUEUE);
         let backlog = self.transport.send_backlog(0);
-        // Room to grow back to the browser's size without a new encoder.
         let max = (self.config.width, self.config.height);
         let pipeline = match block_in_place(|| {
             VideoPipeline::start(info.id, config.clone(), max, tx.clone(), backlog.clone())
         }) {
             Ok(p) => p,
-            // The GPU may not encode AV1 or HEVC: stream H.264 rather than
-            // nothing, if the browser takes it.
             Err(e)
                 if config.codec != VideoCodec::H264
                     && self
@@ -929,7 +853,6 @@ impl Media {
                 let refused = config.codec;
                 let msg = format!("this PC can't encode {refused:?} ({e}); streaming H264");
                 config.codec = VideoCodec::H264;
-                // H.264 failing too means the trouble isn't the codec.
                 let pipeline = block_in_place(|| {
                     VideoPipeline::start(info.id, config.clone(), max, tx, backlog)
                 })
@@ -1002,8 +925,7 @@ impl Media {
         }
     }
 
-    /// Where the encoder starts: under the current estimate (or the
-    /// transport's starting estimate), never above the configured rate.
+    /// Where the encoder starts: under the current estimate, never above the configured rate.
     fn start_kbps(&self) -> u32 {
         self.split_kbps()[0]
     }
@@ -1018,11 +940,7 @@ impl Media {
         })
     }
 
-    /// The encoder target of each stream (the second is 0 while it isn't
-    /// running). The estimate covers the whole connection, so with two
-    /// streams each gets a share of it by pixels; the browser's bitrate
-    /// setting caps the main one, and the second's cap grows with its size
-    /// the way the automatic bitrate does.
+    /// The encoder target of each stream.
     fn split_kbps(&self) -> [u32; 2] {
         let bwe = self.estimate_bps();
         let cap = self.config.bitrate_kbps;
@@ -1043,17 +961,15 @@ impl Media {
         ]
     }
 
-    /// Lets the bandwidth estimate probe up to the browser's bitrate
-    /// setting (plus room for audio), and no further. A second stream gets
-    /// room for its own.
+    /// Lets the bandwidth estimate probe up to the browser's bitrate setting, and no further.
     fn set_ceiling(&self) {
         let streams = if self.second.is_some() { 2.0 } else { 1.0 };
         let video = (f64::from(self.config.bitrate_kbps) * streams * 1000.0 / BWE_HEADROOM) as u64;
         self.transport.set_max_bitrate(video + NON_VIDEO_BPS);
     }
 
-    /// The scale step to encode at: the larger of the bitrate's and the
-    /// bottleneck's, held to the browser's floor.
+    /// The scale step to encode at: the larger of the bitrate's and the bottleneck's, held to the
+    /// browser's floor.
     fn scale_step(&self) -> usize {
         let c = &self.config;
         scale::clamp_step(
@@ -1064,9 +980,8 @@ impl Media {
         )
     }
 
-    /// Judges which end limits the stream (see [`crate::bottleneck`]) and
-    /// shrinks the picture if the host's encoder or the browser's decoder
-    /// does. Runs on the transport's stats, once a second.
+    /// Judges which end limits the stream (see [`crate::bottleneck`]) and shrinks the picture if
+    /// the host's encoder or the browser's decoder does.
     fn check_bottleneck(&mut self, s: &TransportStats, sent: &SentFrames) {
         let Some(live) = &self.live else { return };
         if live.video.is_none() {
@@ -1124,7 +1039,6 @@ impl Media {
             return;
         }
         let keyframe_requests = self.keyframe_requests.swap(0, Ordering::Relaxed);
-        // Transport stats arrive once a second.
         self.reply(HostControl::VideoStats(VideoStats {
             encoder_kbps: live.bitrate_kbps,
             max_kbps: self.config.bitrate_kbps,
@@ -1151,9 +1065,8 @@ impl Media {
         self.apply_bitrate(false);
     }
 
-    /// Restarts the pipeline at another size when the bitrate has been too
-    /// low (or plenty) for the current one for a while. Runs on the
-    /// transport's stats, once a second.
+    /// Restarts the pipeline at another size when the bitrate has been too low (or plenty) for the
+    /// current one for a while.
     fn check_scale(&mut self, s: &TransportStats, sent: &SentFrames) {
         if !self.live.as_ref().is_some_and(|l| l.video.is_some()) {
             return;
@@ -1198,8 +1111,8 @@ impl Media {
         self.request_rebuild();
     }
 
-    /// Moves the encoder to the target for the latest estimate, unless the
-    /// change is too small to matter.
+    /// Moves the encoder to the target for the latest estimate, unless the change is too small to
+    /// matter.
     fn apply_bitrate(&mut self, force: bool) {
         let [kbps, kbps2] = self.split_kbps();
         let Some(live) = &mut self.live else { return };
@@ -1235,8 +1148,6 @@ impl Media {
         match msg {
             ClientControl::ListDisplays => {
                 self.send_displays();
-                // And what is streaming, so the browser's settings start
-                // from the host's.
                 self.display_changed();
             }
             ClientControl::SetHostResolution { width, height } => {
@@ -1254,8 +1165,6 @@ impl Media {
                 if self.browser_asks_stalled(Instant::now()) {
                     tracing::warn!("the browser keeps asking for a keyframe; restarting video");
                     ws_diag::diag!("media_event", "stalled_restart");
-                    // A full restart, not `rebuild`: that resizes in place,
-                    // which does nothing when the size is unchanged.
                     if let Err(e) = self.start_video() {
                         tracing::error!("video: {e}");
                         self.error(format!("could not restart video: {e}"));
@@ -1348,8 +1257,6 @@ impl Media {
             );
             return;
         };
-        // The media task outlives sessions, so this reaches whichever
-        // browser is connected when the script ends.
         let tx = self.control_tx.clone();
         let events = self.host_events.clone();
         let done = move |state, message: String| {
@@ -1426,8 +1333,7 @@ impl Media {
         });
     }
 
-    /// Points input (and pointer positions) at the streamed display's
-    /// current position and size.
+    /// Points input (and pointer positions) at the streamed display's current position and size.
     fn refresh_input_rect(&mut self) {
         let Some(info) = self.chosen_display() else {
             return;
@@ -1477,7 +1383,6 @@ impl Media {
             self.error("no display to change".into());
             return;
         };
-        // A mode change can take seconds; keep this loop (and input) moving.
         self.mode_busy = true;
         let (tx, session) = (self.later_tx.clone(), self.session);
         tokio::spawn(async move {
@@ -1520,9 +1425,6 @@ impl Media {
                     change.height,
                     "host resolution matched to the browser"
                 );
-                // Capture picks the new size up by itself (duplication is
-                // lost and reopened); input needs the new rectangle, now and
-                // again once the desktop has settled.
                 self.refresh_input_rect();
                 self.send_displays();
                 let tx = self.later_tx.clone();
@@ -1592,7 +1494,6 @@ impl Media {
     }
 
     fn set_video_config(&mut self, config: VideoConfig) {
-        // The browser picked a size: start from it again.
         if (config.width, config.height) != (self.config.width, self.config.height) {
             self.autoscale.reset();
             self.bottleneck.reset();
@@ -1604,9 +1505,6 @@ impl Media {
         } == self.config;
         let video_running = self.live.as_ref().is_some_and(|l| l.video.is_some());
         if same_but_bitrate || !video_running {
-            // Nothing to rebuild: the bitrate changes in place, a lower
-            // scale floor waits for the next step, and anything else applies
-            // when the pipeline next starts.
             let bitrate_changed = config.bitrate_kbps != self.config.bitrate_kbps;
             self.config = config;
             if bitrate_changed {
@@ -1631,8 +1529,8 @@ impl Media {
         self.request_rebuild();
     }
 
-    /// Records a browser keyframe request; true once it has asked
-    /// [`STALL_ASKS`] times within [`STALL_WINDOW`] with no restart between.
+    /// Records a browser keyframe request; true once it has asked [`STALL_ASKS`] times within
+    /// [`STALL_WINDOW`] with no restart between.
     fn browser_asks_stalled(&mut self, now: Instant) -> bool {
         self.browser_asks
             .retain(|t| now.duration_since(*t) < STALL_WINDOW);
@@ -1641,9 +1539,6 @@ impl Media {
             return false;
         }
         self.browser_asks.clear();
-        // Back off: a restart that doesn't cure the stall (a broken decoder)
-        // must not make the host churn, so after STALL_RESTARTS in
-        // STALL_BACKOFF it only logs.
         self.stall_restarts
             .retain(|t| now.duration_since(*t) < STALL_BACKOFF);
         if self.stall_restarts.len() >= STALL_RESTARTS {
@@ -1656,15 +1551,13 @@ impl Media {
         true
     }
 
-    /// Rebuilds the pipeline now, or once [`MIN_RESTART_GAP`] after the
-    /// last rebuild if that was too recent.
+    /// Rebuilds the pipeline now, or once [`MIN_RESTART_GAP`] after the last rebuild if that was
+    /// too recent.
     fn request_rebuild(&mut self) {
         if let Some(wait) = self
             .last_restart
             .and_then(|t| MIN_RESTART_GAP.checked_sub(t.elapsed()))
         {
-            // Too soon after the last rebuild: apply the newest settings
-            // once the gap is over.
             if !self.rebuild_pending {
                 self.rebuild_pending = true;
                 let (tx, session) = (self.later_tx.clone(), self.session);
@@ -1693,11 +1586,8 @@ impl Media {
         self.display_changed();
     }
 
-    /// Applies a change of stream size alone (a new size from the browser,
-    /// or an autoscale step) to the running pipeline without restarting it:
-    /// no new capture thread, device or encoder session, so no stall, and
-    /// this loop isn't held up. False if anything else changed too, or the
-    /// pipeline couldn't resize; the caller restarts it.
+    /// Applies a change of stream size alone to the running pipeline without restarting it: no new
+    /// capture thread, device or encoder session, so no stall, and this loop isn't held up.
     fn resize_in_place(&mut self) -> bool {
         let codec = self.streaming_codec();
         let (width, height) = scale::size(self.config.width, self.config.height, self.scale_step());
@@ -1763,8 +1653,8 @@ impl Media {
         self.sync_second();
     }
 
-    /// The display the second stream shows, if one is chosen, exists and is
-    /// not the one the first stream shows (two captures of one output fail).
+    /// The display the second stream shows, if one is chosen, exists and is not the one the first
+    /// stream shows.
     fn second_display(&self) -> Option<DisplayInfo> {
         let wanted = self.second?;
         let displays = ws_capture::list_displays().ok()?;
@@ -1811,9 +1701,9 @@ impl Media {
         }
     }
 
-    /// Makes the second stream match the choice and the first stream: off
-    /// when none is chosen, resized in place when only the scale changed,
-    /// and started afresh when its display or the codec changed.
+    /// Makes the second stream match the choice and the first stream: off when none is chosen,
+    /// resized in place when only the scale changed, and started afresh when its display or the
+    /// codec changed.
     fn sync_second(&mut self) {
         let Some(second) = self.second_display() else {
             self.stop_second();
@@ -1864,7 +1754,6 @@ impl Media {
             }
         }
         self.stop_second();
-        // Room to grow back to the browser's full size without a new encoder.
         let max = follow(self.config.width, self.config.height);
         let config = VideoConfig {
             width,
@@ -1938,9 +1827,8 @@ impl Media {
         }
     }
 
-    /// The codec the stream runs (or will run) in: the configured one if
-    /// both the browser and this PC can, else H.264, else whatever the
-    /// browser takes.
+    /// The codec the stream runs (or will run) in: the configured one if both the browser and this
+    /// PC can, else H.264, else whatever the browser takes.
     fn streaming_codec(&self) -> Option<VideoCodec> {
         let accepted = self.codecs.borrow().clone();
         pick_codec(self.config.codec, accepted.as_deref(), &self.refused_codecs)
@@ -1999,9 +1887,7 @@ fn event_name(ev: &TransportEvent) -> &'static str {
     }
 }
 
-/// Takes frames from a capture pipeline to the transport as video stream
-/// `lane`. Only the main stream (`sent` is `Some`) counts toward the stats
-/// the browser shows and the auto-resolution decides on.
+/// Takes frames from a capture pipeline to the transport as video stream `lane`.
 async fn forward_video(
     mut frames: mpsc::Receiver<EncodedFrame>,
     transport: Transport,
@@ -2024,8 +1910,6 @@ async fn forward_video(
         frame.lane = lane;
         transport.send_video(frame);
     }
-    // The pipeline is gone: dropped on purpose (the generation is then stale)
-    // or stopped on an error.
     tokio::time::sleep(VIDEO_RESTART_DELAY).await;
     let _ = stopped.send(generation).await;
 }
@@ -2036,14 +1920,12 @@ async fn forward_audio(mut packets: mpsc::Receiver<ws_proto::AudioPacket>, trans
     }
 }
 
-/// Joins whatever threads `value` owns without stalling other tasks on this
-/// worker.
+/// Joins whatever threads `value` owns without stalling other tasks on this worker.
 fn drop_blocking<T>(value: T) {
     block_in_place(|| drop(value));
 }
 
-/// The configured codec if the browser accepted it, else H.264, else
-/// anything it accepted. `None` (not known yet) trusts the configuration.
+/// The configured codec if the browser accepted it, else H.264, else anything it accepted.
 fn pick_codec(
     wanted: VideoCodec,
     accepted: Option<&[VideoCodec]>,
@@ -2072,8 +1954,7 @@ fn rect(d: &DisplayInfo) -> DisplayRect {
     }
 }
 
-/// Whether moving the encoder from `current` to `target` kbps is worth a
-/// reconfigure.
+/// Whether moving the encoder from `current` to `target` kbps is worth a reconfigure.
 fn worth_changing(current: u32, target: u32) -> bool {
     let step = if target < current {
         BITRATE_STEP_DOWN
@@ -2112,7 +1993,6 @@ mod tests {
             text: secret.into(),
         });
         assert!(!h.contains(secret) && h.contains("21 bytes"), "{h}");
-        // Everything else is logged as before.
         assert!(super::describe_client(&ClientControl::ListDisplays).contains("ListDisplays"));
     }
 
@@ -2120,7 +2000,6 @@ mod tests {
 
     #[test]
     fn a_frame_held_by_the_pacer_does_not_count_against_the_encoder() {
-        // Held 200 ms (Source quality), then encoded in 4 ms.
         let frame = EncodedFrame {
             lane: 0,
             display: DisplayId(0),
@@ -2137,7 +2016,6 @@ mod tests {
         };
         let mut sent = SentFrames::default();
         sent.add(&frame);
-        // The overlay's figure still runs from capture.
         assert_eq!(sent.encode_micros, 204_000);
         assert_eq!(sent.encoder_micros, 4_000);
         let host = bottleneck::HostSample {

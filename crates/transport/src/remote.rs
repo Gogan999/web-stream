@@ -1,16 +1,4 @@
 //! A [`Transport`] whose peer connection runs in another process.
-//!
-//! The Windows service keeps everything that parses what comes off the
-//! network (signaling, DTLS, SRTP, SCTP) in a process with almost no rights,
-//! and capture, encoding and input in a SYSTEM one. The SYSTEM side uses a
-//! [`Transport::remote`] handle exactly as it would a real one; a bridge in
-//! the host carries what it is asked to send ([`RemoteCmd`]) to the real
-//! transport, and feeds what that transport reports back in with
-//! [`Remote::event`] and [`Remote::set_state`].
-//!
-//! Keyframe requests, repairs and input go to the sinks set here, and are
-//! held for them, just as the real transport does: the other side forwards
-//! all of them, in order with the connection events, and this side decides.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -34,8 +22,8 @@ pub enum RemoteCmd {
         reply: oneshot::Sender<Result<bool, Error>>,
     },
     MaxBitrate(u64),
-    /// [`Transport::set_video_sink`] (true) or
-    /// [`Transport::clear_video_sink`] was called, for this video lane.
+    /// [`Transport::set_video_sink`] (true) or [`Transport::clear_video_sink`] was called, for this
+    /// video lane.
     VideoSink(u8, bool),
 }
 
@@ -51,10 +39,8 @@ pub struct Remote {
 }
 
 impl Transport {
-    /// A handle for a transport in another process: what it is asked to do
-    /// comes out of the returned [`Remote`], and what that process reports
-    /// goes into it. Negotiation is the other process's job, so
-    /// [`Transport::offer`] and [`Transport::accept_answer`] fail here.
+    /// A handle for a transport in another process: what it is asked to do comes out of the
+    /// returned [`Remote`], and what that process reports goes into it.
     pub fn remote() -> (Transport, Events, Remote) {
         let (transport, events, ends) = Transport::new();
         let Ends {
@@ -75,8 +61,8 @@ impl Transport {
 }
 
 impl Remote {
-    /// The next thing to send to the real transport, in order; `None` once
-    /// every handle is gone or [`Transport::shutdown`] was called.
+    /// The next thing to send to the real transport, in order; `None` once every handle is gone or
+    /// [`Transport::shutdown`] was called.
     pub async fn next(&mut self) -> Option<RemoteCmd> {
         loop {
             if let Some(frame) = self.frames.pop_front() {
@@ -109,9 +95,7 @@ impl Remote {
         }
     }
 
-    /// Something the real transport reported (input and keyframe requests
-    /// included: send those as the events and channel messages they would
-    /// be on a [`Transport`] with no sinks).
+    /// Something the real transport reported.
     pub fn event(&self, ev: TransportEvent) {
         let shared = &self.shared;
         match ev {
@@ -142,8 +126,8 @@ impl Remote {
         }
     }
 
-    /// Whether the peer connection is up, and how far behind each video
-    /// stream's send queue is, as the real transport last said.
+    /// Whether the peer connection is up, and how far behind each video stream's send queue is, as
+    /// the real transport last said.
     pub fn set_state(&self, connected: bool, backlog: [Duration; LANES]) {
         self.shared.connected.store(connected, Ordering::Relaxed);
         for (lane, age) in self.shared.lanes.iter().zip(backlog) {
@@ -213,7 +197,6 @@ mod tests {
         );
         assert!(offer.is_err());
 
-        // Input waits for this connection's sink; repairs go to the video sink.
         let got = Arc::new(Mutex::new(Vec::new()));
         remote.event(TransportEvent::Connected);
         assert!(transport.is_connected());

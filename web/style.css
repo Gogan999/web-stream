@@ -1,5 +1,5 @@
 * { box-sizing: border-box; }
-/* No page pinch or double-tap zoom (the stream has its own); pans still scroll panels. */
+/* No page pinch or double-tap zoom; pans still scroll panels. */
 * { touch-action: pan-x pan-y; }
 [hidden] { display: none !important; }
 html, body { margin: 0; height: 100%; background: #000; color: #ddd; font: 13px system-ui, sans-serif; }
@@ -100,8 +100,7 @@ body.unpaired #stage, body.unpaired #bar > :not(#status), body.adding #stage, bo
 #pc-add { align-self: center; font: 14px system-ui, sans-serif; color: #ccc; background: none; border: 1px dashed #555; border-radius: 6px; padding: 8px 16px; min-height: 40px; }
 #stage-connect { overflow-y: auto; }
 
-/* Touch: overlay buttons on the stream (they stay in fullscreen), the extra keys row and the hidden
-   textarea the phone keyboard types into. */
+/* Touch: overlay buttons on the stream, the extra keys row and the hidden textarea the phone keyboard types into. */
 #touchbar, #keys { position: absolute; display: flex; gap: 4px; z-index: 1; }
 #touchbar { top: max(6px, env(safe-area-inset-top)); right: max(6px, env(safe-area-inset-right)); }
 #keys { top: calc(max(6px, env(safe-area-inset-top)) + 44px); right: max(6px, env(safe-area-inset-right)); left: max(6px, env(safe-area-inset-left)); flex-wrap: wrap; justify-content: flex-end; }
@@ -112,7 +111,7 @@ body.unpaired #stage, body.unpaired #bar > :not(#status), body.adding #stage, bo
 body.touch #touchbar, body.fake-fs #touchbar { display: flex; }
 #keys .fkeys { flex: 1 0 100%; display: flex; gap: 4px; overflow-x: auto; justify-content: flex-start; -webkit-overflow-scrolling: touch; touch-action: pan-x; }
 #keys .fkeys button { flex: 0 0 auto; }
-body.touch #fullscreen { display: none; } /* the overlay has it, and it stays reachable in fullscreen */
+body.touch #fullscreen { display: none; }
 
 /* Fullscreen fallback where the page can't go fullscreen (iPhone): the stream fills the window. */
 body.fake-fs #bar { display: none; }

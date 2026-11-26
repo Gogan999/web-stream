@@ -1,5 +1,5 @@
-//! Turns decoded input events into injection calls, tracking what is held
-//! down so a dropped connection never leaves a key, button or stick stuck.
+//! Turns decoded input events into injection calls, tracking what is held down so a dropped
+//! connection never leaves a key, button or stick stuck.
 
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
@@ -22,8 +22,7 @@ pub enum GamepadKind {
     DualShock4,
 }
 
-/// Where input ends up. The Windows implementation is
-/// [`crate::WindowsInput`]; tests use a recorder.
+/// Where input ends up.
 pub trait InputSink {
     fn key(&mut self, key: KeyTarget, down: bool) -> Result<(), SinkError>;
     fn mouse_move(&mut self, dx: i32, dy: i32) -> Result<(), SinkError>;
@@ -47,13 +46,12 @@ pub enum HandleError {
     Sink(#[from] SinkError),
 }
 
-/// The client resends gamepad state every 100 ms; this many missed resends
-/// means the client is gone and a held stick must not keep the game moving.
+/// The client resends gamepad state every 100 ms; this many missed resends means the client is gone
+/// and a held stick must not keep the game moving.
 pub const GAMEPAD_STALE_AFTER: Duration = Duration::from_millis(500);
 
-/// After a disconnect, gamepad state still in flight on the unordered channel
-/// is ignored for this long so it cannot plug the pad back in. A failed
-/// plug-in waits this long before the next attempt.
+/// After a disconnect, gamepad state still in flight on the unordered channel is ignored for this
+/// long.
 pub const GAMEPAD_HOLDOFF: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, Copy)]
@@ -114,10 +112,6 @@ impl<S: InputSink> InputHandler<S> {
         match event {
             InputEvent::MouseMove { dx, dy } => self.sink.mouse_move(dx.into(), dy.into())?,
             InputEvent::MouseAbs { x, y, seq, .. } => {
-                // One overtaken by a newer position is stale. The browser
-                // numbers its reliable positions (ahead of a touch click)
-                // too, so a lossy one still in flight can't follow them.
-                // Unnumbered ones (from older pages) always apply.
                 if let Some(seq) = seq {
                     if self.abs_seq.is_some_and(|last| !seq_newer(seq, last)) {
                         return Ok(());
@@ -159,9 +153,6 @@ impl<S: InputSink> InputHandler<S> {
                 self.apply_pad(index, state, seq.or(last), now)?;
             }
             InputEvent::GamepadButtons { index, state, seq } => {
-                // In order on the reliable channel, so its buttons always
-                // apply: a press or release is never lost. Its sticks only
-                // if no newer snapshot has already moved them.
                 let (state, seq) = match self.pads[index as usize] {
                     Some(slot) if slot.seq.is_some_and(|last| !seq_newer(seq, last)) => (
                         GamepadState {
@@ -206,8 +197,6 @@ impl<S: InputSink> InputHandler<S> {
             }
         }
         let neutral = state == GamepadState::default();
-        // Keepalives repeat the same state; only changes reach the driver,
-        // except right after plug-in so the pad starts in the right state.
         let changed = slot.is_none_or(|s| !(s.neutral && neutral));
         *slot = Some(PadSlot {
             last_seen: now,
@@ -217,8 +206,6 @@ impl<S: InputSink> InputHandler<S> {
         });
         if changed {
             if let Err(e) = self.sink.gamepad_update(index, &state) {
-                // Plug-in failed or the pad vanished: forget it and
-                // try plugging in again after the hold-off.
                 self.pads[i] = None;
                 self.holdoff[i] = Some(now + GAMEPAD_HOLDOFF);
                 return Err(e.into());
@@ -227,9 +214,7 @@ impl<S: InputSink> InputHandler<S> {
         Ok(())
     }
 
-    /// Centres any gamepad whose state has not been refreshed for
-    /// [`GAMEPAD_STALE_AFTER`]. Call it from a timer (every 100 ms or so) while
-    /// a session is live, since a dead client sends nothing to trigger it.
+    /// Centres any gamepad whose state has not been refreshed for [`GAMEPAD_STALE_AFTER`].
     pub fn expire_stale_gamepads(&mut self, now: Instant) {
         for (index, slot) in self.pads.iter_mut().enumerate() {
             let Some(slot) = slot else { continue };
@@ -247,9 +232,7 @@ impl<S: InputSink> InputHandler<S> {
         }
     }
 
-    /// Releases every held key and button and centres every gamepad. Call it
-    /// when the client loses focus or the session ends; errors are logged
-    /// because there is nobody left to report them to.
+    /// Releases every held key and button and centres every gamepad.
     pub fn release_all(&mut self) {
         for key in std::mem::take(&mut self.keys) {
             if let Err(e) = self.sink.key(key, false) {
@@ -505,8 +488,6 @@ mod tests {
                 Call::Connect(2, GamepadKind::DualShock4),
                 Call::Update(2, GamepadState::default()),
                 Call::Update(2, pad(0x1000)),
-                // A held button's keepalive is forwarded; it is harmless and
-                // repairs a lost earlier update.
                 Call::Update(2, pad(0x1000)),
                 Call::Disconnect(2),
             ]
@@ -560,11 +541,9 @@ mod tests {
         h.apply(InputEvent::GamepadDisconnect { index: 0 }, t0)
             .unwrap();
         take(&mut h);
-        // Reordered on the unordered channel: arrives after the disconnect.
         h.apply(state.clone(), t0 + Duration::from_millis(5))
             .unwrap();
         assert!(take(&mut h).is_empty());
-        // A pad that really reconnects later is plugged back in.
         h.apply(state, t0 + GAMEPAD_HOLDOFF).unwrap();
         assert_eq!(
             take(&mut h),
@@ -698,7 +677,7 @@ mod tests {
         send(&mut h, abs(1, Some(10)));
         send(&mut h, abs(2, Some(9)));
         send(&mut h, abs(3, Some(11)));
-        // Unnumbered (ahead of a touch click) always applies.
+        // Unnumbered always applies.
         send(&mut h, abs(4, None));
         assert_eq!(
             take(&mut h),
@@ -737,8 +716,6 @@ mod tests {
             },
         );
         take(&mut h);
-        // A tap (press 10, release 11) arrives after snapshot 12 on the
-        // unordered channel: both edges still apply, keeping 12's stick.
         for (buttons, seq) in [(0x1000, 10), (0, 11)] {
             send(
                 &mut h,

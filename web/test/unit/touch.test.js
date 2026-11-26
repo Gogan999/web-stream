@@ -24,7 +24,7 @@ test('trackpad: tap clicks, drag moves without clicking', () => {
   assert.deepEqual(log, [['down', 0], ['up', 0]]);
   log.length = 0;
   g.down(1, 100, 100, 1000);
-  g.move(1, 115, 100); // past the slop: the whole distance so far is sent
+  g.move(1, 115, 100);
   g.move(1, 120, 95);
   g.up(1, 1200);
   assert.deepEqual(log, [['move', 15, 0], ['move', 5, -5]]);
@@ -51,14 +51,12 @@ test('two-finger tap right-clicks; two-finger drag scrolls like a touch screen',
   log.length = 0;
   g.down(1, 100, 100, 1000);
   g.down(2, 200, 100, 1010);
-  // Both fingers down 30 px: content follows the fingers, which is wheel up (+).
   for (let y = 105; y <= 130; y += 5) { g.move(1, 100, y); g.move(2, 200, y); }
   g.up(1, 1500);
   g.up(2, 1510);
   const wheel = log.filter((e) => e[0] === 'wheel').reduce((s, e) => s + e[2], 0);
   assert.ok(wheel > 0, JSON.stringify(log));
   assert.ok(!log.some((e) => e[0] === 'down' || e[0] === 'move'));
-  // The lift after scrolling doesn't click, and a lone finger left over doesn't start moving.
   log.length = 0;
   g.down(1, 100, 100, 2000);
   g.down(2, 200, 100, 2010);
@@ -105,7 +103,6 @@ test('trackpad: tap then touch again and drag drags with the left button, moving
   g.move(1, 140, 110);
   g.up(1, 900);
   assert.deepEqual(log, [['move', 20, 0], ['down', 0], ['move', 20, 10], ['up', 0]]);
-  // Too late after the tap: an ordinary move.
   log.length = 0;
   g.down(1, 100, 100, 1000);
   g.up(1, 1050);
@@ -114,7 +111,6 @@ test('trackpad: tap then touch again and drag drags with the left button, moving
   g.move(1, 120, 100);
   g.up(1, 2000);
   assert.deepEqual(log, [['move', 20, 0]]);
-  // Two quick taps double-click; a third quick touch doesn't drag.
   log.length = 0;
   g.down(1, 100, 100, 3000);
   g.up(1, 3050);
@@ -156,7 +152,7 @@ test('with Pan on, a two-finger drag pans the view instead of scrolling', () => 
 test('a pinch whose first finger slides before the second lands still pinches, not drags', () => {
   for (const mode of ['direct', 'trackpad']) {
     const { g, log } = rig(mode);
-    if (mode === 'trackpad') { g.down(1, 100, 100, 0); g.up(1, 50); } // a tap first: the touch would tap-drag
+    if (mode === 'trackpad') { g.down(1, 100, 100, 0); g.up(1, 50); }
     log.length = 0;
     const t = 100;
     g.down(1, 100, 100, t);
@@ -180,13 +176,11 @@ test('direct: a drag waits for a second finger at most SECOND_FINGER_MS, from wh
   g.move(1, 60, 20, SECOND_FINGER_MS + 10);
   g.up(1, 400);
   assert.deepEqual(log, [['TO', 10, 20], ['TO', 10, 20], ['down', 0], ['to', 40, 20], ['to', 60, 20], ['up', 0]]);
-  // A quick flick, lifted before the wait is over, is still a drag rather than a click.
   log.length = 0;
   g.down(1, 10, 20, 1000);
   g.move(1, 60, 20, 1040);
   g.up(1, 1060);
   assert.deepEqual(log, [['TO', 10, 20], ['TO', 10, 20], ['down', 0], ['to', 60, 20], ['up', 0]]);
-  // No hold right-click for a finger that slid.
   log.length = 0;
   g.down(1, 10, 20, 2000);
   g.move(1, 60, 20, 2010);
@@ -201,10 +195,10 @@ test('lifting one finger of a pinch and putting it back keeps pinching', () => {
   g.down(2, 200, 100, 10);
   for (let i = 1; i <= 5; i++) { g.move(1, 100 - i * 10, 100); g.move(2, 200 + i * 10, 100); }
   g.up(2, 300);
-  g.move(1, 40, 100); // the finger left over does nothing on its own
+  g.move(1, 40, 100);
   log.length = 0;
   g.down(2, 200, 100, 400);
-  g.move(2, 202, 100); // under the pinch threshold, but this is a pinch already
+  g.move(2, 202, 100);
   g.up(1, 500);
   g.up(2, 510);
   assert.deepEqual(log.map((e) => e[0]), ['pinch']);
@@ -220,14 +214,12 @@ test('a three-finger tap middle-clicks in both modes; moving or holding does not
     g.up(2, 110);
     g.up(3, 120);
     assert.deepEqual(log.filter((e) => e[0] === 'down' || e[0] === 'up'), [['down', 1], ['up', 1]], mode);
-    // Slow: not a tap.
     log.length = 0;
     g.down(1, 100, 100, 1000);
     g.down(2, 200, 100, 1020);
     g.down(3, 300, 100, 1040);
     g.up(1, 1500); g.up(2, 1510); g.up(3, 1520);
     assert.ok(!log.some((e) => e[0] === 'down' || e[0] === 'up'), mode);
-    // Moved: not a tap.
     log.length = 0;
     g.down(1, 100, 100, 2000);
     g.down(2, 200, 100, 2020);

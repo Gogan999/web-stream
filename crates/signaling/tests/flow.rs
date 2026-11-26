@@ -1,5 +1,4 @@
-//! Pairing and signaling over a real socket (plain HTTP; TLS is the same
-//! router behind rustls).
+//! Pairing and signaling over a real socket.
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -151,7 +150,6 @@ async fn pair_then_signal() {
     let origin = format!("https://{addr}");
     let origin = Some(origin.as_str());
 
-    // Not paired yet.
     let r = request(addr, "GET", "/api/session", None, None, "").await;
     assert_eq!(r.status, 401);
     assert!(r.headers.to_lowercase().contains("content-security-policy"));
@@ -172,7 +170,6 @@ async fn pair_then_signal() {
     .await;
     assert_eq!(r.status, 403);
 
-    // Pairing is closed until the host user opens it.
     let r = request(
         addr,
         "POST",
@@ -285,7 +282,6 @@ async fn pair_then_signal() {
         HostSignal::Error { .. }
     ));
 
-    // A second connection replaces the first.
     let mut ws2 = ws_connect(addr, &cookie).await.unwrap();
     assert_eq!(
         next_host_msg(&mut ws).await,
@@ -303,7 +299,6 @@ async fn pair_then_signal() {
     let mut session2 = events.sessions.recv().await.unwrap();
     assert!(session2.host.is_some());
 
-    // A handoff closes the socket but keeps the session live.
     ws2.send(Message::text(r#"{"type":"handoff"}"#))
         .await
         .unwrap();
@@ -321,9 +316,6 @@ async fn pair_then_signal() {
             .is_err()
     );
 
-    // A new connection still replaces it; the host hears why, to tell the
-    // browser over the peer connection. (This one came through a Cloudflare
-    // Tunnel, whose name is no place to send media.)
     let mut ws3 = ws_connect_with(addr, &cookie, &[("cf-connecting-ip", "198.51.100.9")])
         .await
         .unwrap();
@@ -436,7 +428,6 @@ async fn pairing_link_pairs_once() {
     let origin = Some(origin.as_str());
     let body = |link: &str| format!(r#"{{"link":"{link}","device_name":"Phone"}}"#);
 
-    // Closed: nothing to pair with.
     let r = request(addr, "POST", "/api/pair/link", origin, None, &body("x")).await;
     assert_eq!(
         (r.status, &*body_json(&r)["error"].to_string()),
@@ -444,7 +435,6 @@ async fn pairing_link_pairs_once() {
     );
 
     let link = handle.open_pairing().await.unwrap();
-    // Cross-origin is refused even with the right link.
     let r = request(
         addr,
         "POST",
@@ -467,7 +457,6 @@ async fn pairing_link_pairs_once() {
             device_name: "Phone".into()
         })
     );
-    // Once only.
     let r = request(addr, "POST", "/api/pair/link", origin, None, &body(&link)).await;
     assert_eq!(r.status, 403);
 }
@@ -519,7 +508,6 @@ async fn another_origin_pairs_for_a_token_and_signals_with_it() {
     assert!(!r.headers.to_lowercase().contains("set-cookie"));
     let token = body_json(&r)["token"].as_str().unwrap().to_string();
 
-    // A cookie from another origin is still refused.
     let mut req = format!("ws://{addr}/ws").into_client_request().unwrap();
     req.headers_mut()
         .insert("Origin", "https://evil.example".parse().unwrap());

@@ -1,11 +1,6 @@
 // The second monitor's video in a window of its own, so each host monitor can fill a client screen.
-//
-// The window is empty but for the video and the host pointer's overlay. Its mouse, wheel and keys go
-// to the page's InputCapture, which treats the window's video as the second monitor's: `input.video2`
-// is this one while the window is open. Absolute mouse mode and pointer lock both work in it.
 
-// Opens the window; null if the browser blocked it (pop-ups need a click, and may need allowing).
-// `onClose` runs once when the window goes away, by `close()` or by the user.
+// Opens the window; null if the browser blocked it.
 export function openPopout({ input, onClose }) {
   const win = window.open('', 'ws-second-monitor', 'popup=yes,width=1280,height=720');
   if (!win) return null;
@@ -38,7 +33,6 @@ export function openPopout({ input, onClose }) {
   doc.addEventListener('mousemove', (e) => { if (mine(e)) input.onMouseMove(e); }, opt);
   doc.addEventListener('wheel', (e) => { if (mine(e)) input.onWheel(e); }, { ...opt, passive: false });
   doc.addEventListener('contextmenu', (e) => e.preventDefault(), opt);
-  // Like the page's own stage: only while the pointer is over it do keys go to the host.
   page.addEventListener('mouseenter', () => { input.stageFocused = true; }, opt);
   page.addEventListener('mouseleave', () => {
     if (input.mode === 'absolute') input.releaseAll();
@@ -48,7 +42,6 @@ export function openPopout({ input, onClose }) {
   win.addEventListener('keyup', (e) => input.onKey(e, false), { ...opt, capture: true });
   win.addEventListener('blur', () => input.releaseAll(), opt);
   doc.addEventListener('pointerlockchange', () => { if (!input.locked) input.releaseAll(); }, opt);
-  // Double-click: fullscreen on the screen the window is on, and back.
   doc.addEventListener('dblclick', () => {
     if (doc.fullscreenElement) doc.exitFullscreen().catch(() => {});
     else page.requestFullscreen().catch(() => {});
@@ -59,7 +52,7 @@ export function openPopout({ input, onClose }) {
     if (closed) return;
     closed = true;
     stop.abort();
-    try { win.close(); } catch { /* already gone */ }
+    try { win.close(); } catch { }
     onClose();
   };
   win.addEventListener('pagehide', close, { once: true });

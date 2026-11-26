@@ -1,6 +1,4 @@
-// Stand-in for the real host agent so the client can be developed and tested without it.
-// Streams an animated canvas plus a tone, answers the client's offer, sends a display list,
-// switches "displays" on request and logs decoded input.
+// Stand-in for the real host agent.
 
 import { decode } from '../js/protocol.js';
 
@@ -46,7 +44,7 @@ function setDisplay(id) {
 const videoTrack = canvas.captureStream(60).getVideoTracks()[0];
 
 // The second video track, like the real host's: always offered, with frames while a second monitor
-// is chosen. It shows the other display than the first track's.
+// is chosen.
 let second = null; // id of the display on the second track
 const canvas2 = document.createElement('canvas');
 const ctx2 = canvas2.getContext('2d');
@@ -76,7 +74,7 @@ const audioTrack = dest.stream.getAudioTracks()[0];
 
 const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws?role=host`);
 let pc = null;
-let handedOff = false; // the client closed its socket; it hears from us over control only
+let handedOff = false;
 const send = (m) => ws.send(JSON.stringify(m));
 ws.onopen = () => write({ ev: 'signaling-open' });
 
@@ -89,7 +87,6 @@ ws.onmessage = async (e) => {
       break;
     case 'dev-client-connected':
       write({ ev: 'client-connected' });
-      // Like the real host: a client that handed signaling off learns it was replaced over control.
       if (handedOff && window.__control?.readyState === 'open') window.__control.send(JSON.stringify({ type: 'bye', reason: 'replaced' }));
       handedOff = false;
       send({ type: 'welcome', ice_servers: [] });
@@ -111,7 +108,7 @@ ws.onmessage = async (e) => {
       if (pc) await pc.addIceCandidate({ candidate: msg.candidate, sdpMid: msg.sdpMid, sdpMLineIndex: msg.sdpMLineIndex }).catch(() => {});
       break;
     case 'dev-client-disconnected':
-      if (handedOff) break; // the session goes on over the peer connection
+      if (handedOff) break;
       pc?.close();
       pc = null;
       break;
@@ -127,7 +124,6 @@ async function offer() {
   pc.addTransceiver(videoTrack2, { direction: 'sendonly' });
   pc.addTransceiver(audioTrack, { direction: 'sendrecv' });
   window.__hostPc = pc;
-  // Keep the "display" resolution fixed, as the real host's encoder does, so the client sees it change on a switch.
   for (const s of pc.getSenders()) {
     if (s.track?.kind !== 'video') continue;
     const p = s.getParameters();
@@ -146,7 +142,6 @@ async function offer() {
     if (channel.label === 'file') window.__file = channel;
     channel.onopen = () => {
       write({ ev: 'channel', label: channel.label, ordered: channel.ordered, maxRetransmits: channel.maxRetransmits });
-      // Like the real host: what it can do, when the control channel opens.
       if (channel.label === 'control') channel.send(JSON.stringify({ type: 'capabilities', clipboard: !window.mockNoClipboard, sas: false, hostName: 'MOCK-PC', version: '0.0.0' }));
     };
     channel.onmessage = (m) => {
@@ -154,7 +149,7 @@ async function offer() {
         const c = JSON.parse(m.data);
         write({ ev: 'control', ...c });
         // Like the real host: the stream keeps its configured size whatever the display (the canvas
-        // resizes here only so the client sees a switch), and settings come back in displayChanged.
+        // resizes here only.
         if (c.type === 'listDisplays') {
           sendDisplays(channel);
           sendConfig(channel);
@@ -190,8 +185,6 @@ async function offer() {
     };
   }
   await pc.setLocalDescription(await pc.createOffer());
-  // Like the real host: all candidates go in the offer, no trickle. Host candidates come
-  // within milliseconds; don't wait for slow interfaces to finish.
   await new Promise((r) => {
     pc.addEventListener('icegatheringstatechange', () => pc.iceGatheringState === 'complete' && r());
     setTimeout(r, 500);
@@ -199,7 +192,6 @@ async function offer() {
   send({ type: 'offer', sdp: pc.localDescription.sdp });
 }
 
-// Mic audio packets received from the client so far.
 window.mockMicPackets = async () => {
   let n = 0;
   for (const s of (await window.__hostPc?.getStats())?.values() ?? []) {
@@ -214,7 +206,6 @@ function sendConfig(channel) {
   channel.send(JSON.stringify({ type: 'displayChanged', id: active.id, config }));
 }
 
-// A rough videoStats once a second, so the client's host line and auto-tune have something to read.
 setInterval(() => {
   const ch = window.__control;
   if (ch?.readyState !== 'open') return;
@@ -234,7 +225,7 @@ function sendDisplays(channel) {
 }
 
 // Shared files, like the real host's: offered by id, sent in 16 KiB chunks with an id and offset
-// header when asked for. Only for small files: this mock ignores the ack window.
+// header when asked for.
 const shared = new Map();
 window.mockShareFile = (id, name, text) => {
   const data = new TextEncoder().encode(text);

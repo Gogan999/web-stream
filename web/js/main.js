@@ -21,7 +21,7 @@ import { ClientReporter } from './telemetry.js';
 
 const $ = (id) => document.getElementById(id);
 // First thing: the pairing link's secret leaves the address bar (and history) before anything else
-// runs. null: none; '': a damaged one.
+// runs.
 const pairingLink = pairing.takePairingLink();
 
 const ui = {
@@ -79,37 +79,37 @@ let savedPcs = hosts.loadHosts();
 let localPaired = false;
 let target = null;
 let cursor = null;
-let cursor2 = null; // the pointer on the second monitor's video
-let popout = null; // the second monitor's window, while it has one
+let cursor2 = null;
+let popout = null;
 let statsTimer = 0;
 const reporter = new ClientReporter({ getPc: () => session?.pc, send: (m) => session?.sendControl(m) });
 let prevSnap = null;
 const frameTimer = new FrameTimer(ui.video);
 const alerts = new Alerts();
 
-// Stream settings and what the host reported. See settings.js.
+// Stream settings and what the host reported.
 const settings = settingsStore.load();
-let host = null; // { displays, active, config, stats } for the current session
+let host = null;
 let lastSent = null;
 let tuning = null; // running AutoTune
-let tuned = null; // what the last auto-tune picked: { bitrateKbps, quality }, for this connection only until kept
-let tuneWindow = null; // host stats gathered while auto-tune measures
-let micTrack = null; // this browser's microphone while the Mic setting is on and a session runs
-let remoteUpdate = false; // the host lets this browser update and restart it
+let tuned = null;
+let tuneWindow = null;
+let micTrack = null;
+let remoteUpdate = false;
 
 function setStatus(text, state) {
   ui.status.textContent = text;
   ui.status.dataset.state = state;
 }
 
-// Connected (or connecting): the toolbar button disconnects, and the big one on the stage goes away.
+// Connected (or connecting): the toolbar button disconnects, and the big one on the stage goes
+// away.
 function showConnected(on) {
   ui.connect.textContent = on ? 'Disconnect' : 'Connect';
   document.body.classList.toggle('connected', on);
 }
 
 // Hooks for the host's capabilities message (see capabilities.js).
-// Ctrl+Alt+Del works only when the host runs as the service; hidden until the host says so.
 function setSasVisible(visible) {
   ui.sas.hidden = !visible;
   $('keys-sas').hidden = !visible;
@@ -149,14 +149,12 @@ async function connect(next = target) {
   session.addEventListener('file-chunk', (e) => files.onChunk(e.detail));
   session.addEventListener('control-open', () => {
     keepAwake();
-    // A new connection: the host offers its files afresh, and says whether it takes any.
     files.clear();
     uploads.clear();
     if (diag && session.pc) diag.start(session.pc, ui.video);
     session.sendControl({ type: 'listDisplays' });
     reporter.start();
     sendCursorMode();
-    // The host keeps the last choice across sessions; tell it this browser's.
     session.sendControl({ type: 'setMicEnabled', enabled: settings.mic });
     session.sendControl(settingsStore.audioConfig(settings));
   });
@@ -176,7 +174,6 @@ async function connect(next = target) {
   clearTuned();
   host = { displays: [], active: null, second: null, config: null, stats: null, matched: false, awaitingMatch: false };
   lastSent = null;
-  // The host sends "bye" with reason "revoked" when this browser is unpaired.
   session.addEventListener('status', (e) => { if (/unpaired/.test(e.detail.text)) recheck(target); });
   input = new InputCapture({
     session, video: ui.video, video2: ui.video2, stage: ui.stage, onHotkey,
@@ -190,7 +187,7 @@ async function connect(next = target) {
   input.start();
   cursor = new CursorView({
     video: ui.video, overlay: ui.cursor, displaySize: () => host?.displays.find((d) => d.id === host.active) ?? null,
-    onPlace: (x, y) => zoom.follow(x, y), // zoomed in, the view keeps the trackpad's pointer in sight
+    onPlace: (x, y) => zoom.follow(x, y),
   });
   cursor.setMode(ui.mouseMode.value);
   makeCursor2(ui.video2, ui.cursor2);
@@ -290,10 +287,8 @@ function onControl(msg) {
     setRemoteUpdate(msg.enabled === true);
   } else if (msg.type === 'updateStatus' && typeof msg.message === 'string') {
     setStatus(`Host update: ${msg.message}`, ui.status.dataset.state);
-    // Started: the host restarts once the build is done, and this page reconnects to the new one.
     setRemoteUpdate(true, msg.state === 'started');
   } else if (msg.type === 'micUnavailable') {
-    // The host can't play the mic: stop sending it.
     setStatus(`Host: ${msg.message}`, ui.status.dataset.state);
     settings.mic = false;
     showMic();
@@ -301,10 +296,8 @@ function onControl(msg) {
     setMic(false);
   } else if (msg.type === 'error' && typeof msg.message === 'string') {
     setStatus(`Host: ${msg.message}`, ui.status.dataset.state);
-    // A refused update can be tried again.
     if (remoteUpdate) setRemoteUpdate(true);
     if (host) {
-      // Whatever was asked for may not have applied; let the next change (or this one) go again.
       lastSent = null;
       if (host.awaitingMatch) {
         host.awaitingMatch = false;
@@ -321,8 +314,6 @@ function applySettings() {
     host.matched = true;
     host.awaitingMatch = true;
     const { width, height } = settingsStore.screenPixels();
-    // The host answers with a fresh display list (or an error), which brings us back here; the
-    // stream is sized for the new resolution then, not twice.
     session.sendControl({ type: 'setHostResolution', width, height });
   }
   if (host.awaitingMatch) return;
@@ -332,7 +323,6 @@ function applySettings() {
 function currentConfig() {
   const display = host.displays.find((d) => d.id === host.active) ?? null;
   const config = settingsStore.videoConfig(settings, { screen: settingsStore.screenPixels(), display, codec: host.config.codec, rotate: isTouch() });
-  // An auto-tune result applies to this connection only (it never rewrites the saved settings).
   return tuned ? { ...config, ...tuned } : config;
 }
 
@@ -363,7 +353,6 @@ fillSelect(ui.fps, settingsStore.FRAME_RATES, (v) => String(v));
 const CODEC_LABELS = { h264: 'H.264', h265: 'H.265 (HEVC)', av1: 'AV1' };
 const decodable = settingsStore.decodableCodecs();
 fillSelect(ui.codec, decodable, (v) => CODEC_LABELS[v]);
-// A codec picked in another browser (settings are per origin) may not play in this one.
 if (settings.codec && !decodable.includes(settings.codec)) settings.codec = null;
 fillSelect(ui.priority, settingsStore.PRIORITIES, (v) => v[0].toUpperCase() + v.slice(1));
 fillSelect(ui.keyframeScale, settingsStore.KEYFRAME_SCALES, (v) => (v === 1 ? '1x (fastest)' : v === 4 ? '4x (sharpest)' : `${v}x`));
@@ -383,7 +372,6 @@ function ensureOption(select, value, label) {
 
 // Shows the settings.
 function showSettings() {
-  // A bitrate that isn't in the list (kept from auto-tune), or a resolution no longer listed, gets its own entry.
   ensureOption(ui.bitrate, settings.bitrate, () => `${Number(settings.bitrate) / 1000} Mb/s`);
   ensureOption(ui.resolution, settings.resolution, () => RES_LABELS[settings.resolution]);
   ui.resolution.value = settings.resolution;
@@ -403,7 +391,7 @@ function showSettings() {
   ui.audioFrame.value = settings.audioFrame;
   ui.statsLevel.value = settings.statsLevel;
 }
-// The chosen codec, else what the host streams (nothing selected before it says).
+// The chosen codec, else what the host streams.
 function showCodec() {
   ui.codec.value = settings.codec ?? host?.config?.codec ?? '';
 }
@@ -413,7 +401,7 @@ function showMic() {
   ui.mic.checked = !!settings.mic;
   ui.micToggle.setAttribute('aria-pressed', String(!!settings.mic));
 }
-// Mouse button: Game / Desktop, or Trackpad / Direct on a touch screen (the same two modes).
+// Mouse button: Game / Desktop, or Trackpad / Direct on a touch screen.
 function showMouseLabel() {
   const touch = document.body.classList.contains('touch');
   const relative = settings.mouseMode === 'relative';
@@ -435,7 +423,7 @@ for (const [el, key] of [[ui.resolution, 'resolution'], [ui.codec, 'codec'], [ui
   el.addEventListener('change', () => {
     settings[key] = ['fps', 'keyframeScale', 'minScale'].includes(key) ? Number(el.value) : el.value;
     if (key === 'priority' && settings.priority === 'source') Object.assign(settings, settingsStore.SOURCE_PRESET);
-    clearTuned(); // a choice made now replaces what auto-tune picked
+    clearTuned();
     settingsStore.save(settings);
     showSettings();
     applySettings();
@@ -466,7 +454,7 @@ ui.matchHost.addEventListener('change', () => {
   }
 });
 
-// Starts or stops sending the mic. The host plays it into its virtual cable (see docs/guide/audio-and-gamepads.md).
+// Starts or stops sending the mic.
 let micGen = 0;
 async function setMic(on) {
   const s = session;
@@ -569,7 +557,6 @@ async function autoTune() {
   for (const el of [ui.resolution, ui.codec, ui.bitrate, ui.fps, ui.priority, ui.keyframeScale, ui.minScale, ui.recoverDrops, ui.display, ui.displayQuick, ui.matchHost]) el.disabled = true;
   try {
     const { config, summary } = await tuning.run();
-    // This connection only: nothing is saved unless the user presses Keep these.
     tuned = { bitrateKbps: config.bitrateKbps, quality: config.quality };
     ui.autotuneKeep.hidden = false;
     setStatus(`${summary} (this connection only; Settings > Advanced > Keep these)`, 'connected');
@@ -599,7 +586,6 @@ ui.autotuneKeep.addEventListener('click', () => {
   setStatus('Saved auto-tune result as Max bitrate and Priority', ui.status.dataset.state);
 });
 
-// Back to the defaults, for everything this page keeps. The host and the pairing are untouched.
 ui.resetSettings.addEventListener('click', () => {
   if (!confirm('Put all settings on this page back to their defaults?')) return;
   const matched = settings.matchHost;
@@ -621,7 +607,6 @@ function makeCursor2(video, overlay) {
   cursor2?.stop();
   cursor2 = new CursorView({
     video, overlay, displaySize: () => displayById(host?.second),
-    // The host reports the pointer from the main display's corner; this video starts at the other's.
     shift: () => {
       const main = displayById(host?.active);
       const other = displayById(host?.second);
@@ -633,8 +618,7 @@ function makeCursor2(video, overlay) {
 
 const displayById = (id) => (id == null ? null : host?.displays.find((d) => d.id === id) ?? null);
 
-// The second monitor's choices: off, or any display (the host refuses the one already shown, and
-// swaps if the main one is switched to it).
+// The second monitor's choices: off, or any display.
 function fillSecond(displays, second) {
   ui.display2.replaceChildren(...[{ id: 'off', label: 'Off' }, ...displays.map((d, i) => ({ id: String(d.id), label: `${i + 1}: ${d.name || d.id}` }))]
     .map(({ id, label }) => {
@@ -650,7 +634,6 @@ function fillSecond(displays, second) {
 // Two monitors side by side, or one.
 function showDual(on) {
   if (!on) popIn();
-  // In a window of its own, the second monitor leaves the page's layout.
   document.body.classList.toggle('dual', on && !popout);
   ui.video2.hidden = !on || !!popout;
   ui.popout.hidden = !on;
@@ -667,7 +650,6 @@ function popOut() {
     return;
   }
   popout = p;
-  // The stream follows the video element, also after a reconnect gives it a new one.
   p.video.srcObject = ui.video2.srcObject;
   ui.video2.srcObject = null;
   session.video2 = input.video2 = p.video;
@@ -705,7 +687,7 @@ function selectDisplay(id) {
   if (!session) return;
   ui.display.value = id;
   ui.displayQuick.value = id;
-  zoom.reset(); // a different screen: start from the whole of it
+  zoom.reset();
   session.sendControl({ type: 'selectDisplay', id: Number(id) });
 }
 
@@ -724,19 +706,13 @@ async function toggleFullscreen() {
   const request = ui.stage.requestFullscreen ?? ui.stage.webkitRequestFullscreen;
   try {
     await request.call(ui.stage, { navigationUI: 'hide' });
-    // The old webkit call returns nothing and may quietly do nothing.
     if (!fullscreenElement()) await new Promise((r) => setTimeout(r, 300));
     if (!fullscreenElement()) throw new Error('not fullscreen');
   } catch {
-    // iPhone Safari only fullscreens <video>, with its own controls and no input; fill the window instead.
-    // On desktop a refusal just leaves things as they were.
     if (isTouch()) setFakeFullscreen(true);
     return;
   }
-  // Keyboard Lock (Chromium, fullscreen only) lets Esc, Alt+Tab and the Windows key reach the host.
-  // Hold Esc to leave fullscreen.
   try { await navigator.keyboard?.lock(); } catch { /* unsupported */ }
-  // Phones: turn to the host display's shape (Android Chrome allows this only while fullscreen).
   if (isTouch()) {
     const d = host?.displays.find((x) => x.id === host.active);
     const portrait = d?.width && d?.height && d.height > d.width;
@@ -761,7 +737,7 @@ for (const ev of ['fullscreenchange', 'webkitfullscreenchange']) {
       try { navigator.keyboard?.lock()?.catch(() => {}); } catch { /* unsupported */ }
     } else {
       navigator.keyboard?.unlock?.();
-      try { screen.orientation?.unlock?.(); } catch { /* not locked */ }
+      try { screen.orientation?.unlock?.(); } catch { }
     }
     showFullscreenState();
   });
@@ -774,8 +750,8 @@ function toggleStats() {
   else startStats();
 }
 
-// A stream that arrives but never decodes (the host restarted its video and the new keyframe was lost or
-// unusable) is rescued by asking the host for a keyframe, and the host restarts its video if that repeats.
+// A stream that arrives but never decodes is rescued by asking the host for a keyframe, and the
+// host restarts its video if that repeats.
 const stallWatchdog = new StallWatchdog();
 setInterval(async () => {
   const pc = session?.pc;
@@ -843,7 +819,6 @@ function sendCursorMode() {
 }
 
 // In a window the browser keeps Esc to free the mouse and never passes it on; say how to send one.
-// Only the page's fullscreen (not F11) can lock the keyboard and let Esc through.
 let releasingMouse = false;
 let escHintShown = false;
 document.addEventListener('pointerlockchange', () => {
@@ -856,7 +831,7 @@ document.addEventListener('pointerlockchange', () => {
   setStatus('Esc frees the mouse in a window. Use Fullscreen to send Esc, or Ctrl+Alt+Shift+E', ui.status.dataset.state);
 });
 
-// Ctrl+Alt+Shift+<key>. Returns true when handled so the key is not sent to the host.
+// Ctrl+Alt+Shift+<key>.
 function onHotkey(code) {
   const digit = /^Digit([1-9])$/.exec(code);
   if (digit) {
@@ -887,17 +862,15 @@ ui.displayQuick.addEventListener('change', () => selectDisplay(ui.displayQuick.v
 ui.mouseMode.addEventListener('change', () => setMouseMode(ui.mouseMode.value));
 ui.mouseToggle.addEventListener('click', () => setMouseMode(ui.mouseMode.value === 'relative' ? 'absolute' : 'relative'));
 ui.fullscreen.addEventListener('click', toggleFullscreen);
-// Ctrl+Alt+Del never reaches the page as keys; the host asks Windows for it.
 for (const el of [$('sas'), $('keys-sas')]) {
   el.addEventListener('click', () => session?.sendControl({ type: 'secureAttention' }));
 }
 ui.touchFullscreen.addEventListener('click', toggleFullscreen);
 ui.statsToggle.addEventListener('click', toggleStats);
 ui.statsLevel.addEventListener('change', () => setStatsLevel(ui.statsLevel.value));
-// Toolbar controls keep focus otherwise, and Space/Enter would re-trigger them.
 for (const el of [ui.connect, ui.connectBig, ui.fullscreen, ui.sas, ui.mouseToggle, ui.micToggle, ui.statsToggle, ui.autotune, ui.clipboard]) el.addEventListener('mouseup', () => el.blur());
 
-// Update host: only when the host allows it, and only after a confirm, since it restarts the host.
+// Update host: only when the host allows it, and only after a confirm.
 function setRemoteUpdate(enabled, running = false) {
   remoteUpdate = enabled;
   ui.updateHost.disabled = !enabled || running;
@@ -914,7 +887,8 @@ ui.updateHost.addEventListener('click', () => {
   session.sendControl({ type: 'updateHost' });
 });
 
-// Settings and Files dropdowns: a toggle opens one; a click or tap anywhere else, or Esc, closes it.
+// Settings and Files dropdowns: a toggle opens one; a click or tap anywhere else, or Esc, closes
+// it.
 function setSettingsOpen(open) {
   if (open) setFilesOpen(false);
   document.body.classList.toggle('more-open', open);
@@ -935,7 +909,7 @@ try {
 } catch { /* defaults from the page */ }
 ui.more.addEventListener('toggle', () => {
   const open = Object.fromEntries([...ui.more.querySelectorAll('details')].map((d) => [d.id, d.open]));
-  try { localStorage.setItem(FOLDS_KEY, JSON.stringify(open)); } catch { /* not remembered */ }
+  try { localStorage.setItem(FOLDS_KEY, JSON.stringify(open)); } catch { }
 }, { capture: true });
 ui.moreToggle.addEventListener('click', () => setSettingsOpen(!document.body.classList.contains('more-open')));
 ui.filesToggle.addEventListener('click', () => setFilesOpen(!document.body.classList.contains('files-open')));
@@ -949,7 +923,8 @@ document.addEventListener('keydown', (e) => {
   if (document.body.classList.contains('files-open')) setFilesOpen(false);
 });
 
-// Files the host shares: the Files button shows how many; each row saves, cancels or says what happened.
+// Files the host shares: the Files button shows how many; each row saves, cancels or says what
+// happened.
 const files = new Files({ sendControl: (msg) => session?.sendControl(msg) });
 files.addEventListener('offer', (e) => {
   setStatus(`Host shared ${e.detail.name} (${formatSize(e.detail.size)}): see Files`, ui.status.dataset.state);
@@ -961,8 +936,7 @@ const uploads = new Uploads({
   fileBuffered: () => session?.fileBuffered() ?? null,
 });
 
-// Clipboard text, both ways (clipboard.js). The toolbar button and the touch Paste button show only
-// while the host shares its clipboard and the Share clipboard setting is on.
+// Clipboard text, both ways (clipboard.js).
 const clip = new ClipboardSync({
   sendControl: (msg) => session?.sendControl(msg),
   notify: (text) => setStatus(text, ui.status.dataset.state),
@@ -976,7 +950,7 @@ const clip = new ClipboardSync({
   },
 });
 ui.clipEnabled.checked = clip.enabled;
-ui.clipEnabled.disabled = true; // until the host says it shares its clipboard
+ui.clipEnabled.disabled = true;
 ui.clipEnabled.addEventListener('change', () => clip.setEnabled(ui.clipEnabled.checked));
 ui.clipboard.addEventListener('click', () => clip.button());
 window.addEventListener('focus', () => clip.onFocus());
@@ -986,8 +960,7 @@ ui.stage.addEventListener('pointerdown', () => clip.onGesture());
 function typeText(text) {
   for (const buf of P.text(text)) input?.rel(buf);
 }
-// Paste on a touch screen: the host gets this device's clipboard, then Ctrl+V. Where the clipboard
-// can't be shared (or the browser refuses to read it), the text is typed instead if it can be read.
+// Paste on a touch screen: the host gets this device's clipboard, then Ctrl+V.
 async function touchPaste() {
   if (await clip.toHost()) {
     const ctrl = hidUsage('ControlLeft');
@@ -1117,20 +1090,17 @@ const softKeys = new SoftKeyboard({
   keys: ui.keys,
   send: (usage, down) => input?.rel(P.key(usage, down)),
   sendText: typeText,
-  // The keyboard's own Paste (long press): the host's clipboard gets the text and it is typed.
   onPaste: (text) => { clip.pushText(text); typeText(text); },
 });
 const markTouch = () => { document.body.classList.add('touch'); showMouseLabel(); };
 if (matchMedia('(pointer: coarse)').matches) markTouch();
 document.addEventListener('pointerdown', (e) => { if (e.pointerType === 'touch') markTouch(); }, { capture: true });
 
-// Overlay buttons don't take focus, so tapping them leaves the phone keyboard open.
 for (const el of [$('touchbar'), ui.keys]) {
   for (const ev of ['pointerdown', 'mousedown']) el.addEventListener(ev, (e) => e.preventDefault());
 }
 // Opening the keyboard has to happen on click: phones show it only for a focus() inside a tap's
-// user activation, which a touch pointerdown doesn't give. Whether it was open is read on pointerdown
-// in case the tap moved focus anyway.
+// user activation, which a touch pointerdown doesn't give.
 let kbdWasOpen = false;
 ui.kbdToggle.addEventListener('pointerdown', () => { kbdWasOpen = softKeys.open; });
 ui.kbdToggle.addEventListener('click', () => {

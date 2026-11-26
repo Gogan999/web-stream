@@ -1,8 +1,4 @@
-//! Ctrl+Alt+Del for the browser. Windows sends the secure attention
-//! sequence only for a service (`SendSAS`), and only when the
-//! `SoftwareSASGeneration` policy lets services do it. The session host
-//! isn't a service, so it sets an event the service created and handed it;
-//! the service's thread waiting on that event calls `SendSAS`.
+//! Ctrl+Alt+Del for the browser.
 
 use std::time::{Duration, Instant};
 
@@ -16,12 +12,11 @@ use windows::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RRF_RT_REG_DWORD, Reg
 use windows::Win32::System::Threading::{CreateEventW, INFINITE, SetEvent, WaitForSingleObject};
 use windows::core::{s, w};
 
-/// Requests closer together than this are one request: a double click
-/// shouldn't open and close the Ctrl+Alt+Del screen.
+/// Requests closer together than this are one request: a double click shouldn't open and close the
+/// Ctrl+Alt+Del screen.
 const MIN_INTERVAL: Duration = Duration::from_secs(2);
 
-/// An auto-reset event the session host can inherit. Lives as long as the
-/// service, so it is never closed.
+/// An auto-reset event the session host can inherit.
 pub fn new_event() -> anyhow::Result<usize> {
     let sa = SECURITY_ATTRIBUTES {
         nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
@@ -75,8 +70,7 @@ fn send() -> anyhow::Result<()> {
              so Windows will likely ignore it (see docs/guide/windows-service.md)"
         );
     }
-    // SAFETY: sas.dll from System32 only; SendSAS has the signature
-    // `void SendSAS(BOOL AsUser)`.
+    // SAFETY: sas.dll from System32 only; SendSAS has the signature `void SendSAS(BOOL AsUser)`.
     unsafe {
         let lib = LoadLibraryExW(w!("sas.dll"), None, LOAD_LIBRARY_SEARCH_SYSTEM32)
             .context("load sas.dll")?;
@@ -88,8 +82,7 @@ fn send() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Whether `SoftwareSASGeneration` is 1 (services) or 3 (services and
-/// Ease of Access apps).
+/// Whether `SoftwareSASGeneration` is 1 (services) or 3.
 fn policy_allows_services() -> bool {
     let mut value = 0u32;
     let mut size = size_of::<u32>() as u32;

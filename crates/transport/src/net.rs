@@ -1,11 +1,4 @@
-//! Sockets: one UDP socket and one ICE-TCP listener per local address. Every
-//! received packet, from either, is funneled into one channel for the run
-//! loop.
-//!
-//! The ports are open to the internet, so the readers filter before
-//! anything reaches the run loop: a source is admitted only by a STUN
-//! Binding request naming the current session's ICE ufrag, and after that
-//! is rate capped. Everything else is dropped at the socket.
+//! Sockets: one UDP socket and one ICE-TCP listener per local address.
 
 use std::collections::{HashMap, VecDeque};
 use std::io;
@@ -21,28 +14,23 @@ use str0m::net::Protocol;
 
 /// Most ICE-TCP connections a browser will reasonably open at once.
 const MAX_TCP_CONNS: usize = 8;
-/// ICE-TCP connections from one IP, so a single host cannot hold every
-/// permit while it stalls through the first-check deadline.
+/// ICE-TCP connections from one IP, so a single host cannot hold every permit while it stalls
+/// through the first-check deadline.
 const MAX_TCP_PER_IP: usize = 2;
 /// RFC 4571 frames are length-prefixed with a u16.
 const MAX_FRAME: usize = u16::MAX as usize;
 /// An ICE-TCP connection must open with a STUN check this soon.
 const TCP_FIRST_STUN: Duration = Duration::from_secs(2);
-/// Browsers send consent checks every few seconds; silence this long means
-/// the peer is gone.
+/// Browsers send consent checks every few seconds; silence this long means the peer is gone.
 const TCP_IDLE: Duration = Duration::from_secs(30);
-/// Queued outgoing frames per ICE-TCP connection. Kept shallow, with a small
-/// kernel buffer, so a backed-up TCP path drops instead of adding latency.
+/// Queued outgoing frames per ICE-TCP connection.
 const TCP_WRITE_QUEUE: usize = 16;
 const TCP_SNDBUF: usize = 128 * 1024;
-/// UDP send buffer. The pacer hands over a few milliseconds of video at a
-/// time; Windows' default 64 KiB fills at high bitrates, and every packet it
-/// refuses is lost to the browser.
+/// UDP send buffer.
 const UDP_SNDBUF: usize = 1024 * 1024;
-/// Peers admitted at once (a browser uses a few candidate pairs).
+/// Peers admitted at once.
 const MAX_PEERS: usize = 16;
-/// Per-source packet budget. Far above what a browser sends (feedback,
-/// input, mic audio), low enough that a flood can't swamp the run loop.
+/// Per-source packet budget.
 const PEER_PPS: f64 = 5_000.0;
 const PEER_BURST: f64 = 1_000.0;
 /// STUN checks from sources not yet admitted, per reader.
@@ -56,15 +44,13 @@ pub struct Packet {
     pub data: Vec<u8>,
 }
 
-/// Which packets the readers let through, set by the run loop for each new
-/// session.
+/// Which packets the readers let through, set by the run loop for each new session.
 pub struct Filter {
     ufrag: Option<Vec<u8>>,
-    /// Admitted sources, and whether str0m has answered them (so their
-    /// check passed its integrity check, not just our ufrag gate).
+    /// Admitted sources, and whether str0m has answered them.
     peers: HashMap<SocketAddr, bool>,
-    /// Unconfirmed peers, oldest first: evicted to make room, so spoofed
-    /// checks (the ufrag is visible on the wire) cannot fill the table.
+    /// Unconfirmed peers, oldest first: evicted to make room, so spoofed checks cannot fill the
+    /// table.
     unconfirmed: VecDeque<SocketAddr>,
     /// Bumped on every reset; ICE-TCP connections of an older session close.
     epoch: watch::Sender<u64>,
@@ -84,8 +70,7 @@ impl Default for Filter {
 pub type SharedFilter = Arc<Mutex<Filter>>;
 
 impl Filter {
-    /// A new session: admit checks for `ufrag` (or nothing, for `None`) and
-    /// forget earlier peers.
+    /// A new session: admit checks for `ufrag` and forget earlier peers.
     pub fn reset(&mut self, ufrag: Option<&str>) {
         self.ufrag = ufrag.map(|u| u.as_bytes().to_vec());
         self.peers.clear();
@@ -93,21 +78,18 @@ impl Filter {
         self.epoch.send_modify(|e| *e += 1);
     }
 
-    /// str0m sent to `addr`, which it only does for a source whose check it
-    /// validated: keep it.
+    /// str0m sent to `addr`, which it only does for a source whose check it validated: keep it.
     pub fn confirm(&mut self, addr: SocketAddr) {
         if let Some(confirmed) = self.peers.get_mut(&addr) {
             *confirmed = true;
         }
     }
 
-    /// Whether to pass a packet from `source` on. A new source needs a
-    /// check for our ufrag and a token from `budget`.
+    /// Whether to pass a packet from `source` on.
     fn admit(&mut self, source: SocketAddr, data: &[u8], budget: impl FnOnce() -> bool) -> bool {
         if self.peers.contains_key(&source) {
             return true;
         }
-        // Budget only checks that pass, so junk cannot use it up.
         if !self.is_valid_check(data) || !budget() {
             return false;
         }
@@ -138,9 +120,7 @@ impl Filter {
     }
 }
 
-/// True if `data` is a STUN Binding request whose USERNAME is
-/// `<ufrag>:<remote ufrag>`. The integrity check is left to str0m; this is
-/// only a cheap gate.
+/// True if `data` is a STUN Binding request whose USERNAME is `<ufrag>:<remote ufrag>`.
 fn binding_request_for(data: &[u8], ufrag: &[u8]) -> bool {
     const HEADER: usize = 20;
     const MAGIC: [u8; 4] = [0x21, 0x12, 0xA4, 0x42];
@@ -224,8 +204,6 @@ impl Net {
         for ip in ips {
             let mut udp_ports = vec![udp_port];
             for p in extra_udp_ports {
-                // Port 0 would pick a fresh port per entry, which nobody
-                // could know to forward.
                 if *p != 0 && !udp_ports.contains(p) {
                     udp_ports.push(*p);
                 }
@@ -263,9 +241,7 @@ impl Net {
         Ok(net)
     }
 
-    /// Send without waiting. A full socket buffer drops the packet, which is
-    /// what we want for media: never queue behind old data. Returns false
-    /// when a full buffer dropped it.
+    /// Send without waiting.
     pub fn send(
         &self,
         proto: Protocol,
@@ -315,8 +291,6 @@ async fn udp_reader(
     loop {
         let (n, source) = match socket.recv_from(&mut buf).await {
             Ok(r) => r,
-            // Windows reports ICMP port unreachable from an earlier send as
-            // a receive error; it is harmless.
             Err(e) if e.kind() == io::ErrorKind::ConnectionReset => continue,
             Err(e) => {
                 tracing::warn!(%local, "udp receive failed: {e}");
@@ -346,7 +320,6 @@ async fn udp_reader(
             destination: local,
             data: data.to_vec(),
         };
-        // Never wait on the run loop: if it is behind, drop.
         match incoming.try_send(pkt) {
             Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => {}
             Err(mpsc::error::TrySendError::Closed(_)) => return,
@@ -370,8 +343,6 @@ async fn tcp_acceptor(
                 continue;
             }
         };
-        // Taken before spawning, so the cap holds however fast connections
-        // arrive; released when the connection task ends.
         let Some(ip_slot) = IpSlot::take(&per_ip, peer.ip()) else {
             tracing::debug!(%peer, "too many ICE-TCP connections from this address");
             continue;
@@ -444,9 +415,6 @@ async fn tcp_conn(
     let (mut rd, mut wr) = stream.into_split();
     let mut buf = vec![0u8; MAX_FRAME];
 
-    // The first frame must be a check for the current session. The epoch is
-    // taken under the same lock, so the connection belongs to exactly the
-    // session it was checked against.
     let checked = match tokio::time::timeout(TCP_FIRST_STUN, read_frame(&mut rd, &mut buf)).await {
         Ok(Ok(f)) => {
             let filter = filter.lock().expect("filter lock");
@@ -491,7 +459,6 @@ async fn tcp_conn(
                     Ok(Ok(f)) => f.to_vec(),
                     _ => break,
                 },
-                // A new session (or none): this connection belonged to the old one.
                 _ = epoch.changed() => break,
             },
         };
@@ -516,8 +483,8 @@ async fn tcp_conn(
     writer.abort();
 }
 
-/// Private and other non-loopback IPv4 addresses of this machine's
-/// interfaces, for when none are configured.
+/// Private and other non-loopback IPv4 addresses of this machine's interfaces, for when none are
+/// configured.
 pub fn lan_ips() -> Vec<IpAddr> {
     let mut ips: Vec<IpAddr> = local_ip_address::list_afinet_netifas()
         .unwrap_or_default()
@@ -539,7 +506,6 @@ mod tests {
 
     fn binding(username: &[u8]) -> Vec<u8> {
         let mut attrs = Vec::new();
-        // An unrelated attribute first, to exercise padding.
         attrs.extend_from_slice(&[0x80, 0x29, 0x00, 0x03, 1, 2, 3, 0]);
         attrs.extend_from_slice(&0x0006u16.to_be_bytes());
         attrs.extend_from_slice(&(username.len() as u16).to_be_bytes());
@@ -581,16 +547,12 @@ mod tests {
         // The real browser is admitted and str0m answers it.
         assert!(f.admit(addr(1), &check, || true));
         f.confirm(addr(1));
-        // A spoofed flood far past the table size keeps getting in by
-        // evicting earlier unconfirmed spoofs, never the confirmed peer.
         for port in 100..200 {
             assert!(f.admit(addr(port), &check, || true));
         }
         assert_eq!(f.peers.len(), MAX_PEERS);
         assert!(f.admit(addr(1), &[0x80; 20], || false));
-        // A late real source still gets a slot.
         assert!(f.admit(addr(2), &check, || true));
-        // Junk and wrong-ufrag checks never do, and spend no budget.
         assert!(!f.admit(addr(3), &[0x80; 20], || panic!("budget spent")));
         assert!(!f.admit(addr(3), &binding(b"zzzz:wxyz"), || panic!("budget spent")));
     }
@@ -614,11 +576,9 @@ mod tests {
         let mut framed = (check.len() as u16).to_be_bytes().to_vec();
         framed.extend_from_slice(&check);
         conn.write_all(&framed).await.unwrap();
-        // Still open after a valid check...
         let mut b = [0u8; 1];
         let read = tokio::time::timeout(Duration::from_millis(200), conn.read(&mut b)).await;
         assert!(read.is_err(), "closed early: {read:?}");
-        // ...and closed once a new session starts.
         filter.lock().unwrap().reset(Some("efgh"));
         let read = tokio::time::timeout(Duration::from_secs(1), conn.read(&mut b)).await;
         assert!(matches!(read, Ok(Ok(0)) | Ok(Err(_))), "{read:?}");

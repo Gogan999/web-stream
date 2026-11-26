@@ -1,13 +1,4 @@
-//! Updates from the GitHub release manifest. Always started by the user
-//! (a click, or at most one check when the app opens if they asked for
-//! that): the manifest is fetched over HTTPS, the installer it lists is
-//! downloaded over HTTPS and must match the manifest's size and SHA-256
-//! before it is run. Nothing here is signed: trust comes from GitHub
-//! (only the repository's maintainers publish releases) and the hashes
-//! only prove the download is complete and is the file the release lists.
-//!
-//! The manifest is `.github/workflows/release.yml`'s `manifest.json`:
-//! `{product, version, released, files: [{name, size, sha256}], notes}`.
+//! Updates from the GitHub release manifest.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -18,8 +9,8 @@ use anyhow::{Context, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-/// Where the newest non-pre-release's manifest is; GitHub redirects to the
-/// asset, and `latest` skips pre-releases.
+/// Where the newest non-pre-release's manifest is; GitHub redirects to the asset, and `latest`
+/// skips pre-releases.
 pub const MANIFEST_URL: &str =
     "https://github.com/Gogan999/web-stream/releases/latest/download/manifest.json";
 const DOWNLOAD_BASE: &str = "https://github.com/Gogan999/web-stream/releases/download";
@@ -66,7 +57,6 @@ impl Release {
 }
 
 /// The release in `json` if it is newer than `current`; `None` if not.
-/// Errors for a manifest that isn't ours or lists no usable installer.
 pub fn parse_manifest(json: &str, current: &str) -> anyhow::Result<Option<Release>> {
     let m: Manifest = serde_json::from_str(json).context("the update manifest is not valid")?;
     if m.product != PRODUCT {
@@ -77,7 +67,6 @@ pub fn parse_manifest(json: &str, current: &str) -> anyhow::Result<Option<Releas
     }
     let latest = semver::Version::parse(&m.version)
         .with_context(|| format!("the manifest's version \"{}\" is not a version", m.version))?;
-    // Pre-releases are only ever installed by hand.
     if !latest.pre.is_empty() {
         return Ok(None);
     }
@@ -85,8 +74,6 @@ pub fn parse_manifest(json: &str, current: &str) -> anyhow::Result<Option<Releas
     if latest <= current {
         return Ok(None);
     }
-    // The exact name the release workflow gives it, so a manifest can't
-    // point the download anywhere else (or at a path).
     let name = format!("web-stream-setup-{}.exe", m.version);
     let file = m
         .files
@@ -108,10 +95,8 @@ pub fn parse_manifest(json: &str, current: &str) -> anyhow::Result<Option<Releas
     }))
 }
 
-/// The HTTP client. Production agents are HTTPS-only; tests serve plain
-/// HTTP from localhost with `agent(false)`.
+/// The HTTP client.
 fn agent(https_only: bool) -> ureq::Agent {
-    // Windows' own certificate store (and so a company's proxy root).
     let tls = ureq::tls::TlsConfig::builder()
         .root_certs(ureq::tls::RootCerts::PlatformVerifier)
         .build();
@@ -119,8 +104,6 @@ fn agent(https_only: bool) -> ureq::Agent {
         .tls_config(tls)
         .https_only(https_only)
         .user_agent(format!("web-stream-host/{VERSION}"))
-        // Per request: the connection and the response headers. The body
-        // of a download is limited by its own stall check below.
         .timeout_connect(Some(TIMEOUT))
         .timeout_recv_response(Some(TIMEOUT))
         .timeout_send_request(Some(TIMEOUT))
@@ -147,9 +130,7 @@ fn check_url(agent: &ureq::Agent, url: &str, current: &str) -> anyhow::Result<Op
     parse_manifest(&body, current)
 }
 
-/// Downloads `release`'s installer into `dir`, checking its size and
-/// SHA-256 against the manifest (a mismatch deletes it). `progress` gets
-/// the bytes so far, at most a few times a second.
+/// Downloads `release`'s installer into `dir`, checking its size and SHA-256 against the manifest.
 pub fn download(
     release: &Release,
     dir: &Path,
@@ -206,7 +187,6 @@ fn fetch_to(
             break;
         }
         total += n as u64;
-        // The release's size is exact: a longer body is wrong, stop early.
         if total > release.size {
             bail!(
                 "the download is larger than the release says ({} bytes)",
@@ -237,10 +217,8 @@ fn fetch_to(
     Ok(())
 }
 
-/// Opens the downloaded installer and checks its size and SHA-256 again,
-/// right before it is run: it sits in a folder the user can write to, so
-/// the check at download time is not enough. On Windows the returned handle
-/// denies others write and delete access; keep it until setup has started.
+/// Opens the downloaded installer and checks its size and SHA-256 again, right before it is run: it
+/// sits in a folder the user can write to.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub fn open_verified(release: &Release, path: &Path) -> anyhow::Result<std::fs::File> {
     let mut opts = std::fs::OpenOptions::new();
@@ -248,7 +226,6 @@ pub fn open_verified(release: &Release, path: &Path) -> anyhow::Result<std::fs::
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;
-        // FILE_SHARE_READ only: no writing, renaming or deleting while held.
         opts.share_mode(1);
     }
     let mut file = opts
@@ -302,13 +279,11 @@ pub fn updates_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("updates")
 }
 
-/// The updater's own small settings (apart from the host's, so changing
-/// them never restarts the host).
+/// The updater's own small settings.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Prefs {
-    /// Check once when the app opens and say so if there is a newer
-    /// version. Off unless the user turns it on; never installs by itself.
+    /// Check once when the app opens and say so if there is a newer version.
     pub notify_on_start: bool,
 }
 
@@ -330,9 +305,8 @@ impl Prefs {
     }
 }
 
-/// `Some(version)` once, the first time this version runs after a different
-/// one did (an update); records the running version either way. Also tidies
-/// up the downloaded installer.
+/// `Some(version)` once, the first time this version runs after a different one did (an update);
+/// records the running version either way.
 pub fn take_updated_notice(data_dir: &Path, current: &str) -> Option<String> {
     let path = data_dir.join(LAST_VERSION_FILE);
     let previous = std::fs::read_to_string(&path).ok();
@@ -357,8 +331,7 @@ pub enum State {
     Failed(String),
 }
 
-/// The check and the download run on their own threads; the window reads
-/// [`Updater::state`].
+/// The check and the download run on their own threads; the window reads [`Updater::state`].
 #[derive(Clone)]
 pub struct Updater {
     state: Arc<Mutex<State>>,
@@ -435,8 +408,7 @@ mod tests {
     use super::*;
     use std::net::TcpListener;
 
-    /// The manifest the release workflow published for v0.2.0 (shape and
-    /// field order as `jq` writes it; hash shortened to a valid one).
+    /// The manifest the release workflow published for v0.2.0.
     fn manifest(version: &str, size: u64, sha: &str) -> String {
         format!(
             r#"{{
@@ -478,7 +450,6 @@ mod tests {
 
     #[test]
     fn versions_compare_as_numbers_and_prereleases() {
-        // 0.10.0 is newer than 0.9.0 (a string compare says otherwise).
         assert!(
             parse_manifest(&manifest("0.10.0", 5, SHA), "0.9.0")
                 .unwrap()
@@ -490,7 +461,6 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
-        // ...but a release candidate is never offered.
         assert_eq!(
             parse_manifest(&manifest("1.0.0-rc.2", 5, SHA), "0.2.0").unwrap(),
             None
@@ -505,7 +475,6 @@ mod tests {
         assert!(parse_manifest(&manifest("0.3.0", 5, "abc"), "0.2.0").is_err());
         assert!(parse_manifest(&manifest("0.3.0", 0, SHA), "0.2.0").is_err());
         assert!(parse_manifest(&manifest("nonsense", 5, SHA), "0.2.0").is_err());
-        // The installer must be listed under its release name.
         let renamed = manifest("0.3.0", 5, SHA).replace("web-stream-setup-0.3.0.exe", "evil.exe");
         assert!(parse_manifest(&renamed, "0.2.0").is_err());
     }
@@ -642,7 +611,6 @@ mod tests {
     #[test]
     fn notice_shows_once_after_a_version_change() {
         let dir = tempfile::tempdir().unwrap();
-        // First ever run: nothing to announce.
         assert_eq!(take_updated_notice(dir.path(), "0.2.0"), None);
         assert_eq!(take_updated_notice(dir.path(), "0.2.0"), None);
         assert_eq!(

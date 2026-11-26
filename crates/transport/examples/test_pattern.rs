@@ -1,13 +1,5 @@
-//! End-to-end harness: the embedded signaling server plus the transport,
-//! streaming a moving AV1 test pattern (software-encoded with rav1e, since
-//! test Chromium builds lack H.264) and echoing data channel messages.
-//!
-//! ```text
-//! cargo run -p ws-transport --example test_pattern -- 18443
-//! node crates/transport/examples/e2e/run.mjs 18443
-//! ```
-//!
-//! Pairing codes are printed as `PAIRING_CODE <code>` on stdout.
+//! End-to-end harness: the embedded signaling server plus the transport, streaming a moving AV1
+//! test pattern (software-encoded with rav1e.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -42,15 +34,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut config = SignalingConfig::new(([127, 0, 0, 1], port).into(), data_dir);
     config.web_root = Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/e2e"));
     let (server, mut events) = SignalingServer::new(config)?;
-    // Stands in for the host user choosing "pair a device" in the tray.
     server
         .handle()
         .open_pairing_for(Duration::from_secs(600))
         .await?;
     tokio::spawn(server.serve());
 
-    // Fixed media ports (UDP n, ICE-TCP n+1) let a test forward them from
-    // a fake public address; 0 picks free ones.
     let media_port: u16 = std::env::var("TEST_MEDIA_PORT")
         .ok()
         .map(|p| p.parse())
@@ -79,10 +68,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // Input channel messages skip the event queue and go to the input sink
-    // (see Transport::set_input_sink). A sink must return at once, so it
-    // queues them for this task to echo. It doesn't learn the channel; the
-    // test sends `hi-<channel>`, so reply on the channel the message names.
     let (input_tx, mut input_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     let echo = transport.clone();
     tokio::spawn(async move {
@@ -114,7 +99,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 echo.set_input_sink(sink, transitions);
             }
             match ev {
-                // rav1e can't skip a dropped frame; restart from a keyframe.
                 TransportEvent::KeyframeNeeded(_) | TransportEvent::FramesLost(..) => {
                     want_keyframe.store(true, Ordering::Relaxed)
                 }
@@ -140,8 +124,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// The glue the host agent needs: offer on connect (advertising the address
-/// the browser reached us at), apply the answer, pass candidates through,
+/// The glue the host agent needs: offer on connect, apply the answer, pass candidates through,
 /// re-offer on restart.
 async fn run_session(mut session: SignalingSession, transport: Transport) {
     let mut send_offer = true;
@@ -172,7 +155,6 @@ async fn run_session(mut session: SignalingSession, transport: Transport) {
                 transport.add_remote_candidate(candidate)
             }
             Some(SessionEvent::Signal(ClientSignal::Restart)) => send_offer = true,
-            // The session goes on over the peer connection until it is ended.
             Some(SessionEvent::Signal(ClientSignal::Handoff) | SessionEvent::HandedOff) => {}
             Some(SessionEvent::Ended(_)) | None => break,
         }

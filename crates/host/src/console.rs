@@ -1,5 +1,4 @@
-//! The host's events as lines of text and typed commands, for the
-//! service's control pipe (and the test host in `examples`).
+//! The host's events as lines of text and typed commands, for the service's control pipe.
 
 use std::time::{Duration, Instant};
 
@@ -13,9 +12,8 @@ commands: pair (let a browser pair for two minutes), unpair-all, drop (end the s
           send <path> (offer a file to the connected browser),
           unshare <id> (stop offering it), quit";
 
-/// Sent first by a console that wants the host's [`Event`]s as JSON, one
-/// per line, instead of lines of text (the tray app, attached to the
-/// service's host).
+/// Sent first by a console that wants the host's [`Event`]s as JSON, one per line, instead of lines
+/// of text.
 pub const EVENTS_JSON: &str = "events json";
 
 /// An event as the host user reads it; `None` for those not worth a line.
@@ -41,7 +39,6 @@ pub fn describe(e: Event) -> Option<String> {
                 data_dir.display()
             )
         }
-        // Never the link: these lines are logged.
         Event::PairingOpened { .. } => {
             "pairing is open for two minutes: request a code in the browser".into()
         }
@@ -52,9 +49,8 @@ pub fn describe(e: Event) -> Option<String> {
     })
 }
 
-/// The pairing link's secret as a line for a console the host user reads
-/// directly (the test host's stdout), never for a log: it pairs a browser
-/// without a code while pairing is open.
+/// The pairing link's secret as a line for a console the host user reads directly, never for a log:
+/// it pairs a browser without a code while pairing is open.
 pub fn pairing_link_line(e: &Event) -> Option<String> {
     match e {
         Event::PairingOpened { link, .. } => Some(format!(
@@ -121,18 +117,8 @@ struct IssuedCode {
     until: Instant,
 }
 
-/// What a console that connects late is told first: the host's start,
-/// where the Cloudflare Tunnel is up, the browser connected now, and the
-/// pairing in progress.
-///
-/// Pairing events carry time relative to when they were sent, so the
-/// snapshot turns them into deadlines and, at greeting time, back into what
-/// remains; whatever has run out is left out. The aim is that a console
-/// ends up in the state it would have reached had it listened all along.
-/// That follows the tray app's rules: opening pairing lifts a lockout (as
-/// the host does), a lockout withdraws the code, and a completed pairing
-/// ends the window and the code but not a lockout. The lockout lasts until
-/// pairing is opened again, however long ago the window closed.
+/// What a console that connects late is told first: the host's start, where the Cloudflare Tunnel
+/// is up, the browser connected now, and the pairing in progress.
 #[derive(Default)]
 pub struct Snapshot {
     started: Option<Event>,
@@ -174,8 +160,6 @@ impl Snapshot {
                     until: now + Duration::from_secs(*expires_in_secs),
                 });
             }
-            // A failed attempt changes nothing the tray app shows beyond
-            // its log, so it is not recorded.
             Event::Notice(Notice::Paired { .. }) => {
                 self.window = None;
                 self.code = None;
@@ -214,9 +198,6 @@ impl Snapshot {
                 device_name: device_name.clone(),
             }));
         }
-        // Opened before locked: hearing the opening lifts a lockout.
-        // Less than a whole second left is as good as over: it would be
-        // sent as zero, a state the console would only tidy away.
         let live = |until: Instant| until >= now + Duration::from_secs(1);
         if let Some(w) = self.window.as_ref().filter(|w| live(w.until)) {
             out.push(Event::PairingOpened {
@@ -245,8 +226,7 @@ enum Format {
     Json,
 }
 
-/// `e` as the console reads it, ending in a line break; `None` if there
-/// is nothing to say.
+/// `e` as the console reads it, ending in a line break; `None` if there is nothing to say.
 fn format_event(e: &Event, format: Format) -> Option<String> {
     match format {
         Format::Text => describe(e.clone()).map(|t| format!("{t}\n")),
@@ -254,13 +234,11 @@ fn format_event(e: &Event, format: Format) -> Option<String> {
     }
 }
 
-/// How long a console has to ask for JSON ([`EVENTS_JSON`]) before it is
-/// greeted in text.
+/// How long a console has to ask for JSON ([`EVENTS_JSON`]) before it is greeted in text.
 const ASK_FOR_JSON: Duration = Duration::from_millis(300);
 
-/// One console on the service's control pipe: commands typed into it go to
-/// the host, the host's events come back. `greeting` is the snapshot of
-/// the host when it connected (see [`Snapshot`]).
+/// One console on the service's control pipe: commands typed into it go to the host, the host's
+/// events come back.
 pub async fn session<S: AsyncRead + AsyncWrite>(
     client: S,
     commands: mpsc::Sender<Command>,
@@ -269,15 +247,11 @@ pub async fn session<S: AsyncRead + AsyncWrite>(
 ) {
     let (read, mut write) = tokio::io::split(client);
     let mut read = BufReader::new(read).lines();
-    // A console that wants JSON says so first, before it is greeted; one
-    // typed into by hand gets the host's start in text.
     let first = match tokio::time::timeout(ASK_FOR_JSON, read.next_line()).await {
         Ok(Ok(Some(line))) => Some(line),
         Ok(_) => return,
         Err(_) => None,
     };
-    // A text console is told only of the host's start: the rest of the
-    // greeting is state for the tray app.
     let (format, greeting): (_, Vec<&Event>) = match &first {
         Some(line) if line.trim() == EVENTS_JSON => (Format::Json, greeting.iter().collect()),
         _ => (
@@ -314,9 +288,6 @@ pub async fn session<S: AsyncRead + AsyncWrite>(
                                 return;
                             }
                         }
-                        // A JSON console that fell this far behind has
-                        // missed events it can't do without: it connects
-                        // again.
                         Err(broadcast::error::RecvError::Lagged(_)) if format == Format::Json => {
                             return;
                         }
@@ -376,8 +347,7 @@ pub fn parse_line(line: &str) -> Line {
     })
 }
 
-/// The lines that type `cmd` into a console ([`parse_line`] reads them
-/// back). A path with a line break in it can't be typed: it is left out.
+/// The lines that type `cmd` into a console.
 pub fn command_lines(cmd: &Command) -> Vec<String> {
     match cmd {
         Command::OpenPairing => vec!["pair".into()],
@@ -484,7 +454,6 @@ mod tests {
         let mut snapshot = Snapshot::default();
         snapshot.update_at(&opened(Some(120)), t);
         snapshot.update_at(&code(120), t + Duration::from_secs(10));
-        // The window ends before the code does: only the code is left.
         assert_eq!(
             snapshot.events_at(t + Duration::from_secs(100)),
             vec![opened(Some(20)), code(30)]
@@ -503,7 +472,6 @@ mod tests {
         snapshot.update_at(&code(120), t);
         assert!(snapshot.events_at(t + Duration::from_secs(120)).is_empty());
         assert!(snapshot.events_at(t + Duration::from_secs(500)).is_empty());
-        // About half a second left would be sent as zero: left out.
         assert!(
             snapshot
                 .events_at(t + Duration::from_millis(119_500))
@@ -553,8 +521,6 @@ mod tests {
         snapshot.update_at(&opened(Some(120)), t);
         snapshot.update_at(&code(120), t);
         snapshot.update_at(&locked, t);
-        // The code is withdrawn; the link works on, and the lockout comes
-        // after the opening, which would lift it.
         assert_eq!(
             snapshot.events_at(t + Duration::from_secs(10)),
             vec![opened(Some(110)), locked.clone()]
@@ -587,8 +553,6 @@ mod tests {
         let first = read.next_line().await.unwrap().unwrap();
         assert!(first.starts_with("web-stream host on https://"), "{first}");
         events.send(Event::UnpairedAll).unwrap();
-        // The start is several lines; nothing about pairing comes before
-        // the live event.
         loop {
             let line = read.next_line().await.unwrap().unwrap();
             assert!(!line.to_lowercase().contains("pairing"), "{line}");
@@ -642,7 +606,6 @@ mod tests {
         assert_eq!(next(read.next_line().await.unwrap()), link);
         write.write_all(b"pair\nbogus\n").await.unwrap();
         assert_eq!(commands.recv().await, Some(Command::OpenPairing));
-        // No help text for a JSON console.
         events.send(Event::UnpairedAll).unwrap();
         assert_eq!(next(read.next_line().await.unwrap()), Event::UnpairedAll);
     }
@@ -652,13 +615,11 @@ mod tests {
         let (ours, mut commands, _events) = console();
         let (read, mut write) = tokio::io::split(ours);
         let mut read = BufReader::new(read).lines();
-        // Says nothing at first: greeted after a moment.
         let first = read.next_line().await.unwrap().unwrap();
         assert!(first.starts_with("web-stream host on https://"), "{first}");
         write.write_all(b"drop\n").await.unwrap();
         assert_eq!(commands.recv().await, Some(Command::DropSession));
 
-        // A command typed at once is carried out after the greeting.
         let (ours, mut commands, _events) = console();
         let (read, mut write) = tokio::io::split(ours);
         let mut read = BufReader::new(read).lines();

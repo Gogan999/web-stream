@@ -1,5 +1,4 @@
-// WebSocket signaling client. JSON text frames; see docs/dev/signaling.md.
-// Auth: the pairing cookie on the same origin, or a device token as a subprotocol.
+// WebSocket signaling client.
 
 export const PROTOCOL = 'web-stream';
 export const AUTH_PREFIX = 'web-stream.auth.';

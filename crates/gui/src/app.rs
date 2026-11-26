@@ -17,7 +17,7 @@ use crate::{portcheck, qr, upnp};
 
 pub struct App {
     host: Host,
-    /// What the host was last started with (and what is saved).
+    /// What the host was last started with.
     settings: Settings,
     /// What the settings form shows.
     draft: Settings,
@@ -31,27 +31,23 @@ pub struct App {
     settings_error: Option<String>,
     #[cfg(windows)]
     autostart: bool,
-    /// The web-stream service, which hosts instead of this app while it is
-    /// installed.
+    /// The web-stream service, which hosts instead of this app while it is installed.
     #[cfg(windows)]
     service: crate::service_watch::Watcher,
     first_run: FirstRun,
-    /// First run: open pairing once the host is up and say what to do with
-    /// the QR code. Cleared when pairing was opened, or the user did it.
+    /// First run: open pairing once the host is up and say what to do with the QR code.
     first_pairing: bool,
     /// Shows the first-run hint in the pairing card, until a browser connects.
     first_hint: bool,
     upnp: &'static upnp::Mapper,
-    /// Frames until the window hides itself, for `--hidden`. eframe shows
-    /// the window after the first frame whatever it was built with.
+    /// Frames until the window hides itself, for `--hidden`.
     #[cfg_attr(not(windows), allow(dead_code))]
     hide_in_frames: Option<u8>,
     updater: Updater,
     update_prefs: update_check::Prefs,
     /// Set for the first run after an update: "Updated to vX".
     updated_to: Option<String>,
-    /// The version the tray menu names as available, to change it only on
-    /// a change.
+    /// The version the tray menu names as available, to change it only on a change.
     #[cfg(windows)]
     tray_update: Option<String>,
     /// The tray's Quit item says the service keeps running.
@@ -71,7 +67,6 @@ impl App {
         let host = Host::new(Arc::new(move |e: Option<&Event>| {
             #[cfg(windows)]
             if let Some(Event::Notice(Notice::PairingCode { .. })) = e {
-                // Pairing was asked for here; the code has to be seen.
                 crate::win::show_window();
             }
             #[cfg(not(windows))]
@@ -161,8 +156,6 @@ impl App {
             #[cfg(windows)]
             tray_service_label: false,
         };
-        // A browser may ask for an update (when the settings allow it):
-        // update.ps1 builds, then this app restarts itself on the build.
         let restarting = app.host.clone();
         ws_host::update::enable(move || crate::restart_after_update(&restarting));
 
@@ -192,8 +185,7 @@ impl App {
         None
     }
 
-    /// Starts this app's own host, unless the service is installed: only
-    /// one host may run.
+    /// Starts this app's own host, unless the service is installed: only one host may run.
     fn start(&mut self) {
         if self.service_installed().is_some() {
             self.host.log(
@@ -225,18 +217,16 @@ impl App {
             self.settings_error = Some(format!("could not save the settings: {e:#}"));
             return false;
         }
-        // Saved to its own file; the form doesn't keep it.
         self.draft.tunnel_token.clear();
         self.settings_error = None;
         self.settings = self.draft.clone();
-        // The ports may have changed.
         self.upnp
             .want(self.settings.upnp.then(|| self.settings.forwarded_ports()));
         true
     }
 
-    /// Changes one setting the setup page shows (not part of the form) and
-    /// saves it, leaving unsaved edits in the form as they are.
+    /// Changes one setting the setup page shows and saves it, leaving unsaved edits in the form as
+    /// they are.
     fn save_one(&mut self, change: impl Fn(&mut Settings)) {
         change(&mut self.settings);
         change(&mut self.draft);
@@ -245,8 +235,7 @@ impl App {
         }
     }
 
-    /// Reaching the host from outside (a Cloudflare Tunnel, opt-in UPnP, the
-    /// port test). Folded away: at home on the same Wi-Fi none of it is needed.
+    /// Reaching the host from outside.
     fn remote_access_ui(&mut self, ui: &mut egui::Ui) {
         ui.label(
             "At home on the same Wi-Fi nothing is needed. From elsewhere, a Cloudflare Tunnel \
@@ -331,9 +320,7 @@ impl App {
         }
     }
 
-    /// The public address the port test found this host at, for the QR
-    /// code. Not the one the router reports: any device on the network can
-    /// answer UPnP, and the QR code carries the pairing secret.
+    /// The public address the port test found this host at, for the QR code.
     fn public_ips(&self) -> Vec<std::net::IpAddr> {
         match self.first_run.report() {
             (_, Some(r)) => r.verified_ip.into_iter().collect(),
@@ -342,8 +329,6 @@ impl App {
     }
 
     /// The addresses a device could open the client at, and the one in use.
-    /// Shared by the instructions and the QR code so both name the same
-    /// address. `None` while the host is not running or has nothing to offer.
     fn pairing_addresses(&self) -> Option<(Vec<String>, String)> {
         let (port, lan, tunnel_url) = {
             let state = self.host.state();
@@ -387,8 +372,7 @@ impl App {
         }
     }
 
-    /// What to do while pairing is open and no device has asked yet. The code
-    /// only exists once a device asks for it, so this says where to ask.
+    /// What to do while pairing is open and no device has asked yet.
     fn pairing_instructions_ui(&mut self, ui: &mut egui::Ui) {
         ui.add_space(4.0);
         match self.pairing_addresses() {
@@ -419,8 +403,7 @@ impl App {
         ui.weak("The code appears here, with the device's name.");
     }
 
-    /// The pairing link as a QR code. `with_choice` adds the address choice;
-    /// the instructions already show it while waiting for a code.
+    /// The pairing link as a QR code.
     fn pairing_qr_ui(&mut self, ui: &mut egui::Ui, link: &str, with_choice: bool) {
         let Some((choices, host)) = self.pairing_addresses() else {
             ui.weak(
@@ -442,9 +425,8 @@ impl App {
         ui.weak("Pairs once, while pairing is open. Anyone who can see this code can pair.");
     }
 
-    /// Under the QR code: what the phone's certificate warning means, and the
-    /// ends of the fingerprint to compare. Not shown for the Cloudflare Tunnel
-    /// address, which has a certificate browsers trust.
+    /// Under the QR code: what the phone's certificate warning means, and the ends of the
+    /// fingerprint to compare.
     fn certificate_hint_ui(&self, ui: &mut egui::Ui) {
         let Some((_, host)) = self.pairing_addresses() else {
             return;
@@ -478,9 +460,7 @@ impl App {
         ui.weak(CA_INSTALL_TEXT);
     }
 
-    /// First run: open pairing once, as soon as the host is up, so the window
-    /// opens on a QR code to scan. Not while the service hosts (its pairing
-    /// takes an administrator).
+    /// First run: open pairing once, as soon as the host is up.
     fn open_first_pairing(&mut self) {
         if !self.first_pairing || !matches!(self.host.state().status, Status::Running { .. }) {
             return;
@@ -551,8 +531,8 @@ impl App {
         });
     }
 
-    /// The service's state, and what this app can do about it: attached
-    /// (elevated), it shows the service's host like its own.
+    /// The service's state, and what this app can do about it: attached (elevated), it shows the
+    /// service's host like its own.
     #[cfg(windows)]
     fn service_status_ui(&mut self, ui: &mut egui::Ui, running: bool, status: &Status) {
         let elevated = self.service.elevated;
@@ -611,9 +591,8 @@ impl App {
         }
     }
 
-    /// Hands over to a copy of this app run as administrator (a UAC
-    /// prompt), which attaches to the service's host; with `pair`, it opens
-    /// pairing once attached. This copy exits once that one has started.
+    /// Hands over to a copy of this app run as administrator (a UAC prompt), which attaches to the
+    /// service's host; with `pair`, it opens pairing once attached.
     #[cfg(windows)]
     fn hand_over(&mut self, pair: bool) {
         let mut args = vec!["--after".to_string(), std::process::id().to_string()];
@@ -626,8 +605,8 @@ impl App {
         }
     }
 
-    /// Keeps the tray's update item in step with what the updater knows, and
-    /// answers its "Check for updates".
+    /// Keeps the tray's update item in step with what the updater knows, and answers its "Check for
+    /// updates".
     #[cfg(windows)]
     fn sync_update_tray(&mut self) {
         if crate::win::take_update_request() {
@@ -645,14 +624,10 @@ impl App {
         }
     }
 
-    /// Hands over to the downloaded setup: stops the host, lets go of the
-    /// single-instance lock the installer checks, starts the installer (its
-    /// own UAC prompt) and exits; setup relaunches the app when it is done.
-    /// If the installer does not start (UAC declined), hosting goes on.
+    /// Hands over to the downloaded setup: stops the host, lets go of the single-instance lock the
+    /// installer checks, starts the installer and exits; setup relaunches the app when it is done.
     #[cfg(windows)]
     fn install_update(&mut self, release: &update_check::Release, setup: &std::path::Path) {
-        // The file is in a folder this user can write to: check it again
-        // now, and hold it write-locked until setup has started.
         let _locked = match update_check::open_verified(release, setup) {
             Ok(f) => f,
             Err(e) => {
@@ -667,8 +642,6 @@ impl App {
         self.host.stop_and_wait(Duration::from_secs(15));
         crate::win::release_instance();
         match crate::win::run_setup(setup) {
-            // Like a hand-over: the router keeps forwarding the ports, which
-            // the relaunched app goes on renewing.
             Ok(()) => crate::win::hand_over(&self.host),
             Err(e) => {
                 crate::win::retake_instance();
@@ -685,9 +658,8 @@ impl App {
         }
     }
 
-    /// Runs `service <rest>` as administrator: in a child process when this
-    /// app already is one (the result goes to the log), else with a UAC
-    /// prompt (the result shows in a message box).
+    /// Runs `service <rest>` as administrator: in a child process when this app already is one,
+    /// else with a UAC prompt.
     #[cfg(windows)]
     fn run_service(&mut self, rest: &[&str]) {
         let args: Vec<String> = std::iter::once("service")
@@ -734,8 +706,7 @@ impl App {
         self.service.refresh();
     }
 
-    /// Where the running host (this app's own, or the service's) can be
-    /// reached.
+    /// Where the running host can be reached.
     fn running_ui(&mut self, ui: &mut egui::Ui, status: &Status) {
         match status {
             Status::Failed(e) => {
@@ -872,7 +843,6 @@ impl App {
                 self.host.command(Command::OpenPairing);
             }
             if let Some(left) = view.countdown {
-                // Locked codes can't be requested, so don't say to.
                 let tail = if view.locked {
                     ""
                 } else {
@@ -885,7 +855,6 @@ impl App {
                 ));
             }
         });
-        // The red notice lives here, not beside the button, so it is said once.
         if let Some(notice) = locked_notice(&view) {
             ui.colored_label(Color32::RED, notice);
         }
@@ -901,8 +870,6 @@ impl App {
             (PairingStage::CodesLocked, _) => {}
             _ => {}
         }
-        // The QR code is the easy way to pair a phone, so it is shown whenever
-        // pairing is open (it only lives for those two minutes, and pairs once).
         if let (true, Some(link)) = (view.offer_qr, &link) {
             if self.first_hint && connected.is_none() {
                 ui.label(
@@ -942,8 +909,8 @@ impl App {
         });
     }
 
-    /// Files shared with the connected browser: pick more, see how they
-    /// are doing, stop sharing one.
+    /// Files shared with the connected browser: pick more, see how they are doing, stop sharing
+    /// one.
     fn files_ui(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             #[cfg(windows)]
@@ -1001,8 +968,6 @@ impl App {
     }
 
     fn settings_ui(&mut self, ui: &mut egui::Ui) {
-        // The service refuses these (see Settings::service_args): say so
-        // instead of leaving a control that does nothing.
         let service = self.service_installed().is_some();
         let from_source = ws_host::update::can_update_from_source();
         let d = &mut self.draft;
@@ -1155,8 +1120,6 @@ impl App {
                     }
                 });
                 ui.end_row();
-                // Only a build made in a git clone can update itself; an
-                // installed build never offers it.
                 if from_source {
                     ui.label("Updates");
                     ui.vertical(|ui| {
@@ -1206,7 +1169,6 @@ impl App {
                                 )
                                 .changed()
                             {
-                                // The port after the main one follows it.
                                 d.ice_tcp_port = (port != next).then_some(port);
                             }
                         });
@@ -1413,8 +1375,6 @@ impl App {
                     self.host.stop();
                     self.restart = true;
                 } else {
-                    // A stopped host stays stopped; the settings apply when
-                    // it is started.
                     self.host
                         .log("settings saved; they apply when hosting starts");
                 }
@@ -1445,8 +1405,7 @@ impl App {
         }
     }
 
-    /// The web-stream service: streams the sign-in screen, UAC prompts and
-    /// elevated programs. Each action takes an administrator.
+    /// The web-stream service: streams the sign-in screen, UAC prompts and elevated programs.
     #[cfg(windows)]
     fn service_ui(&mut self, ui: &mut egui::Ui) {
         let installed = self.service_installed();
@@ -1471,9 +1430,6 @@ impl App {
                     )
                     .clicked()
                 {
-                    // Once it is installed, this app's own host stops (see
-                    // service_watch); the service retries until the ports
-                    // are free.
                     self.apply_to_service();
                 }
             }
@@ -1507,8 +1463,8 @@ impl App {
         });
     }
 
-    /// At the top of the window: "Updated to vX" once after an update, and a
-    /// newer version once a check has found one.
+    /// At the top of the window: "Updated to vX" once after an update, and a newer version once a
+    /// check has found one.
     fn update_banner_ui(&mut self, ui: &mut egui::Ui) {
         if let Some(v) = self.updated_to.clone() {
             ui.horizontal(|ui| {
@@ -1530,8 +1486,7 @@ impl App {
         }
     }
 
-    /// Settings > Updates: this version, the manual check, the optional
-    /// check at start.
+    /// Settings > Updates: this version, the manual check, the optional check at start.
     fn updates_ui(&mut self, ui: &mut egui::Ui) {
         ui.strong("Updates");
         ui.label(format!("This is version {}.", update_check::VERSION));
@@ -1633,8 +1588,8 @@ impl App {
     }
 }
 
-/// A playback device by name: `first` (value, label) then `devices`, and
-/// the saved name if it is not among them (unplugged, or typed elsewhere).
+/// A playback device by name: `first` (value, label) then `devices`, and the saved name if it is
+/// not among them.
 fn device_combo(
     ui: &mut egui::Ui,
     id: &str,
@@ -1747,7 +1702,6 @@ impl eframe::App for App {
                 }
                 ui.weak("certificate, paired browsers, settings and log");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // The service hosts, so quitting only closes this window's app.
                     let (label, hover) = if self.service_installed().is_some() {
                         (
                             "Close tray (service keeps running)",
@@ -1795,8 +1749,7 @@ impl eframe::App for App {
     }
 }
 
-/// Opens the file dialog on a thread of its own, so the window keeps
-/// drawing, and shares what is picked.
+/// Opens the file dialog on a thread of its own.
 #[cfg(windows)]
 fn pick_files(host: Host) {
     let spawned = std::thread::Builder::new()
@@ -1853,13 +1806,11 @@ enum PairingStage {
     AwaitingCode,
     /// A device asked and its code is on screen.
     Code,
-    /// Pairing is open but codes are locked after wrong guesses. Its own
-    /// stage so the "ask for a code" instructions can't show: asking can't
-    /// work now, though the QR link and reopening pairing both still do.
+    /// Pairing is open but codes are locked after wrong guesses.
     CodesLocked,
 }
 
-/// What the pairing area shows, decided apart from egui so it can be tested.
+/// What the pairing area shows, decided apart from egui.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PairingView {
     stage: PairingStage,
@@ -1867,14 +1818,12 @@ struct PairingView {
     countdown: Option<u64>,
     /// Codes are locked after wrong guesses.
     locked: bool,
-    /// Whether the QR code is offered: only with a link, which
-    /// exists only while pairing is open.
+    /// Whether the QR code is offered: only with a link, which exists only while pairing is open.
     offer_qr: bool,
 }
 
-/// The code is minted per request and bound to the asking device, so until a
-/// device asks there is none to show; the window says where to ask instead.
-/// A code on screen wins over the instructions.
+/// The code is minted per request and bound to the asking device, so until a device asks there is
+/// none to show; the window says where to ask instead.
 fn pairing_view(
     pairing_until: Option<Instant>,
     code: Option<&PairingCode>,
@@ -1896,8 +1845,7 @@ fn pairing_view(
     }
 }
 
-/// What the pairing card tells a friend about the browser's certificate
-/// warning (the host's certificate is self-signed).
+/// What the pairing card tells a friend about the browser's certificate warning.
 const CA_INSTALL_TEXT: &str = "iPhone: open that link in Safari, Allow, then Settings > \
      Profile Downloaded > Install, then Settings > General > About > Certificate Trust Settings > \
      turn on web-stream host CA. Android: Settings > Security > Install a certificate > CA certificate.";
@@ -1913,9 +1861,8 @@ struct CertificateHint {
     end: String,
 }
 
-/// The certificate guidance for the address in the QR code, or `None` when
-/// there is nothing to warn about: a CA-signed certificate, or the Cloudflare
-/// Tunnel address (its certificate is trusted by browsers).
+/// The certificate guidance for the address in the QR code, or `None` when there is nothing to warn
+/// about: a CA-signed certificate, or the Cloudflare Tunnel address.
 fn certificate_hint(
     host: &str,
     tunnel_url: Option<&str>,
@@ -1937,10 +1884,7 @@ fn certificate_hint(
     })
 }
 
-/// The red notice for locked codes, if any. A code lockout doesn't stop the
-/// QR link, and pairing again clears the lockout, so an open window names
-/// both; a closed one has no QR left to promise. A code on screen can't be
-/// locked (the lock clears it), so that stage never gets a notice.
+/// The red notice for locked codes, if any.
 fn locked_notice(view: &PairingView) -> Option<&'static str> {
     if !view.locked {
         return None;
@@ -1987,7 +1931,6 @@ mod tests {
         let tunnel = Some("https://pc.example.com/");
         assert!(certificate_hint("https://pc.example.com", tunnel, true, &fp).is_none());
         assert!(certificate_hint("https://192.168.1.20:8443", None, false, &fp).is_none());
-        // Another address of the same host still has the self-signed warning.
         assert!(certificate_hint("https://192.168.1.20:8443", tunnel, true, &fp).is_some());
         assert!(certificate_hint("https://x:1", None, true, "short").is_none());
     }

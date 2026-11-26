@@ -1,31 +1,5 @@
 //! `ws-host-gui`: the host as a tray app with a status and settings window.
-//! It is the host's only program: the same exe also runs the Windows
-//! service.
-//!
-//! ```text
-//! ws-host-gui [--hidden] [--after PID] [--pair]
-//!     --hidden     start in the tray (used by "Start with Windows" and updates)
-//!     --after PID  wait for process PID to exit first (the build an update
-//!                  replaces, or the copy that handed over to this elevated one)
-//!     --pair       open pairing once hosting, or attached to the service's host
-//! ws-host-gui service install|update|start|stop|uninstall [--quiet]
-//!     started elevated from the settings; shows the result unless --quiet
-//! ws-host-gui service run|session-host|network-host ...
-//!     the service and the host it starts (see ws_host::service)
-//! ws-host-gui setup autostart on|off | mic-driver | upnp-remove
-//!     steps the installer and uninstaller run (see setup.rs)
-//! ```
-//!
-//! Closing the window keeps the host running in the tray; Quit stops it (with the
-//! Windows service installed it only closes the tray: the service keeps hosting).
-//! Settings are saved in the data dir and started as the equivalent host
-//! options (`ws_host::options`).
-//!
-//! While the Windows service is installed the app never hosts itself: the
-//! service does, and the app, run elevated, attaches to the service's host
-//! and applies saved settings to it (see `service_watch`).
 
-// No console window on Windows.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod app;
@@ -73,10 +47,8 @@ fn main() {
     }
 }
 
-/// `service ...`: the exit code.
+/// `service...`: the exit code.
 fn service(args: &[String]) -> i32 {
-    // An administrator asked (from the settings, or update.ps1 with
-    // --quiet): say how it went. The service and its host run unseen.
     let asked = matches!(
         args.first().map(String::as_str),
         Some("install" | "update" | "start" | "stop" | "uninstall") | Some("-h" | "--help") | None
@@ -118,8 +90,6 @@ fn run(args: &[String]) -> anyhow::Result<()> {
         .with_context(|| format!("could not create {}", data_dir.display()))?;
     init_logging(&data_dir, LOG_FILE);
 
-    // Restarted by an update: the old build still holds the ports and the
-    // single-instance lock until it has stopped.
     #[cfg(windows)]
     if let Some(pid) = after {
         win::wait_for_exit(pid, Duration::from_secs(30));
@@ -164,8 +134,7 @@ fn run(args: &[String]) -> anyhow::Result<()> {
     .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
-/// Logs to a file in the data dir (there is no console), started afresh on
-/// each launch; `RUST_LOG` filters it.
+/// Logs to a file in the data dir, started afresh on each launch; `RUST_LOG` filters it.
 fn init_logging(data_dir: &std::path::Path, file: &str) {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| "info,str0m=warn".into());
@@ -179,17 +148,13 @@ fn init_logging(data_dir: &std::path::Path, file: &str) {
     }
 }
 
-/// After a browser-started update has built a new version (called on the
-/// update's thread): starts the new build, which waits for this process to
-/// exit, then stops the host (putting back a changed resolution) and exits.
-/// If the new build can't be started, this one keeps running.
+/// After a browser-started update has built a new version: starts the new build, which waits for
+/// this process to exit, then stops the host and exits.
 pub fn restart_after_update(host: &host::Host) {
     let exe = match std::env::current_exe() {
         Ok(exe) => exe,
         Err(e) => return host.log(format!("update: can't find this program: {e}")),
     };
-    // While it runs, this build's exe has been renamed to .old: the new
-    // build has the name.
     let new = exe.with_file_name(if cfg!(windows) {
         "ws-host-gui.exe"
     } else {
@@ -222,7 +187,6 @@ pub fn icon_rgba() -> (Vec<u8>, u32) {
             let cx = fx.clamp(r, N as f32 - r);
             let cy = fy.clamp(r, N as f32 - r);
             let inside = (fx - cx).powi(2) + (fy - cy).powi(2) <= r * r;
-            // Triangle pointing right: x from 11 to 24, narrowing to the tip.
             let half = (24.0 - fx) * 0.6;
             let in_triangle = (11.0..=24.0).contains(&fx) && (fy - 16.0).abs() <= half;
             let px = match (inside, in_triangle) {

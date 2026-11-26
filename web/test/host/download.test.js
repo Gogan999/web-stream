@@ -1,8 +1,5 @@
-// End-to-end against the real host: a file shared from the test host's console reaches the browser's
-// downloads, or its save dialog. Runs when WS_HOST_BIN names a built test host (CI's Linux job;
-// cargo build -p ws-host --example test-host);
-// display capture isn't there, but pairing, the control and file channels are. Runs again with the
-// host split in two processes as the Windows service runs it (--split).
+// End-to-end against the real host: a file shared from the test host's console reaches the
+// browser's downloads, or its save dialog.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -39,15 +36,12 @@ test(`a shared file opens a download or the save dialog${split ? ' (split host)'
   const browser = await chromium.launch();
   t.after(() => browser.close());
 
-  // Pairs a new browser context and connects it. dialog: 'none' (no save dialog), 'ok' or
-  // 'blocked' (it refuses to open).
+  // Pairs a new browser context and connects it.
   async function connect(device, dialog = 'none') {
     const ctx = await browser.newContext({ ...device, ignoreHTTPSErrors: true, acceptDownloads: true });
     const page = await ctx.newPage();
     const errors = [];
     page.on('pageerror', (e) => errors.push(e.message));
-    // Chrome's save dialog can't open headless: a stand-in records whether the Save click's
-    // activation was still live, and keeps what is written.
     await page.addInitScript((dialog) => {
       window.picks = [];
       window.showSaveFilePicker = dialog === 'none' ? undefined : async ({ suggestedName }) => {
@@ -70,7 +64,6 @@ test(`a shared file opens a download or the save dialog${split ? ' (split host)'
     const [, code] = await hostSays(/PAIRING CODE (\d+)/, from);
     await page.fill('#pair-code', code);
     await page.click('#pair-confirm');
-    // Files can be shared once the control channel is up, which is when signaling hands off.
     await hostSays(/handed off to the peer connection/, from);
     return { ctx, page, errors };
   }
@@ -103,7 +96,6 @@ test(`a shared file opens a download or the save dialog${split ? ' (split host)'
   assert.deepEqual(s.errors, []);
   await s.ctx.close();
 
-  // Chrome's save dialog: opened while the click still counts, and gets every byte.
   s = await connect(desktop, 'ok');
   const viaDialog = await share(s.page, 2 * 1024 * 1024);
   await s.page.click('#files-toggle');
@@ -113,13 +105,11 @@ test(`a shared file opens a download or the save dialog${split ? ' (split host)'
   assert.ok(viaDialog.data.equals(Buffer.from(await s.page.evaluate(() => [...window.written]))));
   await s.ctx.close();
 
-  // A save dialog that won't open (policy, say) still gets the file to downloads.
   s = await connect(desktop, 'blocked');
   await saveToDownloads(s.page, await share(s.page, 100 * 1024));
   assert.equal((await s.page.evaluate(() => window.picks)).length, 1);
   await s.ctx.close();
 
-  // A phone (Android has no save dialog): from the toolbar's Files button to downloads.
   s = await connect(devices['Pixel 7']);
   await saveToDownloads(s.page, await share(s.page, 1024 * 1024));
   assert.deepEqual(s.errors, []);

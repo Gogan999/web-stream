@@ -1,6 +1,4 @@
-//! The host agent as a library. The `ws-host-gui` tray app runs
-//! [`serve::serve`], and its exe also runs the Windows service
-//! ([`service`]).
+//! The host agent as a library.
 
 mod bottleneck;
 pub mod clipboard;

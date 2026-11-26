@@ -1,18 +1,4 @@
-//! Files the browser sends to the host, when the host user allows it
-//! (`--allow-upload`).
-//!
-//! Everything lands in one folder. The browser's name is only a
-//! suggestion: it is cut to a bare name, cleaned of whatever Windows would
-//! read as a path, a stream or a device, and never replaces a file already
-//! there (`name (2).ext`). The bytes go to `name.part`, which becomes the
-//! file once complete; a cancelled or broken upload leaves nothing behind.
-//! On Windows the file is marked as downloaded from the internet, so
-//! SmartScreen and Office treat it with the same care as a download. The
-//! host never opens what it receives.
-//!
-//! One file at a time, in [`file_chunk`]s on the `file` channel. The host
-//! acks what it has written; the browser keeps at most [`FILE_WINDOW`]
-//! past that in flight.
+//! Files the browser sends to the host, when the host user allows it (`--allow-upload`).
 
 use std::fs::File;
 use std::io::Write;
@@ -32,11 +18,10 @@ pub const MAX_SIZE: u64 = 4 << 30;
 /// Written bytes between acks.
 const ACK_EVERY: u64 = 256 * 1024;
 const _: () = assert!(ACK_EVERY <= FILE_WINDOW);
-/// Chunks waiting to be written; the browser's window keeps it at about
-/// 64.
+/// Chunks waiting to be written; the browser's window keeps it at about 64.
 const QUEUE: usize = 256;
-/// Files one browser session may send, and their total size: a paired
-/// browser can't fill the host's disk with a stream of files.
+/// Files one browser session may send, and their total size: a paired browser can't fill the host's
+/// disk with a stream of files.
 const SESSION_FILES: u32 = 500;
 const SESSION_BYTES: u64 = 32 << 30;
 /// Longest name kept, in UTF-16 units.
@@ -47,9 +32,8 @@ const RESERVED: &[&str] = &[
     "COM5", "COM6", "COM7", "COM8", "COM9", "COM¹", "COM²", "COM³", "LPT0", "LPT1", "LPT2", "LPT3",
     "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9", "LPT¹", "LPT²", "LPT³",
 ];
-/// Kinds of file Explorer reads by itself when it shows the folder, which
-/// can make it fetch an icon from a remote share and hand over the user's
-/// credentials. Saved with `.download` added, so they are only data.
+/// Kinds of file Explorer reads by itself when it shows the folder, which can make it fetch an icon
+/// from a remote share and hand over the user's credentials.
 const INERT_EXTENSIONS: &[&str] = &["url", "lnk", "scf", "library-ms", "searchconnector-ms"];
 const INERT_NAMES: &[&str] = &["desktop.ini"];
 
@@ -65,8 +49,8 @@ pub enum UploadMsg {
     Cancel(FileId),
 }
 
-/// The upload receiver of one browser session; dropping it deletes a file
-/// that is only partly received.
+/// The upload receiver of one browser session; dropping it deletes a file that is only partly
+/// received.
 pub struct UploadSession {
     tx: mpsc::Sender<UploadMsg>,
     task: AbortHandle,
@@ -99,13 +83,10 @@ impl UploadSession {
     pub fn send(&self, msg: UploadMsg) {
         if let UploadMsg::Data(d) = &msg {
             if d.len() > FILE_CHUNK_HEADER + FILE_CHUNK_MAX {
-                // Oversized; the upload in progress fails on the gap.
                 tracing::warn!(len = d.len(), "dropping an oversized file chunk");
                 return;
             }
         }
-        // The browser sent past its window. The upload in progress fails on
-        // the gap this leaves.
         if let Err(mpsc::error::TrySendError::Full(UploadMsg::Data(_))) = self.tx.try_send(msg) {
             tracing::warn!("upload queue full; dropping file data");
         }
@@ -114,7 +95,6 @@ impl UploadSession {
 
 impl Drop for UploadSession {
     fn drop(&mut self) {
-        // The task owns the partial file; aborting it drops (deletes) it.
         self.task.abort();
     }
 }
@@ -129,8 +109,7 @@ struct Receiver {
     bytes: u64,
 }
 
-/// A file being received. Dropped before it is complete, it deletes its
-/// partial file and the name it held.
+/// A file being received.
 struct Incoming {
     id: FileId,
     name: String,
@@ -281,7 +260,6 @@ impl Receiver {
         let saved = block_in_place(|| -> std::io::Result<()> {
             file.sync_all()?;
             drop(file);
-            // Marked before it gets its name: the stream moves with it.
             mark_downloaded(&cur.part);
             // Replaces the empty file that held the name.
             std::fs::rename(&cur.part, &cur.path)?;
@@ -342,9 +320,8 @@ impl Receiver {
     }
 }
 
-/// A bare file name Windows takes as it is: no folders, no `:` (a stream),
-/// no device name, no trailing dots or spaces, nothing invisible, and
-/// nothing Explorer acts on by itself.
+/// A bare file name Windows takes as it is: no folders, no `:` (a stream), no device name, no
+/// trailing dots or spaces, nothing invisible, and nothing Explorer acts on by itself.
 fn safe_name(name: &str) -> String {
     let base = name.rsplit(['/', '\\']).next().unwrap_or("");
     let cleaned: String = base
@@ -375,7 +352,7 @@ fn safe_name(name: &str) -> String {
     if name.is_empty() { "file".into() } else { name }
 }
 
-/// `name`, or `name (2)`, `name (3)`... before the extension.
+/// `name`, or `name (2)`, `name (3)`...
 fn numbered(name: &str, n: u32) -> String {
     if n == 1 {
         return name.into();
@@ -386,8 +363,7 @@ fn numbered(name: &str, n: u32) -> String {
     }
 }
 
-/// Takes the first free name in `dir`: creates it empty (so nothing else
-/// takes it) and its `.part` file to write into.
+/// Takes the first free name in `dir`: creates it empty and its `.part` file to write into.
 fn reserve(dir: &Path, name: &str) -> std::io::Result<(PathBuf, PathBuf, File)> {
     std::fs::create_dir_all(dir)?;
     let create = |p: &Path| {
@@ -423,8 +399,7 @@ fn file_name(path: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// The Mark of the Web: Windows treats the file as downloaded from the
-/// internet. Best effort (FAT drives have no streams).
+/// The Mark of the Web: Windows treats the file as downloaded from the internet.
 fn mark_downloaded(path: &Path) {
     #[cfg(windows)]
     {
@@ -551,7 +526,6 @@ mod tests {
         h.rx.handle(UploadMsg::Cancel(FileId(1)));
         assert!(h.files().is_empty());
 
-        // A missing chunk fails the upload.
         h.rx.handle(offer(2, "b.bin", 100_000));
         h.rx.handle(UploadMsg::Data(file_chunk(FileId(2), 16_384, &[0; 10])));
         assert!(matches!(
@@ -592,7 +566,6 @@ mod tests {
             HostControl::UploadFailed { id: FileId(2), .. }
         ));
 
-        // A session can't send endless files.
         h.rx.files = SESSION_FILES;
         h.rx.handle(offer(5, "a", 1));
         assert!(matches!(

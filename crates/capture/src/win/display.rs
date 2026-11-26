@@ -1,6 +1,5 @@
-//! Enumerates capturable displays: DXGI (adapter, output) pairs attached to
-//! the desktop, named with the monitor's friendly name from the display
-//! configuration API.
+//! Enumerates capturable displays: DXGI (adapter, output) pairs attached to the desktop, named with
+//! the monitor's friendly name from the display configuration API.
 
 use std::collections::HashMap;
 
@@ -118,7 +117,7 @@ pub(crate) fn find(id: DisplayId) -> Result<Output> {
         .ok_or(crate::CaptureError::DisplayNotFound(id))
 }
 
-/// `\\.\DISPLAY3` -> 3. Stable for the session, unlike enumeration order.
+/// `\\.\DISPLAY3` -> 3.
 fn parse_display_number(gdi_name: &str) -> Option<u32> {
     gdi_name.strip_prefix(r"\\.\DISPLAY")?.parse().ok()
 }
@@ -134,8 +133,7 @@ struct PathConfig {
     refresh_mhz: u32,
 }
 
-/// GDI device name (`\\.\DISPLAY1`) -> monitor friendly name and exact
-/// refresh rate. Best effort: an empty map just means generic names.
+/// GDI device name (`\\.\DISPLAY1`) -> monitor friendly name and exact refresh rate.
 fn display_config() -> HashMap<String, PathConfig> {
     let mut map = HashMap::new();
     let (mut np, mut nm) = (0u32, 0u32);

@@ -1,10 +1,5 @@
-//! One-time pairing codes shown on the host and typed into the browser, or
-//! a pairing link the host shows as a QR code.
-//!
-//! Pairing is closed unless the host user opens it (tray or console action)
-//! for a short window, so nobody on the internet can start one or guess at
-//! an unattended host. Too many wrong codes lock pairing until the host user
-//! opens it again, and that lockout survives restarts.
+//! One-time pairing codes shown on the host and typed into the browser, or a pairing link the host
+//! shows as a QR code.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -18,7 +13,7 @@ use crate::Error;
 pub const CODE_TTL: Duration = Duration::from_secs(120);
 pub const DEFAULT_WINDOW: Duration = Duration::from_secs(120);
 const ATTEMPTS_PER_CODE: u8 = 3;
-/// Wrong codes in total (across codes and restarts) before pairing locks.
+/// Wrong codes in total before pairing locks.
 const MAX_FAILURES: u32 = 5;
 const MAX_STARTS: usize = 5;
 const STARTS_WINDOW: Duration = Duration::from_secs(60);
@@ -48,9 +43,7 @@ pub enum StartError {
     /// Too many wrong codes; the host user must open pairing again.
     Locked,
     RateLimited,
-    /// Another browser's code is still pending. The first request keeps the
-    /// window, so a stranger cannot replace the code the host user is
-    /// about to read out.
+    /// Another browser's code is still pending.
     Busy,
 }
 
@@ -100,13 +93,7 @@ impl Pairing {
         })
     }
 
-    /// Host-side action: accept pairing requests for `window`. Also clears a
-    /// lockout, since the host user is evidently present.
-    ///
-    /// Returns the secret of a pairing link that works once, instead of a
-    /// code, until the window closes. Only the host UI shows it (as a QR
-    /// code); it is long and random, so a wrong one doesn't count towards
-    /// the lockout.
+    /// Host-side action: accept pairing requests for `window`.
     pub fn open(&mut self, now: Instant, window: Duration) -> Result<String, Error> {
         let link = crate::store::random_token()?;
         self.open_until = Some(now + window);
@@ -125,13 +112,8 @@ impl Pairing {
         self.pending = None;
     }
 
-    /// Pairs with the link the host showed; on success returns the device
-    /// name and closes pairing, like a right code. `None` if pairing is
-    /// closed or this is not its link (the browser can't tell which).
-    ///
-    /// A code lockout doesn't stop the link: wrong codes from a stranger
-    /// would otherwise also take away the QR code the host user is
-    /// showing, and the link can't be guessed.
+    /// Pairs with the link the host showed; on success returns the device name and closes pairing,
+    /// like a right code.
     pub fn redeem_link(&mut self, link: &str, device_name: &str, now: Instant) -> Option<String> {
         let open = self.open_until.is_some_and(|t| now < t);
         let matches = self
@@ -149,8 +131,8 @@ impl Pairing {
         self.state.locked
     }
 
-    /// Only one code is pending at a time; a new one can start once it is
-    /// confirmed, burned by wrong guesses, or expired.
+    /// Only one code is pending at a time; a new one can start once it is confirmed, burned by
+    /// wrong guesses, or expired.
     pub fn start(
         &mut self,
         device_name: &str,
@@ -191,8 +173,7 @@ impl Pairing {
         Ok(Ok(started))
     }
 
-    /// On success returns the device name, consumes the code and closes
-    /// pairing.
+    /// On success returns the device name, consumes the code and closes pairing.
     pub fn confirm(
         &mut self,
         pairing_id: &str,
@@ -227,7 +208,6 @@ impl Pairing {
         self.state.failures += 1;
         let locked = self.state.failures >= MAX_FAILURES;
         if locked {
-            // Codes stop; the link stays until pairing closes.
             self.state.locked = true;
             self.pending = None;
         }
@@ -249,7 +229,6 @@ impl Pairing {
 
 /// Six uniformly random digits.
 fn random_code() -> Result<String, Error> {
-    // Largest multiple of 10^6 that fits in u32, for rejection sampling.
     const LIMIT: u32 = u32::MAX - u32::MAX % 1_000_000;
     loop {
         let mut b = [0u8; 4];
@@ -262,8 +241,6 @@ fn random_code() -> Result<String, Error> {
 }
 
 fn clean_name(name: &str) -> String {
-    // The host user reads this name next to the code, so nothing invisible
-    // (bidi overrides, zero-width marks) may make it look like another one.
     let cleaned: String = name
         .chars()
         .filter(|&c| ws_proto::names::printable(c))
@@ -371,7 +348,6 @@ mod tests {
         assert_eq!(last, Some(Err(ConfirmError::Locked)));
         assert_eq!(p.start("x", now).unwrap(), Err(StartError::Locked));
 
-        // A restart does not clear it.
         let mut p = Pairing::load(dir.path()).unwrap();
         assert!(p.is_locked());
         assert_eq!(p.start("x", now).unwrap(), Err(StartError::Locked));
@@ -405,7 +381,6 @@ mod tests {
             Ok("mine".into())
         );
 
-        // Once the code expires, a new request may start.
         let mut p = Pairing::load(dir.path()).unwrap();
         p.open(now, 2 * CODE_TTL).unwrap();
         p.start("x", now).unwrap().unwrap();
@@ -424,11 +399,9 @@ mod tests {
             p.redeem_link(&link, "iPhone\u{200B}", now),
             Some("iPhone".into())
         );
-        // Used up, and pairing is closed again.
         assert_eq!(p.redeem_link(&link, "x", now), None);
         assert_eq!(p.start("x", now).unwrap(), Err(StartError::Closed));
 
-        // A new window makes a new link; the old one never works again.
         let second = p.open(now, DEFAULT_WINDOW).unwrap();
         assert_ne!(second, link);
         assert_eq!(p.redeem_link(&link, "x", now), None);
@@ -445,7 +418,6 @@ mod tests {
             assert_eq!(p.redeem_link("guess", "x", now), None);
         }
         assert!(!p.is_locked());
-        // A stranger burns the codes until pairing locks...
         for _ in 0..MAX_FAILURES {
             let s = p.start("x", now).unwrap().unwrap();
             p.confirm(&s.pairing_id, wrong(&s.code), now).unwrap().ok();
@@ -454,7 +426,6 @@ mod tests {
         }
         assert!(p.is_locked());
         assert_eq!(p.start("x", now).unwrap(), Err(StartError::Locked));
-        // ...and the QR code still pairs, once.
         assert_eq!(p.redeem_link(&link, "phone", now), Some("phone".into()));
         assert_eq!(p.redeem_link(&link, "phone", now), None);
     }

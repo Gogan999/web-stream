@@ -1,12 +1,4 @@
 //! Following the input desktop.
-//!
-//! Windows shows the lock screen, the sign-in screen and UAC prompts on a
-//! desktop of their own ("Winlogon"), separate from the one apps run on. A
-//! thread captures the screen, reads the pointer and injects input only on
-//! the desktop it is attached to, so the threads that do call
-//! [`follow_input_desktop`] when that stops working. Only a process running
-//! as SYSTEM may open the Winlogon desktop (the service starts the host that
-//! way, see `ws_host::service`); for anyone else the call changes nothing.
 
 #[cfg(windows)]
 mod imp {
@@ -32,9 +24,6 @@ mod imp {
 
     impl Drop for Attached {
         fn drop(&mut self) {
-            // A desktop can't be closed while a thread is on it: move back
-            // first. Neither call matters if the thread is exiting anyway.
-            // SAFETY: both handles are valid; `opened` is ours to close.
             unsafe {
                 let _ = SetThreadDesktop(self.original);
                 let _ = CloseDesktop(self.opened);
@@ -64,9 +53,7 @@ mod imp {
         Some(String::from_utf16_lossy(&buf[..len]))
     }
 
-    /// Attaches the calling thread to the desktop that receives input now,
-    /// if it is on another one. True if the thread moved, so whatever just
-    /// failed is worth retrying. The thread must not own windows or hooks.
+    /// Attaches the calling thread to the desktop that receives input now, if it is on another one.
     pub fn follow_input_desktop() -> bool {
         // SAFETY: plain calls; the returned handle is closed or kept below.
         let input = match unsafe {
@@ -77,14 +64,11 @@ mod imp {
             )
         } {
             Ok(d) => d,
-            // Usually access denied: the secure desktop, and we aren't SYSTEM.
             Err(_) => return false,
         };
         // SAFETY: the current thread's desktop handle needs no closing.
         let current = unsafe { GetThreadDesktop(GetCurrentThreadId()) }.ok();
         let input_name = name(input);
-        // Without the current desktop there is nothing to move back to (or
-        // to compare with): stay put.
         let Some(current) = current else {
             // SAFETY: we opened `input` and nothing uses it.
             let _ = unsafe { CloseDesktop(input) };
@@ -108,10 +92,8 @@ mod imp {
         ATTACHED.with(|a| {
             let mut a = a.borrow_mut();
             match a.as_mut() {
-                // Off the previous one now, so it can be closed.
                 Some(prev) => {
-                    // SAFETY: we opened it, and this thread (the only one
-                    // with this handle) is off it now.
+                    // SAFETY: we opened it, and this thread is off it now.
                     let _ = unsafe { CloseDesktop(std::mem::replace(&mut prev.opened, input)) };
                 }
                 None => {
@@ -149,8 +131,7 @@ mod imp {
         if !ok {
             return false;
         }
-        // SAFETY: GetTokenInformation filled a TOKEN_USER at the start of
-        // `buf`; read unaligned since a Vec<u8> promises no alignment.
+        // SAFETY: GetTokenInformation filled a TOKEN_USER at the start of `buf`; read unaligned.
         let user: TOKEN_USER = unsafe { std::ptr::read_unaligned(buf.as_ptr().cast()) };
         // SAFETY: the SID points into `buf`, which is still alive.
         unsafe { IsWellKnownSid(user.User.Sid, WinLocalSystemSid) }.as_bool()

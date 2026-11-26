@@ -1,9 +1,5 @@
 name: release
 
-# Push a tag vX.Y.Z (or vX.Y.Z-rc.1 for a pre-release) on a commit on main,
-# or run it from the Actions tab on main with the version and notes; then the
-# tag is made only once the build has passed. The build runs on its own; publishing waits for approval in the `release`
-# environment if it has a required reviewer. See docs/dev/releasing.md.
 on:
   push:
     tags: ['v*']
@@ -83,9 +79,6 @@ jobs:
       RUST_VERSION: 1.97.0
     steps:
       - uses: actions/checkout@v4
-      # No build cache and no third-party action: a release is built from
-      # scratch from Cargo.lock, with a pinned compiler (rustup comes with
-      # the runner). Move RUST_VERSION forward deliberately.
       - name: toolchain
         run: |
           rustup toolchain install $env:RUST_VERSION --profile minimal --component rustfmt,clippy
@@ -103,8 +96,6 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
-          # cloudflared goes next to the exe, where the host looks for it
-          # when a Cloudflare Tunnel is on.
           ./installer/fetch-redist.ps1
           $stage = 'target/zip'
           Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
@@ -130,8 +121,6 @@ jobs:
           path: dist/
           if-no-files-found: error
 
-  # Publishes. Pauses until Logan approves the run when the `release`
-  # environment has a required reviewer; it needs no secrets.
   publish:
     needs: [check, build]
     runs-on: ubuntu-latest
@@ -149,9 +138,6 @@ jobs:
         with:
           name: release-files
           path: dist
-      # Run from the Actions tab: the tag is made here, after the build has
-      # passed, at the commit that was built. (A tag pushed with the job's
-      # token doesn't start this workflow again.)
       - name: tag
         if: github.event_name == 'workflow_dispatch'
         env:
@@ -167,9 +153,6 @@ jobs:
         run: |
           set -euo pipefail
           cd dist
-          # The tag's message is the release notes the host shows. An
-          # annotated tag only, and without its own signature block, if it
-          # has one.
           if [ "$(git cat-file -t "refs/tags/$TAG")" != tag ]; then
             echo "::error::$TAG is a lightweight tag: tag with git tag -a and the release notes as its message"; exit 1
           fi

@@ -1,10 +1,7 @@
-//! Scheduling for the transport's own thread on Windows: fine timer
-//! resolution and the MMCSS "Games" class while the run loop runs.
+//! Scheduling for the transport's own thread on Windows: fine timer resolution and the MMCSS
+//! "Games" class while the run loop runs.
 
-/// Asks Windows for 1 ms timer resolution until dropped. At the default
-/// ~15.6 ms the run loop's sleeps (the pacer's next send) wake late, and the
-/// pacer then sends well below its rate: the queue grows without bound and
-/// every frame is dropped as late. Does nothing on other systems.
+/// Asks Windows for 1 ms timer resolution until dropped.
 pub(crate) struct FineTimer(());
 
 impl FineTimer {
@@ -62,10 +59,7 @@ impl Drop for FineTimer {
     }
 }
 
-/// Puts the calling thread in the MMCSS "Games" class until dropped, so the
-/// pacer's wakeups aren't delayed behind ordinary threads (a game using
-/// every core, say). Must be dropped on the thread that made it. Does
-/// nothing on other systems, or if MMCSS refuses.
+/// Puts the calling thread in the MMCSS "Games" class until dropped.
 pub(crate) struct Mmcss {
     #[cfg(windows)]
     task: Option<windows::Win32::Foundation::HANDLE>,
@@ -96,8 +90,7 @@ impl Drop for Mmcss {
     fn drop(&mut self) {
         #[cfg(windows)]
         if let Some(task) = self.task {
-            // SAFETY: the handle came from AvSetMmThreadCharacteristicsW on
-            // this thread.
+            // SAFETY: the handle came from AvSetMmThreadCharacteristicsW on this thread.
             let _ =
                 unsafe { windows::Win32::System::Threading::AvRevertMmThreadCharacteristics(task) };
         }

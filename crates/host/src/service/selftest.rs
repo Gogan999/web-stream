@@ -1,9 +1,6 @@
-//! `service sandbox-test <folder>`: checks, as the service would, that the
-//! network host's folder gets its label and that a process with the network
-//! host's token can do what it needs and not what it mustn't. Run by CI as
-//! SYSTEM (installer/test-network-sandbox.ps1), because none of this behaves
-//! the same for an ordinary user, and it can't be learned on a real PC
-//! without taking the stream down.
+//! `service sandbox-test <folder>`: checks, as the service would, that the network host's folder
+//! gets its label and that a process with the network host's token can do what it needs and not
+//! what it mustn't.
 
 use std::net::{TcpListener, UdpSocket};
 use std::path::Path;
@@ -16,15 +13,14 @@ use super::{launch, scm};
 const OLD_FILE: &str = "sandbox-test-old.txt";
 const NEW_FILE: &str = "sandbox-test-new.txt";
 
-/// The parent: `outside` is a folder this makes, open to Everyone and to
-/// Users, for the child to fail to write in.
+/// The parent: `outside` is a folder this makes, open to Everyone and to Users, for the child to
+/// fail to write in.
 pub fn run(args: &[String]) -> anyhow::Result<String> {
     let [outside] = args else {
         bail!("sandbox-test needs a scratch folder to make");
     };
     let outside = Path::new(outside);
     std::fs::create_dir_all(outside)?;
-    // The app has no console: what happened goes in a file.
     let report = outside.join("report.txt");
     let result = run_in(outside, &report);
     let line = match &result {
@@ -47,16 +43,12 @@ fn note(report: &Path, line: &str) {
 }
 
 fn run_in(outside: &Path, report: &Path) -> anyhow::Result<String> {
-    // Open to every user, at medium integrity: only the token's restrictions
-    // keep the network host out.
     launch::secure_dir(
         outside,
         "D:P(A;OICI;FA;;;WD)(A;OICI;FA;;;BU)(A;OICI;FA;;;SY)",
     )?;
     let outside_file = outside.join("outside.txt");
 
-    // A file from before the label, which the network host must still be
-    // able to write.
     let dir = scm::network_dir()?;
     std::fs::create_dir_all(&dir)?;
     let old = dir.join(OLD_FILE);
@@ -69,7 +61,6 @@ fn run_in(outside: &Path, report: &Path) -> anyhow::Result<String> {
         bail!("the folder and its files could not all be labelled low integrity");
     }
     note(report, &format!("labelled {}\n", dir.display()));
-    // The label is really there, on the folder and on the file from before.
     for path in [dir.clone(), dir.join(OLD_FILE)] {
         let out = std::process::Command::new("icacls").arg(&path).output()?;
         let text = String::from_utf8_lossy(&out.stdout).into_owned();

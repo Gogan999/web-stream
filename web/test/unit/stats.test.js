@@ -79,7 +79,6 @@ test('essential warnings name reduced resolution, bitrate, slow and lossy links,
   assert.match(text, /TCP fallback in use/);
   assert.match(text, /Browser dropped 3 frames/);
   assert.match(text, /Host dropped 2 frames/);
-  // Worst first.
   assert.equal(got[0].sev, 'bad');
   const lines = render('essential', s, 5, h, config, got);
   assert.equal(lines[0].text[0], '!');

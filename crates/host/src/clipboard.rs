@@ -1,31 +1,13 @@
 //! Text clipboard sync between the host PC and a connected browser.
-//!
-//! The Windows backend lives on its own thread with a message-only window:
-//! `AddClipboardFormatListener` tells it when the clipboard changes (a burst
-//! of changes is debounced for [`DEBOUNCE`]), and writes from the browser
-//! run on the same thread, so the clipboard is only ever opened from one
-//! place. Everywhere else [`Clipboard::open`] fails, so the host reports the
-//! clipboard as unavailable.
-//!
-//! What may cross is decided by [`SyncState`], which has no OS in it: text
-//! over [`MAX_BYTES`] is refused (never cut short), empty text is ignored,
-//! and what the browser just set is not sent back to it (the write makes
-//! Windows announce a change; without this the two clipboards would
-//! ping-pong). Clipboard contents are only read while a browser is
-//! connected ([`Clipboard::set_active`]), and text a password manager marks
-//! as excluded from clipboard monitoring
-//! (`ExcludeClipboardContentFromMonitorProcessing`) is never read.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-/// Most bytes of UTF-8 text synced either way (see
-/// [`ws_proto::CLIPBOARD_MAX`]).
+/// Most bytes of UTF-8 text synced either way (see [`ws_proto::CLIPBOARD_MAX`]).
 pub const MAX_BYTES: usize = ws_proto::CLIPBOARD_MAX;
 
-/// A change is read this long after the last notification, since programs
-/// often announce one copy several times.
+/// A change is read this long after the last notification.
 pub const DEBOUNCE: Duration = Duration::from_millis(250);
 
 /// What to do with text the host clipboard now holds.
@@ -33,8 +15,7 @@ pub const DEBOUNCE: Duration = Duration::from_millis(250);
 pub enum Local {
     /// Send it to the browser.
     Forward(String),
-    /// It is what was last synced (the browser's own write, or already
-    /// sent): say nothing.
+    /// It is what was last synced: say nothing.
     Echo,
     /// Nothing to send: empty.
     Empty,
@@ -65,9 +46,7 @@ impl SyncState {
         Local::Forward(text)
     }
 
-    /// The browser asks to put `text` on the host clipboard: `true` if it
-    /// should be written (it is then remembered, so its change
-    /// notification is an [`Local::Echo`]).
+    /// The browser asks to put `text` on the host clipboard: `true` if it should be written.
     pub fn remote_set(&mut self, text: &str) -> bool {
         if text.len() > MAX_BYTES {
             return false;
@@ -82,13 +61,8 @@ impl SyncState {
     }
 }
 
-/// Whether the program that copied asked for the text to stay out of
-/// clipboard monitoring, history or the cloud, which is how password managers
-/// mark what they copy. `monitor_excluded` is whether the
-/// `ExcludeClipboardContentFromMonitorProcessing` format is present (its
-/// mere presence counts); the other two are the DWORD values of
-/// `CanIncludeInClipboardHistory` and `CanUploadToCloudClipboard` when
-/// present, where 0 means no.
+/// Whether the program that copied asked for the text to stay out of clipboard monitoring, history
+/// or the cloud, which is how password managers mark what they copy.
 pub fn marked_private(
     monitor_excluded: bool,
     include_in_history: Option<u32>,
@@ -97,7 +71,7 @@ pub fn marked_private(
     monitor_excluded || include_in_history == Some(0) || upload_to_cloud == Some(0)
 }
 
-/// An open clipboard. Dropping it ends its thread.
+/// An open clipboard.
 pub struct Clipboard {
     state: Arc<Mutex<SyncState>>,
     active: Arc<AtomicBool>,
@@ -105,10 +79,7 @@ pub struct Clipboard {
 }
 
 impl Clipboard {
-    /// Starts the clipboard thread and checks that this process can open the
-    /// Windows clipboard (a session without a usable desktop cannot). `Err`
-    /// says why not. `on_change` is called on that thread, with text to send
-    /// the browser.
+    /// Starts the clipboard thread and checks that this process can open the Windows clipboard.
     pub fn open(on_change: impl Fn(String) + Send + 'static) -> Result<Self, String> {
         let state = Arc::new(Mutex::new(SyncState::default()));
         let active = Arc::new(AtomicBool::new(false));
@@ -116,8 +87,7 @@ impl Clipboard {
         Ok(Self { state, active, imp })
     }
 
-    /// Whether a browser is connected: clipboard contents are read and
-    /// forwarded only while it is.
+    /// Whether a browser is connected: clipboard contents are read and forwarded only while it is.
     pub fn set_active(&self, active: bool) {
         self.active.store(active, Ordering::Relaxed);
         if !active {
@@ -125,9 +95,7 @@ impl Clipboard {
         }
     }
 
-    /// Writes the browser's text to the clipboard, then calls `done` with
-    /// whether it worked (on the clipboard thread). Text over [`MAX_BYTES`]
-    /// is refused without touching the clipboard.
+    /// Writes the browser's text to the clipboard, then calls `done` with whether it worked.
     pub fn set(&self, text: String, done: impl FnOnce(bool) + Send + 'static) {
         let allowed = self
             .state
@@ -244,8 +212,8 @@ mod imp {
     }
 
     fn run(worker: Worker, ready: mpsc::Sender<Result<isize, String>>) {
-        // SAFETY: plain Win32 calls on this thread; the window and its
-        // listener are removed before the thread ends.
+        // SAFETY: plain Win32 calls on this thread; the window and its listener are removed before
+        // the thread ends.
         unsafe {
             let hwnd = match create_window() {
                 Ok(h) => h,
@@ -255,7 +223,6 @@ mod imp {
                 let _ = DestroyWindow(hwnd);
                 return drop(ready.send(Err(format!("AddClipboardFormatListener: {e}"))));
             }
-            // The honest check: can this session open the clipboard at all?
             if let Err(e) = with_clipboard(hwnd, || ()) {
                 let _ = RemoveClipboardFormatListener(hwnd);
                 let _ = DestroyWindow(hwnd);
@@ -285,7 +252,6 @@ mod imp {
                 lpszClassName: w!("WebStreamClipboard"),
                 ..Default::default()
             };
-            // Zero if it exists already (a second host in this process).
             RegisterClassW(&class);
             CreateWindowExW(
                 WINDOW_EX_STYLE(0),
@@ -315,7 +281,6 @@ mod imp {
         unsafe {
             match msg {
                 WM_CLIPBOARDUPDATE => {
-                    // Restarts the timer: only the last of a burst is read.
                     SetTimer(
                         Some(hwnd),
                         DEBOUNCE_TIMER,
@@ -403,8 +368,7 @@ mod imp {
         }
     }
 
-    /// Runs `f` with the clipboard open, retrying while another program
-    /// holds it.
+    /// Runs `f` with the clipboard open, retrying while another program holds it.
     unsafe fn with_clipboard<T>(hwnd: HWND, f: impl FnOnce() -> T) -> Result<T, String> {
         let mut last = String::new();
         for _ in 0..OPEN_TRIES {
@@ -425,8 +389,7 @@ mod imp {
     }
 
     enum Read {
-        /// No text, or the program that copied it asked not to be monitored
-        /// (password managers do).
+        /// No text, or the program that copied it asked not to be monitored (password managers do).
         NoText,
         Text(String),
         /// Over the cap, so not even copied out.
@@ -434,8 +397,8 @@ mod imp {
     }
 
     unsafe fn read(hwnd: HWND) -> Result<Read, String> {
-        // SAFETY: the clipboard APIs are used on this thread, with the
-        // clipboard open while the global memory is locked.
+        // SAFETY: the clipboard APIs are used on this thread, with the clipboard open while the
+        // global memory is locked.
         unsafe {
             if IsClipboardFormatAvailable(CF_UNICODETEXT).is_err() {
                 return Ok(Read::NoText);
@@ -452,8 +415,6 @@ mod imp {
                 }
                 let handle = GetClipboardData(CF_UNICODETEXT).map_err(|e| e.to_string())?;
                 let mem = HGLOBAL(handle.0);
-                // UTF-8 is at least one byte per UTF-16 unit, so more units
-                // than the cap is over the cap.
                 let units = GlobalSize(mem) / 2;
                 if units > MAX_BYTES + 1 {
                     return Ok(Read::TooLarge);
@@ -473,8 +434,7 @@ mod imp {
         }
     }
 
-    /// The DWORD stored under a registered clipboard format, if the clipboard
-    /// (open) has it.
+    /// The DWORD stored under a registered clipboard format, if the clipboard (open) has it.
     unsafe fn dword(format: u32) -> Option<u32> {
         // SAFETY: the clipboard is open; the memory is locked while read.
         unsafe {
@@ -498,8 +458,8 @@ mod imp {
     unsafe fn write(hwnd: HWND, text: &str) -> Result<(), String> {
         let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
         let bytes = wide.len() * 2;
-        // SAFETY: the allocation is filled before the clipboard takes it,
-        // and freed here only if the clipboard did not.
+        // SAFETY: the allocation is filled before the clipboard takes it, and freed here only if
+        // the clipboard did not.
         unsafe {
             with_clipboard(hwnd, || {
                 let mem = GlobalAlloc(GMEM_MOVEABLE, bytes).map_err(|e| e.to_string())?;
@@ -553,10 +513,8 @@ mod tests {
     fn local_text_is_forwarded_once() {
         let mut s = SyncState::default();
         assert_eq!(s.local_changed("a".into()), Local::Forward("a".into()));
-        // The same text announced again (many programs notify twice).
         assert_eq!(s.local_changed("a".into()), Local::Echo);
         assert_eq!(s.local_changed("b".into()), Local::Forward("b".into()));
-        // Copying an earlier text again is a change.
         assert_eq!(s.local_changed("a".into()), Local::Forward("a".into()));
     }
 
@@ -564,14 +522,11 @@ mod tests {
     fn the_browsers_own_write_is_not_sent_back() {
         let mut s = SyncState::default();
         assert!(s.remote_set("from phone"));
-        // Windows announces the write we just made.
         assert_eq!(s.local_changed("from phone".into()), Local::Echo);
-        // A later, different copy on the PC goes out.
         assert_eq!(
             s.local_changed("from pc".into()),
             Local::Forward("from pc".into())
         );
-        // And the phone setting that very text again still writes.
         assert!(s.remote_set("from pc"));
     }
 

@@ -1,5 +1,4 @@
 // KeyboardEvent.code -> USB HID usage ID (Keyboard/Keypad page 0x07).
-// Physical key positions, so the host sees the same key regardless of browser layout.
 
 const map = {
   Enter: 0x28, Escape: 0x29, Backspace: 0x2a, Tab: 0x2b, Space: 0x2c,

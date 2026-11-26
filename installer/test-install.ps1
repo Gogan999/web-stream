@@ -33,13 +33,10 @@ function Check([bool]$ok, [string]$what) {
     if ($ok) { Write-Host "ok   $what" } else { Write-Host "FAIL $what" -ForegroundColor Red; $script:Failures += $what }
 }
 
-# The Run value, or $null when there is none (StrictMode won't read a
-# missing property off the key).
 function Get-RunValue {
     try { Get-ItemPropertyValue -Path $RunKey -Name 'web-stream host' -ErrorAction Stop } catch { $null }
 }
 
-# Software OpenGL for a runner without a GPU, next to the installed app.
 function Add-SoftwareGl {
     $archive = Join-Path $env:RUNNER_TEMP 'mesa.7z'
     if (-not (Test-Path $archive) -or (Get-FileHash -Algorithm SHA256 $archive).Hash -ne $Mesa.Sha256) {
@@ -80,10 +77,7 @@ function Install([string]$log) {
     }
 }
 
-# Setup as the tray app's updater runs it: quiet, asking for the app back.
 function Install-Relaunch([string]$log) {
-    # No -Wait: it waits for the whole process tree, and the relaunched app
-    # (which stays running) is a child of setup.
     $p = Start-Process -FilePath $Setup -PassThru -ArgumentList @(
         '/SILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/RELAUNCH', "/LOG=`"$log`"")
     if (-not $p.WaitForExit(300000)) { throw 'setup /RELAUNCH did not finish in 5 minutes' }
@@ -99,7 +93,6 @@ function Status([string]$path) {
 }
 
 Install (Join-Path $env:RUNNER_TEMP 'setup1.log')
-# Again over the first: an upgrade.
 Install (Join-Path $env:RUNNER_TEMP 'setup2.log')
 
 Check (Test-Path $Exe) 'the tray app is in Program Files'
@@ -111,7 +104,6 @@ $run = Get-RunValue
 Check ($run -eq "`"$Exe`" --hidden") "start with Windows points at the installed app ($run)"
 Check (Test-Path $UninstallKey) 'listed in Apps'
 
-# A plain silent install starts nothing; only /RELAUNCH starts the app.
 Check ($null -eq (Get-Process -Name 'ws-host-gui' -ErrorAction SilentlyContinue)) 'a silent install does not start the app'
 
 # The host the installed app runs.
@@ -128,8 +120,6 @@ Check ($session -eq '401') "the host answers, unpaired (/api/session: $session)"
 Check ((Status '/') -eq '200') 'the host serves the web client'
 Check ((Status '/ca.crt') -eq '200') 'the host offers its CA certificate'
 
-# An update while the app runs (a double-clicked setup or the one-line installer): setup quits
-# the app by itself and starts it again.
 $before = (Get-Process -Name 'ws-host-gui').Id
 $log = Join-Path $env:RUNNER_TEMP 'setup-running.log'
 $p = Start-Process -FilePath $Setup -PassThru -ArgumentList @(
@@ -152,9 +142,6 @@ if ($Failures.Count) { Show-Logs }
 Stop-Process -Name 'ws-host-gui' -Force -ErrorAction SilentlyContinue
 Start-Sleep -Seconds 2
 
-# An update, as the tray app runs it: setup /SILENT /RELAUNCH over the
-# installed version, which must leave the app running again (with its
-# single-instance lock free for it, since the old copy exited).
 Install-Relaunch (Join-Path $env:RUNNER_TEMP 'setup3.log')
 $session = ''
 foreach ($i in 1..60) {
@@ -169,8 +156,6 @@ Stop-Process -Name 'ws-host-gui' -Force -ErrorAction SilentlyContinue
 Start-Sleep -Seconds 2
 Remove-SoftwareGl
 
-# Uninstall. The uninstaller runs a copy of itself from the temp folder and
-# returns at once, so wait for the folder to go.
 Start-Process -FilePath (Join-Path $App 'unins000.exe') -Wait -ArgumentList @(
     '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/PURGE')
 foreach ($i in 1..60) {

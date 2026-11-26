@@ -1,24 +1,8 @@
-//! Keep the TLS key and device store private to the account running the
-//! host. Unix gets 0600/0700 modes at creation; Windows gets a protected DACL
-//! allowing only the user running the host, administrators and SYSTEM, since
-//! a data dir under `ProgramData` would otherwise be readable by every local
-//! user.
-//!
-//! The Windows ACE names the user's own SID, not "owner rights": a host run
-//! as administrator creates files owned by the Administrators group, and an
-//! owner-rights ACE then locks the same user out when they run the host
-//! (or the tray app) normally.
-//!
-//! Administrators are named too, and not only for the folders they can take
-//! anyway: run by the service, the host is SYSTEM (or LocalService), so
-//! "this user and SYSTEM" would come out as a folder no administrator can
-//! read, and the tray app could never attach to the service's host (it
-//! reads the control pipe's name from the service's data folder).
+//! Keep the TLS key and device store private to the account running the host.
 
 use std::path::Path;
 
-/// Restrict `dir` and every regular file directly inside it. Links are left
-/// alone, so nothing outside the directory is changed through one.
+/// Restrict `dir` and every regular file directly inside it.
 pub fn restrict_tree(dir: &Path) -> std::io::Result<()> {
     restrict_to_owner(dir)?;
     for entry in std::fs::read_dir(dir)? {
@@ -48,8 +32,8 @@ pub fn restrict_to_owner(path: &Path) -> std::io::Result<()> {
         .collect();
     let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
     let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
-    // SAFETY: both strings are NUL-terminated and outlive the calls; `sd` is
-    // allocated by the first call and freed with LocalFree below.
+    // SAFETY: both strings are NUL-terminated and outlive the calls; `sd` is allocated by the first
+    // call and freed with LocalFree below.
     unsafe {
         if ConvertStringSecurityDescriptorToSecurityDescriptorW(
             sddl.as_ptr(),
@@ -74,15 +58,14 @@ pub fn restrict_to_owner(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Full access for `sid`, administrators and SYSTEM, inherited by anything
-/// created inside a directory; `P` = do not inherit the parent's ACEs.
+/// Full access for `sid`, administrators and SYSTEM, inherited by anything created inside a
+/// directory; `P` = do not inherit the parent's ACEs.
 #[cfg(windows)]
 fn dacl_sddl(sid: &str) -> String {
     format!("D:P(A;OICI;FA;;;{sid})(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)")
 }
 
 /// The SID of the user this process runs as, in string form ("S-1-5-21-...").
-/// The same when elevated.
 #[cfg(windows)]
 fn user_sid() -> std::io::Result<String> {
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LocalFree};
@@ -94,10 +77,9 @@ fn user_sid() -> std::io::Result<String> {
     if let Some(sid) = SID.get() {
         return Ok(sid.clone());
     }
-    // SAFETY: the token handle is closed before returning; `buf` is large
-    // enough for a TOKEN_USER (checked by GetTokenInformation) and u64-aligned;
-    // the string from ConvertSidToStringSidW is NUL-terminated and freed
-    // with LocalFree.
+    // SAFETY: the token handle is closed before returning; `buf` is large enough for a TOKEN_USER
+    // (checked by GetTokenInformation) and u64-aligned; the string from ConvertSidToStringSidW is
+    // NUL-terminated and freed with LocalFree.
     let sid = unsafe {
         let mut token: HANDLE = std::ptr::null_mut();
         if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
@@ -144,10 +126,9 @@ pub fn restrict_to_owner(_path: &Path) -> std::io::Result<()> {
 
 #[cfg(all(test, windows))]
 mod tests {
-    /// Run by the service the host is SYSTEM, so a DACL naming only "this
-    /// user" and SYSTEM came out as SYSTEM alone: the folder held the
-    /// control pipe's name, and the tray app, however elevated, could no
-    /// longer read it to attach to the service's host.
+    /// Run by the service the host is SYSTEM, so a DACL naming only "this user" and SYSTEM came out
+    /// as SYSTEM alone: the folder held the control pipe's name, and the tray app, however
+    /// elevated, could no longer read it to attach to the service's host.
     #[test]
     fn a_system_host_leaves_the_folder_readable_by_administrators() {
         let sddl = super::dacl_sddl("S-1-5-18");

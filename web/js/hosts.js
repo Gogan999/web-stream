@@ -49,7 +49,6 @@ export function setLocalName(name, storage = globalThis.localStorage) {
 }
 
 // Address or pairing link -> { origin, link }; null when it is not one.
-// "192.168.1.20" and "pc.lan" get the host port; "https://name" keeps its own.
 export function parseTarget(text) {
   const raw = String(text ?? '').trim();
   if (!raw) return null;

@@ -3,17 +3,14 @@
 /// One keystroke of typed text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TextKey {
-    /// A UTF-16 code unit, sent as a `KEYEVENTF_UNICODE` press and release
-    /// (a character outside the BMP is two of these, high surrogate first).
+    /// A UTF-16 code unit, sent as a `KEYEVENTF_UNICODE` press and release.
     Unit(u16),
     /// Enter: most programs ignore a Unicode line feed.
     Enter,
     Tab,
 }
 
-/// The keystrokes that type `text`. A CR LF pair (a Windows or browser
-/// line break) is one Enter; control characters other than Tab and line
-/// breaks are dropped, since they would do something other than type.
+/// The keystrokes that type `text`.
 pub fn text_keys(text: &str) -> Vec<TextKey> {
     let mut out = Vec::with_capacity(text.len());
     let mut chars = text.chars().peekable();

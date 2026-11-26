@@ -50,7 +50,6 @@ test('a position on the second monitor carries its lane', () => {
   assert.deepEqual(P.decode(P.mouseAbs(0, 1, undefined, 1)), { type: 'mouse-abs', lane: 1, x: 0, y: 65535 });
   assert.deepEqual(P.decode(P.mouseAbs(0.5, 0, 300, 1)), { type: 'mouse-abs', lane: 1, x: 32768, y: 0, seq: 300 });
   assert.equal(P.mouseAbs(0.5, 0.5, 7, 1).byteLength, 8);
-  // The main monitor keeps the original form.
   assert.equal(P.mouseAbs(0.5, 0.5, 7, 0).byteLength, 7);
   assert.equal(new Uint8Array(P.mouseAbs(0.5, 0.5, 7))[0], 0x02);
 });

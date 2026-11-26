@@ -1,7 +1,6 @@
-//! The session host's console, on a named pipe only SYSTEM and elevated
-//! administrators can open: whoever can open pairing can let a browser
-//! drive the sign-in screen and UAC prompts, so a program running as a
-//! normal user must not be able to.
+//! The session host's console, on a named pipe only SYSTEM and elevated administrators can open:
+//! whoever can open pairing can let a browser drive the sign-in screen and UAC prompts, so a
+//! program running as a normal user must not be able to.
 
 use std::ffi::c_void;
 use std::io::Write;
@@ -29,24 +28,18 @@ use super::launch::wide;
 use crate::console::{self, EVENTS_JSON, command_lines, describe};
 
 /// Protected DACL: full access for SYSTEM and Administrators, nobody else.
-/// An administrator's unelevated token has Administrators as deny-only, so
-/// it takes an elevated prompt.
 const PIPE_SDDL: &str = "D:P(A;;GA;;;SY)(A;;GA;;;BA)";
 const ERROR_ACCESS_DENIED: i32 = 5;
 const ERROR_FILE_NOT_FOUND: i32 = 2;
 const ERROR_PIPE_BUSY: i32 = 231;
 
 /// Runs the host with its console on the pipe, until it is told to quit.
-/// `pipe` is the name the service picked (see `PIPE_PREFIX`). With a `link`
-/// (an inherited pipe handle; 0 for none) this is the media side, and the
-/// network host at the other end serves the browser.
 pub async fn serve(pipe: String, link: usize, opts: ServeOptions) -> anyhow::Result<()> {
     let (commands, commands_rx) = mpsc::channel(8);
     let (events_tx, mut events) = mpsc::unbounded_channel::<Event>();
     let (sent, _) = broadcast::channel::<Event>(256);
     let snapshot = Arc::new(Mutex::new(console::Snapshot::default()));
 
-    // The first instance fails if anyone else holds the name.
     let first = create(&pipe, true).with_context(|| format!("control pipe {pipe} is taken"))?;
     tokio::spawn(accept(
         pipe,
@@ -60,8 +53,6 @@ pub async fn serve(pipe: String, link: usize, opts: ServeOptions) -> anyhow::Res
             if let Some(text) = describe(e.clone()) {
                 tracing::info!("{text}");
             }
-            // Under the lock, so a console that connects now gets either
-            // the snapshot with this event, or this event.
             let mut snapshot = snapshot.lock().unwrap();
             snapshot.update(&e);
             let _ = sent.send(e);
@@ -74,8 +65,8 @@ pub async fn serve(pipe: String, link: usize, opts: ServeOptions) -> anyhow::Res
         );
         return serve::serve(opts, commands_rx, events_tx).await;
     }
-    // SAFETY: the service handed this process the pipe's server end,
-    // overlapped and already connected, and nothing else here owns it.
+    // SAFETY: the service handed this process the pipe's server end, overlapped and already
+    // connected, and nothing else here owns it.
     let link = unsafe { NamedPipeServer::from_raw_handle(link as *mut c_void) }
         .context("the link to the network host")?;
     crate::split::serve_media(opts, link, commands_rx, events_tx).await
@@ -99,8 +90,7 @@ fn create(name: &str, first: bool) -> std::io::Result<NamedPipeServer> {
         lpSecurityDescriptor: sd.0,
         bInheritHandle: false.into(),
     };
-    // SAFETY: `sa` points at a valid SECURITY_ATTRIBUTES for the call, which
-    // copies the descriptor.
+    // SAFETY: `sa` points at a valid SECURITY_ATTRIBUTES for the call, which copies the descriptor.
     let server = unsafe {
         ServerOptions::new()
             .first_pipe_instance(first)
@@ -121,14 +111,12 @@ async fn accept(
 ) {
     loop {
         let connected = server.connect().await;
-        // A free instance for the next console before serving this one.
         let next = match create(&name, false) {
             Ok(s) => s,
             Err(e) => return tracing::error!("control pipe: {e}"),
         };
         let client = std::mem::replace(&mut server, next);
         if let Err(e) = connected {
-            // Say, a client that left at once: this instance is done for.
             tracing::debug!("control pipe: {e}");
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             continue;
@@ -174,9 +162,8 @@ fn current_pipe() -> anyhow::Result<(String, u32)> {
         .with_context(|| format!("{} does not name a control pipe", file.display()))
 }
 
-/// Fails unless process `pid` serves the pipe `handle` is connected to: a
-/// pipe name can be seen by anyone, and taken by anyone once its host is
-/// gone.
+/// Fails unless process `pid` serves the pipe `handle` is connected to: a pipe name can be seen by
+/// anyone, and taken by anyone once its host is gone.
 fn check_server(handle: HANDLE, name: &str, pid: u32) -> anyhow::Result<()> {
     let mut server = 0u32;
     // SAFETY: a valid pipe handle.
@@ -188,12 +175,8 @@ fn check_server(handle: HANDLE, name: &str, pid: u32) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Attaches to the service's host, checking it is the process the service
-/// started, and passes on its events until the pipe breaks (the host
-/// stopped) or `commands` closes. The tray app, run as an elevated
-/// administrator, is the one user: it shows the service's host as it
-/// would its own. [`serve::Command::Quit`] only detaches; it never stops
-/// the service's host.
+/// Attaches to the service's host, checking it is the process the service started, and passes on
+/// its events until the pipe breaks (the host stopped) or `commands` closes.
 pub async fn attach(
     mut commands: mpsc::Receiver<serve::Command>,
     events: mpsc::UnboundedSender<Event>,
@@ -214,8 +197,6 @@ pub async fn attach(
                 if line.trim().is_empty() {
                     continue;
                 }
-                // A build from before the tray app could attach greets
-                // in text.
                 let e = serde_json::from_str::<Event>(&line).map_err(|_| {
                     anyhow::anyhow!(
                         "the service runs an older build: click \"Update the service\" \
@@ -257,11 +238,8 @@ async fn open_client() -> anyhow::Result<tokio::net::windows::named_pipe::NamedP
     Ok(client)
 }
 
-/// Tells the host (process `pid`) to quit, retrying for a moment while
-/// its pipe isn't up yet or is busy. Called by the service, which runs as
-/// SYSTEM: the pipe is opened for identification only, so whoever answers
-/// can't act as the service, and nothing is sent unless the host itself
-/// answers.
+/// Tells the host (process `pid`) to quit, retrying for a moment while its pipe isn't up yet or is
+/// busy.
 pub fn request_quit(name: &str, pid: u32) -> anyhow::Result<()> {
     let deadline = Instant::now() + Duration::from_secs(2);
     let mut pipe = loop {

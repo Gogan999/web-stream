@@ -1,5 +1,5 @@
-//! Windows injection: `SendInput` for keyboard and mouse, ViGEmBus for
-//! virtual Xbox 360 and DualShock 4 controllers.
+//! Windows injection: `SendInput` for keyboard and mouse, ViGEmBus for virtual Xbox 360 and
+//! DualShock 4 controllers.
 
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Once};
@@ -58,9 +58,8 @@ impl DisplayRect {
     }
 }
 
-/// Makes the process per-monitor DPI aware (v2), so system metrics are in
-/// the same physical pixels as DXGI's display coordinates. Fails harmlessly
-/// when awareness was already set, e.g. by the manifest or another crate.
+/// Makes the process per-monitor DPI aware (v2), so system metrics are in the same physical pixels
+/// as DXGI's display coordinates.
 pub(crate) fn ensure_dpi_aware() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
@@ -84,8 +83,7 @@ enum Pad {
 }
 
 enum Slot {
-    /// Plug-in runs on its own thread because `wait_ready` blocks. Updates
-    /// before it is ready are dropped; the client resends state every 100 ms.
+    /// Plug-in runs on its own thread.
     Pending {
         ready: Receiver<Result<Pad, SinkError>>,
     },
@@ -102,16 +100,10 @@ pub struct WindowsInput {
 
 fn send(inputs: &[INPUT]) -> Result<(), SinkError> {
     let mut sent = send_once(inputs);
-    // The lock screen or a UAC prompt came up, or went away: input goes to
-    // the desktop showing now. Only works when running as SYSTEM. Retried
-    // only when nothing went in, so a partial send isn't doubled.
     if sent == 0 && ws_desktop::follow_input_desktop() {
         sent = send_once(inputs);
     }
     if sent as usize != inputs.len() {
-        // Usually UIPI: the foreground window belongs to an elevated process,
-        // or the secure desktop (UAC, lock screen) is showing. The host
-        // service (running as SYSTEM) gets past both.
         return Err(SinkError(format!(
             "SendInput blocked: {}",
             windows::core::Error::from_thread()
@@ -157,9 +149,8 @@ fn keyboard(vk: u16, scan: u16, flags: KEYBD_EVENT_FLAGS) -> INPUT {
 }
 
 impl WindowsInput {
-    /// `rumble` is called from a ViGEm notification thread whenever a game
-    /// sets an Xbox controller's motors, with a [`HostControl::Rumble`] to
-    /// send on the `control` channel.
+    /// `rumble` is called from a ViGEm notification thread whenever a game sets an Xbox
+    /// controller's motors, with a [`HostControl::Rumble`] to send on the `control` channel.
     pub fn new(rumble: impl Fn(HostControl) + Send + Sync + 'static) -> Self {
         ensure_dpi_aware();
         Self {
@@ -171,8 +162,8 @@ impl WindowsInput {
         }
     }
 
-    /// Call when the streamed display changes so absolute mouse positions land
-    /// on the display the client is looking at.
+    /// Call when the streamed display changes so absolute mouse positions land on the display the
+    /// client is looking at.
     pub fn set_display_rect(&mut self, display: DisplayRect) {
         self.display = display;
     }
@@ -220,7 +211,6 @@ fn plug_in(
             t.wait_ready().map_err(err)?;
             match t.request_notification() {
                 Ok(req) => {
-                    // The thread ends by itself when the target is unplugged.
                     req.spawn_thread(move |_, n| {
                         rumble(HostControl::Rumble {
                             index,
@@ -301,7 +291,6 @@ impl InputSink for WindowsInput {
             inputs.push(down);
             inputs.push(up);
         }
-        // Chunked so one call stays small; each chunk holds whole pairs.
         for chunk in inputs.chunks(512) {
             send(chunk)?;
         }
@@ -389,8 +378,6 @@ impl InputSink for WindowsInput {
         std::thread::Builder::new()
             .name(format!("ws-input-pad{index}"))
             .spawn(move || {
-                // If the slot was dropped meanwhile, the returned pad is dropped
-                // here, which unplugs it.
                 let _ = tx.send(plug_in(client, index, kind, rumble));
             })
             .map_err(|e| SinkError(format!("gamepad {index}: {e}")))?;

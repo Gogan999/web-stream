@@ -11,7 +11,7 @@ pub enum AudioDirection {
     Capture,
 }
 
-/// One Opus packet (typically 10 ms or 20 ms).
+/// One Opus packet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AudioPacket {
     pub direction: AudioDirection,

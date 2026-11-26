@@ -1,5 +1,5 @@
-//! Short-lived TURN credentials (draft-uberti-behave-turn-rest), as coturn
-//! checks them with `use-auth-secret`.
+//! Short-lived TURN credentials (draft-uberti-behave-turn-rest), as coturn checks them with
+//! `use-auth-secret`.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -43,7 +43,6 @@ mod tests {
         let now = UNIX_EPOCH + Duration::from_secs(1_000_000);
         let ice = credentials(&server, now);
         assert_eq!(ice.username.as_deref(), Some("1003600:web-stream"));
-        // printf '1003600:web-stream' | openssl dgst -sha1 -hmac secret -binary | base64
         assert_eq!(
             ice.credential.as_deref(),
             Some("Fc6VduirVhPFTBq3lqlH9U1thOo=")

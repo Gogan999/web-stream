@@ -1,11 +1,6 @@
-// Development server standing in for the host's built-in HTTPS listener: serves web/,
-// implements the pairing API (docs/dev/signaling.md) in memory, and relays /ws between one
-// mock host page (/ws?role=host) and one paired client. Not for production.
-//
-//   node dev/server.mjs [port]     then open http://localhost:8080/dev/mock-host.html
-//                                  and http://localhost:8080/
-//
-// The pairing code is printed here and shown on the mock host page.
+// Development server standing in for the host's built-in HTTPS listener: serves web/, implements
+// the pairing API (docs/dev/signaling.md) in memory, and relays /ws between one mock host page
+// (/ws?role=host) and one paired client.
 
 import http from 'node:http';
 import fs from 'node:fs/promises';
@@ -19,7 +14,7 @@ const port = Number(process.argv[2] || process.env.PORT || 8080);
 const types = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.webmanifest': 'application/manifest+json' };
 
 const devices = new Map(); // cookie token -> device name
-const pairings = new Map(); // pairing_id -> { code, name, expires, attempts }
+const pairings = new Map();
 let host = null;
 let lastCode = null;
 let client = null;
@@ -124,7 +119,6 @@ server.on('upgrade', (req, socket, head) => {
     }
     ws.on('message', (data) => {
       (isHost ? client : host)?.send(data.toString());
-      // Like the real host: after a handoff the client's socket closes and the session goes on.
       if (!isHost && /"type":"handoff"/.test(data.toString())) ws.close(1000, 'handoff');
     });
     ws.on('close', () => {

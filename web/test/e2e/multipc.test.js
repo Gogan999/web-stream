@@ -60,12 +60,10 @@ test('a saved second PC pairs by token, connects, survives a reload and swaps', 
   assert.equal(saved[0].origin, baseB);
   assert.ok(saved[0].token);
 
-  // Reload: the saved PC is offered and autoconnect picks it again.
   await client.reload();
   await connected(client);
   assert.equal(await client.locator('#pair').isHidden(), true);
 
-  // Pair the page's own PC too, then swap with the toolbar switcher.
   await client.click('#connect');
   await client.waitForSelector('#pc-list li');
   await client.click('#pc-list button.pc-connect:has-text("Pair")');
@@ -83,7 +81,6 @@ test('a saved second PC pairs by token, connects, survives a reload and swaps', 
   await connected(client);
   assert.equal(await client.evaluate(() => JSON.parse(localStorage.getItem('ws-host-last'))), saved[0].id);
 
-  // Forgetting the saved PC removes it from the list and the switcher.
   await client.click('#connect');
   client.once('dialog', (d) => d.accept());
   await client.click('#pc-list .pc-remove');

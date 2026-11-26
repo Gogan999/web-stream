@@ -1,5 +1,4 @@
-//! Embeds the web client (`web/index.html`, `style.css`, the manifest, `sw.js`,
-//! `icons/*.png` and `js/`) in the binary.
+//! Embeds the web client in the binary.
 
 use std::fmt::Write;
 use std::path::{Path, PathBuf};

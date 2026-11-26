@@ -1,20 +1,4 @@
 //! Temporary diagnostic log for chasing freezes and unexpected keyframes.
-//!
-//! Off unless `WS_DIAG` is set when the host starts, or a file named
-//! `ws-diag.on` sits next to the executable (for the tray app and the
-//! service, which don't inherit a shell's environment). `WS_DIAG=1` or the
-//! marker file writes `ws-diag-<unix seconds>.log` next to the executable (or
-//! in the temp directory if that isn't writable); any other `WS_DIAG` value
-//! is the file path, and `WS_DIAG=0` turns it off even with the marker.
-//!
-//! Every line is `<unix ms> <host ms> <kind> <key=value ...>`: the first is
-//! wall-clock time, to line up with the browser's diagnostic log, the second
-//! the host's monotonic clock that frame timestamps use. Lines go through a
-//! channel to a writer thread, so a slow disk never holds up capture or the
-//! transport; if the writer falls behind, lines are dropped and counted.
-//!
-//! Meant to come out again: every call site uses [`diag!`], so removing this
-//! crate and its uses is a grep.
 
 use std::fmt::Write as _;
 use std::io::Write as _;
@@ -39,7 +23,7 @@ fn sink() -> Option<&'static Sink> {
     SINK.get_or_init(open).as_ref()
 }
 
-/// Whether diagnostics are on. Cheap after the first call.
+/// Whether diagnostics are on.
 pub fn enabled() -> bool {
     sink().is_some()
 }
@@ -49,7 +33,7 @@ pub fn path() -> Option<PathBuf> {
     sink().map(|s| s.path.clone())
 }
 
-/// Writes one line. Use [`diag!`], which skips formatting when off.
+/// Writes one line.
 pub fn write(kind: &str, args: std::fmt::Arguments<'_>) {
     let Some(sink) = sink() else { return };
     let wall = SystemTime::now()
@@ -68,7 +52,7 @@ pub fn write(kind: &str, args: std::fmt::Arguments<'_>) {
     }
 }
 
-/// Logs a diagnostic line: `diag!("kind", "key={} ...", value)`.
+/// Logs a diagnostic line: `diag!`.
 #[macro_export]
 macro_rules! diag {
     ($kind:expr, $($arg:tt)*) => {
@@ -115,8 +99,6 @@ fn open() -> Option<Sink> {
         .name("ws-diag".into())
         .spawn(move || {
             let mut out = std::io::BufWriter::with_capacity(256 * 1024, file);
-            // Flush whenever the queue runs dry, and at least every half
-            // second, so a crash or a killed process loses little.
             loop {
                 match rx.recv_timeout(Duration::from_millis(500)) {
                     Ok(line) => {

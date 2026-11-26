@@ -85,7 +85,6 @@ function Get-HostProcess([string]$Name) {
     })
 }
 
-# Swaps each exe with its .old copy. Works while the host runs from either.
 function Switch-Builds {
     foreach ($exe in $Exes) {
         $cur = Join-Path $bin $exe
@@ -106,7 +105,6 @@ function Switch-Builds {
     }
 }
 
-# Puts the .old build back after a failed set-aside or build.
 function Restore-Build {
     foreach ($exe in $Exes) {
         $cur = Join-Path $bin $exe
@@ -115,9 +113,6 @@ function Restore-Build {
     if (Test-Path "$commitFile.old") { Move-Item -Force "$commitFile.old" $commitFile }
 }
 
-# The web-stream service runs its own copy of the host from Program Files.
-# Copying the new build there takes administrator rights: one UAC prompt,
-# which a browser connected through the service can answer.
 function Update-Service {
     if (-not (Get-Service -Name 'web-stream' -ErrorAction SilentlyContinue)) { return }
     $exe = Join-Path $bin 'ws-host-gui.exe'
@@ -139,8 +134,6 @@ function Update-Service {
     }
 }
 
-# The console host (ws-host.exe) is retired: the tray app does everything
-# it did. Removes what earlier builds left, unless it still runs.
 function Remove-ConsoleHost {
     $console = Join-Path $bin 'ws-host.exe'
     if (-not (Test-Path $console) -and -not (Test-Path "$console.old")) { return }
@@ -162,7 +155,6 @@ function Restart-Host {
     }
     $gui = Join-Path $bin 'ws-host-gui.exe'
     $running = Get-HostProcess 'ws-host-gui'
-    # With the service hosting, the tray app would only fight it for the ports.
     if (Get-Service -Name 'web-stream' -ErrorAction SilentlyContinue) {
         if ($running) {
             Write-Host 'The tray app is running alongside the web-stream service; they use the same ports. Quit the tray app.' -ForegroundColor Yellow
@@ -177,7 +169,6 @@ function Restart-Host {
         Write-Step 'Restarting the host'
         $running | Stop-Process -Force
         $running | Wait-Process -Timeout 15 -ErrorAction SilentlyContinue
-        # A copy still running holds the single-instance lock, and the new one would exit.
         if (Get-HostProcess 'ws-host-gui') { throw 'The old host did not stop. Quit it from the tray and start it again.' }
     } else {
         Write-Step 'Starting the host'
@@ -185,10 +176,8 @@ function Restart-Host {
     $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
         [Security.Principal.WindowsBuiltInRole]::Administrator)
     if ($admin) {
-        # Never start the host elevated: Explorer starts it as the normal user.
         Start-Process -FilePath explorer.exe -ArgumentList "`"$gui`""
     } else {
-        # Back to the tray, as after Start with Windows: the window would cover the stream.
         $start = @{ FilePath = $gui; WorkingDirectory = $bin }
         if ($running) { $start.ArgumentList = '--hidden' }
         Start-Process @start
@@ -221,7 +210,6 @@ foreach ($tool in 'git', 'cargo') {
     }
 }
 
-# A folder from GitHub's "Download ZIP" has no git history to pull into.
 if (-not (Test-Path (Join-Path $repo '.git'))) {
     throw "$repo is not a git clone (a downloaded ZIP has no .git folder), so it can't be updated. Clone it once with: git clone https://github.com/Gogan999/web-stream.git, then run scripts\install.ps1 from the clone."
 }
@@ -233,18 +221,10 @@ if (Invoke-Git status --porcelain --untracked-files=no) {
     throw 'The checkout has local changes. Commit or discard them (git status) and run this again.'
 }
 
-# Whether $Tag is a signed release: a tag object named host-* that names
-# itself $Tag (so a tag signed as something else can't be pushed under a
-# release name), signed with SSH by a key in $Signers. OpenPGP and X.509
-# signatures are refused, whatever keys this PC trusts.
 function Test-SignedTag([string]$Signers, [string]$Tag) {
     if ($Tag -notlike 'host-*') { return $false }
-    # Windows PowerShell turns a native command's redirected stderr into
-    # errors, which 'Stop' would end the script on, and verify-tag reports
-    # even a good signature on stderr. Local to this function.
     $ErrorActionPreference = 'Continue'
     $body = @(& git -C $repo cat-file tag $Tag 2>$null)
-    # A lightweight tag has no tag object, and no signature.
     if ($LASTEXITCODE -ne 0) { return $false }
     $blank = [array]::IndexOf($body, '')
     $header = if ($blank -ge 0) { $body[0..($blank - 1)] } else { $body }
@@ -260,8 +240,6 @@ function Test-OnMain([string]$Commit) {
     $LASTEXITCODE -eq 0
 }
 
-# The newest signed release on main, as a commit id, or $null if there is
-# none.
 function Find-SignedRelease([string]$Signers) {
     $tags = @(Invoke-Git tag --list 'host-*' --sort=-creatordate)
     foreach ($tag in $tags) {
@@ -282,7 +260,6 @@ function Find-SignedRelease([string]$Signers) {
     $null
 }
 
-# Whether a signed release on main points at this checkout's commit.
 function Test-HeadSigned([string]$Signers) {
     $head = (Invoke-Git rev-parse HEAD).Trim()
     if (-not (Test-OnMain $head)) { return $false }
@@ -300,9 +277,6 @@ if (Test-Path $signers) {
     if (-not $target) {
         throw "No host-* tag on main is signed by a key in $signers, so there is nothing to build. Sign one (git tag -s host-<date>) and push it."
     }
-    # Only forward along main. A checkout ahead of the newest release has
-    # commits nobody signed (pulled by hand, or before signing was set up):
-    # build it only if it is itself a signed release.
     & git -C $repo merge-base --is-ancestor HEAD $target
     if ($LASTEXITCODE -ne 0) {
         if (-not (Test-HeadSigned $signers)) {
@@ -329,11 +303,7 @@ if ($new) {
     $head = (Invoke-Git rev-parse HEAD).Trim()
 }
 
-# Keep the current build as .old, so the build can write new executables
-# while the host runs and so -Rollback has something to go back to.
 Write-Step 'Setting the current build aside'
-# Delete the build before last first, so nothing has moved yet if one of
-# its executables is still running.
 foreach ($exe in $Exes) {
     $old = Join-Path $bin "$exe.old"
     if (-not (Test-Path $old)) { continue }
@@ -353,9 +323,6 @@ try {
     Restore-Build
     throw "Could not set the current build aside: $_"
 }
-# Cargo hard-links target\release\<exe> to its copy in deps, so the running
-# host also holds that file and the linker could not write it. Rename it
-# too; earlier copies are deleted once nothing runs from them.
 $deps = Join-Path $bin 'deps'
 if (Test-Path $deps) {
     Get-ChildItem -Path $deps -Filter '*.old' | ForEach-Object {
@@ -372,8 +339,6 @@ if (Test-Path $deps) {
 Write-Step 'Building the host (release)'
 Push-Location $repo
 try {
-    # --target-dir: a CARGO_TARGET_DIR in the environment would put the build
-    # somewhere other than $bin.
     & cargo build --release --target-dir (Join-Path $repo 'target') -p ws-host-gui
     $ok = $LASTEXITCODE -eq 0
 } finally {

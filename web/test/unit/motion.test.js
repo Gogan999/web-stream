@@ -64,7 +64,7 @@ test('an absolute click sends the pointer position before the button', () => {
   Object.defineProperty(ic, 'locked', { value: false });
   ic.mode = 'absolute';
   ic.stageFocused = true;
-  ic.motionSentAt = performance.now(); // motion just went out, so this move alone would wait
+  ic.motionSentAt = performance.now();
   ic.onMouseDown({ clientX: 50, clientY: 50, button: 0, preventDefault() {} });
   assert.deepEqual(session.sent.map((m) => m.type), ['mouse-abs', 'mouse-button']);
   clearTimeout(ic.motionTimer);

@@ -76,10 +76,11 @@ jobs:
         working-directory: web
       - run: npx playwright install --with-deps chromium
         working-directory: web
-      - run: cargo build -p ws-transport --example test_pattern
+      - name: build the test pattern host (release, so its software AV1 encoder keeps up on a shared runner)
+        run: cargo build --release -p ws-transport --example test_pattern
       - name: e2e
         run: node crates/transport/examples/e2e/run.mjs 18443
         env:
           TEST_BLOCK_UDP: '1'
-          TEST_PATTERN_BIN: ${{ github.workspace }}/target/debug/examples/test_pattern
+          TEST_PATTERN_BIN: ${{ github.workspace }}/target/release/examples/test_pattern
           PLAYWRIGHT_PATH: ${{ github.workspace }}/web/node_modules/playwright

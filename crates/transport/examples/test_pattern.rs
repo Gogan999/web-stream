@@ -1,5 +1,5 @@
 //! End-to-end harness: the embedded signaling server plus the transport, streaming a moving AV1
-//! test pattern (software-encoded with rav1e.
+//! test pattern encoded in software with rav1e.
 
 use std::path::PathBuf;
 use std::sync::Arc;

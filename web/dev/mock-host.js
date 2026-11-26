@@ -148,8 +148,7 @@ async function offer() {
       if (channel.label === 'control') {
         const c = JSON.parse(m.data);
         write({ ev: 'control', ...c });
-        // Like the real host: the stream keeps its configured size whatever the display (the canvas
-        // resizes here only.
+        // Like the real host: the stream keeps its configured size whatever the display.
         if (c.type === 'listDisplays') {
           sendDisplays(channel);
           sendConfig(channel);

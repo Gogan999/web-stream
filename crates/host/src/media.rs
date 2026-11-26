@@ -258,7 +258,7 @@ struct Parked {
     video: Video,
     /// The display it captures.
     display: DisplayId,
-    /// The rate its encoder runs at (changed in place.
+    /// The rate its encoder runs at.
     bitrate_kbps: u32,
     audio: Option<platform::Loopback>,
 }

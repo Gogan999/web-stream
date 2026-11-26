@@ -18,8 +18,7 @@ export function diagEnabled(params, storage) {
   try { return storage?.getItem('ws-diag') === '1'; } catch { return false; }
 }
 
-// The fields above from an inbound-rtp video stats object, plus the decoder (logged when it
-// changes.
+// The fields above from an inbound-rtp video stats object, plus the decoder.
 export function videoSample(s) {
   const out = {};
   for (const k of VIDEO_FIELDS) if (s[k] != null) out[k] = typeof s[k] === 'number' ? +s[k].toFixed(4) : s[k];

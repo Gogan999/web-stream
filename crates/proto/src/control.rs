@@ -343,7 +343,7 @@ pub struct BottleneckReport {
     pub detail: String,
     /// The size the host encodes at now, percent of the browser's asked size.
     pub scale_percent: u32,
-    /// Of that, how much is lost to relieving the limiter above (the host would.
+    /// Of that, how much is lost to relieving the limiter above.
     pub relieving: bool,
     /// What the size is being held down for.
     #[serde(default)]

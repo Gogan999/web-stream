@@ -9,7 +9,13 @@
     manifest, and runs it silently. Running it again updates in place.
 #>
 
+function Get-InstalledVersion([string]$Key) {
+    $item = Get-ItemProperty -Path $Key -ErrorAction SilentlyContinue
+    if ($item -and $item.PSObject.Properties['DisplayVersion']) { $item.DisplayVersion } else { $null }
+}
+
 function Install-WebStream {
+    Set-StrictMode -Version Latest
     $ErrorActionPreference = 'Stop'
     $ProgressPreference = 'SilentlyContinue'
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
@@ -33,7 +39,7 @@ function Install-WebStream {
         throw "The release $version lists no valid $name."
     }
 
-    $installed = (Get-ItemProperty -Path $uninstallKey -ErrorAction SilentlyContinue).DisplayVersion
+    $installed = Get-InstalledVersion $uninstallKey
     if ($installed -eq $version -and -not $env:WEB_STREAM_REINSTALL) {
         Write-Host "web-stream host $version is already installed and up to date."
         return

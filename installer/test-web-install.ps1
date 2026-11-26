@@ -79,7 +79,8 @@ try {
 
     # Fresh install.
     Invoke-OneLiner | Out-Null
-    $installed = (Get-ItemProperty -Path $UninstallKey -ErrorAction SilentlyContinue).DisplayVersion
+    $item = Get-ItemProperty -Path $UninstallKey -ErrorAction SilentlyContinue
+    $installed = if ($item -and $item.PSObject.Properties['DisplayVersion']) { $item.DisplayVersion } else { $null }
     Check ($installed -eq $version) "the one-liner installs $version ($installed)"
     Check (Wait-Host) 'the one-liner starts the host'
     $before = Host-Ids

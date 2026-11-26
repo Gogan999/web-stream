@@ -1,5 +1,5 @@
-//! Windows only: the tray icon, hiding the window to the tray, one instance
-//! at a time, and starting with Windows.
+//! Windows only: the tray icon, hiding the window to the tray, one instance at a time, and starting
+//! with Windows.
 
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
@@ -20,8 +20,8 @@ use windows::Win32::System::Registry::{
     HKEY_CURRENT_USER, REG_SZ, RRF_RT_REG_SZ, RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW,
 };
 use windows::Win32::System::Threading::{
-    CreateMutexW, GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_SYNCHRONIZE,
-    WaitForSingleObject,
+    CreateEventW, CreateMutexW, GetCurrentProcess, INFINITE, OpenProcess, OpenProcessToken,
+    PROCESS_SYNCHRONIZE, WaitForSingleObject,
 };
 use windows::Win32::UI::Shell::{
     FOLDERID_ProgramFilesCommonX86, KF_FLAG_DEFAULT, SHGetKnownFolderPath, ShellExecuteW,
@@ -42,12 +42,37 @@ const RUN_VALUE: &str = "web-stream host";
 /// The main window, once eframe has created it.
 static WINDOW: AtomicIsize = AtomicIsize::new(0);
 
-/// Set by the tray's "Check for updates"; the window takes it on its next
-/// frame (see [`take_update_request`]).
+/// Set by the tray's "Check for updates"; the window takes it on its next frame (see
+/// [`take_update_request`]).
 static UPDATE_REQUESTED: AtomicBool = AtomicBool::new(false);
 
+/// The named event setup and uninstall signal to make the app quit cleanly.
+const QUIT_EVENT: windows::core::PCWSTR = w!("Local\\web-stream-host-gui-quit");
+
+/// Quits like the tray's Quit when setup or uninstall signals the quit event.
+pub fn listen_for_quit(host: Host) {
+    let event = match unsafe { CreateEventW(None, true, false, QUIT_EVENT) } {
+        Ok(h) => h.0 as isize,
+        Err(e) => return tracing::debug!("quit event: {e}"),
+    };
+    let spawned = std::thread::Builder::new()
+        .name("ws-quit-event".into())
+        .spawn(move || {
+            let event = windows::Win32::Foundation::HANDLE(event as *mut _);
+            unsafe { WaitForSingleObject(event, INFINITE) };
+            tracing::info!("quitting for the installer");
+            hide_window();
+            host.stop_and_wait(Duration::from_secs(15));
+            crate::upnp::shutdown();
+            std::process::exit(0)
+        });
+    if let Err(e) = spawned {
+        tracing::debug!("quit event thread: {e}");
+    }
+}
+
 thread_local! {
-    /// Kept on the UI thread; dropped before exiting so the icon goes away.
+    /// Kept on the UI thread; dropped before exiting.
     static TRAY: RefCell<Option<TrayIcon>> = const { RefCell::new(None) };
     /// The tray's update item, whose text says when a newer version is known.
     static UPDATE_ITEM: RefCell<Option<MenuItem>> = const { RefCell::new(None) };
@@ -60,8 +85,8 @@ pub fn take_update_request() -> bool {
     UPDATE_REQUESTED.swap(false, Ordering::Relaxed)
 }
 
-/// Names the newer version in the tray menu and tooltip (UI thread only);
-/// `None` puts the plain texts back.
+/// Names the newer version in the tray menu and tooltip (UI thread only); `None` puts the plain
+/// texts back.
 pub fn set_tray_update(version: Option<&str>) {
     UPDATE_ITEM.with(|i| {
         if let Some(item) = i.borrow().as_ref() {
@@ -81,12 +106,10 @@ pub fn set_tray_update(version: Option<&str>) {
     });
 }
 
-/// The single-instance mutex, held for the life of the process (except
-/// while an update's setup runs: see [`release_instance`]).
+/// The single-instance mutex, held for the life of the process.
 static INSTANCE: AtomicIsize = AtomicIsize::new(0);
 
-/// False if the app is already running; that copy's window is brought
-/// forward instead.
+/// False if the app is already running; that copy's window is brought forward instead.
 pub fn single_instance() -> bool {
     if take_instance_mutex() {
         return true;
@@ -110,8 +133,7 @@ fn take_instance_mutex() -> bool {
     true
 }
 
-/// Lets go of the single-instance mutex, which the installer's `AppMutex`
-/// checks, before it is started.
+/// Lets go of the single-instance mutex.
 pub fn release_instance() {
     let h = INSTANCE.swap(0, Ordering::Relaxed);
     if h != 0 {
@@ -128,9 +150,8 @@ pub fn retake_instance() {
     }
 }
 
-/// Starts the downloaded setup as administrator (a UAC prompt, which it
-/// asks for itself), quietly, relaunching the app when it is done; returns
-/// once it started, not when it ends.
+/// Starts the downloaded setup as administrator, quietly, relaunching the app when it is done;
+/// returns once it started, not when it ends.
 pub fn run_setup(setup: &std::path::Path) -> anyhow::Result<()> {
     let r = unsafe {
         ShellExecuteW(
@@ -173,7 +194,7 @@ pub fn info_box(text: &str) {
     }
 }
 
-/// Waits up to `timeout` for process `pid` to exit (at once if it is gone).
+/// Waits up to `timeout` for process `pid` to exit.
 pub fn wait_for_exit(pid: u32, timeout: Duration) {
     let Ok(process) = (unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid) }) else {
         return;
@@ -184,8 +205,7 @@ pub fn wait_for_exit(pid: u32, timeout: Duration) {
     }
 }
 
-/// Whether this process runs as an elevated administrator, which the
-/// service's control pipe takes.
+/// Whether this process runs as an elevated administrator.
 pub fn is_elevated() -> bool {
     let mut token = Default::default();
     if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) }.is_err() {
@@ -209,8 +229,8 @@ pub fn is_elevated() -> bool {
     ok && elevation.TokenIsElevated != 0
 }
 
-/// Starts this exe with `args` as administrator (a UAC prompt); returns
-/// once it started, not when it ends.
+/// Starts this exe with `args` as administrator (a UAC prompt); returns once it started, not when
+/// it ends.
 pub fn run_elevated(args: &[String]) -> anyhow::Result<()> {
     let exe = std::env::current_exe()?;
     let params: Vec<String> = args
@@ -227,7 +247,6 @@ pub fn run_elevated(args: &[String]) -> anyhow::Result<()> {
             SW_SHOWNORMAL,
         )
     };
-    // Above 32 is success; ERROR_CANCELLED (1223) when the prompt is declined.
     if r.0 as isize <= 32 {
         anyhow::bail!(
             "the administrator prompt was declined or failed ({})",
@@ -237,7 +256,7 @@ pub fn run_elevated(args: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Remembers eframe's window so the tray can show and hide it.
+/// Remembers eframe's window.
 pub fn set_window(handle: &impl HasWindowHandle) {
     if let Ok(h) = handle.window_handle() {
         if let RawWindowHandle::Win32(h) = h.as_raw() {
@@ -253,8 +272,6 @@ fn window() -> Option<HWND> {
     }
 }
 
-// Async: the host thread calls this too, and must never wait on the UI
-// thread (which may be waiting for the host to stop).
 fn show_hwnd(hwnd: HWND) {
     unsafe {
         let _ = ShowWindowAsync(hwnd, SW_RESTORE);
@@ -262,7 +279,7 @@ fn show_hwnd(hwnd: HWND) {
     }
 }
 
-/// Shows the window and brings it forward. Any thread.
+/// Shows the window and brings it forward.
 pub fn show_window() {
     if let Some(hwnd) = window() {
         show_hwnd(hwnd);
@@ -278,8 +295,7 @@ pub fn hide_window() {
     }
 }
 
-/// Puts the icon in the tray. Its menu acts on `host` directly, so it works
-/// while the window is hidden (and eframe isn't running frames).
+/// Puts the icon in the tray.
 pub fn create_tray(host: Host, ctx: eframe::egui::Context) -> anyhow::Result<()> {
     let open = MenuItem::with_id("open", "Open web-stream host", true, None);
     let pair = MenuItem::with_id("pair", "Pair a device", true, None);
@@ -350,9 +366,7 @@ pub fn create_tray(host: Host, ctx: eframe::egui::Context) -> anyhow::Result<()>
     Ok(())
 }
 
-/// Quit only closes this app while the Windows service hosts, so the menu
-/// says so.
-/// False if there is no tray menu yet (try again later).
+/// Quit only closes this app while the Windows service hosts.
 pub fn set_service_mode(service: bool) -> bool {
     QUIT_ITEM.with(|q| {
         q.borrow().as_ref().is_some_and(|item| {
@@ -366,8 +380,7 @@ pub fn set_service_mode(service: bool) -> bool {
     })
 }
 
-/// Stops the host (putting back a changed resolution) and exits. Runs on
-/// the UI thread, from the tray menu or when the window closes.
+/// Stops the host and exits.
 pub fn quit(host: &Host) -> ! {
     hide_window();
     host.stop_and_wait(Duration::from_secs(15));
@@ -376,9 +389,8 @@ pub fn quit(host: &Host) -> ! {
     std::process::exit(0)
 }
 
-/// Exits for an elevated copy of this app (started with `--after` this
-/// process) to take over: like [`quit`], but the router keeps forwarding
-/// the ports, which the new copy goes on renewing.
+/// Exits for an elevated copy of this app to take over: like [`quit`], but the router keeps
+/// forwarding the ports.
 pub fn hand_over(host: &Host) -> ! {
     hide_window();
     host.stop_and_wait(Duration::from_secs(15));
@@ -438,15 +450,14 @@ fn known_folder(id: &GUID) -> anyhow::Result<std::path::PathBuf> {
     Ok(path?)
 }
 
-/// Steam's signed virtual microphone driver, in Steam's own folder (under
-/// Program Files, so only administrators can change it).
+/// Steam's signed virtual microphone driver, in Steam's own folder.
 pub fn steam_mic_inf() -> anyhow::Result<std::path::PathBuf> {
     Ok(known_folder(&FOLDERID_ProgramFilesCommonX86)?
         .join(r"Steam\drivers\Windows10\x64\SteamStreamingMicrophone.inf"))
 }
 
-/// Installs the driver package `inf`, as Sunshine installs Steam's virtual
-/// speakers; true if Windows needs a restart. Needs administrator rights.
+/// Installs the driver package `inf`, as Sunshine installs Steam's virtual speakers; true if
+/// Windows needs a restart.
 pub fn install_driver(inf: &std::path::Path) -> anyhow::Result<bool> {
     let mut reboot = BOOL(0);
     unsafe {

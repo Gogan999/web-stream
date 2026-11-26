@@ -1,6 +1,6 @@
 # Browser client
 
-Plain HTML, CSS and ES modules. No framework, no build step: the host program serves this folder as-is. Chromium-based browsers are the target (Keyboard Lock and raw pointer lock are Chromium-only).
+Plain HTML, CSS and ES modules. No framework, no build step: the host program serves this folder as-is. Chrome, Edge and Safari (macOS, iPhone, iPad) are supported; Keyboard Lock and raw pointer lock are Chromium-only.
 
 Pairing and signaling: [`docs/dev/signaling.md`](../docs/dev/signaling.md). Data channel messages: [`docs/dev/protocol.md`](../docs/dev/protocol.md).
 
@@ -10,11 +10,13 @@ Pairing and signaling: [`docs/dev/signaling.md`](../docs/dev/signaling.md). Data
 |---|---|
 | `index.html`, `style.css` | Toolbar (display, mouse, mic toggles) with a Settings dropdown, plus a full-size `<video>`, stats overlay and touch overlay |
 | `manifest.webmanifest` | Lets a phone add the client to its home screen, opening fullscreen and landscape |
+| `sw.js` | Caches the app shell so the home-screen app opens when its own PC is off |
 | `icons/` | The home-screen icons (192, 512, maskable 512 and the 180 px iOS one) the manifest and `index.html` point to; the host embeds them |
 | `js/main.js` | UI wiring, hotkeys, fullscreen + Keyboard Lock, stats polling |
 | `js/session.js` | Signaling + `RTCPeerConnection`, data channels, low playout delay |
 | `js/signaling.js` | WebSocket signaling client |
-| `js/pairing.js` | Pairing API client (`/api/session`, `/api/pair/*`) |
+| `js/pairing.js` | Pairing API client (`/api/session`, `/api/pair/*`), same origin by cookie or another PC by token |
+| `js/hosts.js` | Saved PCs: address, name and device token for each, kept in `localStorage` |
 | `js/input.js` | Keyboard, mouse (pointer lock or absolute), touch and gamepad capture |
 | `js/touch.js` | Touch gestures → mouse actions (trackpad and direct modes) and pinch zoom |
 | `js/zoom.js` | Pinch zoom and pan of the stream in the page |

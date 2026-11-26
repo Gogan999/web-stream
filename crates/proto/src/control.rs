@@ -2,29 +2,25 @@ use serde::{Deserialize, Serialize};
 
 use crate::{ByeReason, CursorShape, DisplayId, DisplayInfo, VideoConfig};
 
-/// Identifies a file the host has offered this session. The host only ever
-/// serves ids it issued, never paths from the client.
+/// Identifies a file the host has offered this session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct FileId(pub u64);
 
 impl FileId {
-    /// Ids stay below 2^53 so they survive as JSON numbers in the browser.
+    /// Ids stay below 2^53.
     pub const MAX: u64 = (1 << 53) - 1;
 }
 
 /// Most file bytes in one message on the `file` channel.
 pub const FILE_CHUNK_MAX: usize = 16 * 1024;
-/// Bytes of a file chunk's header: the [`FileId`] then the offset of the
-/// first byte, both big-endian `u64`.
+/// Bytes of a file chunk's header: the [`FileId`] then the offset of the first byte, both
+/// big-endian `u64`.
 pub const FILE_CHUNK_HEADER: usize = 16;
-/// Most bytes the sender keeps in flight past the receiver's last ack
-/// ([`ClientControl::FileAck`]).
+/// Most bytes the sender keeps in flight past the receiver's last ack ([`ClientControl::FileAck`]).
 pub const FILE_WINDOW: u64 = 1024 * 1024;
 
-/// One binary message on the `file` channel: header, then the bytes of the
-/// file from `offset` on. The offset lets the receiver drop bytes left over
-/// from a transfer it cancelled.
+/// One binary message on the `file` channel: header, then the bytes of the file from `offset` on.
 pub fn file_chunk(id: FileId, offset: u64, data: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(FILE_CHUNK_HEADER + data.len());
     out.extend_from_slice(&id.0.to_be_bytes());
@@ -41,9 +37,6 @@ pub fn parse_file_chunk(msg: &[u8]) -> Option<(FileId, u64, &[u8])> {
 }
 
 /// Messages on the reliable `control` data channel, browser -> host.
-///
-/// Everything here is untrusted input: the host must validate or clamp every
-/// value (see [`VideoConfig::clamped`]) before acting on it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(
     tag = "type",
@@ -55,9 +48,7 @@ pub enum ClientControl {
     SelectDisplay {
         id: DisplayId,
     },
-    /// Also stream this display, as a second video track (`None` stops
-    /// it). It must not be the display already streamed; the host answers
-    /// with [`HostControl::SecondDisplay`].
+    /// Also stream this display, as a second video track (`None` stops it).
     SelectSecondDisplay {
         id: Option<DisplayId>,
     },
@@ -69,47 +60,33 @@ pub enum ClientControl {
     SetMicEnabled {
         enabled: bool,
     },
-    /// Game audio quality. `None` is the host's own setting
-    /// (`--audio-kbps`, `--audio-frame-ms`). Bitrates are clamped to
-    /// 32-510 kb/s; frames are 10 or 20 ms.
+    /// Game audio quality.
     SetAudioConfig {
         bitrate_kbps: Option<u32>,
         frame_ms: Option<u32>,
     },
-    /// Change the streamed display's desktop resolution to the largest it
-    /// supports within `width` x `height` (the browser's screen). Only
-    /// honoured when the host user started the host with
-    /// `--allow-resolution-change`; undone on disconnect.
+    /// Change the streamed display's desktop resolution to the largest it supports within `width` x
+    /// `height` (the browser's screen).
     SetHostResolution {
         width: u32,
         height: u32,
     },
     /// Put every display this session changed back to its own resolution.
     RestoreHostResolution,
-    /// Ask for a file the host offered with [`HostControl::FileOffer`]; any
-    /// other id is rejected. The bytes come on the `file` channel as
-    /// [`file_chunk`]s from offset 0; the file is done when the browser has
-    /// the offer's `size`. Asking again starts over.
+    /// Ask for a file the host offered with [`HostControl::FileOffer`]; any other id is rejected.
     RequestFile {
         id: FileId,
     },
-    /// The browser has stored the first `received` bytes of a requested
-    /// file. The host sends at most [`FILE_WINDOW`] past it, and counts the
-    /// file as sent when `received` is its size.
+    /// The browser has stored the first `received` bytes of a requested file.
     FileAck {
         id: FileId,
         received: u64,
     },
-    /// Stop sending a requested file. It stays on offer.
+    /// Stop sending a requested file.
     CancelFile {
         id: FileId,
     },
-    /// Send the host a file, if it accepts them
-    /// ([`HostControl::Uploads`]). `id` is the browser's own, new for each
-    /// file; `name` is only a suggestion, which the host cleans. After
-    /// [`HostControl::UploadAccepted`] the bytes go on the `file` channel as
-    /// [`file_chunk`]s from offset 0, at most [`FILE_WINDOW`] past the
-    /// host's last [`HostControl::UploadAck`]. One file at a time.
+    /// Send the host a file, if it accepts them ([`HostControl::Uploads`]).
     UploadFile {
         id: FileId,
         name: String,
@@ -119,9 +96,7 @@ pub enum ClientControl {
     CancelUpload {
         id: FileId,
     },
-    /// Whether to send [`HostControl::CursorPosition`]: the browser draws
-    /// the host pointer itself in relative mouse mode, while in absolute
-    /// mode its own pointer is already where the host's is. Off until asked.
+    /// Whether to send [`HostControl::CursorPosition`].
     SetCursorPositions {
         enabled: bool,
     },
@@ -129,32 +104,19 @@ pub enum ClientControl {
         client_time_ms: f64,
     },
     /// How the browser is coping, about once a second while video runs.
-    /// The host sets it beside its own figures to tell which end is the
-    /// bottleneck ([`HostControl::Bottleneck`]).
     ClientStats(ClientStats),
-    /// Ctrl+Alt+Del, which no browser can send as keys: the host asks
-    /// Windows for the secure attention sequence (sign-in and lock screen,
-    /// Task Manager menu). Only a host running as the web-stream service
-    /// can; any other answers with [`HostControl::Error`].
+    /// Ctrl+Alt+Del: the host asks Windows for the secure attention sequence.
     SecureAttention,
-    /// Update the host to the latest `main` and restart it, as
-    /// `scripts\update.ps1` on the host would. Only honoured when the host
-    /// user allowed it ([`HostControl::RemoteUpdate`]); the browser chooses
-    /// nothing about what is built. Answered with
-    /// [`HostControl::UpdateStatus`] or [`HostControl::Error`].
+    /// Update the host to the latest `main` and restart it, as `scripts\update.ps1` on the host
+    /// would.
     UpdateHost,
-    /// Put this text on the host's clipboard (the browser's clipboard
-    /// changed, or the user pressed Paste). Honoured only when the host
-    /// shares its clipboard ([`HostControl::Capabilities`] `clipboard`); text
-    /// over [`CLIPBOARD_MAX`] bytes is refused. Always answered with
-    /// [`HostControl::ClipboardSet`], so a browser can send Ctrl+V after it.
+    /// Put this text on the host's clipboard.
     SetClipboard {
         text: String,
     },
 }
 
 /// Most bytes of UTF-8 text the clipboard sync carries in one message.
-/// Larger clipboards are not synced (the sender is told, not truncated).
 pub const CLIPBOARD_MAX: usize = 256 * 1024;
 
 /// Messages on the reliable `control` data channel, host -> browser.
@@ -184,25 +146,21 @@ pub enum HostControl {
         client_time_ms: f64,
     },
     /// A file the host user chose to share; the client may request it by id.
-    /// `name` is a bare file name, for display and as the suggested name.
     FileOffer {
         id: FileId,
         name: String,
         size: u64,
     },
-    /// The host user stopped sharing the file: it can't be requested, and a
-    /// transfer of it stopped.
+    /// The host user stopped sharing the file: it can't be requested, and a transfer of it stopped.
     FileWithdrawn {
         id: FileId,
     },
-    /// Sending a requested file failed (it couldn't be read, or the id is
-    /// not on offer). It may be requested again if still on offer.
+    /// Sending a requested file failed.
     FileFailed {
         id: FileId,
         message: String,
     },
-    /// Whether the host accepts files from the browser, and how big. Sent
-    /// when the `control` channel opens.
+    /// Whether the host accepts files from the browser, and how big.
     Uploads {
         enabled: bool,
         max_size: u64,
@@ -216,55 +174,45 @@ pub enum HostControl {
         id: FileId,
         received: u64,
     },
-    /// The whole file is on the host, saved as `name` in its folder for
-    /// received files.
+    /// The whole file is on the host, saved as `name` in its folder for received files.
     UploadSaved {
         id: FileId,
         name: String,
     },
-    /// The host refused the file or stopped receiving it, and deleted what
-    /// it had.
+    /// The host refused the file or stopped receiving it, and deleted what it had.
     UploadFailed {
         id: FileId,
         message: String,
     },
-    /// Whether this browser may update and restart the host
-    /// ([`ClientControl::UpdateHost`]). Sent when the `control` channel opens.
+    /// Whether this browser may update and restart the host ([`ClientControl::UpdateHost`]).
     RemoteUpdate {
         enabled: bool,
     },
-    /// What this host can do, so the page shows only buttons that work. Sent
-    /// when the `control` channel opens, after [`HostControl::Uploads`].
+    /// What this host can do.
     Capabilities {
-        /// The host shares its clipboard (text) with the browser: false when the
-        /// host user turned it off (`--no-clipboard`) or the host cannot open
-        /// the Windows clipboard in its session (probed at start).
+        /// The host shares its clipboard (text) with the browser: false when the host user turned
+        /// it off (`--no-clipboard`) or the host cannot open the Windows clipboard in its session
+        /// (probed at start).
         clipboard: bool,
-        /// Ctrl+Alt+Del works ([`ClientControl::SecureAttention`]): the host
-        /// runs as the web-stream service.
+        /// Ctrl+Alt+Del works ([`ClientControl::SecureAttention`]): the host runs as the web-stream
+        /// service.
         sas: bool,
         /// The PC's name, for the page title and the not-connected screen.
         host_name: String,
         /// The host program's version.
         version: String,
     },
-    /// How an update this browser started is going. `Started` is followed
-    /// by the host restarting (the session drops and the browser reconnects
-    /// to the new build) unless `Finished` (nothing to update) or `Failed`
-    /// comes first.
+    /// How an update this browser started is going.
     UpdateStatus {
         state: UpdateState,
         message: String,
     },
-    /// The host's clipboard text changed (someone copied on the PC), sent
-    /// only while a browser is connected and sharing is on.
+    /// The host's clipboard text changed, sent only while a browser is connected and sharing is on.
     Clipboard {
         text: String,
     },
-    /// Answer to [`ClientControl::SetClipboard`]: the host has written the
-    /// text (`ok`), or could not (too large, off, or the clipboard was
-    /// locked by another program), after which it is safe to send the
-    /// paste keys.
+    /// Answer to [`ClientControl::SetClipboard`]: the host has written the text (`ok`), or could
+    /// not.
     ClipboardSet {
         ok: bool,
     },
@@ -274,35 +222,27 @@ pub enum HostControl {
         strong: f32,
         weak: f32,
     },
-    /// Sent about once a second while video runs, for the browser's stats
-    /// overlay and auto-tune.
+    /// Sent about once a second while video runs, for the browser's stats overlay and auto-tune.
     VideoStats(VideoStats),
-    /// Which part of the chain is limiting the stream now, and what the host
-    /// did about it. Sent when either changes.
+    /// Which part of the chain is limiting the stream now, and what the host did about it.
     Bottleneck(BottleneckReport),
-    /// The host pointer changed shape, or was hidden or shown. Sent when the
-    /// stream starts and on every change.
+    /// The host pointer changed shape, or was hidden or shown.
     CursorShape(CursorShape),
-    /// Where the host pointer's hotspot is, in desktop pixels from the
-    /// streamed display's top-left corner (outside the display when the
-    /// pointer is on another one). Sent on change while the pointer shows and
-    /// the browser asked with [`ClientControl::SetCursorPositions`]; only the
-    /// newest matters.
+    /// Where the host pointer's hotspot is, in desktop pixels from the streamed display's top-left
+    /// corner.
     CursorPosition {
         x: i32,
         y: i32,
     },
-    /// The mic the browser turned on can't play on the host (`--no-mic`, or
-    /// no such device). The browser should stop sending it.
+    /// The mic the browser turned on can't play on the host.
     MicUnavailable {
         message: String,
     },
     Error {
         message: String,
     },
-    /// The session is over, as signaling's `bye`: sent here once the browser
-    /// has handed signaling off ([`crate::ClientSignal::Handoff`]), just
-    /// before the host closes the peer connection.
+    /// The session is over, as signaling's `bye`: sent here once the browser has handed signaling
+    /// off ([`crate::ClientSignal::Handoff`]), just before the host closes the peer connection.
     Bye {
         reason: ByeReason,
     },
@@ -336,23 +276,19 @@ pub struct VideoStats {
     pub sent_kbps: u32,
     /// Average capture-to-encoded time.
     pub encode_ms: f32,
-    /// Keyframes asked for (by the browser or after a dropped frame) in
-    /// the interval: each is a stall or a soft picture, so fewer is better.
+    /// Keyframes asked for in the interval.
     pub keyframe_requests: u32,
     /// Fraction of packets the browser reports lost, 0..=1.
     pub loss: Option<f32>,
-    /// Of the keyframe requests, those from the browser: it lost a packet
-    /// that no resend repaired.
+    /// Of the keyframe requests, those from the browser: it lost a packet that no resend repaired.
     #[serde(default)]
     pub browser_keyframe_requests: u32,
-    /// Frames dropped because the network send queue was too far behind.
     #[serde(default)]
     pub late_frames: u32,
-    /// Frames dropped for another reason (the encoder got too far ahead, or
-    /// they built on a dropped frame).
+    /// Frames dropped for another reason.
     #[serde(default)]
     pub lost_frames: u32,
-    /// Packets the host's socket refused because its buffer was full.
+    /// Packets the host's socket refused.
     #[serde(default)]
     pub send_drops: u32,
     /// Late or dropped frames the encoder skipped over without a keyframe.
@@ -360,8 +296,7 @@ pub struct VideoStats {
     pub recovered_frames: u32,
 }
 
-/// The browser's side of the stream over the last second, from its own
-/// stats. Untrusted: the host clamps and sanity-checks it.
+/// The browser's side of the stream over the last second, from its own stats.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClientStats {
@@ -375,8 +310,7 @@ pub struct ClientStats {
     /// Times the picture froze in the interval.
     #[serde(default)]
     pub freezes: u32,
-    /// The page is in the background, where browsers throttle video: the
-    /// numbers say nothing about the PC.
+    /// The page is in the background.
     #[serde(default)]
     pub hidden: bool,
 }
@@ -405,10 +339,9 @@ pub struct BottleneckReport {
     pub detail: String,
     /// The size the host encodes at now, percent of the browser's asked size.
     pub scale_percent: u32,
-    /// Of that, how much is lost to relieving the limiter above (the host
-    /// would otherwise run larger).
+    /// Of that, how much is lost to relieving the limiter above.
     pub relieving: bool,
-    /// What the size is being held down for (`None` when it isn't).
+    /// What the size is being held down for.
     #[serde(default)]
     pub relieving_for: Limiter,
 }

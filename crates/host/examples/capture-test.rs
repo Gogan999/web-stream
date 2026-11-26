@@ -1,14 +1,5 @@
-//! Encodes a display to a file and prints frame rate, drops and
-//! capture-to-encoded latency once a second. For checking capture and the
-//! encoder on their own, without a browser:
-//!
-//! ```text
-//! cargo run --release -p ws-host --example capture-test -- [--display N] [--seconds S]
-//!     [--fps F] [--kbps K] [--size WxH] [--codec h264|h265|av1]
-//!     [--quality speed|balanced|clarity] [--out FILE]
-//! ```
-//!
-//! It writes the raw bitstream; play it with `ffplay FILE`.
+//! Encodes a display to a file and prints frame rate, drops and capture-to-encoded latency once a
+//! second.
 
 use std::io::Write;
 use std::time::{Duration, Instant};

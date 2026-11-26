@@ -1,26 +1,5 @@
-//! The host as a Windows service, so a browser can also use the sign-in
-//! and lock screens, UAC prompts and programs running as administrator.
-//! The tray app's exe runs it: `ws-host-gui service ...` (see [`main`]),
-//! started elevated from the tray app's settings.
-//!
-//! The service (LocalSystem, in session 0) only supervises. It runs the
-//! host as two processes, linked by a pipe (see [`crate::split`]):
-//!
-//! - `<exe> service session-host` in the session on the PC's own screen, as
-//!   SYSTEM with nearly every privilege removed: capture, encoding, input,
-//!   audio. Running as SYSTEM on the user's screen is what lets capture and
-//!   input follow Windows onto the secure desktop and into elevated windows.
-//! - `<exe> service network-host` as LocalService with no privileges, in
-//!   session 0: the signaling server and the peer connection, everything
-//!   that parses what comes off the network.
-//!
-//! It starts both again when that session changes (signing out, switching
-//! users) or either exits. If the network host can't be started, the
-//! session host runs the whole host, as before, and the log says why. The
-//! host has no console; elevated administrators control it through a named
-//! pipe: the tray app, run elevated, attaches to it ([`control::attach`]).
+//! The host as a Windows service.
 
-// Off Windows only the tests use most of this.
 #![cfg_attr(not(windows), allow(dead_code))]
 
 use std::path::Path;
@@ -85,8 +64,7 @@ const REFUSED: &[(&str, &str)] = &[
     ),
 ];
 
-/// Runs `service <args>`; what it did, for the administrator who asked
-/// (empty for the service and the session host, which run until stopped).
+/// Runs `service <args>`; what it did, for the administrator who asked.
 pub fn main(args: &[String]) -> anyhow::Result<String> {
     let rest = args.get(1..).unwrap_or_default();
     match args.first().map(String::as_str) {
@@ -101,7 +79,6 @@ pub fn main(args: &[String]) -> anyhow::Result<String> {
         Some("session-host") => imp::session_host(rest).map(|()| String::new()),
         // Started by the service as LocalService.
         Some("network-host") => imp::network_host(rest).map(|()| String::new()),
-        // CI only: see selftest.rs.
         #[cfg(windows)]
         Some("sandbox-test") => selftest::run(rest),
         #[cfg(windows)]
@@ -111,9 +88,8 @@ pub fn main(args: &[String]) -> anyhow::Result<String> {
     }
 }
 
-/// Logging for `service <args>`: the service writes to service.log (it has
-/// no stdout); the session host's stdout is its host.log, the network
-/// host's network.log.
+/// Logging for `service <args>`: the service writes to service.log; the session host's stdout is
+/// its host.log, the network host's network.log.
 pub fn init_logging(args: &[String]) {
     let logs = tracing_subscriber::fmt()
         .with_env_filter(
@@ -132,16 +108,13 @@ pub fn init_logging(args: &[String]) {
     logs.init();
 }
 
-/// Whether the service is installed, and if so whether it runs. Needs no
-/// administrator rights.
+/// Whether the service is installed and running.
 pub fn query() -> anyhow::Result<Option<bool>> {
     imp::query()
 }
 
-/// The control pipe's name starts with this; the rest is random, picked by
-/// the service each time it starts the host and written to [`PIPE_FILE`]
-/// in its data folder, which only administrators can read. A program that
-/// can't read it can't take the name before the host does.
+/// The control pipe's name starts with this; the rest is random, picked by the service each time it
+/// starts the host and written to [`PIPE_FILE`] in its data folder.
 pub const PIPE_PREFIX: &str = r"\\.\pipe\web-stream-host-";
 pub const PIPE_FILE: &str = "control-pipe.txt";
 
@@ -149,9 +122,9 @@ pub const PIPE_FILE: &str = "control-pipe.txt";
 pub const HEALTHY_RUN: Duration = Duration::from_secs(30);
 pub const MAX_BACKOFF: Duration = Duration::from_secs(60);
 
-/// How long to wait before starting the host again, after waiting `prev`
-/// last time for a host that then ran for `ran`: one second after a
-/// healthy run, doubling up to [`MAX_BACKOFF`] while it keeps failing.
+/// How long to wait before starting the host again, after waiting `prev` last time for a host that
+/// then ran for `ran`: one second after a healthy run, doubling up to [`MAX_BACKOFF`] while it
+/// keeps failing.
 pub fn next_backoff(prev: Duration, ran: Duration) -> Duration {
     if ran >= HEALTHY_RUN {
         Duration::from_secs(1)
@@ -172,10 +145,9 @@ pub fn random_pipe_name() -> anyhow::Result<String> {
     Ok(format!("{PIPE_PREFIX}{}", random_hex()?))
 }
 
-/// The session host's arguments (after the exe), as the service builds
-/// them: the pipe, the Ctrl+Alt+Del event handle and the link to the
-/// network host (0: none, run the whole host) it inherits, the installed
-/// serve options, and the host's data folder.
+/// The session host's arguments (after the exe), as the service builds them: the pipe, the
+/// Ctrl+Alt+Del event handle and the link to the network host it inherits, the installed serve
+/// options, and the host's data folder.
 pub fn session_host_args(
     pipe: &str,
     sas_event: usize,
@@ -196,8 +168,8 @@ pub fn session_host_args(
     args
 }
 
-/// The network host's arguments: the link and the alive pipe (see
-/// `launch::alive_pipe`) it inherits, and as for [`session_host_args`].
+/// The network host's arguments: the link and the alive pipe (see `launch::alive_pipe`) it
+/// inherits, and as for [`session_host_args`].
 pub fn network_host_args(
     link: usize,
     alive: usize,
@@ -220,8 +192,7 @@ pub fn network_host_args(
 #[derive(Debug)]
 pub struct SessionHost {
     pub pipe: String,
-    /// The inherited event the host sets to ask the service for
-    /// Ctrl+Alt+Del; 0 for none.
+    /// The inherited event the host sets to ask the service for Ctrl+Alt+Del; 0 for none.
     pub sas_event: usize,
     /// The inherited end of the pipe to the network host; 0 for none.
     pub link: usize,
@@ -265,8 +236,7 @@ fn parse_handle(text: &str) -> anyhow::Result<usize> {
         .map_err(|_| anyhow::anyhow!("bad handle {text:?}"))
 }
 
-/// Files the network host keeps, which the service kept in its own data
-/// folder before the host was split: moved into the network host's folder.
+/// Files the network host keeps.
 pub const NETWORK_FILES: &[&str] = &[
     "tls-cert.pem",
     "tls-key.pem",
@@ -283,8 +253,7 @@ pub const CERT_COPY: &str = "service-cert.pem";
 pub const KEY_COPY: &str = "service-key.pem";
 pub const TOKEN_COPY: &str = "service-tunnel-token.txt";
 
-/// Points the file flags that name a file directly in `from` (an install
-/// from before the split) at the same file in `to`.
+/// Points the file flags that name a file directly in `from` at the same file in `to`.
 pub fn relocate_files(args: &[String], from: &Path, to: &Path) -> Vec<String> {
     let mut out = args.to_vec();
     for i in 1..out.len() {
@@ -309,8 +278,7 @@ pub fn valid_pipe_name(name: &str) -> bool {
         .is_some_and(|rest| rest.len() == 32 && rest.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
-/// Replaces the value after every `flag` with `value` (the parser keeps
-/// the last one, so none may be left behind).
+/// Replaces the value after every `flag` with `value`.
 pub fn replace_value(args: &[String], flag: &str, value: &str) -> Vec<String> {
     let mut out = args.to_vec();
     let mut i = 0;
@@ -324,8 +292,7 @@ pub fn replace_value(args: &[String], flag: &str, value: &str) -> Vec<String> {
     out
 }
 
-/// What [`PIPE_FILE`] holds: the pipe's name and the host process serving
-/// it, so a console can check it talks to the host itself.
+/// What [`PIPE_FILE`] holds: the pipe's name and the host process serving it.
 pub fn pipe_file_contents(pipe: &str, pid: u32) -> String {
     format!("{pipe}\n{pid}\n")
 }
@@ -347,8 +314,7 @@ pub fn check_install_args(args: &[String]) -> anyhow::Result<ServeOptions> {
     ServeOptions::parse(args)
 }
 
-/// Checks the options the service hands the session host, which adds
-/// `--data-dir` itself.
+/// Checks the options the service hands the session host.
 pub fn check_session_host_options(opts: &ServeOptions) -> anyhow::Result<()> {
     if opts.web_root.is_some() || opts.media.upload_dir.is_some() {
         bail!("the service's host never serves a web root or receives files");
@@ -360,16 +326,14 @@ pub fn check_session_host_options(opts: &ServeOptions) -> anyhow::Result<()> {
     {
         bail!("the service only runs the cloudflared installed next to it");
     }
-    // Refused at install too; checked again in case the service's command
-    // line was edited.
     if opts.media.update_log.is_some() || opts.pair_at_start {
         bail!("the service's host never updates from the browser or pairs at start");
     }
     Ok(())
 }
 
-/// Quotes one argument for a Windows command line the way
-/// `CommandLineToArgvW` and the C runtime split it.
+/// Quotes one argument for a Windows command line the way `CommandLineToArgvW` and the C runtime
+/// split it.
 pub fn quote_arg(arg: &str) -> String {
     if !arg.is_empty() && !arg.contains([' ', '\t', '\n', '\u{b}', '"']) {
         return arg.to_string();
@@ -380,7 +344,6 @@ pub fn quote_arg(arg: &str) -> String {
         match c {
             '\\' => backslashes += 1,
             '"' => {
-                // Escape the backslashes before a quote, and the quote.
                 out.extend(std::iter::repeat_n('\\', backslashes * 2 + 1));
                 out.push('"');
                 backslashes = 0;
@@ -392,7 +355,6 @@ pub fn quote_arg(arg: &str) -> String {
             }
         }
     }
-    // Backslashes before the closing quote are doubled.
     out.extend(std::iter::repeat_n('\\', backslashes * 2));
     out.push('"');
     out
@@ -405,8 +367,8 @@ pub use scm::service_log;
 mod imp {
     pub use super::scm::{install, query, run, start, stop, uninstall, update};
 
-    /// Running as SYSTEM, load DLLs only from System32 and the exe's
-    /// folder, never the current directory or PATH.
+    /// Running as SYSTEM, load DLLs only from System32 and the exe's folder, never the current
+    /// directory or PATH.
     pub fn harden_dll_search() {
         use windows::Win32::System::LibraryLoader::{
             LOAD_LIBRARY_SEARCH_DEFAULT_DIRS, SetDefaultDllDirectories,
@@ -435,18 +397,15 @@ mod imp {
 
     pub fn network_host(args: &[String]) -> anyhow::Result<()> {
         harden_dll_search();
-        // The point of this process is that it isn't SYSTEM.
         if ws_desktop::running_as_system() {
             anyhow::bail!("network-host must not run as SYSTEM");
         }
         let (link, alive, opts) = super::parse_network_host_args(args)?;
-        // Before anything from the network can reach this process: tells the
-        // service its code ran (see `scm::STARTUP_FAILED`).
         {
             use std::io::Write;
             use std::os::windows::io::FromRawHandle;
-            // SAFETY: the service handed this process the pipe's write end,
-            // and nothing else here owns it.
+            // SAFETY: the service handed this process the pipe's write end, and nothing else here
+            // owns it.
             let mut alive = unsafe { std::fs::File::from_raw_handle(alive as *mut _) };
             alive
                 .write_all(&[1])
@@ -456,8 +415,8 @@ mod imp {
             .enable_all()
             .build()?
             .block_on(async move {
-                // SAFETY: the service handed this process the pipe's client
-                // end, overlapped, and nothing else here owns it.
+                // SAFETY: the service handed this process the pipe's client end, overlapped, and
+                // nothing else here owns it.
                 let link = unsafe {
                     tokio::net::windows::named_pipe::NamedPipeClient::from_raw_handle(
                         link as *mut std::ffi::c_void,

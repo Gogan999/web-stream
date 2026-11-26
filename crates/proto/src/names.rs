@@ -1,8 +1,6 @@
-//! Names that cross the wire (file names, browser names): what to keep of them.
+//! Names that cross the wire: what to keep of them.
 
-/// Neither a control character nor an invisible formatting one (Unicode
-/// Cf: bidi overrides like U+202E, zero-width marks), which can make
-/// `exe.txt` show as something else.
+/// Neither a control character nor an invisible formatting one.
 pub fn printable(c: char) -> bool {
     !c.is_control() && !is_format(c)
 }
@@ -18,8 +16,8 @@ fn is_format(c: char) -> bool {
         | '\u{E0001}' | '\u{E0020}'..='\u{E007F}')
 }
 
-/// The longest start of `s` that is at most `max` UTF-16 units, the unit
-/// Windows and JavaScript count names in.
+/// The longest start of `s` that is at most `max` UTF-16 units, the unit Windows and JavaScript
+/// count names in.
 pub fn truncate_utf16(s: &str, max: usize) -> &str {
     let mut units = 0;
     for (i, c) in s.char_indices() {

@@ -1,7 +1,4 @@
-//! Ctrl+Alt+Del (the secure attention sequence). Windows takes it only from
-//! a service, so the host hands the request to whoever installed a sender:
-//! the web-stream service's session host does, the tray app and console
-//! host don't.
+//! Ctrl+Alt+Del.
 
 use std::sync::OnceLock;
 
@@ -14,12 +11,12 @@ pub fn install(send: impl Fn() -> Result<(), String> + Send + Sync + 'static) {
     let _ = SENDER.set(Box::new(send));
 }
 
-/// Whether [`request`] can work here (this process is the service's host).
+/// Whether [`request`] can work here.
 pub fn available() -> bool {
     SENDER.get().is_some()
 }
 
-/// Asks for Ctrl+Alt+Del on the host. The error is for the browser.
+/// Asks for Ctrl+Alt+Del on the host.
 pub fn request() -> Result<(), String> {
     match SENDER.get() {
         Some(send) => send(),

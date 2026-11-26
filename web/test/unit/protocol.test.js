@@ -50,7 +50,6 @@ test('a position on the second monitor carries its lane', () => {
   assert.deepEqual(P.decode(P.mouseAbs(0, 1, undefined, 1)), { type: 'mouse-abs', lane: 1, x: 0, y: 65535 });
   assert.deepEqual(P.decode(P.mouseAbs(0.5, 0, 300, 1)), { type: 'mouse-abs', lane: 1, x: 32768, y: 0, seq: 300 });
   assert.equal(P.mouseAbs(0.5, 0.5, 7, 1).byteLength, 8);
-  // The main monitor keeps the original form.
   assert.equal(P.mouseAbs(0.5, 0.5, 7, 0).byteLength, 7);
   assert.equal(new Uint8Array(P.mouseAbs(0.5, 0.5, 7))[0], 0x02);
 });
@@ -60,7 +59,7 @@ test('text is UTF-8 on the wire and splits only between characters', () => {
   assert.equal(new Uint8Array(one)[0], 0x0b);
   assert.deepEqual(P.decode(one), { type: 'text', text: 'hé \u{1f600}' });
   assert.deepEqual(P.text(''), []);
-  // 3-byte characters: 1365 fit in 4096 bytes, so 2000 make two messages that rejoin exactly.
+  // 3-byte characters: 2000 make two messages that rejoin exactly.
   const long = '世'.repeat(2000);
   const parts = P.text(long);
   assert.equal(parts.length, 2);

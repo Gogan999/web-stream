@@ -51,6 +51,5 @@ test('absolute points leave out bars the host drew for a display of another shap
   const rect = { left: 0, top: 0, width: 1920, height: 1080 };
   assert.deepEqual(videoPoint(960, 134, rect, 1920, 1080, false, display), { x: 0.5, y: 0 });
   assert.equal(videoPoint(960, 100, rect, 1920, 1080, false, display), null);
-  // Same shape: nothing changes.
   assert.deepEqual(pictureRect(1920, 1080, { width: 3840, height: 2160 }), { x: 0, y: 0, width: 1920, height: 1080 });
 });

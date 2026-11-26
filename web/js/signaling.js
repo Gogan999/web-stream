@@ -1,10 +1,17 @@
-// WebSocket signaling client. JSON text frames; see docs/dev/signaling.md.
-// Auth is the HttpOnly pairing cookie, which the browser sends on the upgrade by itself.
+// WebSocket signaling client.
+
+export const PROTOCOL = 'web-stream';
+export const AUTH_PREFIX = 'web-stream.auth.';
+
+export function protocolsFor(token) {
+  return token ? [PROTOCOL, AUTH_PREFIX + token] : undefined;
+}
 
 export class Signaling extends EventTarget {
-  constructor(url) {
+  constructor(url, token = null) {
     super();
     this.url = url;
+    this.token = token;
     this.ws = null;
   }
 
@@ -14,7 +21,7 @@ export class Signaling extends EventTarget {
 
   open() {
     return new Promise((resolve, reject) => {
-      const ws = new WebSocket(this.url);
+      const ws = new WebSocket(this.url, protocolsFor(this.token));
       this.ws = ws;
       ws.onopen = () => resolve();
       ws.onerror = () => reject(new Error('Could not reach host (or not paired)'));
@@ -39,7 +46,6 @@ export class Signaling extends EventTarget {
   }
 }
 
-// Same origin as the page, /ws.
 export function defaultSignalUrl(loc = location) {
   const scheme = loc.protocol === 'https:' ? 'wss:' : 'ws:';
   return `${scheme}//${loc.host}/ws`;

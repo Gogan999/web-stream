@@ -1,8 +1,6 @@
-//! TLS accept loop with the limits a host on the open internet needs:
-//! connection caps (global and per IP), a TLS handshake deadline, a
-//! request-header deadline that also closes idle keep-alive connections, and
-//! HTTP/1.1 only. Loopback has no per-IP cap: a Cloudflare Tunnel's
-//! connector on this PC carries every remote browser from 127.0.0.1.
+//! TLS accept loop with the limits a host on the open internet needs: connection caps, a TLS
+//! handshake deadline, a request-header deadline that also closes idle keep-alive connections, and
+//! HTTP/1.1 only.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -22,8 +20,7 @@ use crate::Error;
 pub const MAX_CONNECTIONS: usize = 64;
 pub const MAX_CONNECTIONS_PER_IP: usize = 8;
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
-/// Applies to every request on a connection, so an idle keep-alive
-/// connection is closed once it passes this long without a new request.
+/// Applies to every request on a connection.
 const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub async fn serve(
@@ -47,7 +44,6 @@ pub async fn serve_listener(
         let (tcp, peer) = match listener.accept().await {
             Ok(c) => c,
             Err(e) => {
-                // Usually fd exhaustion; back off instead of spinning.
                 tracing::warn!("accept failed: {e}");
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 continue;

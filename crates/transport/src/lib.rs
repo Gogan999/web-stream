@@ -1,24 +1,4 @@
 //! WebRTC transport between the host and the browser.
-//!
-//! Owns the peer connection, the video/audio tracks fed from
-//! [`ws_proto::EncodedFrame`] and [`ws_proto::AudioPacket`], and the data
-//! channels in [`ws_proto::channels`]. Signaling travels separately (see
-//! `ws-signaling`): the host calls [`Transport::offer`], sends the SDP to the
-//! browser, and hands the answer back with [`Transport::accept_answer`].
-//!
-//! Late frames are dropped, never queued: if the send side is behind (a
-//! newer frame arrived before the last was sent, or the pacer queue is older
-//! than [`TransportConfig::max_send_delay`]) it skips to the newest frame and
-//! raises [`TransportEvent::FramesLost`], so the encoder sends a frame that
-//! builds only on what the browser has (or a keyframe). Until that frame goes
-//! out, frames that build on the skipped one are dropped too, so the browser
-//! never decodes against a picture it doesn't have. NACKs are answered for packets
-//! younger than [`TransportConfig::max_resend_age`]: a late resend costs the
-//! browser a short wait, a keyframe costs a stall and a soft picture.
-//!
-//! The host is ICE-lite and reachable directly: one UDP port (and optionally
-//! one ICE-TCP port for networks that block UDP) on each LAN address, plus any
-//! public addresses that forward to them.
 
 mod net;
 mod remote;
@@ -43,56 +23,38 @@ use crate::net::{Net, Packet, SharedFilter};
 pub use crate::session::LANES;
 use crate::session::{Session, Step, VideoWrite};
 
-/// Frames the encoder may get ahead of the send loop (about 50 ms at 60 fps)
-/// before the oldest is dropped. The late-frame drop still bounds latency.
+/// Frames the encoder may get ahead of the send loop before the oldest is dropped.
 const VIDEO_QUEUE: usize = 3;
-/// Data channel messages and mic packets waiting for the host app. If it
-/// falls this far behind, more are dropped rather than queued without
-/// bound. Connection, channel and bitrate events are never dropped.
+/// Data channel messages and mic packets waiting for the host app.
 const DATA_QUEUE: usize = 1024;
 const CMD_QUEUE: usize = 64;
-/// A keyframe request is repeated only if no keyframe went out this long
-/// after the last one.
+/// A keyframe request is repeated only if no keyframe went out this long after the last one.
 const KEYFRAME_RETRY: Duration = Duration::from_millis(300);
-/// How long after a host-side drop a frame that skips the gap must go out
-/// before a keyframe is asked for instead.
+/// How long after a host-side drop a frame that skips the gap must go out before a keyframe is
+/// asked for instead.
 const RECOVERY_WAIT: Duration = Duration::from_millis(150);
-/// A new peer connection this soon after the last estimate (a restart after
-/// a network blip, say) starts from that estimate rather than from
-/// [`TransportConfig::initial_bitrate_bps`], so the stream doesn't spend
-/// seconds climbing back. Unless [`Transport::forget_estimate`] said the
-/// next one is for another device, whose path the estimate says nothing
-/// about.
+/// A new peer connection this soon after the last estimate starts from that estimate rather than
+/// from [`TransportConfig::initial_bitrate_bps`].
 pub const ESTIMATE_KEPT_FOR: Duration = Duration::from_secs(60);
-/// It starts a little under it: the path may have changed.
+/// It starts a little under it.
 pub const KEPT_ESTIMATE_SHARE: f64 = 0.8;
 
 #[derive(Debug, Clone)]
 pub struct TransportConfig {
-    /// Local addresses to listen on. Empty means every LAN IPv4 address.
+    /// Local addresses to listen on.
     pub ips: Vec<IpAddr>,
-    /// Public addresses that port-forward to the first local address, for
-    /// access from the internet.
+    /// Public addresses that port-forward to the first local address, for access from the internet.
     pub public_ips: Vec<IpAddr>,
-    /// UDP port for all media and data. 0 picks a free port.
+    /// UDP port for all media and data.
     pub udp_port: u16,
-    /// More UDP ports for the same media, for clients whose network lets
-    /// only some ports through (UDP 443 is often open where 8443 is not).
-    /// A port that can't be bound (in use, or not allowed) is skipped with
-    /// a warning; the first `udp_port` must bind.
+    /// More UDP ports for the same media, for clients whose network lets only some ports through.
     pub extra_udp_ports: Vec<u16>,
     /// ICE-TCP port, or `None` to disable the TCP fallback.
     pub tcp_port: Option<u16>,
-    /// Don't resend packets older than this; a keyframe repairs the loss
-    /// instead. Long enough for a lost resend to be asked for again: the
-    /// browser repeats a NACK about once a round trip, and until it knows the
-    /// round trip (a receive-only peer rarely does) it assumes 100 ms.
+    /// Don't resend packets older than this.
     pub max_resend_age: Duration,
-    /// Drop a (non-key) frame instead of queueing it when the oldest unsent
-    /// video packet has waited longer than this. A drop costs a keyframe (a
-    /// stall and a soft picture), so this only catches a queue that has truly
-    /// fallen behind: a burst can sit a few milliseconds past two frame times,
-    /// on Windows especially, and is better sent a little late.
+    /// Drop a (non-key) frame instead of queueing it when the oldest unsent video packet has waited
+    /// longer than this.
     pub max_send_delay: Duration,
     /// Starting point for bandwidth estimation.
     pub initial_bitrate_bps: u64,
@@ -118,21 +80,13 @@ impl Default for TransportConfig {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TransportEvent {
-    /// ICE and DTLS are up; media can flow. Also asks for a keyframe.
+    /// ICE and DTLS are up; media can flow.
     Connected,
     Disconnected,
-    /// The browser lost a frame (PLI/FIR) or the transport dropped one:
-    /// send an IDR or intra refresh now. Not repeated until a keyframe has
-    /// been sent (or a short retry interval passes). Goes to the
-    /// [`VideoSink`] instead while one is set.
+    /// The browser lost a frame (PLI/FIR) or the transport dropped one: send an IDR or intra
+    /// refresh now.
     KeyframeNeeded(u8),
-    /// The transport dropped frames from this `frame_index` on (sent too
-    /// late, or built on a dropped frame); the browser never saw them. The
-    /// next frame must build only on earlier ones
-    /// ([`ws_proto::EncodedFrame::recovers_from`]), or be a keyframe.
-    /// Raised again if that frame is dropped too; if none has gone out a
-    /// short while later, [`TransportEvent::KeyframeNeeded`] follows. Goes
-    /// to the [`VideoSink`] instead while one is set.
+    /// The transport dropped frames from this `frame_index` on; the browser never saw them.
     FramesLost(u8, u64),
     /// Bandwidth estimate, in bits per second; drive the encoder bitrate.
     TargetBitrate(u64),
@@ -140,8 +94,8 @@ pub enum TransportEvent {
     ChannelClosed(&'static str),
     /// The channel's send buffer drained; more data can be written.
     ChannelLow(&'static str),
-    /// A data channel message, except on the input channels: those go to
-    /// the [`InputSink`] (see [`Transport::set_input_sink`]).
+    /// A data channel message, except on the input channels: those go to the [`InputSink`] (see
+    /// [`Transport::set_input_sink`]).
     Data {
         channel: &'static str,
         binary: bool,
@@ -162,33 +116,24 @@ pub struct TransportStats {
     pub trouble: Trouble,
 }
 
-/// Counts, since the last [`TransportStats`], of what costs the browser a
-/// keyframe or a packet: to tell a bad network from a host that can't keep up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Trouble {
-    /// Keyframe requests from the browser (PLI/FIR): it lost a packet that
-    /// no resend repaired.
+    /// Keyframe requests from the browser (PLI/FIR): it lost a packet that no resend repaired.
     pub browser_keyframe_requests: u32,
-    /// Frames dropped because the send queue was too far behind.
     pub late_frames: u32,
-    /// Frames dropped for another reason (the encoder got too far ahead, or
-    /// they built on a dropped frame).
+    /// Frames dropped for another reason.
     pub lost_frames: u32,
-    /// Packets the host's socket refused (its buffer was full).
+    /// Packets the host's socket refused.
     pub send_drops: u32,
     /// Dropped frames the encoder skipped over without a keyframe.
     pub recovered: u32,
 }
 
-/// Takes every message on the `input` and `input-motion` channels, called
-/// straight from the transport's run loop (see [`Transport::set_input_sink`]).
-/// Must return at once: it holds up all media while it runs.
+/// Takes every message on the `input` and `input-motion` channels, called straight from the
+/// transport's run loop (see [`Transport::set_input_sink`]).
 pub type InputSink = Box<dyn Fn(&[u8]) + Send + Sync>;
 
-/// What the encoder must do so the browser can keep decoding: the
-/// [`TransportEvent::KeyframeNeeded`] and [`TransportEvent::FramesLost`]
-/// events, delivered straight from the run loop (see
-/// [`Transport::set_video_sink`]).
+/// What the encoder must do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VideoSignal {
     Keyframe,
@@ -198,14 +143,12 @@ pub enum VideoSignal {
 /// The state of one video stream shared by the handle and the run loop.
 #[derive(Default)]
 struct Lane {
-    /// Frames from the encoder not yet taken by the send loop (at most
-    /// [`VIDEO_QUEUE`]).
+    /// Frames from the encoder not yet taken by the send loop (at most [`VIDEO_QUEUE`]).
     frames: Mutex<VecDeque<EncodedFrame>>,
     /// When the outstanding keyframe request was made.
     keyframe_asked: Mutex<Option<Instant>>,
-    /// The first frame index the browser is missing after a drop, and when
-    /// it went missing, until a frame skipping the gap or a keyframe goes
-    /// out.
+    /// The first frame index the browser is missing after a drop, and when it went missing, until a
+    /// frame skipping the gap or a keyframe goes out.
     recovering: Mutex<Option<(u64, Instant)>>,
     /// Where keyframe requests and repairs go, if not to `events`.
     video: Mutex<Option<VideoSink>>,
@@ -214,12 +157,9 @@ struct Lane {
 }
 
 /// Takes [`VideoSignal`]s, called straight from the transport's run loop.
-/// Must return at once (hand the signal to the encoder's thread).
 pub type VideoSink = Box<dyn Fn(VideoSignal) + Send + Sync>;
 
-/// The transport's events for the host app, in order. Connection, channel
-/// and bitrate events are never dropped; data channel messages and mic
-/// packets are once [`DATA_QUEUE`] of them are waiting.
+/// The transport's events for the host app, in order.
 pub struct Events {
     rx: mpsc::UnboundedReceiver<TransportEvent>,
     queued_data: Arc<AtomicUsize>,
@@ -245,10 +185,7 @@ impl Events {
     }
 }
 
-/// Events that are many and bulky (uploads, mic audio): bounded, dropped
-/// when the app is behind. Messages on `control` are few, and losing one
-/// (a keyframe request, a size change) would go unnoticed, so they are
-/// never dropped.
+/// Events that are many and bulky (uploads, mic audio): bounded, dropped when the app is behind.
 fn is_data(ev: &TransportEvent) -> bool {
     match ev {
         TransportEvent::Data { channel, .. } => *channel != channels::CONTROL,
@@ -257,7 +194,7 @@ fn is_data(ev: &TransportEvent) -> bool {
     }
 }
 
-/// A short name for an event, for logs (data events carry bulk payloads).
+/// A short name for an event, for logs.
 fn event_kind(ev: &TransportEvent) -> &'static str {
     match ev {
         TransportEvent::Data { channel, .. } => channel,
@@ -266,9 +203,7 @@ fn event_kind(ev: &TransportEvent) -> &'static str {
     }
 }
 
-/// Input messages kept while no sink is set (the app is still starting its
-/// input side). Past this the oldest go, and the sink is first told to
-/// release everything, since a dropped key-up would leave a key held.
+/// Input messages kept while no sink is set.
 const INPUT_PENDING: usize = 1024;
 
 /// Where input channel messages go.
@@ -279,9 +214,7 @@ struct InputRoute {
     pending: VecDeque<Vec<u8>>,
     /// Some of `pending` was dropped.
     overflowed: bool,
-    /// Connected and Disconnected events delivered so far. A sink is only
-    /// taken from an app that has handled all of them, so it belongs to the
-    /// current connection.
+    /// Connected and Disconnected events delivered so far.
     transitions: u64,
 }
 
@@ -299,8 +232,7 @@ impl InputRoute {
         }
     }
 
-    /// The connection came up or went down: what was set up for the last
-    /// state no longer applies.
+    /// The connection came up or went down: what was set up for the last state no longer applies.
     fn reset(&mut self) {
         self.sink = None;
         self.pending.clear();
@@ -359,9 +291,7 @@ enum Cmd {
     /// End the run loop and the thread, whatever handles remain.
     Shutdown,
     MaxBitrate(u64),
-    /// A video sink was set (true) or cleared, for the stream `lane`. Only
-    /// a [`Remote`] run loop needs telling: the real one reads the sink from
-    /// [`Shared`].
+    /// A video sink was set (true) or cleared, for the stream `lane`.
     VideoSink(u8, bool),
     Data {
         channel: String,
@@ -381,20 +311,16 @@ struct Shared {
     /// Data events sent and not yet taken by [`Events`].
     queued_data: Arc<AtomicUsize>,
     input: Mutex<InputRoute>,
-    /// Woken when a lane's backlog changes, so a watcher need not poll it.
+    /// Woken when a lane's backlog changes.
     backlog_changed: Notify,
     /// The next offer starts from the configured estimate.
     forget_estimate: AtomicBool,
-    /// Fires once the transport thread has dropped its runtime, and with it
-    /// every socket.
+    /// Fires once the transport thread has dropped its runtime, and with it every socket.
     exited: Mutex<Option<oneshot::Receiver<()>>>,
 }
 
 impl Shared {
-    /// Store the backlog and wake the watcher if it moved. `notify_one`
-    /// keeps a permit when nobody is waiting, so a change between the
-    /// watcher's awaits still wakes its next one. Unchanged values (the
-    /// usual case while idle or steady) wake nothing.
+    /// Store the backlog and wake the watcher if it moved.
     fn set_backlog(&self, lane: usize, age: Duration) {
         let backlog = &self.lanes[lane].backlog;
         if backlog.get() != age {
@@ -405,8 +331,6 @@ impl Shared {
 
     fn emit(&self, ev: TransportEvent) {
         let transition = matches!(ev, TransportEvent::Connected | TransportEvent::Disconnected);
-        // Held across the send, so a sink set meanwhile is checked against
-        // the count this event makes.
         let mut route = transition.then(|| self.input_route());
         let data = is_data(&ev);
         if data && self.queued_data.fetch_add(1, Ordering::Relaxed) >= DATA_QUEUE {
@@ -429,8 +353,8 @@ impl Shared {
         }
     }
 
-    /// Hands a keyframe request or repair to the encoder: straight to the
-    /// video sink if one is set, else as an event.
+    /// Hands a keyframe request or repair to the encoder: straight to the video sink if one is set,
+    /// else as an event.
     fn signal_video(&self, lane: usize, signal: VideoSignal) {
         let video = self.lanes[lane]
             .video
@@ -457,7 +381,6 @@ impl Shared {
     }
 
     fn input_route(&self) -> std::sync::MutexGuard<'_, InputRoute> {
-        // A sink that panicked leaves nothing half-done in the route.
         self.input.lock().unwrap_or_else(|e| e.into_inner())
     }
 
@@ -491,9 +414,7 @@ impl Shared {
         self.recovered(lane);
     }
 
-    /// `dropped` did not go out, and the browser has every frame before
-    /// `next`. Asks the encoder to skip the gap, or for a keyframe once
-    /// that has taken too long (or before anything was sent).
+    /// `dropped` did not go out, and the browser has every frame before `next`.
     fn frame_dropped(&self, lane: usize, next: Option<u64>, dropped: &EncodedFrame) {
         let Some(from) = next else {
             return self.keyframe_needed(lane, "drop_before_first_keyframe");
@@ -525,8 +446,7 @@ impl Shared {
         }
     }
 
-    /// A frame skipping the gap was discarded before it reached the send
-    /// loop: ask for another, since the frames after it build on it.
+    /// A frame skipping the gap was discarded before it reached the send loop: ask for another.
     fn repair_lost(&self, lane: usize) {
         let recovering = *self.lanes[lane].recovering.lock().expect("recovery lock");
         if let Some((from, _)) = recovering {
@@ -547,16 +467,15 @@ impl Shared {
             .take();
     }
 
-    /// The keyframe answering a request never went out: ask again now
-    /// rather than after [`KEYFRAME_RETRY`], since every frame until the
-    /// next keyframe is held back.
+    /// The keyframe answering a request never went out: ask again now rather than after
+    /// [`KEYFRAME_RETRY`].
     fn keyframe_lost(&self, lane: usize) {
         self.keyframe_sent(lane);
         self.keyframe_needed(lane, "keyframe_lost");
     }
 }
 
-/// Handle to the transport task. Cheap to clone.
+/// Handle to the transport task.
 #[derive(Clone)]
 pub struct Transport {
     cmds: mpsc::Sender<Cmd>,
@@ -564,8 +483,7 @@ pub struct Transport {
     audio: mpsc::Sender<AudioPacket>,
 }
 
-/// What a run loop holds: the real one ([`Transport::start`]) or a
-/// [`Remote`] one.
+/// What a run loop holds: the real one ([`Transport::start`]) or a [`Remote`] one.
 struct Ends {
     cmds: mpsc::Receiver<Cmd>,
     audio: mpsc::Receiver<AudioPacket>,
@@ -575,14 +493,7 @@ struct Ends {
 }
 
 impl Transport {
-    /// Bind the sockets and start the transport on its own thread. Events
-    /// arrive on the returned receiver.
-    ///
-    /// The run loop paces every video packet out, so it gets an OS thread
-    /// and a runtime of its own (with the MMCSS "Games" class on Windows)
-    /// rather than sharing the host's tokio workers with HTTPS, file
-    /// transfer and disk writes, any of which could make a pacer wakeup
-    /// late. The sockets' reader tasks run there too.
+    /// Bind the sockets and start the transport on its own thread.
     pub async fn start(config: TransportConfig) -> Result<(Transport, Events), Error> {
         let ips = if config.ips.is_empty() {
             net::lan_ips()
@@ -650,9 +561,6 @@ impl Transport {
                     if ready_tx.send(Ok(())).is_err() {
                         return;
                     }
-                    // Ends on Transport::shutdown, or once every Transport
-                    // handle is gone; dropping the runtime then stops the
-                    // socket tasks.
                     driver.run(cmd_rx, pkt_rx, audio_rx).await;
                 });
                 drop(runtime);
@@ -667,7 +575,6 @@ impl Transport {
         let (cmds, cmd_rx) = mpsc::channel(CMD_QUEUE);
         let (events_tx, events) = mpsc::unbounded_channel();
         let queued_data = Arc::new(AtomicUsize::new(0));
-        // About 80 ms of 10 ms Opus packets; beyond that, old audio is useless.
         let (audio, audio_rx) = mpsc::channel(8);
         let (exit_tx, exit_rx) = oneshot::channel();
         let shared = Arc::new(Shared {
@@ -701,17 +608,13 @@ impl Transport {
         )
     }
 
-    /// Start a new peer connection (replacing any current one) and return
-    /// the SDP offer for the browser.
+    /// Start a new peer connection and return the SDP offer for the browser.
     pub async fn offer(&self) -> Result<String, Error> {
         self.offer_reachable_at(Vec::new()).await
     }
 
-    /// Like [`Transport::offer`], also advertising `public`: addresses this
-    /// browser reached the host at (say, the WAN address or DDNS name in its
-    /// URL), which forward the media ports here. Without one of these (or
-    /// [`TransportConfig::public_ips`]) a browser outside the LAN only sees
-    /// LAN candidates and can never connect.
+    /// Like [`Transport::offer`], also advertising `public`: addresses this browser reached the
+    /// host at.
     pub async fn offer_reachable_at(&self, public: Vec<IpAddr>) -> Result<String, Error> {
         let (tx, rx) = oneshot::channel();
         self.cmds
@@ -730,7 +633,7 @@ impl Transport {
         rx.await.map_err(|_| Error::Stopped)?
     }
 
-    /// A trickled browser candidate (optional for an ICE-lite host).
+    /// A trickled browser candidate.
     pub fn add_remote_candidate(&self, candidate: String) {
         if self.cmds.try_send(Cmd::Candidate(candidate)).is_err() {
             tracing::debug!("transport busy; dropping remote candidate");
@@ -743,9 +646,6 @@ impl Transport {
     }
 
     /// End the current peer connection.
-    /// Stops the transport for good, and returns once its thread has closed
-    /// every socket, so another transport can bind the same ports. Every
-    /// handle fails with [`Error::Stopped`] from then on.
     pub async fn shutdown(&self) {
         let _ = self.cmds.send(Cmd::Shutdown).await;
         let exited = self
@@ -773,11 +673,7 @@ impl Transport {
         }
     }
 
-    /// Hand over the next encoded frame. Frames the send loop has not taken
-    /// yet stay queued, so two arriving back to back (the encoder catching up
-    /// after a stall) both go out. A keyframe supersedes the queue. Past
-    /// [`VIDEO_QUEUE`] frames the oldest is discarded; the frame after it
-    /// then can't go out, which raises [`TransportEvent::FramesLost`].
+    /// Hand over the next encoded frame.
     pub fn send_video(&self, frame: EncodedFrame) {
         let lane = usize::from(frame.lane);
         if lane >= LANES {
@@ -820,14 +716,8 @@ impl Transport {
         self.shared.notify.notify_one();
     }
 
-    /// Hand input channel messages to `sink` as they arrive, starting with
-    /// any that came in before it was set. Input then never waits behind
-    /// other events, and a press is never dropped because the event queue
-    /// is full. `transitions` is how many [`TransportEvent::Connected`] and
-    /// [`TransportEvent::Disconnected`] events the caller has handled: if
-    /// another has been sent since, the sink belongs to a connection that is
-    /// already gone, and it is refused (false). Every such event clears the
-    /// sink, so the app sets it again after each Connected.
+    /// Hand input channel messages to `sink` as they arrive, starting with any that came in before
+    /// it was set.
     pub fn set_input_sink(&self, sink: InputSink, transitions: u64) -> bool {
         let mut route = self.shared.input_route();
         if route.transitions != transitions {
@@ -843,14 +733,8 @@ impl Transport {
         true
     }
 
-    /// Send keyframe requests and repairs straight to `sink` (the encoder)
-    /// from the run loop, instead of as events. A repair then never waits
-    /// behind the app's other work (a pipeline being rebuilt, say).
-    ///
-    /// Call it with each new encoder, before its first frame: frames still
-    /// queued from the last one are discarded, and any repair in progress
-    /// is forgotten, since the new encoder starts with a keyframe and its
-    /// frame numbers start again.
+    /// Send keyframe requests and repairs straight to `sink` (the encoder) from the run loop,
+    /// instead of as events.
     pub fn set_video_sink(&self, lane: u8, sink: VideoSink) {
         let Some(state) = self.shared.lanes.get(usize::from(lane)) else {
             return;
@@ -864,9 +748,8 @@ impl Transport {
     }
 
     /// The next offer is for another device: its estimate starts from
-    /// [`TransportConfig::initial_bitrate_bps`], not from the last
-    /// connection's (see [`ESTIMATE_KEPT_FOR`]). Call before
-    /// [`Transport::offer`].
+    /// [`TransportConfig::initial_bitrate_bps`], not from the last connection's (see
+    /// [`ESTIMATE_KEPT_FOR`]).
     pub fn forget_estimate(&self) {
         self.shared.forget_estimate.store(true, Ordering::Relaxed);
     }
@@ -885,20 +768,14 @@ impl Transport {
         self.shared.input_route().sink = None;
     }
 
-    /// How far behind the video send queue is, updated as it sends. The
-    /// encoder skips frames while it is behind rather than send frames that
-    /// would only be dropped as late.
+    /// How far behind the video send queue is, updated as it sends.
     pub fn send_backlog(&self, lane: u8) -> SendBacklog {
         self.shared.lanes[usize::from(lane).min(LANES - 1)]
             .backlog
             .clone()
     }
 
-    /// Resolve when the send backlog has changed since the last time this
-    /// returned. A change made while nobody was waiting is not lost: the
-    /// next call returns at once. It says only that the value moved (read it
-    /// with [`Transport::send_backlog`]), and the move can be tiny, so the
-    /// caller decides what is worth acting on. Meant for one watcher.
+    /// Resolve when the send backlog has changed since the last time this returned.
     pub async fn backlog_changed(&self) {
         self.shared.backlog_changed.notified().await;
     }
@@ -911,14 +788,12 @@ impl Transport {
         }
     }
 
-    /// Queue one Opus packet of game audio. Dropped if the queue is full.
+    /// Queue one Opus packet of game audio.
     pub fn send_audio(&self, packet: AudioPacket) {
         let _ = self.audio.try_send(packet);
     }
 
     /// Write to a data channel by label (see [`ws_proto::channels`]).
-    /// `Ok(false)` means its buffer is full: wait for
-    /// [`TransportEvent::ChannelLow`] and retry.
     pub async fn send_data(
         &self,
         channel: &str,
@@ -962,8 +837,6 @@ impl Driver {
         let _timer = timer::FineTimer::new();
         loop {
             let deadline = self.drain();
-            // Unbiased: no source (a flood on the sockets, say) can starve
-            // the others.
             tokio::select! {
                 cmd = cmds.recv() => match cmd {
                     Some(Cmd::Shutdown) => {
@@ -992,8 +865,6 @@ impl Driver {
                         let queue = ws_diag::enabled().then(|| s.queue_diag(lane, now));
                         let result = s.write_video(&frame, now);
                         if let Some((age, bytes, packets)) = queue {
-                            // since_enc: encode done -> here, the hop through
-                            // the host's tasks and this loop.
                             diag!(
                                 "send",
                                 "lane={lane} idx={} key={} repair={} bytes={} result={result:?} since_enc_ms={:.2} batch={batch} pacer_age_ms={:.2} pacer_bytes={bytes} pacer_pkts={packets}",
@@ -1037,8 +908,6 @@ impl Driver {
                 }
                 _ = tokio::time::sleep_until(deadline.into()) => {
                     let now = Instant::now();
-                    // A timer that fires late holds up the pacer: the tokio
-                    // pool was busy, or the timer is coarse.
                     let late = now.saturating_duration_since(deadline);
                     if late > Duration::from_millis(4) {
                         diag!("loop_timer_late", "ms={:.2}", late.as_secs_f64() * 1000.0);
@@ -1056,76 +925,68 @@ impl Driver {
         let Some(s) = &mut self.session else {
             return Instant::now() + Duration::from_secs(3600);
         };
-        // Each step is acted on as str0m yields it, so a packet goes to the socket
-        // straight from str0m's buffer, in order, and an event still takes effect
-        // after the packets before it and before those after it.
-        let deadline = s.poll(|step| {
-            match step {
-                Step::Transmit {
-                    proto,
-                    source,
-                    destination,
-                    data,
-                } => {
-                    if proto == Protocol::Udp && self.confirmed.insert(destination) {
-                        self.filter
-                            .lock()
-                            .expect("filter lock")
-                            .confirm(destination);
-                    }
-                    if !self.net.send(proto, source, destination, data) {
-                        diag!(
-                            "send_drop",
-                            "proto={proto:?} dst={destination} bytes={}",
-                            data.len()
-                        );
-                        bump(&self.shared.trouble.send_drops);
-                    }
+        let deadline = s.poll(|step| match step {
+            Step::Transmit {
+                proto,
+                source,
+                destination,
+                data,
+            } => {
+                if proto == Protocol::Udp && self.confirmed.insert(destination) {
+                    self.filter
+                        .lock()
+                        .expect("filter lock")
+                        .confirm(destination);
                 }
-                Step::Event(ev) => match ev {
-                    TransportEvent::Connected => {
-                        self.shared.connected.store(true, Ordering::Relaxed);
-                        self.shared.emit(TransportEvent::Connected);
-                        // The first frame the browser sees must be decodable.
-                        // The second stream only when something encodes it;
-                        // otherwise its first frame asks.
-                        for lane in 0..LANES {
-                            self.shared.keyframe_sent(lane);
-                            if lane == 0 || self.shared.has_sink(lane) {
-                                self.shared.keyframe_needed(lane, "connected");
-                            }
+                if !self.net.send(proto, source, destination, data) {
+                    diag!(
+                        "send_drop",
+                        "proto={proto:?} dst={destination} bytes={}",
+                        data.len()
+                    );
+                    bump(&self.shared.trouble.send_drops);
+                }
+            }
+            Step::Event(ev) => match ev {
+                TransportEvent::Connected => {
+                    self.shared.connected.store(true, Ordering::Relaxed);
+                    self.shared.emit(TransportEvent::Connected);
+                    for lane in 0..LANES {
+                        self.shared.keyframe_sent(lane);
+                        if lane == 0 || self.shared.has_sink(lane) {
+                            self.shared.keyframe_needed(lane, "connected");
                         }
                     }
-                    TransportEvent::KeyframeNeeded(lane) => {
-                        bump(&self.shared.trouble.browser_keyframe_requests);
-                        self.shared
-                            .keyframe_needed(usize::from(lane).min(LANES - 1), "browser")
-                    }
-                    TransportEvent::Stats(mut stats) => {
-                        stats.trouble = self.shared.trouble.take();
-                        diag!(
-                            "transport_stats",
-                            "rtt_ms={:?} loss={:?} bwe={:?} bytes_tx={} trouble={:?}",
-                            stats.rtt.map(|r| r.as_millis()),
-                            stats.egress_loss,
-                            stats.bwe,
-                            stats.bytes_tx,
-                            stats.trouble
-                        );
-                        self.shared.emit(TransportEvent::Stats(stats))
-                    }
-                    TransportEvent::TargetBitrate(bps) => {
-                        self.last_estimate = Some((bps, Instant::now()));
-                        self.shared.emit(TransportEvent::TargetBitrate(bps))
-                    }
-                    TransportEvent::Data { channel, data, .. }
-                        if channel == channels::INPUT || channel == channels::INPUT_MOTION =>
-                    {
-                        self.shared.input_route().input(data)
-                    }
-                    ev => self.shared.emit(ev),
-                },
-            }
+                }
+                TransportEvent::KeyframeNeeded(lane) => {
+                    bump(&self.shared.trouble.browser_keyframe_requests);
+                    self.shared
+                        .keyframe_needed(usize::from(lane).min(LANES - 1), "browser")
+                }
+                TransportEvent::Stats(mut stats) => {
+                    stats.trouble = self.shared.trouble.take();
+                    diag!(
+                        "transport_stats",
+                        "rtt_ms={:?} loss={:?} bwe={:?} bytes_tx={} trouble={:?}",
+                        stats.rtt.map(|r| r.as_millis()),
+                        stats.egress_loss,
+                        stats.bwe,
+                        stats.bytes_tx,
+                        stats.trouble
+                    );
+                    self.shared.emit(TransportEvent::Stats(stats))
+                }
+                TransportEvent::TargetBitrate(bps) => {
+                    self.last_estimate = Some((bps, Instant::now()));
+                    self.shared.emit(TransportEvent::TargetBitrate(bps))
+                }
+                TransportEvent::Data { channel, data, .. }
+                    if channel == channels::INPUT || channel == channels::INPUT_MOTION =>
+                {
+                    self.shared.input_route().input(data)
+                }
+                ev => self.shared.emit(ev),
+            },
         });
         let alive = s.is_alive();
         if !alive {
@@ -1145,9 +1006,8 @@ impl Driver {
         deadline
     }
 
-    /// Host candidates for the bound sockets, plus server-reflexive ones for
-    /// the configured public addresses and `extra` (IPv4 only, as the
-    /// sockets are; local addresses are already host candidates).
+    /// Host candidates for the bound sockets, plus server-reflexive ones for the configured public
+    /// addresses and `extra`.
     fn candidates(&self, extra: &[IpAddr]) -> Vec<str0m::Candidate> {
         let mut public = self.config.public_ips.clone();
         for ip in extra {
@@ -1259,7 +1119,6 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), transport.backlog_changed())
             .await
             .expect("the change made before waiting wakes the wait");
-        // Several changes before one wait coalesce into a single wakeup.
         for ms in [6, 7, 8] {
             transport.shared.set_backlog(0, Duration::from_millis(ms));
         }
@@ -1271,7 +1130,6 @@ mod tests {
                 .await
                 .is_err()
         );
-        // Setting the same value again is no change, so nothing wakes.
         transport.shared.set_backlog(0, Duration::from_millis(8));
         assert!(
             tokio::time::timeout(Duration::from_millis(50), transport.backlog_changed())
@@ -1300,7 +1158,6 @@ mod tests {
         shared.emit(TransportEvent::Connected);
         shared.input_route().input(vec![1]);
         shared.input_route().input(vec![2]);
-        // The app hasn't seen Connected yet: its sink is for no connection.
         assert!(!transport.set_input_sink(sink(), 0));
         assert!(transport.set_input_sink(sink(), 1));
         shared.input_route().input(vec![3]);
@@ -1319,7 +1176,6 @@ mod tests {
             Some(TransportEvent::Connected)
         ));
 
-        // A long wait keeps the newest.
         transport.clear_input_sink();
         for i in 0..INPUT_PENDING + 5 {
             shared.input_route().input(vec![(i % 256) as u8]);
@@ -1328,7 +1184,6 @@ mod tests {
         got.lock().unwrap().clear();
         assert!(transport.set_input_sink(sink(), 3));
         let got = got.lock().unwrap();
-        // Release everything first: a dropped release would leave a key held.
         assert_eq!(got[0], ws_proto::InputEvent::ReleaseAll.encode()[0]);
         assert_eq!(got[1..3], [5, 6]);
         assert_eq!(got.len(), INPUT_PENDING + 1);
@@ -1367,7 +1222,6 @@ mod tests {
         assert_eq!(got.len(), DATA_QUEUE + 2);
         assert_eq!(got[DATA_QUEUE], control);
         assert_eq!(got.last(), Some(&TransportEvent::Connected));
-        // Taking them makes room again.
         shared.emit(data());
         assert_eq!(events.try_recv().ok(), Some(data()));
     }
@@ -1389,7 +1243,6 @@ mod tests {
         .unwrap();
         let other = transport.clone();
         transport.shutdown().await;
-        // Even with a handle left, the sockets are gone.
         std::net::UdpSocket::bind(("127.0.0.1", port)).unwrap();
         assert!(matches!(other.offer().await, Err(Error::Stopped)));
     }
@@ -1415,8 +1268,6 @@ mod tests {
         );
         assert!(events.try_recv().is_err());
 
-        // The second stream has its own sink: with none set, its signals are
-        // events that name it, and the first stream's sink hears nothing.
         transport.shared.signal_video(1, VideoSignal::FramesLost(3));
         assert_eq!(
             events.try_recv().ok(),

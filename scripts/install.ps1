@@ -50,7 +50,6 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $RepoUrl = 'https://github.com/Gogan999/web-stream.git'
-# winget's "already installed" result.
 $WingetAlreadyInstalled = -1978335189
 $VcComponent = 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64'
 $SdkComponent = 'Microsoft.VisualStudio.Component.Windows11SDK.22621'
@@ -75,7 +74,6 @@ function Install-WingetPackage([string]$Id, [string[]]$Extra = @()) {
     Write-Step "Installing $Id"
     $wingetArgs = @('install', '--exact', '--id', $Id, '--source', 'winget',
         '--accept-package-agreements', '--accept-source-agreements') + $Extra
-    # Out-Host keeps winget's output off the pipeline of the calling function.
     & winget @wingetArgs | Out-Host
     if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne $WingetAlreadyInstalled) {
         throw "winget could not install $Id (exit code $LASTEXITCODE)."
@@ -105,7 +103,6 @@ function Install-BuildTools {
         $existing = & $VsWhere -latest -products * -property installationPath
     }
     if ($existing) {
-        # Visual Studio is there but lacks the C++ tools or the SDK: add them.
         Write-Step "Adding the C++ tools and Windows SDK to $existing"
         $p = Start-Process -FilePath $VsSetup -Wait -PassThru -Verb RunAs -ArgumentList @(
             'modify', '--installPath', "`"$existing`"",
@@ -131,7 +128,6 @@ function Install-CMake {
     }
     Install-WingetPackage 'Kitware.CMake' @('--silent')
     if (-not (Test-Command cmake)) {
-        # The installer adds CMake to the machine PATH; fall back to its default folder.
         $env:Path += ";$(Join-Path $env:ProgramFiles 'CMake\bin')"
     }
     if (-not (Test-Command cmake)) { throw 'CMake was installed but is not on PATH.' }
@@ -153,8 +149,6 @@ function Test-MicCable {
     })
 }
 
-# Installs Steam's signed virtual microphone the way Sunshine installs Steam
-# Streaming Speakers: DiInstallDriverW on the INF in Steam's drivers folder.
 function Install-SteamMic {
     if (Test-MicCable) {
         Write-Step 'A virtual mic (VB-CABLE or Steam Streaming Microphone) is already installed'
@@ -173,8 +167,6 @@ if (-not [WebStream.NewDev]::DiInstallDriverW([IntPtr]::Zero, 'INF_PATH', 0, [re
     exit [Runtime.InteropServices.Marshal]::GetLastWin32Error()
 }
 '@
-    # An elevated process does not inherit this one's environment, so the path
-    # goes into the script itself, as a single-quoted string.
     $code = $code.Replace('INF_PATH', $inf.Replace("'", "''"))
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($code))
     $p = Start-Process -FilePath powershell -Wait -PassThru -Verb RunAs -WindowStyle Hidden `
@@ -201,9 +193,6 @@ function Get-RepoRoot {
     return $Dir
 }
 
-# Brings an existing checkout of main up to date, so running the script
-# again builds the latest version. Other branches and local changes are left
-# alone.
 function Update-Checkout($root) {
     if (-not (Test-Command git) -or -not (Test-Path (Join-Path $root '.git'))) { return }
     $branch = (& git -C $root rev-parse --abbrev-ref HEAD).Trim()
@@ -249,9 +238,6 @@ try {
 $bin = Join-Path $repo 'target\release'
 $gui = Join-Path $bin 'ws-host-gui.exe'
 
-# The web client is built into the host now, and the console host
-# (ws-host.exe) is retired; old copies next to the tray app would only
-# confuse.
 $oldWeb = Join-Path $bin 'web'
 if (Test-Path $oldWeb) { Remove-Item -Recurse -Force $oldWeb }
 foreach ($old in 'ws-host.exe', 'ws-host.exe.old') {
@@ -285,8 +271,6 @@ if ($Run) {
     $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
         [Security.Principal.WindowsBuiltInRole]::Administrator)
     if ($admin) {
-        # Never start the host elevated from an administrator shell: Explorer
-        # starts it as the normal user, like the Start menu shortcut does.
         Start-Process -FilePath explorer.exe -ArgumentList "`"$gui`""
     } else {
         Start-Process -FilePath $gui -WorkingDirectory $bin

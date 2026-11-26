@@ -4,7 +4,7 @@ import { ClipboardSync, MAX_BYTES } from '../../js/clipboard.js';
 import { InputCapture } from '../../js/input.js';
 import { HID } from '../../js/keymap.js';
 
-// A browser stand-in: a clipboard that can refuse writes (iOS without a gesture) or reads.
+// A browser stand-in: a clipboard that can refuse writes or reads.
 function setup({ permission = 'granted', writes = true, reads = true, text = '' } = {}) {
   const sent = [];
   const notes = [];
@@ -57,7 +57,6 @@ test('host text is written to the browser clipboard, and not sent back', async (
   await settle();
   assert.equal(board.text, 'from pc');
   assert.equal(clip.pending, null);
-  // Focus returns: the clipboard still holds what the host sent, so nothing is sent back.
   await clip.onFocus();
   assert.deepEqual(sent, []);
 });
@@ -90,7 +89,6 @@ test('this clipboard goes to the host and the paste waits for the answer', async
   assert.equal(done, false, 'still waiting for clipboardSet');
   clip.onControl({ type: 'clipboardSet', ok: true });
   assert.equal(await wait, true);
-  // The same text again is not sent twice.
   assert.equal(await clip.toHost(), true);
   assert.equal(sent.length, 1);
 });
@@ -161,7 +159,6 @@ test('Ctrl+V waits for the clipboard, and keys behind it keep their order', asyn
   const V = HID.KeyV;
   cap.heldKeys.add(V);
   cap.sendKey(V, true);
-  // V released at once: it must not overtake the paste.
   cap.heldKeys.delete(V);
   cap.sendKey(V, false);
   assert.deepEqual(log, []);

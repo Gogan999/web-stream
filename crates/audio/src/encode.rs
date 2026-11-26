@@ -1,5 +1,4 @@
-//! Slices 48 kHz stereo into 10 ms (or 20 ms) frames and encodes each one
-//! with Opus.
+//! Slices 48 kHz stereo into 10 ms (or 20 ms) frames and encodes each one with Opus.
 
 use std::time::{Duration, Instant};
 
@@ -14,24 +13,21 @@ use crate::convert::{CHANNELS, SAMPLE_RATE};
 pub const FRAME_SAMPLES: usize = 480;
 pub const FRAME_DURATION: Duration = Duration::from_millis(10);
 pub const DEFAULT_BITRATE: u32 = 128_000;
-/// Frame lengths the encoder accepts, in milliseconds. 20 ms sounds better
-/// at the same bitrate; 10 ms is 10 ms sooner.
+/// Frame lengths the encoder accepts, in milliseconds.
 pub const FRAME_MS: [u32; 2] = [10, 20];
-/// Packet timestamps follow the sample count, not the jittery time each
-/// buffer was read; they jump forward to the wall clock only when it gets
-/// this far ahead (a stall, a reopened device), never back.
+/// Packet timestamps follow the sample count; they jump forward to the wall clock only when it gets
+/// this far ahead, never back.
 const RESYNC_MICROS: u64 = 80_000;
 
-/// Converts an [`Instant`] to [`MicrosMono`], on the same clock as video
-/// frames ([`ws_proto::mono_micros`]), so audio and video times compare.
+/// Converts an [`Instant`] to [`MicrosMono`], on the same clock as video frames
+/// ([`ws_proto::mono_micros`]).
 pub fn micros_mono(at: Instant) -> MicrosMono {
     ws_proto::mono_micros(at)
 }
 
 pub struct OpusFrameEncoder {
     encoder: Encoder,
-    /// Samples per channel in a frame, and what it becomes after the frame
-    /// being filled now.
+    /// Samples per channel in a frame, and what it becomes after the frame being filled now.
     frame_samples: usize,
     next_frame_samples: usize,
     pending: Vec<f32>,
@@ -44,12 +40,9 @@ pub struct OpusFrameEncoder {
 
 impl OpusFrameEncoder {
     pub fn new(bitrate: u32) -> Result<Self, AudioError> {
-        // Restricted low delay is CELT-only: 2.5 ms algorithmic delay instead
-        // of SILK's 6.5 ms, and it suits game audio and music better than speech mode.
         let mut encoder = Encoder::new(SAMPLE_RATE, Channels::Stereo, Application::LowDelay)?;
         encoder.set_bitrate(Bitrate::Bits(bitrate as i32))?;
         encoder.set_vbr(true)?;
-        // Encoding stereo audio at full complexity costs well under 1% of a core.
         encoder.set_complexity(10)?;
         Ok(Self {
             encoder,
@@ -77,13 +70,10 @@ impl OpusFrameEncoder {
         Ok(())
     }
 
-    /// Where a packet starting at wall-clock `wall` sits on the sample clock:
-    /// right after the previous packet, unless that has drifted too far.
+    /// Where a packet starting at wall-clock `wall` sits on the sample clock: right after the
+    /// previous packet, unless that has drifted too far.
     fn stamp(&mut self, wall: MicrosMono, samples: usize) -> MicrosMono {
         let at = match self.next_capture {
-            // Only forward: a device clock running a little fast puts the
-            // sample clock ahead of the wall clock, and jumping back would
-            // overlap packets already sent.
             Some(t) if wall <= t + RESYNC_MICROS => t,
             _ => wall,
         };
@@ -95,12 +85,8 @@ impl OpusFrameEncoder {
         Ok(self.encoder.set_bitrate(Bitrate::Bits(bitrate as i32))?)
     }
 
-    /// Adds interleaved stereo samples whose first frame was captured at
-    /// `captured_at`, and calls `emit` for every complete packet.
-    ///
-    /// Packets are numbered gap-free from 0. Consecutive capture times are
-    /// exactly one packet's duration apart (whole RTP ticks at 48 kHz), so
-    /// the receiver never sees a gap or overlap to conceal.
+    /// Adds interleaved stereo samples whose first frame was captured at `captured_at`, and calls
+    /// `emit` for every complete packet.
     pub fn push(
         &mut self,
         samples: &[f32],
@@ -155,7 +141,6 @@ mod tests {
     #[test]
     fn emits_one_packet_per_10ms_with_running_timestamps() {
         let mut enc = OpusFrameEncoder::new(DEFAULT_BITRATE).unwrap();
-        // Pin the clock's epoch before `start`; another test may set it first.
         let _ = micros_mono(Instant::now());
         let start = Instant::now();
         let mut frames = vec![];
@@ -233,7 +218,6 @@ mod tests {
         .unwrap();
         assert_eq!(frames.last().unwrap().capture_time, micros_mono(late));
 
-        // Audio arriving early (a fast device clock) never steps back.
         let before = frames.last().unwrap().capture_time;
         enc.push(&vec![0.1f32; FRAME_SAMPLES * CHANNELS], start, |f| {
             frames.push(f)
@@ -252,7 +236,6 @@ mod tests {
             .unwrap();
         enc.set_frame_ms(20).unwrap();
         assert!(enc.set_frame_ms(15).is_err());
-        // Finishes the 10 ms frame it started, then makes 20 ms ones.
         enc.push(&vec![0.1f32; 2160 * CHANNELS], start, |f| packets.push(f))
             .unwrap();
         assert_eq!(packets.len(), 3);

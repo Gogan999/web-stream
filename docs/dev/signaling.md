@@ -27,8 +27,9 @@ from there.
 
 ## TLS
 
-The host generates a self-signed certificate on first run and prints its
-SHA-256 fingerprint; compare it once when the browser warns. A real
+The host generates its own CA and a certificate issued by it on first run
+and prints the certificate's SHA-256 fingerprint; compare it once when the
+browser warns, or install the CA (see [Certificates](#certificates)). A real
 certificate (for example from a DDNS name) can be configured instead.
 
 ## Pairing and auth (HTTP, same origin)
@@ -39,8 +40,8 @@ console, `SignalingHandle::open_pairing`) for two minutes; only then does
 the network can start a pairing or guess codes at an unattended host.
 
 All `POST` bodies are JSON and must send `Content-Type: application/json`.
-The host rejects any request whose `Origin` header is not the host's own
-origin. The device credential is an `HttpOnly; Secure; SameSite=Strict`
+The host rejects any cookie request whose `Origin` header is not the host's
+own origin. The device credential is an `HttpOnly; Secure; SameSite=Strict`
 cookie named `__Host-ws_device`, so page script never sees it and no
 sibling subdomain can set it.
 
@@ -51,6 +52,34 @@ sibling subdomain can set it.
 | `POST /api/pair/confirm` | `{"pairing_id":"…","code":"123456"}` | `200 {"paired":true}` + cookie. `403 {"error":"bad_code","attempts_left":2}`. `410 {"error":"expired"}`. `423 {"error":"locked"}` |
 | `POST /api/pair/link` | `{"link":"…","device_name":"iPhone"}` | `200 {"paired":true}` + cookie. `403 {"error":"pairing_closed"}` if pairing is closed or the link is wrong or used |
 | `POST /api/unpair` | `{}` | `200`, revokes this device and clears the cookie |
+| `GET /ca.crt` | | The host CA certificate (DER) for a device to install and trust |
+
+### Saved PCs (another origin)
+
+The web client can keep several PCs and pair with each from one page. Those
+requests come from another origin, so they authenticate with the device
+token instead of the cookie:
+
+- Pairing bodies add `"want_token": true`. The `200` from
+  `/api/pair/confirm` and `/api/pair/link` is then
+  `{"paired":true,"token":"…"}` and sets no cookie. Pairing still needs the
+  code shown on the host or the QR link.
+- `/api/session` and `/api/unpair` take `Authorization: Bearer <token>`.
+- `/ws` takes the token as a subprotocol: the browser asks for
+  `web-stream` and `web-stream.auth.<token>`; the host selects `web-stream`.
+- `/api/*` answers CORS preflights from any `https://` origin (methods
+  `GET, POST`, headers `content-type, authorization`, and
+  `Access-Control-Allow-Private-Network` when asked), without
+  `Access-Control-Allow-Credentials`, so cookies never travel cross-origin.
+  A token request needs no origin check: another site cannot know the token.
+
+## Certificates
+
+A self-signed host makes its own CA once (`tls-ca-cert.pem`, kept for ten
+years) and issues the server certificate from it (`tls-cert.pem`, with
+`serverAuth`, reissued when the host's addresses change). Installing the CA
+from `/ca.crt` on a phone ends the browser warning for good, including after
+an address change, and lets a page on one PC reach the others.
 
 Opening pairing also makes a pairing link: 32 random bytes the host UI
 shows as a QR code of `https://<host>:<port>/#pair=<link>`. The fragment

@@ -43,8 +43,7 @@ impl DeviceStore {
         })
     }
 
-    /// Pair a new device and return the token to hand to it. The token itself
-    /// is never stored.
+    /// Pair a new device and return the token to hand to it.
     pub fn add(&mut self, name: &str, now: SystemTime) -> Result<String, Error> {
         let token = random_token()?;
         let secs = unix_secs(now);
@@ -67,8 +66,8 @@ impl DeviceStore {
             .find(|d| d.token_sha256 == h && d.last_used >= cutoff)
     }
 
-    /// Validate a token at the start of a session, refresh its idle timer and
-    /// drop any devices that have expired.
+    /// Validate a token at the start of a session, refresh its idle timer and drop any devices that
+    /// have expired.
     pub fn authenticate(&mut self, token: &str, now: SystemTime) -> Result<Option<Device>, Error> {
         let secs = unix_secs(now);
         let cutoff = secs.saturating_sub(self.idle_expiry.as_secs());
@@ -81,8 +80,6 @@ impl DeviceStore {
             .iter_mut()
             .find(|d| d.token_sha256 == h)
             .map(|d| {
-                // The idle timer counts in days, so an hourly refresh is
-                // plenty and keeps disk writes off most connects.
                 if secs.saturating_sub(d.last_used) >= TOUCH_INTERVAL_SECS {
                     d.last_used = secs;
                     touched = true;
@@ -126,8 +123,6 @@ impl DeviceStore {
 pub fn write_private(path: &Path, contents: &[u8]) -> Result<(), Error> {
     let dir = path.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(dir)?;
-    // A fresh random name with `create_new`, so a pre-planted file or link
-    // at a predictable temp path is never written through.
     let mut suffix = [0u8; 8];
     getrandom::fill(&mut suffix).map_err(|e| Error::Random(e.to_string()))?;
     let tmp = dir.join(format!(".{}.tmp", URL_SAFE_NO_PAD.encode(suffix)));

@@ -1,10 +1,4 @@
-// Files the host user shares with this browser, and saving them. See docs/dev/protocol.md (File transfer).
-//
-// The host offers a file on the control channel; Save asks for it, and its bytes come on the
-// "file" channel as chunks: 8-byte id, 8-byte offset (both big-endian), then data. A chunk is kept
-// only if it starts where the file left off, so bytes still in flight from a cancelled transfer
-// are dropped. Chrome writes straight to the file the user picked; without that (Android) the file
-// is collected in memory and handed to the browser's downloads.
+// Files the host user shares with this browser, and saving them.
 
 export const HEADER = 16;
 // Stored bytes between acks; the host sends at most 1 MiB past the last one.
@@ -21,7 +15,6 @@ export function parseChunk(buf) {
 // A name safe to suggest when saving: no folders, no characters Windows refuses, no reserved names.
 export function safeName(name) {
   let n = String(name ?? '').split(/[\\/]/).pop();
-  // Invisible formatting characters (U+202E and the like) could disguise the extension.
   n = n.replace(/\p{Cf}/gu, '').replace(/[\x00-\x1f\x7f<>:"|?*]/g, '_');
   const trim = (s) => s.replace(/^[\s.]+|[\s.]+$/g, '');
   n = trim(n).slice(0, 200).replace(/[\ud800-\udbff]$/, '');
@@ -74,8 +67,6 @@ export function downloadBlob(blob, name) {
 }
 
 // Offered files by id: { id, name, size, state, received, stored, error, startedAt }.
-// state: 'offered' | 'receiving' | 'saved' | 'failed'. Fires 'change' on any change and
-// 'offer' (detail: file) for a new offer.
 export class Files extends EventTarget {
   constructor({ sendControl, pickFile = defaultPicker(), download = downloadBlob }) {
     super();
@@ -115,8 +106,7 @@ export class Files extends EventTarget {
     return false;
   }
 
-  // Picks where to save and asks the host for the file. Must run in a click handler: the save
-  // dialog needs the user's gesture.
+  // Picks where to save and asks the host for the file.
   async save(id) {
     const f = this.files.get(id);
     if (!f || f.state === 'receiving') return;
@@ -126,7 +116,6 @@ export class Files extends EventTarget {
       if (writable) sink = new DiskSink(writable);
     } catch (err) {
       if (err?.name === 'AbortError') return; // the user closed the save dialog
-      // The dialog is blocked (policy, lost gesture, a browser that stubs it): use downloads.
     }
     if (!sink) {
       if (f.size > BLOB_MAX) {
@@ -220,10 +209,7 @@ export function makeChunk(id, offset, bytes) {
   return out.buffer;
 }
 
-// Files this browser sends to the host, when the host allows it ("uploads" on connect). One at a
-// time: offered, accepted, sent in chunks within the host's ack window, then saved.
-// Items by id: { id, name, size, file, state, sent, acked, savedAs, error }; state is
-// 'queued' | 'waiting' (for the host to accept) | 'sending' | 'saved' | 'failed'. Fires 'change'.
+// Files this browser sends to the host, when the host allows it ("uploads" on connect).
 export class Uploads extends EventTarget {
   constructor({ sendControl, sendFile, fileBuffered, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) }) {
     super();
@@ -345,8 +331,7 @@ export class Uploads extends EventTarget {
   }
 }
 
-// Chrome's save dialog, writing as the file arrives; null where there is none (then the file is
-// collected in memory, as it is when the dialog refuses to open).
+// Chrome's save dialog, writing as the file arrives; null where there is none.
 function defaultPicker() {
   if (typeof window === 'undefined' || typeof window.showSaveFilePicker !== 'function') return null;
   return async (name) => {

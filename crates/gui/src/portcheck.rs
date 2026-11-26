@@ -1,15 +1,4 @@
 //! The first-run port test: can a phone away from home reach this host?
-//!
-//! With a Cloudflare Tunnel the web page comes through Cloudflare, and the
-//! test reports whether the tunnel is up; only the media ports need
-//! forwarding then.
-//!
-//! Nothing outside the network is asked. The test learns the public
-//! address from the router (UPnP) or the address typed in the settings,
-//! and connects to it from this PC. Most routers pass that back in
-//! ("hairpin"), and the certificate that answers tells this host apart from
-//! the router's own admin page on the same port. When the router doesn't
-//! loop back, the test says so and the phone on mobile data is the test.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
 use std::time::Duration;
@@ -25,8 +14,7 @@ pub struct Input {
     pub ice_tcp_port: Option<u16>,
     /// The running host's certificate, `None` when it isn't hosting.
     pub fingerprint: Option<String>,
-    /// Whether a Cloudflare Tunnel carries the web page, and where it is up
-    /// (`None` while it isn't).
+    /// Whether a Cloudflare Tunnel carries the web page, and where it is up.
     pub tunnel: Option<Option<String>>,
     /// Public addresses typed in the settings.
     pub public_ips: Vec<IpAddr>,
@@ -50,10 +38,7 @@ pub struct Line {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Report {
     pub lines: Vec<Line>,
-    /// The public address this host was found at (its own certificate
-    /// answered there), for the QR code a phone away from home opens. Only
-    /// a verified one: the router's word alone isn't enough, since any
-    /// device on the network can answer UPnP.
+    /// The public address this host was found at, for the QR code a phone away from home opens.
     pub verified_ip: Option<IpAddr>,
 }
 
@@ -149,8 +134,6 @@ pub fn run(input: &Input) -> Report {
         return r;
     };
 
-    // The ports, through the public address. Through a tunnel nothing
-    // answers on the HTTPS port from outside, and needn't.
     let https = SocketAddr::new(public, input.port);
     let check_https = input.tunnel.is_none();
     match check_https.then(|| certificate_at(https)) {
@@ -217,8 +200,7 @@ fn certificate_at(addr: SocketAddr) -> anyhow::Result<String> {
     Ok(rt.block_on(ws_signaling::certificate_at(addr, CONNECT))?)
 }
 
-/// Reachable from the internet: not private, shared (CGNAT), loopback or
-/// link-local.
+/// Reachable from the internet: not private, shared (CGNAT), loopback or link-local.
 pub fn is_public(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
@@ -284,7 +266,6 @@ mod tests {
         rt.spawn(server.serve());
         std::thread::sleep(Duration::from_millis(200));
 
-        // 127.0.0.1 isn't public, but a typed address is taken as given.
         let input = Input {
             port: addr.port(),
             ice_tcp_port: None,

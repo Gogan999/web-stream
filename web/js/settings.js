@@ -1,15 +1,13 @@
-// Stream settings chosen in the browser: codec, bitrate, resolution, frame rate, encoder quality and keyframe
-// handling, turned into the host's VideoConfig. Pure functions so they can be tested; main.js owns the UI.
+// Stream settings chosen in the browser: codec, bitrate, resolution, frame rate, encoder quality
+// and keyframe handling, turned into the host's VideoConfig.
 
-// Priority is what the user picks (Smooth / Balanced / Sharp); the host's encoder preset is its
-// `quality` field. Source (for reading and working) is a bundle: see SOURCE_PRESET.
+// Priority is what the user picks; the host's encoder preset is its `quality` field.
 export const PRIORITIES = Object.freeze(['smooth', 'balanced', 'sharp', 'source']);
 export const PRIORITY_QUALITY = Object.freeze({ smooth: 'speed', balanced: 'balanced', sharp: 'clarity', source: 'source' });
 export const QUALITY_PRIORITY = Object.freeze({ speed: 'smooth', balanced: 'balanced', clarity: 'sharp', source: 'source' });
 
-// What choosing Source sets besides the preset: host-native pixels (no scaling blur), no automatic
-// shrinking, and a bitrate with room for it; the host keeps each frame sharp and lowers the frame rate,
-// up to the one chosen, to fit the bitrate.
+// What choosing Source sets besides the preset: host-native pixels, no automatic shrinking, and a
+// bitrate with room for it.
 export const SOURCE_PRESET = Object.freeze({ resolution: 'native', fps: 60, minScale: 100, bitrate: 'auto' });
 // Video codecs the host encodes, as VideoConfig names them, with the browser's MIME type for each.
 export const CODECS = Object.freeze({ h264: 'video/H264', h265: 'video/H265', av1: 'video/AV1' });
@@ -18,14 +16,13 @@ export const BITRATES_KBPS = Object.freeze([5000, 10000, 15000, 20000, 30000, 50
 export const FRAME_RATES = Object.freeze([30, 60, 90, 120, 144]);
 // How many ordinary frames' worth of bits a keyframe may use: sharper keyframes, longer to send.
 export const KEYFRAME_SCALES = Object.freeze([1, 2, 3, 4]);
-// 'screen' fits this screen, 'native' is the host display's own size; the rest are fixed heights in the
-// display's shape (never above its own size).
-// 2160 is still read from old saved settings but no longer listed (MENU_RESOLUTIONS).
+// 'screen' fits this screen, 'native' is the host display's own size; the rest are fixed heights in
+// the display's shape.
 export const RESOLUTIONS = Object.freeze(['screen', 'native', '2160', '1440', '1080', '720']);
 export const MENU_RESOLUTIONS = Object.freeze(['screen', 'native', '1440', '1080', '720']);
 
 // Auto resolution: the smallest share of the chosen width and height the host may drop to when the
-// bitrate is too low for it. 0 lets it go as low as it ever does (360 lines); 100 turns it off.
+// bitrate is too low for it.
 export const MIN_SCALES = Object.freeze([0, 50, 75, 100]);
 
 // Game audio: Opus kb/s and frame length in ms; 'host' keeps the host's own setting.
@@ -52,17 +49,15 @@ export function autoKbps(width, height, fps) {
   return Math.round(Math.min(150000, Math.max(5000, kbps)) / 500) * 500;
 }
 
-// Largest even size with the display's shape that fits in the box, never above the display's own size
-// (upscaling on the host only costs bits).
+// Largest even size with the display's shape that fits in the box, never above the display's own
+// size.
 export function fitToDisplay(boxW, boxH, dispW, dispH) {
   if (!(dispW > 0 && dispH > 0)) return { width: even(boxW), height: even(boxH) };
   const scale = Math.min(boxW / dispW, boxH / dispH, 1);
   return { width: even(dispW * scale), height: even(dispH * scale) };
 }
 
-// The stream size for a resolution setting. `screen` is this screen's size in device pixels.
-// `rotate` (touch devices): fit the screen the same way round as the display, since a phone held
-// upright gets turned sideways to watch a landscape display (fullscreen locks it so).
+// The stream size for a resolution setting.
 export function streamSize(resolution, screen, display, rotate = false) {
   const dw = display?.width ?? 1920;
   const dh = display?.height ?? 1080;
@@ -76,7 +71,7 @@ export function streamSize(resolution, screen, display, rotate = false) {
   return { width: even(dw * scale), height: even(dh * scale) };
 }
 
-// The VideoConfig to ask the host for. `codec` is what the host streams now, kept unless one was chosen.
+// The VideoConfig to ask the host for.
 export function videoConfig(settings, { screen, display, codec = 'h264', rotate = false }) {
   settings = sanitize(settings);
   codec = settings.codec ?? codec;
@@ -117,14 +112,13 @@ export function decodableCodecs(receiver = globalThis.RTCRtpReceiver) {
   return all.filter((c) => mimes.has(CODECS[c].toLowerCase()));
 }
 
-// This screen in device pixels (what a fullscreen stream is shown at).
+// This screen in device pixels.
 export function screenPixels(win = globalThis) {
   const dpr = win.devicePixelRatio || 1;
   return { width: Math.round(win.screen.width * dpr), height: Math.round(win.screen.height * dpr) };
 }
 
-// Each stored field is checked and falls back to its default: a bad value would build a config the
-// host rejects. Bitrate may be any whole kbps auto-tune picked, not only the list.
+// Each stored field is checked and falls back to its default.
 export function sanitize(saved) {
   const v = saved && typeof saved === 'object' ? saved : {};
   const kbps = Number(v.bitrate);
@@ -132,8 +126,7 @@ export function sanitize(saved) {
   let minScale = v.minScale;
   let priority = v.priority;
   if (!PRIORITIES.includes(priority)) {
-    // Settings saved before Priority existed: `quality` becomes the matching priority. Source (once
-    // called text) was a bundle: host-native pixels and no automatic shrinking.
+    // Settings saved before Priority existed: `quality` becomes the matching priority.
     const quality = v.quality === 'text' ? 'source' : v.quality;
     priority = QUALITY_PRIORITY[quality] ?? DEFAULTS.priority;
     if (quality === 'source') {
@@ -153,7 +146,6 @@ export function sanitize(saved) {
     minScale: MIN_SCALES.includes(Number(minScale)) ? Number(minScale) : DEFAULTS.minScale,
     matchHost: v.matchHost === true,
     mic: v.mic === true,
-    // A paired page connects as soon as it loads, unless this is turned off.
     autoconnect: v.autoconnect !== false,
     audioKbps: AUDIO_KBPS.includes(v.audioKbps) ? v.audioKbps : DEFAULTS.audioKbps,
     audioFrame: AUDIO_FRAMES.includes(v.audioFrame) ? v.audioFrame : DEFAULTS.audioFrame,
@@ -161,7 +153,7 @@ export function sanitize(saved) {
   };
 }
 
-// Storage can be missing or throw (private windows, blocked site data); settings then last for the page only.
+// Storage can be missing or throw; settings then last for the page only.
 export function load(storage = globalThis.localStorage) {
   try {
     return sanitize(JSON.parse(storage?.getItem(STORAGE_KEY) ?? 'null'));
@@ -171,5 +163,5 @@ export function load(storage = globalThis.localStorage) {
 }
 
 export function save(settings, storage = globalThis.localStorage) {
-  try { storage?.setItem(STORAGE_KEY, JSON.stringify(settings)); } catch { /* not persisted */ }
+  try { storage?.setItem(STORAGE_KEY, JSON.stringify(settings)); } catch { }
 }

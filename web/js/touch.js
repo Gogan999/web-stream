@@ -1,32 +1,18 @@
-// Touch gestures on the video, turned into mouse actions. Pure state machine (times and points
-// come in as arguments) so it can be tested; input.js feeds it pointer events.
-//
-// Trackpad (relative mouse mode): drag moves the cursor, tap clicks, tap then touch again and drag
-// (or hold then drag) drags with the left button, two-finger tap right-clicks, two-finger drag scrolls.
-// Direct (absolute mouse mode): the cursor goes where the finger is; tap clicks there, drag drags
-// with the left button, hold right-clicks, two-finger tap right-clicks, two-finger drag scrolls.
-// Both: a three-finger tap (all three down and up within TWO_TAP_MS, none moved) middle-clicks.
-// Both: pinching zooms the view (the stream, not the host) and moving the pinch pans it; while
-// with Pan on (zoomed in only), any two-finger drag pans instead of scrolling. Lifting one finger of a pinch and putting
-// it back carries on pinching.
-//
-// Real fingers don't land together: the first often slides past the slop before the second lands.
-// A drag that would press a button (direct drag, trackpad tap-drag) waits SECOND_FINGER_MS from the
-// first touch, so that slide still becomes a pinch instead of a drag on the host.
+// Touch gestures on the video, turned into mouse actions.
 
-export const SLOP_PX = 10; // movement below this still counts as a tap or hold
+export const SLOP_PX = 10;
 export const HOLD_MS = 450;
 export const TWO_TAP_MS = 300;
 // Trackpad: a finger landing this soon after a tap drags with the left button once it moves.
 export const TAP_DRAG_MS = 350;
 // How long after the first finger a second one still makes a two-finger gesture, however far the
-// first has moved (see above). A drag starts no later than this; it starts from where it landed.
+// first has moved (see above).
 export const SECOND_FINGER_MS = 120;
 // Two fingers: scroll once their midpoint moves this far, pinch once their spread changes this
-// much (whichever is larger at that point decides).
+// much.
 export const SCROLL_PX = 2 * SLOP_PX;
 export const PINCH_PX = 30;
-// Wheel units per CSS px of two-finger drag (120 is one notch).
+// Wheel units per CSS px of two-finger drag.
 export const WHEEL_PER_PX = 2;
 
 const LEFT = 0;
@@ -34,13 +20,7 @@ const RIGHT = 2;
 const MIDDLE = 1;
 
 export class TouchGestures {
-  // Times are ms on one clock (performance.now() in input.js); move's `t` may be left out, which
-  // counts as late enough for anything.
-  // out: { move(dx, dy), moveTo(x, y, reliable), button(b, down), wheel(dx, dy), haptic(),
-  //        pinch(ratio, midX, midY, panX, panY), pans() }
-  // pans(): two-finger drags pan the view rather than scroll the host (the Pan button).
-  // moveTo's `reliable` is true where a button event follows at that point (touch down, drag start).
-  // pinch: the spread changed by `ratio` around the midpoint, which moved by (panX, panY).
+  // Times are ms on one clock (performance.now() in input.js); move's `t` may be left out.
   constructor(out, mode = 'trackpad') {
     this.out = out;
     this.mode = mode; // 'trackpad' or 'direct'
@@ -49,15 +29,15 @@ export class TouchGestures {
 
   reset() {
     this.points = new Map(); // id -> { x, y, sx, sy }
-    this.primary = null; // first finger down
-    this.state = 'idle'; // idle, pending, moving, holding, dragging, two, done
+    this.primary = null;
+    this.state = 'idle';
     this.t0 = 0;
-    this.two = null; // two fingers: null (undecided), 'scroll' or 'pinch'
-    this.spread = null; // two fingers: { d, x, y } distance and midpoint at the start and last sent
+    this.two = null;
+    this.spread = null;
     this.tapDrag = false;
-    this.three = null; // three fingers down: { t0 } while it may still be a tap
-    this.slid = false; // pending: moved past the slop, but waiting to see if a second finger lands
-    this.lastTap ??= -Infinity; // kept across reset() so cancel doesn't forget it
+    this.three = null;
+    this.slid = false;
+    this.lastTap ??= -Infinity;
     this.leftDown = false;
     this.wheelRest = { x: 0, y: 0 };
   }
@@ -78,7 +58,6 @@ export class TouchGestures {
       if (this.mode === 'direct') this.out.moveTo(x, y, true);
     } else if (n === 2 && (this.state === 'pending' || this.state === 'moving' ||
         (this.state === 'done' && this.two === 'pinch'))) {
-      // From 'done': a finger of a pinch was lifted and put back, so it keeps pinching.
       if (this.state !== 'done') this.two = null;
       this.state = 'two';
       this.t0 = t;
@@ -88,7 +67,6 @@ export class TouchGestures {
       this.spread0 = this.spread;
     } else if (n >= 3) {
       this.releaseLeft();
-      // Three fingers that haven't scrolled or pinched yet may be a middle click.
       if (n === 3 && this.state === 'two' && !this.two) this.three = { t0: this.t0 };
       else this.three = null;
       this.state = 'done';
@@ -103,7 +81,6 @@ export class TouchGestures {
     p.x = x;
     p.y = y;
     if (this.three && Math.hypot(x - p.sx, y - p.sy) >= SLOP_PX) this.three = null;
-    // A second finger that lands mid-drag is ignored rather than moving the cursor too.
     if (this.state !== 'two' && id !== this.primary) return;
     switch (this.state) {
       case 'pending':
@@ -130,12 +107,11 @@ export class TouchGestures {
           else if (pan >= SCROLL_PX && pan > spread) this.two = 'scroll';
           else return;
           if (this.two === 'scroll') {
-            this.scroll(now.x - s.x, now.y - s.y); // the movement so far
+            this.scroll(now.x - s.x, now.y - s.y);
             return;
           }
         }
         if (this.two === 'scroll') {
-          // Each finger moves half the scroll; content follows the fingers like a touch screen.
           this.scroll(dx / 2, dy / 2);
           return;
         }
@@ -156,8 +132,6 @@ export class TouchGestures {
     this.slid = false;
     if (this.mode === 'trackpad') {
       this.state = this.tapDrag ? 'holding' : 'moving';
-      // Move before pressing: the press lands away from the tap, so the host doesn't take the
-      // two as a double-click (which would maximize a window dragged by its title bar).
       this.out.move(p.x - p.sx, p.y - p.sy);
       if (this.tapDrag) this.pressLeft();
     } else {
@@ -177,7 +151,6 @@ export class TouchGestures {
   up(id, t) {
     const p = this.points.get(id);
     if (!p) return;
-    // A quick flick that was still waiting on a second finger is a drag after all.
     if (this.state === 'pending' && this.slid) this.startMove(p);
     this.points.delete(id);
     if (this.three && !this.points.size) {
@@ -190,7 +163,6 @@ export class TouchGestures {
     switch (this.state) {
       case 'pending':
         this.click(LEFT);
-        // A tap that ended a tap-drag's second touch is a double-click; a third touch doesn't drag.
         this.lastTap = this.tapDrag ? -Infinity : t;
         break;
       case 'holding':
@@ -204,8 +176,7 @@ export class TouchGestures {
     this.state = this.points.size ? 'done' : 'idle';
   }
 
-  // Called while a finger is down (input.js runs timers at SECOND_FINGER_MS and HOLD_MS) so a
-  // waiting drag starts and a hold fires without the finger moving.
+  // Called while a finger is down.
   tick(t) {
     if (this.state !== 'pending') return;
     if (this.slid) {
@@ -246,8 +217,7 @@ export class TouchGestures {
     this.out.button(LEFT, false);
   }
 
-  // Finger down (+dy) drags the page down, which is wheel up (+ on Windows); finger left (-dx)
-  // reveals what is to the right, which is horizontal wheel right (+).
+  // Finger down (+dy) is wheel up (+ on Windows); finger left (-dx) is horizontal wheel right (+).
   scroll(dx, dy) {
     const r = this.wheelRest;
     r.x += -dx * WHEEL_PER_PX;

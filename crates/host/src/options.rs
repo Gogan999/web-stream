@@ -1,5 +1,4 @@
-//! The host's options, as flags: the tray app turns its settings into
-//! these (its "More options" field takes any of them), and so does the
+//! The host's options, as flags: the tray app turns its settings into these, and so does the
 //! service's `install`.
 
 use std::net::{IpAddr, SocketAddr};
@@ -93,7 +92,7 @@ pub struct TunnelOptions {
 pub enum TunnelKind {
     /// A tunnel made in the Cloudflare dashboard, with a name that stays.
     Named {
-        /// Holds the token, so it is never on a command line.
+        /// Holds the token.
         token_file: PathBuf,
         /// The public name, when cloudflared shouldn't be asked.
         hostname: Option<String>,
@@ -105,15 +104,15 @@ pub enum TunnelKind {
 /// The tunnel token's file when `--tunnel-token-file` isn't given.
 pub const TUNNEL_TOKEN_FILE: &str = "cloudflare-tunnel-token.txt";
 
-/// Saves a Cloudflare Tunnel token in `dir`'s [`TUNNEL_TOKEN_FILE`],
-/// readable only by this user (and SYSTEM).
+/// Saves a Cloudflare Tunnel token in `dir`'s [`TUNNEL_TOKEN_FILE`], readable only by this user
+/// (and SYSTEM).
 pub fn save_tunnel_token(dir: &std::path::Path, token: &str) -> anyhow::Result<()> {
     let path = dir.join(TUNNEL_TOKEN_FILE);
     ws_signaling::write_private(&path, token.as_bytes())
         .with_context(|| format!("{}", path.display()))
 }
 
-/// cloudflared.exe next to this program (the installer puts it there).
+/// cloudflared.exe next to this program.
 pub fn default_cloudflared() -> PathBuf {
     let name = if cfg!(windows) {
         "cloudflared.exe"
@@ -126,9 +125,7 @@ pub fn default_cloudflared() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(name))
 }
 
-/// `args` without the flags of the DuckDNS / Let's Encrypt certificate,
-/// which the Cloudflare Tunnel replaced: a service installed with them
-/// still starts.
+/// `args` without the flags of the DuckDNS / Let's Encrypt certificate.
 pub fn drop_retired_flags(args: &[String]) -> Vec<String> {
     const WITH_VALUE: &[&str] = &["--duckdns", "--duckdns-token-file", "--acme-email"];
     const ALONE: &[&str] = &["--no-duckdns-address", "--acme-staging"];
@@ -166,8 +163,8 @@ pub struct MediaOptions {
     /// `None` disables the mic.
     pub mic_device: Option<String>,
     pub game_audio: bool,
-    /// Substring of the output device game audio is captured from; `None`
-    /// follows the default output.
+    /// Substring of the output device game audio is captured from; `None` follows the default
+    /// output.
     pub audio_device: Option<String>,
     pub audio_kbps: u32,
     /// Opus frame length, one of `ws_audio::FRAME_MS`.
@@ -181,9 +178,8 @@ pub struct MediaOptions {
     /// Where update.ps1's output goes when the browser may update the host
     /// (`--allow-remote-update`); `None` refuses updates.
     pub update_log: Option<PathBuf>,
-    /// Share the clipboard's text with the connected browser, both ways
-    /// (off with `--no-clipboard`). Even when on, the host only shares it
-    /// if it can open the Windows clipboard in its session.
+    /// Share the clipboard's text with the connected browser, both ways (off with
+    /// `--no-clipboard`).
     pub clipboard: bool,
 }
 
@@ -448,8 +444,7 @@ pub fn default_data_dir() -> PathBuf {
     }
 }
 
-/// `Downloads\web-stream` in the user's profile (the home directory
-/// elsewhere).
+/// `Downloads\web-stream` in the user's profile.
 pub fn default_upload_dir() -> PathBuf {
     let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"));
     match home {

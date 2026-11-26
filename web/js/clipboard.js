@@ -1,24 +1,11 @@
-// Clipboard sync with the host: text only, both ways, while connected. See docs/dev/protocol.md
-// (capabilities.clipboard, clipboard, setClipboard, clipboardSet).
-//
-// What a browser lets a page do decides the shape of this:
-//  - Writing the browser clipboard (host -> here) needs the page focused and, on iOS Safari, a user
-//    gesture. When a write is refused the text waits as `pending`, the Clipboard button says "Copy
-//    from PC", and any tap on the stream or the button writes it.
-//  - Reading it (here -> host) needs a permission prompt in Chromium (asked once, on the first
-//    Ctrl+V or button press). Elsewhere (iOS Safari) readText() is only for a tap, which shows
-//    iOS's own Paste bubble. So reading on focus, and holding back Ctrl+V until the host has the
-//    text, happen only where the browser reports a 'clipboard-read' permission (Chromium).
-// Nothing here throws: any refusal just leaves the feature on its button.
+// Clipboard sync with the host: text only, both ways, while connected.
 
-export const MAX_BYTES = 256 * 1024; // the host's limit (ws_proto::CLIPBOARD_MAX)
+export const MAX_BYTES = 256 * 1024;
 const PREF_KEY = 'ws-clipboard-sync';
 
 const byteLength = (s) => new TextEncoder().encode(s).length;
 
 export class ClipboardSync {
-  // sendControl(msg): to the host. onChange(): the state shown on the button changed.
-  // notify(text): a short message for the status line.
   constructor({ sendControl, onChange = () => {}, notify = () => {}, nav = globalThis.navigator,
     doc = globalThis.document, storage = globalThis.localStorage, ackTimeoutMs = 300 } = {}) {
     this.sendControl = sendControl;
@@ -28,12 +15,12 @@ export class ClipboardSync {
     this.doc = doc;
     this.storage = storage;
     this.ackTimeoutMs = ackTimeoutMs;
-    this.available = false; // the host shares its clipboard and can open it
+    this.available = false;
     this.enabled = this.loadPref();
-    this.pending = null; // host text this browser has not been able to write yet
-    this.lastSynced = null; // what both clipboards last agreed on, so nothing echoes back
-    this.waiters = []; // setClipboard sent, answer not yet back
-    this.permission = null; // 'granted' | 'prompt' | 'denied', or null where it can't be asked
+    this.pending = null;
+    this.lastSynced = null;
+    this.waiters = [];
+    this.permission = null;
     this.watchPermission();
   }
 
@@ -41,16 +28,13 @@ export class ClipboardSync {
     try { return this.storage?.getItem(PREF_KEY) !== 'off'; } catch { return true; }
   }
 
-  // Whether sync works right now: the host offers it and the user has not turned it off.
   get usable() { return this.available && this.enabled; }
 
-  // Where the browser can say whether it may read the clipboard (Chromium), it reads on focus and
-  // before Ctrl+V; elsewhere only buttons read.
   get autoRead() { return this.permission !== null && this.permission !== 'denied'; }
 
   setEnabled(on) {
     this.enabled = !!on;
-    try { this.storage?.setItem(PREF_KEY, this.enabled ? 'on' : 'off'); } catch { /* not kept */ }
+    try { this.storage?.setItem(PREF_KEY, this.enabled ? 'on' : 'off'); } catch { }
     if (!this.enabled) this.pending = null;
     this.onChange();
   }
@@ -61,7 +45,7 @@ export class ClipboardSync {
       if (!status) return;
       this.permission = status.state;
       status.onchange = () => { this.permission = status.state; };
-    } catch { /* Safari and Firefox don't know this permission */ }
+    } catch { }
   }
 
   // Forget the session (it closed): a new one starts from what the host says.
@@ -119,12 +103,13 @@ export class ClipboardSync {
     return true;
   }
 
-  // Any tap or click: a user gesture, which iOS wants for a write.
+  // Any tap or click: a user gesture.
   async onGesture() {
     if (this.pending != null) await this.writePending();
   }
 
-  // The page or the stream got focus: Chromium may write what was waiting and read what changed here.
+  // The page or the stream got focus: Chromium may write what was waiting and read what changed
+  // here.
   async onFocus() {
     if (!this.usable) return;
     if (this.pending != null) await this.writePending();
@@ -148,8 +133,7 @@ export class ClipboardSync {
     return this.pushText(text);
   }
 
-  // Sends `text` as the host's clipboard (it came from here: a read, or a paste into the keyboard
-  // field). Waits for the host's answer; a text the host already has is not sent again.
+  // Sends `text` as the host's clipboard.
   pushText(text) {
     if (!this.usable) return Promise.resolve(false);
     if (text === this.lastSynced) return Promise.resolve(true);
@@ -177,7 +161,7 @@ export class ClipboardSync {
     return this.toHost().catch(() => false);
   }
 
-  // The toolbar button: on a waiting host text, copy it here; otherwise send this clipboard.
+  // The toolbar button: on a waiting host text, copy it here.
   async button() {
     if (!this.usable) return;
     if (this.pending != null) {

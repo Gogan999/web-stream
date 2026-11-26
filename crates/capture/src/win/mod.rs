@@ -32,23 +32,51 @@ pub(crate) fn list_displays() -> Result<Vec<DisplayInfo>> {
     Ok(display::enumerate()?.into_iter().map(|o| o.info).collect())
 }
 
-/// Desktop Duplication reports scaled coordinates and can refuse to start
-/// for DPI-unaware processes, so opt in once before touching DXGI.
+/// Opts the process into per-monitor DPI awareness, once, before DXGI is used.
 fn init_process() {
+    use windows::Win32::System::Threading::{
+        GetCurrentProcess, PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+        PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION,
+        PROCESS_POWER_THROTTLING_STATE, ProcessPowerThrottling, SetProcessInformation,
+    };
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
-        // Fails harmlessly if the manifest or an earlier call already set it.
         let _ =
             unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+        // Opt out of EcoQoS and timer-resolution throttling.
+        let state = PROCESS_POWER_THROTTLING_STATE {
+            Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+            ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED
+                | PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION,
+            StateMask: 0,
+        };
+        let _ = unsafe {
+            SetProcessInformation(
+                GetCurrentProcess(),
+                ProcessPowerThrottling,
+                std::ptr::from_ref(&state).cast(),
+                std::mem::size_of_val(&state) as u32,
+            )
+        };
     });
+}
+
+/// Puts the calling thread in the MMCSS "Games" class for the life of the thread.
+pub(crate) fn enter_mmcss() {
+    use windows::Win32::System::Threading::AvSetMmThreadCharacteristicsW;
+    let mut index = 0;
+    if let Err(e) = unsafe { AvSetMmThreadCharacteristicsW(windows::core::w!("Games"), &mut index) }
+    {
+        tracing::debug!("MMCSS Games class refused: {e}");
+    }
 }
 
 fn win_err(what: &'static str) -> impl Fn(windows::core::Error) -> CaptureError {
     move |e| CaptureError::Platform(format!("{what}: {e}"))
 }
 
-/// A D3D11 device on the adapter that owns the captured output; capture,
-/// conversion and NVENC all share it so frames never leave the GPU.
+/// A D3D11 device on the adapter that owns the captured output; capture, conversion and NVENC all
+/// share it.
 pub(crate) struct Gpu {
     pub device: ID3D11Device,
     pub context: ID3D11DeviceContext,
@@ -75,12 +103,9 @@ impl Gpu {
         let device: ID3D11Device =
             device.ok_or(CaptureError::Platform("no D3D11 device".into()))?;
         let context = context.ok_or(CaptureError::Platform("no D3D11 context".into()))?;
-        // The encoder's output thread works alongside the capture thread.
         if let Ok(mt) = context.cast::<ID3D11Multithread>() {
             let _ = unsafe { mt.SetMultithreadProtected(true) };
         }
-        // Keep our GPU work ahead of a game's when the GPU is saturated.
-        // Best effort: higher priorities may need privileges we don't have.
         if let Ok(dxgi) = device.cast::<IDXGIDevice>() {
             let _ = unsafe { dxgi.SetGPUThreadPriority(7) };
         }

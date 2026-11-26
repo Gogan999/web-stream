@@ -1,5 +1,4 @@
-// What the host says it can do (the `capabilities` control message), so the page shows only
-// controls that work. Until the host speaks, nothing optional is offered.
+// What the host says it can do.
 
 export const NO_CAPABILITIES = Object.freeze({ clipboard: false, sas: false, hostName: '', version: '' });
 
@@ -14,10 +13,7 @@ export function parseCapabilities(msg) {
   };
 }
 
-/**
- * Applies what the host said through the page's hooks: Ctrl+Alt+Del is shown only when the host
- * can send it (the service), clipboard controls only when it shares its clipboard, and the host name and version are shown. Missing text clears them.
- */
+/** Applies what the host said through the page's hooks: Ctrl+Alt+Del is shown only when the host can send it (the service), clipboard controls only when it shares its clipboard, and the host name and version are shown. */
 export function applyCapabilities(caps, { setSasVisible, setHostName, setHostVersion, setClipboardAvailable = () => {} }) {
   setSasVisible(caps.sas);
   setClipboardAvailable(caps.clipboard);

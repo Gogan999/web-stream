@@ -1,25 +1,6 @@
-//! The host as two processes, for the Windows service: everything that
-//! parses what comes off the network (HTTPS, the signaling socket, DTLS,
-//! SRTP, SCTP) in a network process that runs with almost no rights
-//! ([`serve_network`]), and capture, encoding, input, audio and the cursor in
-//! a SYSTEM one ([`serve_media`]). A bug in the network-facing code then
-//! hands an attacker that process, not SYSTEM.
-//!
-//! They talk over one byte stream (a pipe the service hands both). The
-//! media side drives a [`Transport::remote`] handle; what it sends goes to
-//! the real transport in the network process, and what that transport
-//! reports comes back, along with signaling's news (accepted codecs, which
-//! device is connected), notices and the console's pairing commands.
-//!
-//! The media side treats everything from the network process as untrusted,
-//! as it treats a browser: messages are size-limited and read with
-//! back-pressure, input and control messages go through the same parsing
-//! as before, and text for the console is cleaned and labelled. The only
-//! paths it sends (the data folder and web root) are shown, never opened.
-//!
-//! Each message is a frame: a little-endian u32 length, then a u32 header
-//! length, a JSON header and the raw payload (a frame's bitstream, a data
-//! channel message).
+//! The host as two processes, for the Windows service: everything that parses what comes off the
+//! network in a network process that runs with almost no rights ([`serve_network`]), and capture,
+//! encoding, input, audio and the cursor in a SYSTEM one ([`serve_media`]).
 
 use std::net::IpAddr;
 use std::path::PathBuf;
@@ -29,7 +10,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
 use tokio::sync::{mpsc, oneshot, watch};
 use ws_proto::{
     AudioDirection, AudioPacket, DisplayId, EncodedFrame, VideoCodec, channels, mono_now,
@@ -44,38 +25,25 @@ use crate::serve::{self, Command, Event, Network};
 
 /// The largest frame the network side accepts: well above any keyframe.
 const MAX_UP: usize = 64 << 20;
-/// The largest frame the media side accepts from the network process: a
-/// data channel message or a mic packet, never anywhere near this.
+/// The largest frame the media side accepts from the network process.
 const MAX_DOWN: usize = 4 << 20;
-/// Frames read but not yet handled. Past this the reader stops reading,
-/// so a flood from the other side waits in the pipe, not in memory.
+/// Frames read but not yet handled.
 const READ_QUEUE: usize = 256;
+/// Buffer size for each direction of the bridge pipe.
+const PIPE_BUFFER: usize = 64 * 1024;
 /// The longest the network side goes without checking the connection state.
-/// A backlog change is sent as it happens (the encoder reads it to hold
-/// frames back), so this only has to catch connection changes and keep
-/// nothing depending on a message arriving. Slow, since a 5 ms tick woke the
-/// process about 200 times a second even with nothing streaming; idle it
-/// now wakes about 5 times a second.
 const STATE_POLL: Duration = Duration::from_millis(200);
-/// The least time between `State` messages sent because the backlog moved.
-/// Sending on change removes the ceiling the old 5 ms tick gave, about 200
-/// a second, and under load the backlog can cross [`BACKLOG_STEP`] on every
-/// driver pass; each message costs the media process a pipe read, a parse
-/// and a wakeup. A change after a quiet spell still goes at once, and one
-/// held back goes when this has passed. Connection changes ignore it.
+/// The least time between `State` messages sent.
 const BACKLOG_SPACING: Duration = Duration::from_millis(5);
 /// A backlog change smaller than this isn't worth a message.
 const BACKLOG_STEP: Duration = Duration::from_millis(1);
-/// Video and game audio waiting for the network process past this are
-/// dropped. The gap in frame numbers then gets the picture repaired, as any
-/// dropped frame does.
+/// Video and game audio waiting for the network process past this are dropped.
 const MAX_QUEUED: usize = 8 << 20;
 
 /// From the media side to the network side.
 #[derive(Debug, Serialize, Deserialize)]
 enum Up {
-    /// The payload is the bitstream. Times are ages, since each process's
-    /// monotonic clock has its own zero.
+    /// The payload is the bitstream.
     Video {
         lane: u8,
         display: DisplayId,
@@ -84,8 +52,7 @@ enum Up {
         keyframe: bool,
         recovers_from: Option<u64>,
         capture_age_us: u64,
-        /// How long ago the frame went into the encoder. An older build
-        /// leaves it out: then it counts from capture.
+        /// How long ago the frame went into the encoder.
         #[serde(default)]
         encode_start_age_us: Option<u64>,
         encode_age_us: u64,
@@ -172,8 +139,7 @@ enum Report {
     },
     /// An input channel message (the payload), for the input sink.
     Input,
-    /// One Opus packet from the browser mic (the payload). Its time is the
-    /// RTP time, the same in both processes.
+    /// One Opus packet from the browser mic (the payload).
     Mic {
         sequence: u64,
         capture_time: u64,
@@ -222,10 +188,8 @@ impl From<SendError> for ws_transport::Error {
     }
 }
 
-/// One frame, ready to write: the length, header length and header in one
-/// buffer, and the payload kept apart so it is never copied into it. The
-/// payload is whatever the caller already holds (a `Vec`, a shared `Bytes`),
-/// so a video frame goes from the encoder to the pipe without a copy.
+/// One frame, ready to write: the length, header length and header in one buffer, and the payload
+/// kept apart.
 struct Frame {
     head: Vec<u8>,
     payload: Box<dyn AsRef<[u8]> + Send>,
@@ -238,8 +202,8 @@ impl Frame {
     }
 }
 
-/// The wire form is `[u32 len][u32 header_len][header][payload]`, little
-/// endian, where `len` counts everything after itself.
+/// The wire form is `[u32 len][u32 header_len][header][payload]`, little endian, where `len` counts
+/// everything after itself.
 fn frame<H: Serialize>(header: &H, payload: impl AsRef<[u8]> + Send + 'static) -> Frame {
     let header = serde_json::to_vec(header).expect("bridge messages serialize");
     let len = 4 + header.len() + payload.as_ref().len();
@@ -254,8 +218,6 @@ fn frame<H: Serialize>(header: &H, payload: impl AsRef<[u8]> + Send + 'static) -
 }
 
 /// The next frame's header and payload; `None` at a clean end of stream.
-/// The payload is read straight into its own buffer, so nothing is shifted
-/// after the read.
 async fn read_frame<H: DeserializeOwned>(
     read: &mut (impl AsyncRead + Unpin),
     max: usize,
@@ -267,7 +229,6 @@ async fn read_frame<H: DeserializeOwned>(
         Err(e) => return Err(e.into()),
     }
     let len = u32::from_le_bytes(len) as usize;
-    // Checked before anything is allocated for it.
     if !(4..=max).contains(&len) {
         anyhow::bail!("bad frame length {len}");
     }
@@ -285,15 +246,14 @@ async fn read_frame<H: DeserializeOwned>(
     Ok(Some((header, payload)))
 }
 
-/// Reads frames of up to `max` bytes into a channel until the stream ends
-/// or breaks; the channel then closes. Waits while [`READ_QUEUE`] frames
-/// are unhandled. Each side handles what it reads without waiting on its
-/// own writes, so neither can stall the other.
+/// Reads frames of up to `max` bytes into a channel until the stream ends or breaks; the channel
+/// then closes.
 fn spawn_reader<H: DeserializeOwned + Send + 'static>(
-    mut read: impl AsyncRead + Unpin + Send + 'static,
+    read: impl AsyncRead + Unpin + Send + 'static,
     max: usize,
 ) -> mpsc::Receiver<(H, Vec<u8>)> {
     let (tx, rx) = mpsc::channel(READ_QUEUE);
+    let mut read = BufReader::with_capacity(PIPE_BUFFER, read);
     tokio::spawn(async move {
         loop {
             match read_frame(&mut read, max).await {
@@ -326,8 +286,7 @@ impl Out {
         }
     }
 
-    /// Bytes not yet written: a network process that stops reading must not
-    /// make this one queue video without bound.
+    /// Bytes not yet written.
     fn queued(&self) -> usize {
         self.queued.load(Ordering::Relaxed)
     }
@@ -335,8 +294,9 @@ impl Out {
 
 /// Writes queued frames until the queue closes or the stream breaks.
 fn spawn_writer(
-    mut write: impl AsyncWrite + Unpin + Send + 'static,
+    write: impl AsyncWrite + Unpin + Send + 'static,
 ) -> (Out, tokio::task::JoinHandle<()>) {
+    let mut write = BufWriter::with_capacity(PIPE_BUFFER, write);
     let (tx, mut rx) = mpsc::unbounded_channel::<Frame>();
     let queued = Arc::new(AtomicUsize::new(0));
     let out = Out {
@@ -344,15 +304,23 @@ fn spawn_writer(
         queued: queued.clone(),
     };
     let task = tokio::spawn(async move {
-        while let Some(frame) = rx.recv().await {
-            // Only this task writes, so the two writes stay one run of bytes.
-            let mut result = write.write_all(&frame.head).await;
-            let payload = frame.payload.as_ref().as_ref();
-            if result.is_ok() && !payload.is_empty() {
-                result = write.write_all(payload).await;
+        while let Some(mut frame) = rx.recv().await {
+            loop {
+                let mut result = write.write_all(&frame.head).await;
+                let payload = frame.payload.as_ref().as_ref();
+                if result.is_ok() && !payload.is_empty() {
+                    result = write.write_all(payload).await;
+                }
+                queued.fetch_sub(frame.len(), Ordering::Relaxed);
+                if let Err(e) = result {
+                    return tracing::debug!("bridge: {e}");
+                }
+                match rx.try_recv() {
+                    Ok(next) => frame = next,
+                    Err(_) => break,
+                }
             }
-            queued.fetch_sub(frame.len(), Ordering::Relaxed);
-            if let Err(e) = result {
+            if let Err(e) = write.flush().await {
                 return tracing::debug!("bridge: {e}");
             }
         }
@@ -371,9 +339,8 @@ fn ago(age: u64) -> u64 {
     mono_now().saturating_sub(age)
 }
 
-/// The state to send now, if it differs enough from the last one sent: the
-/// connection changed, or the backlog moved by at least [`BACKLOG_STEP`].
-/// Anything less, including a steady backlog, sends nothing.
+/// The state to send now, if it differs enough from the last one sent: the connection changed, or
+/// the backlog moved by at least [`BACKLOG_STEP`].
 fn state_change(
     sent: (bool, Backlog),
     connected: bool,
@@ -395,15 +362,11 @@ fn state_change(
 /// How far behind each video stream's send queue is.
 type Backlog = [Duration; LANES];
 
-/// What the network side last told the media side, and when, so backlog
-/// changes can be sent promptly without exceeding [`BACKLOG_SPACING`].
+/// What the network side last told the media side, and when.
 struct StateReporter {
     sent: (bool, Backlog),
     last_send: Option<tokio::time::Instant>,
-    /// A step-sized backlog change arrived inside the spacing and has not
-    /// been sent. Nothing is stored of its value: it is read again when the
-    /// spacing ends, so what goes out is current, and a change that has since
-    /// reversed sends nothing.
+    /// A step-sized backlog change arrived inside the spacing and has not been sent.
     held: bool,
 }
 
@@ -424,9 +387,7 @@ impl StateReporter {
         })
     }
 
-    /// Look at the current state; return what to send, if anything. The
-    /// periodic floor passes `paced = false`, since it is already far
-    /// slower than the spacing. A backlog wakeup passes `true`.
+    /// Look at the current state; return what to send, if anything.
     fn check(
         &mut self,
         now: tokio::time::Instant,
@@ -454,16 +415,12 @@ fn micros(d: Duration) -> u64 {
     d.as_micros().min(u128::from(u64::MAX)) as u64
 }
 
-/// The network process: serves signaling and runs the real transport, for
-/// the media process at the other end of `link`. Returns when the media
-/// process goes away (or the signaling server fails), after ending the
-/// session and closing the sockets.
+/// The network process: serves signaling and runs the real transport, for the media process at the
+/// other end of `link`.
 pub async fn serve_network(
     opts: ServeOptions,
     link: impl AsyncRead + AsyncWrite + Send + 'static,
 ) -> anyhow::Result<()> {
-    // Fix this process's clock zero now, well before any frame's age is
-    // turned back into a time.
     let _ = mono_now();
     let (read, write) = tokio::io::split(link);
     let mut incoming = spawn_reader::<Up>(read, MAX_UP);
@@ -500,7 +457,6 @@ pub async fn serve_network(
         pairing(&net, PairingCommand::Open, &send).await;
     }
 
-    // Data channel writes, one at a time so they keep their order.
     let (data_tx, mut data_rx) = mpsc::unbounded_channel::<(u64, String, bool, Vec<u8>)>();
     let data_task = tokio::spawn({
         let transport = transport.clone();
@@ -518,7 +474,6 @@ pub async fn serve_network(
 
     let mut transitions = 0u64;
     let mut reporter = StateReporter::new();
-    // Read the live state and send it if it is worth a message.
     let report_state = |reporter: &mut StateReporter, paced: bool| {
         let connected = transport.is_connected();
         let backlog = [
@@ -595,8 +550,6 @@ pub async fn serve_network(
                 let (report, payload) = report(ev);
                 out.send(frame(&Down::Transport(report), payload));
                 if transition {
-                    // Input goes across as it arrives, after the event that
-                    // says which connection it belongs to.
                     transitions += 1;
                     let out = out.clone();
                     transport.set_input_sink(
@@ -700,8 +653,7 @@ fn report(ev: TransportEvent) -> (Report, Vec<u8>) {
     (report, Vec::new())
 }
 
-/// The event a report stands for on the media side; `None` for a channel
-/// this host doesn't have.
+/// The event a report stands for on the media side; `None` for a channel this host doesn't have.
 fn event(report: Report, payload: Vec<u8>) -> Option<TransportEvent> {
     Some(match report {
         Report::Connected => TransportEvent::Connected,
@@ -757,10 +709,8 @@ fn event(report: Report, payload: Vec<u8>) -> Option<TransportEvent> {
     })
 }
 
-/// The media process: capture, encoding, input, audio and the cursor, for
-/// the browser the network process at the other end of `link` connects.
-/// Driven like [`serve::serve`]; returns on [`Command::Quit`], or with an
-/// error once the network process is gone.
+/// The media process: capture, encoding, input, audio and the cursor, for the browser the network
+/// process at the other end of `link` connects.
 pub async fn serve_media(
     opts: ServeOptions,
     link: impl AsyncRead + AsyncWrite + Send + 'static,
@@ -885,8 +835,6 @@ pub async fn serve_media(
             },
         }
     };
-    // Media first (it puts back a changed resolution), then the link: the
-    // network process ends the session and stops once it closes.
     let _ = media_stop.send(());
     let _ = media_task.await;
     drop(remote);
@@ -896,11 +844,8 @@ pub async fn serve_media(
     result
 }
 
-/// Text from the network process, fit for the administrator's console: no
-/// control or invisible characters (which could rewrite what the console
-/// shows), and not too long.
-/// The pairing link's secret goes into a URL the host shows: base64url
-/// only, whatever the network host sent.
+/// Text from the network process, fit for the administrator's console: no control or invisible
+/// characters, and not too long.
 fn clean_link(link: &str) -> String {
     link.chars()
         .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
@@ -955,8 +900,6 @@ mod tests {
 
     #[test]
     fn a_pairing_opened_from_an_older_build_has_no_remaining_time() {
-        // The link's two ends can be different builds: a missing field is
-        // "no information", not an expired window.
         let old = r#"{"PairingOpened":{"link":"secret"}}"#;
         let Down::PairingOpened {
             link,
@@ -993,7 +936,6 @@ mod tests {
             panic!("not Video");
         };
         assert_eq!(encode_start_age_us, Some(100_000));
-        // An older build's header has none.
         let old = json.replace(r#""encode_start_age_us":100000,"#, "");
         assert_ne!(old, json);
         let Up::Video {
@@ -1011,31 +953,24 @@ mod tests {
         use tokio::time::Instant;
         let t0 = Instant::now();
         let ms = Duration::from_millis;
-        // Backlog of the first stream, the second idle.
         let b = |d: Duration| [d, Duration::ZERO];
         let mut r = StateReporter::new();
-        // Connect: sent at once.
         assert_eq!(r.check(t0, true, b(ms(0)), true), Some((true, b(ms(0)))));
-        // A change after a quiet spell: at once.
         let t1 = t0 + ms(100);
         assert_eq!(r.check(t1, true, b(ms(10)), true), Some((true, b(ms(10)))));
-        // Another inside the spacing is held, not sent, and due at the end.
         assert_eq!(r.check(t1 + ms(1), true, b(ms(20)), true), None);
         assert_eq!(r.due(), Some(t1 + BACKLOG_SPACING));
-        // Rapid oscillation stays held; the send carries the current value.
         assert_eq!(r.check(t1 + ms(2), true, b(ms(30)), true), None);
         assert_eq!(
             r.check(t1 + BACKLOG_SPACING, true, b(ms(40)), true),
             Some((true, b(ms(40))))
         );
         assert_eq!(r.due(), None);
-        // A held change that reversed sends nothing and clears the hold.
         let t2 = t1 + ms(50);
         assert_eq!(r.check(t2, true, b(ms(60)), true), Some((true, b(ms(60)))));
         assert_eq!(r.check(t2 + ms(1), true, b(ms(70)), true), None);
         assert_eq!(r.check(t2 + BACKLOG_SPACING, true, b(ms(60)), true), None);
         assert_eq!(r.due(), None);
-        // A connection change inside the spacing is not held.
         assert_eq!(
             r.check(t2 + BACKLOG_SPACING + ms(1), true, b(ms(70)), true),
             Some((true, b(ms(70))))
@@ -1051,7 +986,6 @@ mod tests {
         let base = Duration::from_millis(10);
         let b = |d: Duration| [d, Duration::ZERO];
         let live = (true, b(base));
-        // Steady, and moves smaller than the step: nothing.
         assert_eq!(state_change(live, true, b(base)), None);
         assert_eq!(state_change(live, true, b(base + BACKLOG_STEP / 2)), None);
         assert_eq!(state_change(live, true, b(base - BACKLOG_STEP / 2)), None);
@@ -1060,8 +994,6 @@ mod tests {
         assert_eq!(state_change(live, true, b(up)), Some((true, b(up))));
         let down = base - BACKLOG_STEP;
         assert_eq!(state_change(live, true, b(down)), Some((true, b(down))));
-        // A connection change is sent even at the same backlog, and a
-        // disconnected link reports no backlog.
         assert_eq!(
             state_change(live, false, b(base)),
             Some((false, [Duration::ZERO; LANES]))
@@ -1100,9 +1032,6 @@ mod tests {
 
     #[tokio::test]
     async fn frames_have_the_documented_bytes_and_round_trip() {
-        // Written out by hand, not derived from the code under test: the two
-        // sides of the link can be different builds, so this layout must not
-        // drift. len 23 = 4 + 16 header bytes + 3 payload bytes.
         let expected: &[u8] = b"\x17\0\0\0\x10\0\0\0{\"MaxBitrate\":5}abc";
         assert_eq!(expected.len(), 4 + 23);
         let f = frame(&Up::MaxBitrate(5), b"abc");
@@ -1157,7 +1086,6 @@ mod tests {
         bytes.extend_from_slice(&100u32.to_le_bytes());
         bytes.extend_from_slice(b"{}{}");
         assert_eq!(err(read(&bytes, 100).await), "bad header length 100");
-        // A header that is not JSON for the type.
         let mut bytes = 8u32.to_le_bytes().to_vec();
         bytes.extend_from_slice(&4u32.to_le_bytes());
         bytes.extend_from_slice(b"{}{}");

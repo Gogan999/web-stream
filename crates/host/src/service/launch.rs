@@ -1,19 +1,4 @@
 //! Starting the host's two processes.
-//!
-//! The session host is a SYSTEM process on the user's screen: the service's
-//! own token is copied, moved to the console session and stripped of every
-//! privilege the host doesn't need (debugging, loading drivers, taking
-//! ownership, acting as part of the OS and so on), then the host is started
-//! on that session's interactive desktop.
-//!
-//! The network host runs as LocalService with every privilege but one
-//! removed (in particular impersonation, which would let it borrow a SYSTEM
-//! token), write-restricted and at low integrity (see [`network_token`]), in session 0, away from the user's desktop. It holds everything
-//! that parses what comes off the network.
-//!
-//! Each writes to a log file and runs in a job object, so it never outlives
-//! the service. A pipe made here links the two ([`link_pipe`]); each end is
-//! inherited by one of them, so nothing else can ever connect to it.
 
 use std::ffi::c_void;
 use std::fs::File;
@@ -72,8 +57,7 @@ use windows::core::{PCWSTR, PWSTR};
 
 use super::quote_arg;
 
-/// Privileges the session host keeps; every other one is removed from its
-/// token. Capture, encoding, audio and input need none beyond these.
+/// Privileges the session host keeps; every other one is removed from its token.
 const KEEP_PRIVILEGES: &[&str] = &[
     "SeChangeNotifyPrivilege",
     // Raising the GPU and capture thread priority.
@@ -81,31 +65,22 @@ const KEEP_PRIVILEGES: &[&str] = &[
     "SeCreateGlobalPrivilege",
 ];
 
-/// The network host's only privilege: opening its files by path without
-/// rights on every folder above them (its data folder is inside SYSTEM's
-/// profile).
+/// The network host's only privilege: opening its files by path without rights on every folder
+/// above them.
 const NETWORK_KEEP_PRIVILEGES: &[&str] = &["SeChangeNotifyPrivilege"];
 
-/// The service's data folder: full access for SYSTEM and administrators,
-/// inherited by what is created inside; nothing from the folder above. The
-/// administrators' ACE is what lets the tray app, run elevated, read the
-/// control pipe's name and attach to the service's host.
+/// The service's data folder: full access for SYSTEM and administrators, inherited by what is
+/// created inside; nothing from the folder above.
 pub const DATA_DIR_SDDL: &str = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)";
 
-/// A file in the service's data folder (its logs, the control pipe's name).
-/// The folder's ACEs reach what is created from now on; a file a build from
-/// before kept to itself has to be set on its own.
+/// A file in the service's data folder.
 pub const DATA_FILE_SDDL: &str = "D:P(A;;FA;;;SY)(A;;FA;;;BA)";
 
-/// The network host's data folder: full access for SYSTEM, administrators
-/// and LocalService, inherited by what is created inside; nothing from the
-/// folder above.
+/// The network host's data folder: full access for SYSTEM, administrators and LocalService,
+/// inherited by what is created inside; nothing from the folder above.
 pub const NETWORK_DIR_SDDL: &str = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;LS)";
 
-/// Low integrity, inherited by what is created in the network host's folder:
-/// the network host runs at low integrity, which can't write to anything
-/// labelled higher (every file and folder without a label of its own is
-/// medium), so its folder is the one place it can change.
+/// Low integrity, inherited by what is created in the network host's folder.
 pub const NETWORK_DIR_LABEL_SDDL: &str = "S:(ML;OICI;NW;;;LW)";
 /// The same for a file created there before the label was set.
 pub const NETWORK_FILE_LABEL_SDDL: &str = "S:(ML;;NW;;;LW)";
@@ -116,19 +91,16 @@ const SE_GROUP_LOGON_ID: u32 = 0xC000_0000;
 
 /// The low integrity level (S-1-16-4096).
 const LOW_INTEGRITY_SID: &str = "S-1-16-4096";
-/// Everyone and RESTRICTED: what a write to a system object (the network
-/// stack's device, say) is let through by, in the second access check a
-/// write-restricted token goes through.
+/// Everyone and RESTRICTED: what a write to a system object is let through by, in the second access
+/// check a write-restricted token goes through.
 const EVERYONE_SID: &str = "S-1-1-0";
 const RESTRICTED_SID: &str = "S-1-5-12";
 
-/// The link pipe: SYSTEM only. Both ends are opened here and handed down,
-/// so no process ever opens it by name.
+/// The link pipe: SYSTEM only.
 const LINK_SDDL: &str = "D:P(A;;GA;;;SY)";
 const LINK_BUFFER: u32 = 1 << 20;
 
-/// Log files are started over above this size; the previous one is kept
-/// as `.old`.
+/// Log files are started over above this size; the previous one is kept as `.old`.
 const MAX_LOG: u64 = 10 * 1024 * 1024;
 
 /// A handle closed on drop.
@@ -150,8 +122,7 @@ impl Drop for Owned {
     }
 }
 
-/// The session at the PC's own screen and keyboard, if there is one right
-/// now (there briefly isn't while it changes).
+/// The session at the PC's own screen and keyboard, if there is one right now.
 pub fn console_session() -> Option<u32> {
     // SAFETY: no arguments.
     let id = unsafe { WTSGetActiveConsoleSessionId() };
@@ -160,7 +131,6 @@ pub fn console_session() -> Option<u32> {
 
 pub struct Child {
     process: Owned,
-    // Closing the job kills the host: kept until the child is dropped.
     job: Owned,
     pub session: u32,
     pub pid: u32,
@@ -192,8 +162,6 @@ impl Child {
 }
 
 /// Starts `exe args` as SYSTEM in `session`, its output appended to `log`.
-/// It inherits the handles in `inherit` (which must be inheritable) and no
-/// others.
 pub fn spawn(
     session: u32,
     exe: &Path,
@@ -205,8 +173,7 @@ pub fn spawn(
     spawn_as(&token, r"winsta0\default", session, exe, args, log, inherit)
 }
 
-/// Starts `exe args` with `token` (from [`network_token`]), in session 0,
-/// like [`spawn`] otherwise.
+/// Starts `exe args` with `token` (from [`network_token`]), in session 0, like [`spawn`].
 pub fn spawn_network(
     token: &Owned,
     exe: &Path,
@@ -214,8 +181,6 @@ pub fn spawn_network(
     log: &Path,
     inherit: &[usize],
 ) -> anyhow::Result<Child> {
-    // Empty: a window station of its own logon session's, which Windows
-    // makes for it, rather than the service's, which it may not open.
     spawn_as(token, "", 0, exe, args, log, inherit)
 }
 
@@ -231,9 +196,6 @@ fn spawn_as(
     let env = Environment::new(token)?;
     let log = open_log(log)?;
     let log_handle = HANDLE(log.as_raw_handle());
-    // Inherited by the host as its stdout and stderr, and nothing else is
-    // (the handle list below).
-    // SAFETY: a valid handle we own.
     unsafe { SetHandleInformation(log_handle, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT) }
         .context("log handle")?;
     let job = kill_on_close_job()?;
@@ -281,8 +243,8 @@ fn spawn_as(
     si.StartupInfo.hStdError = log_handle;
     si.lpAttributeList = attrs.list();
     let mut pi = PROCESS_INFORMATION::default();
-    // SAFETY: every pointer is valid for the call; the strings are
-    // NUL-terminated and the command line is writable.
+    // SAFETY: every pointer is valid for the call; the strings are NUL-terminated and the command
+    // line is writable.
     unsafe {
         CreateProcessAsUserW(
             Some(token.0),
@@ -324,8 +286,8 @@ fn spawn_as(
     })
 }
 
-/// The service's SYSTEM token, as a primary token in `session` without the
-/// privileges the host doesn't need.
+/// The service's SYSTEM token, as a primary token in `session` without the privileges the host
+/// doesn't need.
 fn host_token(session: u32) -> anyhow::Result<Owned> {
     let mut own = HANDLE::default();
     // SAFETY: the pseudo handle needs no closing.
@@ -346,8 +308,6 @@ fn host_token(session: u32) -> anyhow::Result<Owned> {
     }
     .context("DuplicateTokenEx")?;
     let token = Owned(dup);
-    // Needs SeTcbPrivilege, which the service (not the host) has.
-    // SAFETY: a u32 for TokenSessionId.
     unsafe {
         SetTokenInformation(
             token.0,
@@ -361,22 +321,7 @@ fn host_token(session: u32) -> anyhow::Result<Owned> {
     Ok(token)
 }
 
-/// A LocalService token for the network host, cut down three ways, so that
-/// a compromised network host has little to gain:
-///
-/// - no privilege but [`NETWORK_KEEP_PRIVILEGES`] (LocalService has
-///   impersonation and token assignment, either of which could turn it back
-///   into SYSTEM);
-/// - write-restricted: every write is also checked against only the
-///   LocalService user, the logon session, Everyone and RESTRICTED, so it
-///   can't write to what is open to, say, every user or every service, only
-///   to what names LocalService itself (its folder);
-/// - low integrity, so it can't write up to anything at medium or above (the
-///   user's files and settings), except its own folder, which is labelled
-///   low ([`NETWORK_DIR_LABEL_SDDL`]).
-///
-/// Reading is unchanged, so the host still finds its own exe, system DLLs and
-/// the network stack.
+/// A LocalService token for the network host, cut down three ways.
 pub fn network_token(low_integrity: bool) -> anyhow::Result<Owned> {
     let (user, domain) = (wide("LocalService"), wide("NT AUTHORITY"));
     let mut token = HANDLE::default();
@@ -396,8 +341,6 @@ pub fn network_token(low_integrity: bool) -> anyhow::Result<Owned> {
     match restrict_network_token(&logon, low_integrity) {
         Ok(token) => Ok(token),
         Err(e) => {
-            // Still LocalService with one privilege: worse than restricted,
-            // far better than running the whole host as SYSTEM.
             tracing::warn!(
                 "could not restrict the network host's token, using LocalService's: {e:#}"
             );
@@ -408,8 +351,6 @@ pub fn network_token(low_integrity: bool) -> anyhow::Result<Owned> {
 }
 
 fn restrict_network_token(logon: &Owned, low_integrity: bool) -> anyhow::Result<Owned> {
-    // LogonUser's token is a primary one; its user and logon-session SIDs
-    // are what the restricted checks keep.
     let user_buf = token_info(logon, TokenUser)?;
     // SAFETY: GetTokenInformation(TokenUser) wrote a TOKEN_USER.
     let user_sid = unsafe { (*user_buf.as_ptr().cast::<TOKEN_USER>()).User.Sid };
@@ -438,8 +379,8 @@ fn restrict_network_token(logon: &Owned, low_integrity: bool) -> anyhow::Result<
         })
         .collect();
     let mut restricted_token = HANDLE::default();
-    // SAFETY: every SID outlives the call; DISABLE_MAX_PRIVILEGE removes all
-    // privileges but SeChangeNotify.
+    // SAFETY: every SID outlives the call; DISABLE_MAX_PRIVILEGE removes all privileges but
+    // SeChangeNotify.
     unsafe {
         CreateRestrictedToken(
             logon.0,
@@ -456,8 +397,6 @@ fn restrict_network_token(logon: &Owned, low_integrity: bool) -> anyhow::Result<
     if low_integrity {
         set_low_integrity(&token)?;
     }
-    // CreateRestrictedToken already removed what it was told to; checked
-    // anyway, so a change in what LocalService has fails loudly.
     strip_privileges(&token, NETWORK_KEEP_PRIVILEGES)?;
     Ok(token)
 }
@@ -521,7 +460,6 @@ fn strip_privileges(token: &Owned, keep: &[&str]) -> anyhow::Result<()> {
     let mut len = 0u32;
     // SAFETY: a size query; fails with the size needed.
     let _ = unsafe { GetTokenInformation(token.0, TokenPrivileges, None, 0, &mut len) };
-    // u64s keep TOKEN_PRIVILEGES aligned.
     let mut buf = vec![0u64; (len as usize).div_ceil(8)];
     // SAFETY: `buf` is writable for `len` bytes.
     unsafe {
@@ -545,8 +483,7 @@ fn strip_privileges(token: &Owned, keep: &[&str]) -> anyhow::Result<()> {
         })
         .collect();
     let tp = buf.as_mut_ptr().cast::<TOKEN_PRIVILEGES>();
-    // SAFETY: GetTokenInformation wrote a TOKEN_PRIVILEGES with
-    // PrivilegeCount entries into `buf`.
+    // SAFETY: GetTokenInformation wrote a TOKEN_PRIVILEGES with PrivilegeCount entries into `buf`.
     let privileges = unsafe {
         std::slice::from_raw_parts_mut(
             (&raw mut (*tp).Privileges).cast::<windows::Win32::Security::LUID_AND_ATTRIBUTES>(),
@@ -599,8 +536,7 @@ impl AttributeList {
         let _ = unsafe { InitializeProcThreadAttributeList(None, count, None, &mut size) };
         let buf = vec![0u64; size.div_ceil(8)];
         let list = LPPROC_THREAD_ATTRIBUTE_LIST(buf.as_ptr().cast_mut().cast());
-        // SAFETY: the buffer is `size` bytes, aligned. Only wrapped (and so
-        // deleted on drop) once initialized.
+        // SAFETY: the buffer is `size` bytes, aligned.
         unsafe { InitializeProcThreadAttributeList(Some(list), count, None, &mut size) }
             .context("InitializeProcThreadAttributeList")?;
         Ok(Self(buf))
@@ -636,8 +572,7 @@ fn kill_on_close_job() -> anyhow::Result<Owned> {
     Ok(job)
 }
 
-/// Opens `path` for appending, starting over (keeping one `.old`) once it
-/// is large.
+/// Opens `path` for appending, starting over (keeping one `.old`) once it is large.
 pub fn open_log(path: &Path) -> anyhow::Result<File> {
     if std::fs::metadata(path).is_ok_and(|m| m.len() > MAX_LOG) {
         let _ = std::fs::rename(path, path.with_extension("log.old"));
@@ -653,9 +588,7 @@ pub fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain([0]).collect()
 }
 
-/// Two connected ends of a fresh pipe, both inheritable: one for each
-/// process. Overlapped, as tokio needs. Opened for identification only, so
-/// neither end can act as the other.
+/// Two connected ends of a fresh pipe, both inheritable: one for each process.
 pub fn link_pipe() -> anyhow::Result<(Owned, Owned)> {
     let name = format!(r"\\.\pipe\web-stream-link-{}", super::random_hex()?);
     let name_w = wide(&name);
@@ -698,10 +631,8 @@ pub fn link_pipe() -> anyhow::Result<(Owned, Owned)> {
     Ok((server, Owned(client)))
 }
 
-/// A pipe the network host writes one byte to as the first thing its own
-/// code does, before it touches the network: (the service's read end, the
-/// inheritable write end). What was written stays there for the service to
-/// see, whatever the network host does afterwards.
+/// A pipe the network host writes one byte to as the first thing its own code does, before it
+/// touches the network.
 pub fn alive_pipe() -> anyhow::Result<(Owned, Owned)> {
     let sa = SECURITY_ATTRIBUTES {
         nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
@@ -722,29 +653,24 @@ pub fn pipe_has_data(read: &Owned) -> bool {
         && available > 0
 }
 
-/// Sets the DACL of the folder `path` from `sddl`, replacing what it
-/// inherited, through a handle: refused if the folder is a junction or other
-/// reparse point (whoever can write the folder could have made it one, to
-/// send this change elsewhere).
+/// Sets the DACL of the folder `path` from `sddl`, replacing what it inherited, through a handle:
+/// refused if the folder is a junction or other reparse point.
 pub fn secure_dir(path: &Path, sddl: &str) -> anyhow::Result<()> {
     set_dacl(path, sddl, true)
 }
 
-/// The same for a plain file, which may be open elsewhere: a log the service
-/// or one of its hosts is writing, so it is opened sharing everything.
+/// The same for a plain file.
 pub fn secure_file(path: &Path, sddl: &str) -> anyhow::Result<()> {
     set_dacl(path, sddl, false)
 }
 
-/// Sets the mandatory integrity label of the folder `path` from `sddl`,
-/// through a handle that refuses a junction (see [`secure_dir`]).
+/// Sets the mandatory integrity label of the folder `path` from `sddl`, through a handle that
+/// refuses a junction (see [`secure_dir`]).
 pub fn label_dir(path: &Path, sddl: &str) -> anyhow::Result<()> {
     set_label(path, sddl, true)
 }
 
-/// The same for a plain file. A file with more than one hard link is
-/// refused: the label would reach every name, and the network host can make
-/// one of its own files a link to something else.
+/// The same for a plain file.
 pub fn label_file(path: &Path, sddl: &str) -> anyhow::Result<()> {
     set_label(path, sddl, false)
 }
@@ -758,10 +684,6 @@ fn set_label(path: &Path, sddl: &str, want_dir: bool) -> anyhow::Result<()> {
     unsafe { GetSecurityDescriptorSacl(sd.0, &mut present, &mut sacl, &mut defaulted) }
         .context("GetSecurityDescriptorSacl")?;
     let path_w = wide(&path.display().to_string());
-    // Held until the label is set, shared for reading and writing but not
-    // deleting or renaming: what was checked can't be swapped for a link
-    // before the label goes on it.
-    // SAFETY: a NUL-terminated path; the handle is closed by `Owned`.
     let handle = Owned(
         unsafe {
             CreateFileW(
@@ -791,9 +713,6 @@ fn set_label(path: &Path, sddl: &str, want_dir: bool) -> anyhow::Result<()> {
             if want_dir { "folder" } else { "file" }
         );
     }
-    // By name: SetSecurityInfo on a handle is refused for a label (access
-    // denied, even as SYSTEM, found by CI), this isn't.
-    // SAFETY: a NUL-terminated path and a SACL that outlives the call.
     unsafe {
         SetNamedSecurityInfoW(
             PCWSTR(path_w.as_ptr()),
@@ -848,8 +767,7 @@ fn set_dacl(path: &Path, sddl: &str, want_dir: bool) -> anyhow::Result<()> {
     // SAFETY: `sd` is a valid descriptor; `dacl` points into it.
     unsafe { GetSecurityDescriptorDacl(sd.0, &mut present, &mut dacl, &mut defaulted) }
         .context("GetSecurityDescriptorDacl")?;
-    // SAFETY: a valid handle opened with WRITE_DAC, and a DACL that
-    // outlives the call.
+    // SAFETY: a valid handle opened with WRITE_DAC, and a DACL that outlives the call.
     unsafe {
         SetSecurityInfo(
             dir.0,

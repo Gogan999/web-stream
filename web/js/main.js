@@ -6,6 +6,7 @@ import { CursorView } from './cursor.js';
 import { openPopout } from './popout.js';
 import { snapshot, compute, assess, render, Alerts, FrameTimer } from './stats.js';
 import * as pairing from './pairing.js';
+import * as hosts from './hosts.js';
 import * as settingsStore from './settings.js';
 import { AutoTune, Cancelled } from './autotune.js';
 import { SoftKeyboard } from './softkeys.js';
@@ -20,7 +21,7 @@ import { ClientReporter } from './telemetry.js';
 
 const $ = (id) => document.getElementById(id);
 // First thing: the pairing link's secret leaves the address bar (and history) before anything else
-// runs. null: none; '': a damaged one.
+// runs.
 const pairingLink = pairing.takePairingLink();
 
 const ui = {
@@ -40,6 +41,10 @@ const ui = {
   filesToggle: $('files-toggle'), files: $('files'), fileList: $('file-list'), fromHost: $('from-host'),
   toHost: $('to-host'), uploadPick: $('upload-pick'), uploadInput: $('upload-input'), uploadList: $('upload-list'),
   diagSave: $('diag-save'), clipboard: $('clipboard'), clipEnabled: $('clip-enabled'), touchPaste: $('touch-paste'),
+  pcQuick: $('pc-quick'), pcList: $('pc-list'), pcAdd: $('pc-add'), pairOther: $('pair-other'),
+  addPc: $('add-pc'), addAddress: $('add-address'), addDeviceName: $('add-device-name'), addStart: $('add-start'),
+  addCode: $('add-code'), addConfirm: $('add-confirm'), addCancel: $('add-cancel'), addMsg: $('add-msg'),
+  addTrust: $('add-trust'), addTrustHost: $('add-trust-host'), addTrustCa: $('add-trust-ca'), addTrustOpen: $('add-trust-open'),
 };
 
 const params = new URLSearchParams(location.search);
@@ -54,8 +59,7 @@ const zoom = new ZoomView({
   el: ui.view, stage: ui.stage,
   onChange: (on) => { ui.zoomReset.hidden = ui.zoomPan.hidden = !on; },
 });
-// iOS Safari zooms the whole page on a pinch whatever the viewport meta says, and touch-action
-// alone doesn't always stop it; the page zoomed in breaks the layout and steals the stream's pinch.
+// Blocks Safari's whole-page pinch zoom.
 for (const ev of ['gesturestart', 'gesturechange', 'gestureend']) {
   document.addEventListener(ev, (e) => e.preventDefault(), { passive: false });
 }
@@ -66,48 +70,55 @@ ui.zoomPan.addEventListener('click', () => {
 });
 
 let session = null;
+let soundBlocked = false;
+let userClosed = true;
+let wakeLock = null;
 let input = null;
+let savedPcs = hosts.loadHosts();
+let localPaired = false;
+let target = null;
 let cursor = null;
-let cursor2 = null; // the pointer on the second monitor's video
-let popout = null; // the second monitor's window, while it has one
+let cursor2 = null;
+let popout = null;
 let statsTimer = 0;
 const reporter = new ClientReporter({ getPc: () => session?.pc, send: (m) => session?.sendControl(m) });
 let prevSnap = null;
 const frameTimer = new FrameTimer(ui.video);
 const alerts = new Alerts();
 
-// Stream settings and what the host reported. See settings.js.
+// Stream settings and what the host reported.
 const settings = settingsStore.load();
-let host = null; // { displays, active, config, stats } for the current session
+let host = null;
 let lastSent = null;
 let tuning = null; // running AutoTune
-let tuned = null; // what the last auto-tune picked: { bitrateKbps, quality }, for this connection only until kept
-let tuneWindow = null; // host stats gathered while auto-tune measures
-let micTrack = null; // this browser's microphone while the Mic setting is on and a session runs
-let remoteUpdate = false; // the host lets this browser update and restart it
+let tuned = null;
+let tuneWindow = null;
+let micTrack = null;
+let remoteUpdate = false;
 
 function setStatus(text, state) {
   ui.status.textContent = text;
   ui.status.dataset.state = state;
 }
 
-// Connected (or connecting): the toolbar button disconnects, and the big one on the stage goes away.
+// Connected (or connecting): the toolbar button disconnects, and the big one on the stage goes
+// away.
 function showConnected(on) {
   ui.connect.textContent = on ? 'Disconnect' : 'Connect';
   document.body.classList.toggle('connected', on);
 }
 
 // Hooks for the host's capabilities message (see capabilities.js).
-// Ctrl+Alt+Del works only when the host runs as the service; hidden until the host says so.
 function setSasVisible(visible) {
   ui.sas.hidden = !visible;
   $('keys-sas').hidden = !visible;
 }
-// Shown on the not-connected screen and in the title, so two hosts are told apart.
+// Shown on the not-connected screen and in the title.
 function setHostName(name) {
   ui.stageHost.textContent = name ?? '';
   ui.stageHost.hidden = !name;
   document.title = name ? `${name} - web-stream` : 'web-stream';
+  if (name && target) rememberName(target, name);
 }
 // The "page vX, host vY" line in Settings > Advanced.
 function setHostVersion(version) {
@@ -115,25 +126,39 @@ function setHostVersion(version) {
   ui.version.hidden = !version;
 }
 
-async function connect() {
+async function connect(next = target) {
+  if (!next) {
+    showAddPc();
+    return;
+  }
   disconnect();
-  session = new Session({ signalUrl, video: ui.video, video2: ui.video2 });
+  userClosed = false;
+  target = next;
+  hosts.setLastHost(target.id);
+  renderPcs();
+  const remote = isRemote(target);
+  session = new Session({
+    signalUrl: remote ? hosts.signalUrlFor(target.origin) : signalUrl,
+    token: remote ? target.token : null,
+    video: ui.video, video2: ui.video2,
+  });
   session.addEventListener('status', (e) => setStatus(e.detail.text, e.detail.state));
+  session.addEventListener('muted', () => { soundBlocked = true; });
   session.addEventListener('control', (e) => onControl(e.detail));
   session.addEventListener('file-chunk', (e) => files.onChunk(e.detail));
   session.addEventListener('control-open', () => {
-    // A new connection: the host offers its files afresh, and says whether it takes any.
+    keepAwake();
     files.clear();
     uploads.clear();
     if (diag && session.pc) diag.start(session.pc, ui.video);
     session.sendControl({ type: 'listDisplays' });
     reporter.start();
     sendCursorMode();
-    // The host keeps the last choice across sessions; tell it this browser's.
     session.sendControl({ type: 'setMicEnabled', enabled: settings.mic });
     session.sendControl(settingsStore.audioConfig(settings));
   });
   session.addEventListener('closed', () => {
+    releaseWakeLock();
     reporter.stop();
     setRemoteUpdate(false);
     clip.reset();
@@ -148,8 +173,7 @@ async function connect() {
   clearTuned();
   host = { displays: [], active: null, second: null, config: null, stats: null, matched: false, awaitingMatch: false };
   lastSent = null;
-  // The host sends "bye" with reason "revoked" when this browser is unpaired.
-  session.addEventListener('status', (e) => { if (/unpaired/.test(e.detail.text)) checkPairing(); });
+  session.addEventListener('status', (e) => { if (/unpaired/.test(e.detail.text)) recheck(target); });
   input = new InputCapture({
     session, video: ui.video, video2: ui.video2, stage: ui.stage, onHotkey,
     keyTarget: ui.kbdInput, onKeySent: (usage, down) => softKeys.keySent(usage, down),
@@ -162,7 +186,7 @@ async function connect() {
   input.start();
   cursor = new CursorView({
     video: ui.video, overlay: ui.cursor, displaySize: () => host?.displays.find((d) => d.id === host.active) ?? null,
-    onPlace: (x, y) => zoom.follow(x, y), // zoomed in, the view keeps the trackpad's pointer in sight
+    onPlace: (x, y) => zoom.follow(x, y),
   });
   cursor.setMode(ui.mouseMode.value);
   makeCursor2(ui.video2, ui.cursor2);
@@ -173,12 +197,12 @@ async function connect() {
     await session.start();
   } catch (err) {
     session.fail(err.message);
-    // A refused upgrade usually means the pairing was revoked; show the pairing screen if so.
-    checkPairing();
+    recheck(target);
   }
 }
 
 function disconnect() {
+  userClosed = true;
   reporter.stop();
   diag?.stop();
   if (input) input.stop();
@@ -262,10 +286,8 @@ function onControl(msg) {
     setRemoteUpdate(msg.enabled === true);
   } else if (msg.type === 'updateStatus' && typeof msg.message === 'string') {
     setStatus(`Host update: ${msg.message}`, ui.status.dataset.state);
-    // Started: the host restarts once the build is done, and this page reconnects to the new one.
     setRemoteUpdate(true, msg.state === 'started');
   } else if (msg.type === 'micUnavailable') {
-    // The host can't play the mic: stop sending it.
     setStatus(`Host: ${msg.message}`, ui.status.dataset.state);
     settings.mic = false;
     showMic();
@@ -273,10 +295,8 @@ function onControl(msg) {
     setMic(false);
   } else if (msg.type === 'error' && typeof msg.message === 'string') {
     setStatus(`Host: ${msg.message}`, ui.status.dataset.state);
-    // A refused update can be tried again.
     if (remoteUpdate) setRemoteUpdate(true);
     if (host) {
-      // Whatever was asked for may not have applied; let the next change (or this one) go again.
       lastSent = null;
       if (host.awaitingMatch) {
         host.awaitingMatch = false;
@@ -293,8 +313,6 @@ function applySettings() {
     host.matched = true;
     host.awaitingMatch = true;
     const { width, height } = settingsStore.screenPixels();
-    // The host answers with a fresh display list (or an error), which brings us back here; the
-    // stream is sized for the new resolution then, not twice.
     session.sendControl({ type: 'setHostResolution', width, height });
   }
   if (host.awaitingMatch) return;
@@ -304,7 +322,6 @@ function applySettings() {
 function currentConfig() {
   const display = host.displays.find((d) => d.id === host.active) ?? null;
   const config = settingsStore.videoConfig(settings, { screen: settingsStore.screenPixels(), display, codec: host.config.codec, rotate: isTouch() });
-  // An auto-tune result applies to this connection only (it never rewrites the saved settings).
   return tuned ? { ...config, ...tuned } : config;
 }
 
@@ -335,7 +352,6 @@ fillSelect(ui.fps, settingsStore.FRAME_RATES, (v) => String(v));
 const CODEC_LABELS = { h264: 'H.264', h265: 'H.265 (HEVC)', av1: 'AV1' };
 const decodable = settingsStore.decodableCodecs();
 fillSelect(ui.codec, decodable, (v) => CODEC_LABELS[v]);
-// A codec picked in another browser (settings are per origin) may not play in this one.
 if (settings.codec && !decodable.includes(settings.codec)) settings.codec = null;
 fillSelect(ui.priority, settingsStore.PRIORITIES, (v) => v[0].toUpperCase() + v.slice(1));
 fillSelect(ui.keyframeScale, settingsStore.KEYFRAME_SCALES, (v) => (v === 1 ? '1x (fastest)' : v === 4 ? '4x (sharpest)' : `${v}x`));
@@ -355,7 +371,6 @@ function ensureOption(select, value, label) {
 
 // Shows the settings.
 function showSettings() {
-  // A bitrate that isn't in the list (kept from auto-tune), or a resolution no longer listed, gets its own entry.
   ensureOption(ui.bitrate, settings.bitrate, () => `${Number(settings.bitrate) / 1000} Mb/s`);
   ensureOption(ui.resolution, settings.resolution, () => RES_LABELS[settings.resolution]);
   ui.resolution.value = settings.resolution;
@@ -375,7 +390,7 @@ function showSettings() {
   ui.audioFrame.value = settings.audioFrame;
   ui.statsLevel.value = settings.statsLevel;
 }
-// The chosen codec, else what the host streams (nothing selected before it says).
+// The chosen codec, else what the host streams.
 function showCodec() {
   ui.codec.value = settings.codec ?? host?.config?.codec ?? '';
 }
@@ -385,7 +400,7 @@ function showMic() {
   ui.mic.checked = !!settings.mic;
   ui.micToggle.setAttribute('aria-pressed', String(!!settings.mic));
 }
-// Mouse button: Game / Desktop, or Trackpad / Direct on a touch screen (the same two modes).
+// Mouse button: Game / Desktop, or Trackpad / Direct on a touch screen.
 function showMouseLabel() {
   const touch = document.body.classList.contains('touch');
   const relative = settings.mouseMode === 'relative';
@@ -407,7 +422,7 @@ for (const [el, key] of [[ui.resolution, 'resolution'], [ui.codec, 'codec'], [ui
   el.addEventListener('change', () => {
     settings[key] = ['fps', 'keyframeScale', 'minScale'].includes(key) ? Number(el.value) : el.value;
     if (key === 'priority' && settings.priority === 'source') Object.assign(settings, settingsStore.SOURCE_PRESET);
-    clearTuned(); // a choice made now replaces what auto-tune picked
+    clearTuned();
     settingsStore.save(settings);
     showSettings();
     applySettings();
@@ -438,7 +453,7 @@ ui.matchHost.addEventListener('change', () => {
   }
 });
 
-// Starts or stops sending the mic. The host plays it into its virtual cable (see docs/guide/audio-and-gamepads.md).
+// Starts or stops sending the mic.
 let micGen = 0;
 async function setMic(on) {
   const s = session;
@@ -541,7 +556,6 @@ async function autoTune() {
   for (const el of [ui.resolution, ui.codec, ui.bitrate, ui.fps, ui.priority, ui.keyframeScale, ui.minScale, ui.recoverDrops, ui.display, ui.displayQuick, ui.matchHost]) el.disabled = true;
   try {
     const { config, summary } = await tuning.run();
-    // This connection only: nothing is saved unless the user presses Keep these.
     tuned = { bitrateKbps: config.bitrateKbps, quality: config.quality };
     ui.autotuneKeep.hidden = false;
     setStatus(`${summary} (this connection only; Settings > Advanced > Keep these)`, 'connected');
@@ -571,7 +585,6 @@ ui.autotuneKeep.addEventListener('click', () => {
   setStatus('Saved auto-tune result as Max bitrate and Priority', ui.status.dataset.state);
 });
 
-// Back to the defaults, for everything this page keeps. The host and the pairing are untouched.
 ui.resetSettings.addEventListener('click', () => {
   if (!confirm('Put all settings on this page back to their defaults?')) return;
   const matched = settings.matchHost;
@@ -593,7 +606,6 @@ function makeCursor2(video, overlay) {
   cursor2?.stop();
   cursor2 = new CursorView({
     video, overlay, displaySize: () => displayById(host?.second),
-    // The host reports the pointer from the main display's corner; this video starts at the other's.
     shift: () => {
       const main = displayById(host?.active);
       const other = displayById(host?.second);
@@ -605,8 +617,7 @@ function makeCursor2(video, overlay) {
 
 const displayById = (id) => (id == null ? null : host?.displays.find((d) => d.id === id) ?? null);
 
-// The second monitor's choices: off, or any display (the host refuses the one already shown, and
-// swaps if the main one is switched to it).
+// The second monitor's choices: off, or any display.
 function fillSecond(displays, second) {
   ui.display2.replaceChildren(...[{ id: 'off', label: 'Off' }, ...displays.map((d, i) => ({ id: String(d.id), label: `${i + 1}: ${d.name || d.id}` }))]
     .map(({ id, label }) => {
@@ -622,7 +633,6 @@ function fillSecond(displays, second) {
 // Two monitors side by side, or one.
 function showDual(on) {
   if (!on) popIn();
-  // In a window of its own, the second monitor leaves the page's layout.
   document.body.classList.toggle('dual', on && !popout);
   ui.video2.hidden = !on || !!popout;
   ui.popout.hidden = !on;
@@ -639,7 +649,6 @@ function popOut() {
     return;
   }
   popout = p;
-  // The stream follows the video element, also after a reconnect gives it a new one.
   p.video.srcObject = ui.video2.srcObject;
   ui.video2.srcObject = null;
   session.video2 = input.video2 = p.video;
@@ -677,7 +686,7 @@ function selectDisplay(id) {
   if (!session) return;
   ui.display.value = id;
   ui.displayQuick.value = id;
-  zoom.reset(); // a different screen: start from the whole of it
+  zoom.reset();
   session.sendControl({ type: 'selectDisplay', id: Number(id) });
 }
 
@@ -696,19 +705,13 @@ async function toggleFullscreen() {
   const request = ui.stage.requestFullscreen ?? ui.stage.webkitRequestFullscreen;
   try {
     await request.call(ui.stage, { navigationUI: 'hide' });
-    // The old webkit call returns nothing and may quietly do nothing.
     if (!fullscreenElement()) await new Promise((r) => setTimeout(r, 300));
     if (!fullscreenElement()) throw new Error('not fullscreen');
   } catch {
-    // iPhone Safari only fullscreens <video>, with its own controls and no input; fill the window instead.
-    // On desktop a refusal just leaves things as they were.
     if (isTouch()) setFakeFullscreen(true);
     return;
   }
-  // Keyboard Lock (Chromium, fullscreen only) lets Esc, Alt+Tab and the Windows key reach the host.
-  // Hold Esc to leave fullscreen.
   try { await navigator.keyboard?.lock(); } catch { /* unsupported */ }
-  // Phones: turn to the host display's shape (Android Chrome allows this only while fullscreen).
   if (isTouch()) {
     const d = host?.displays.find((x) => x.id === host.active);
     const portrait = d?.width && d?.height && d.height > d.width;
@@ -733,7 +736,7 @@ for (const ev of ['fullscreenchange', 'webkitfullscreenchange']) {
       try { navigator.keyboard?.lock()?.catch(() => {}); } catch { /* unsupported */ }
     } else {
       navigator.keyboard?.unlock?.();
-      try { screen.orientation?.unlock?.(); } catch { /* not locked */ }
+      try { screen.orientation?.unlock?.(); } catch { }
     }
     showFullscreenState();
   });
@@ -746,8 +749,8 @@ function toggleStats() {
   else startStats();
 }
 
-// A stream that arrives but never decodes (the host restarted its video and the new keyframe was lost or
-// unusable) is rescued by asking the host for a keyframe, and the host restarts its video if that repeats.
+// A stream that arrives but never decodes is rescued by asking the host for a keyframe, and the
+// host restarts its video if that repeats.
 const stallWatchdog = new StallWatchdog();
 setInterval(async () => {
   const pc = session?.pc;
@@ -814,8 +817,7 @@ function sendCursorMode() {
   session?.sendControl({ type: 'setCursorPositions', enabled: ui.mouseMode.value === 'relative' });
 }
 
-// In a window the browser keeps Esc to free the mouse and never passes it on; say how to send one.
-// Only the page's fullscreen (not F11) can lock the keyboard and let Esc through.
+// Tells how to send Esc while windowed.
 let releasingMouse = false;
 let escHintShown = false;
 document.addEventListener('pointerlockchange', () => {
@@ -828,7 +830,7 @@ document.addEventListener('pointerlockchange', () => {
   setStatus('Esc frees the mouse in a window. Use Fullscreen to send Esc, or Ctrl+Alt+Shift+E', ui.status.dataset.state);
 });
 
-// Ctrl+Alt+Shift+<key>. Returns true when handled so the key is not sent to the host.
+// Ctrl+Alt+Shift+<key>.
 function onHotkey(code) {
   const digit = /^Digit([1-9])$/.exec(code);
   if (digit) {
@@ -859,17 +861,15 @@ ui.displayQuick.addEventListener('change', () => selectDisplay(ui.displayQuick.v
 ui.mouseMode.addEventListener('change', () => setMouseMode(ui.mouseMode.value));
 ui.mouseToggle.addEventListener('click', () => setMouseMode(ui.mouseMode.value === 'relative' ? 'absolute' : 'relative'));
 ui.fullscreen.addEventListener('click', toggleFullscreen);
-// Ctrl+Alt+Del never reaches the page as keys; the host asks Windows for it.
 for (const el of [$('sas'), $('keys-sas')]) {
   el.addEventListener('click', () => session?.sendControl({ type: 'secureAttention' }));
 }
 ui.touchFullscreen.addEventListener('click', toggleFullscreen);
 ui.statsToggle.addEventListener('click', toggleStats);
 ui.statsLevel.addEventListener('change', () => setStatsLevel(ui.statsLevel.value));
-// Toolbar controls keep focus otherwise, and Space/Enter would re-trigger them.
 for (const el of [ui.connect, ui.connectBig, ui.fullscreen, ui.sas, ui.mouseToggle, ui.micToggle, ui.statsToggle, ui.autotune, ui.clipboard]) el.addEventListener('mouseup', () => el.blur());
 
-// Update host: only when the host allows it, and only after a confirm, since it restarts the host.
+// Update host: only when the host allows it, and only after a confirm.
 function setRemoteUpdate(enabled, running = false) {
   remoteUpdate = enabled;
   ui.updateHost.disabled = !enabled || running;
@@ -886,7 +886,8 @@ ui.updateHost.addEventListener('click', () => {
   session.sendControl({ type: 'updateHost' });
 });
 
-// Settings and Files dropdowns: a toggle opens one; a click or tap anywhere else, or Esc, closes it.
+// Settings and Files dropdowns: a toggle opens one; a click or tap anywhere else, or Esc, closes
+// it.
 function setSettingsOpen(open) {
   if (open) setFilesOpen(false);
   document.body.classList.toggle('more-open', open);
@@ -897,7 +898,7 @@ function setFilesOpen(open) {
   document.body.classList.toggle('files-open', open);
   ui.filesToggle.setAttribute('aria-expanded', String(open));
 }
-// Whether Advanced is unfolded is remembered per browser; storage may be unavailable.
+// Whether Advanced is unfolded is remembered per browser.
 const FOLDS_KEY = 'ws-settings-open';
 try {
   const open = JSON.parse(localStorage.getItem(FOLDS_KEY) ?? 'null');
@@ -907,7 +908,7 @@ try {
 } catch { /* defaults from the page */ }
 ui.more.addEventListener('toggle', () => {
   const open = Object.fromEntries([...ui.more.querySelectorAll('details')].map((d) => [d.id, d.open]));
-  try { localStorage.setItem(FOLDS_KEY, JSON.stringify(open)); } catch { /* not remembered */ }
+  try { localStorage.setItem(FOLDS_KEY, JSON.stringify(open)); } catch { }
 }, { capture: true });
 ui.moreToggle.addEventListener('click', () => setSettingsOpen(!document.body.classList.contains('more-open')));
 ui.filesToggle.addEventListener('click', () => setFilesOpen(!document.body.classList.contains('files-open')));
@@ -921,7 +922,8 @@ document.addEventListener('keydown', (e) => {
   if (document.body.classList.contains('files-open')) setFilesOpen(false);
 });
 
-// Files the host shares: the Files button shows how many; each row saves, cancels or says what happened.
+// Files the host shares: the Files button shows how many; each row saves, cancels or says what
+// happened.
 const files = new Files({ sendControl: (msg) => session?.sendControl(msg) });
 files.addEventListener('offer', (e) => {
   setStatus(`Host shared ${e.detail.name} (${formatSize(e.detail.size)}): see Files`, ui.status.dataset.state);
@@ -933,8 +935,7 @@ const uploads = new Uploads({
   fileBuffered: () => session?.fileBuffered() ?? null,
 });
 
-// Clipboard text, both ways (clipboard.js). The toolbar button and the touch Paste button show only
-// while the host shares its clipboard and the Share clipboard setting is on.
+// Clipboard text, both ways (clipboard.js).
 const clip = new ClipboardSync({
   sendControl: (msg) => session?.sendControl(msg),
   notify: (text) => setStatus(text, ui.status.dataset.state),
@@ -948,7 +949,7 @@ const clip = new ClipboardSync({
   },
 });
 ui.clipEnabled.checked = clip.enabled;
-ui.clipEnabled.disabled = true; // until the host says it shares its clipboard
+ui.clipEnabled.disabled = true;
 ui.clipEnabled.addEventListener('change', () => clip.setEnabled(ui.clipEnabled.checked));
 ui.clipboard.addEventListener('click', () => clip.button());
 window.addEventListener('focus', () => clip.onFocus());
@@ -958,8 +959,7 @@ ui.stage.addEventListener('pointerdown', () => clip.onGesture());
 function typeText(text) {
   for (const buf of P.text(text)) input?.rel(buf);
 }
-// Paste on a touch screen: the host gets this device's clipboard, then Ctrl+V. Where the clipboard
-// can't be shared (or the browser refuses to read it), the text is typed instead if it can be read.
+// Paste on a touch screen: the host gets this device's clipboard, then Ctrl+V.
 async function touchPaste() {
   if (await clip.toHost()) {
     const ctrl = hidUsage('ControlLeft');
@@ -981,7 +981,7 @@ const queueFiles = () => {
 };
 files.addEventListener('change', queueFiles);
 uploads.addEventListener('change', queueFiles);
-// Rows are updated in place, so a click isn't lost to a row redrawn under the pointer.
+// Rows are updated in place.
 const fileRows = new Map();
 const uploadRows = new Map();
 function showFiles() {
@@ -1089,20 +1089,16 @@ const softKeys = new SoftKeyboard({
   keys: ui.keys,
   send: (usage, down) => input?.rel(P.key(usage, down)),
   sendText: typeText,
-  // The keyboard's own Paste (long press): the host's clipboard gets the text and it is typed.
   onPaste: (text) => { clip.pushText(text); typeText(text); },
 });
 const markTouch = () => { document.body.classList.add('touch'); showMouseLabel(); };
 if (matchMedia('(pointer: coarse)').matches) markTouch();
 document.addEventListener('pointerdown', (e) => { if (e.pointerType === 'touch') markTouch(); }, { capture: true });
 
-// Overlay buttons don't take focus, so tapping them leaves the phone keyboard open.
 for (const el of [$('touchbar'), ui.keys]) {
   for (const ev of ['pointerdown', 'mousedown']) el.addEventListener(ev, (e) => e.preventDefault());
 }
-// Opening the keyboard has to happen on click: phones show it only for a focus() inside a tap's
-// user activation, which a touch pointerdown doesn't give. Whether it was open is read on pointerdown
-// in case the tap moved focus anyway.
+// Opens the keyboard on click, inside the tap's user activation.
 let kbdWasOpen = false;
 ui.kbdToggle.addEventListener('pointerdown', () => { kbdWasOpen = softKeys.open; });
 ui.kbdToggle.addEventListener('click', () => {
@@ -1118,18 +1114,186 @@ ui.keysToggle.addEventListener('click', () => {
   if (ui.keys.hidden) softKeys.releaseSticky();
 });
 
-// Pairing: the host sets an HttpOnly cookie once the code shown on the host is confirmed.
+// Mobile: sound after a tap, screen kept on, recovery after the app was in the background.
+function unmute() {
+  if (!soundBlocked) return;
+  soundBlocked = false;
+  for (const v of [ui.video, ui.video2]) {
+    v.muted = false;
+    if (v.srcObject && v.paused) v.play().catch(() => {});
+  }
+}
+for (const ev of ['pointerup', 'touchend', 'keydown']) document.addEventListener(ev, unmute, { capture: true });
+
+async function keepAwake() {
+  if (document.hidden || wakeLock || !navigator.wakeLock) return;
+  try {
+    wakeLock = await navigator.wakeLock.request('screen');
+    wakeLock.addEventListener('release', () => { wakeLock = null; });
+  } catch { /* refused or unsupported */ }
+}
+
+function releaseWakeLock() {
+  wakeLock?.release().catch(() => {});
+  wakeLock = null;
+}
+
+function resumed() {
+  if (document.hidden) return;
+  if (session && !session.closed) {
+    for (const v of [ui.video, ui.video2]) if (v.srcObject && v.paused) v.play().catch(() => {});
+    keepAwake();
+  } else if (!userClosed && target && ui.addPc.hidden && ui.pair.hidden) {
+    connect();
+  }
+}
+document.addEventListener('visibilitychange', resumed);
+window.addEventListener('pageshow', (e) => { if (e.persisted) resumed(); });
+
+// iOS keyboards cover the page instead of resizing it: fit the page to what is visible.
+const vv = window.visualViewport;
+if (vv) {
+  const fit = () => {
+    const covered = Math.abs(vv.scale - 1) < 0.01 && window.innerHeight - vv.height > 80;
+    document.documentElement.style.setProperty('--app-height', covered ? `${Math.round(vv.height)}px` : '');
+    if (covered && (window.scrollY || vv.offsetTop)) window.scrollTo(0, 0);
+  };
+  vv.addEventListener('resize', fit);
+  vv.addEventListener('scroll', fit);
+}
+
+// Saved PCs and the page's own host.
+
+const isRemote = (t) => !!t && t.id !== hosts.LOCAL;
+const remoteOf = (t) => (isRemote(t) ? { origin: t.origin, token: t.token } : undefined);
+const localTarget = () => ({ id: hosts.LOCAL, origin: location.origin, token: null, name: hosts.localName() || hosts.hostLabel(location.origin) });
+
+function pickTarget(id) {
+  if (id === hosts.LOCAL) return localPaired ? localTarget() : null;
+  return savedPcs.find((h) => h.id === id && h.token) ?? null;
+}
+
+function targets() {
+  return [...(localPaired ? [localTarget()] : []), ...savedPcs.filter((h) => h.token)];
+}
+
+function defaultTarget() {
+  return pickTarget(hosts.lastHost()) ?? targets()[0] ?? null;
+}
+
+function storePcs(list) {
+  savedPcs = list;
+  hosts.saveHosts(savedPcs);
+}
+
+function rememberName(t, name) {
+  if (t.id === hosts.LOCAL) hosts.setLocalName(name);
+  else storePcs(hosts.renameHost(savedPcs, t.id, name));
+  t.name = name;
+  renderPcs();
+}
+
+function renderPcs() {
+  const list = targets();
+  if (target && !list.some((t) => t.id === target.id)) target = null;
+  ui.pcList.replaceChildren(...list.map((t) => {
+    const li = document.createElement('li');
+    if (target?.id === t.id) li.setAttribute('aria-current', 'true');
+    const go = document.createElement('button');
+    go.type = 'button';
+    go.className = 'pc-connect';
+    const name = document.createElement('b');
+    name.textContent = t.name;
+    const where = document.createElement('small');
+    where.textContent = hosts.hostLabel(t.origin);
+    go.append(name, where);
+    go.addEventListener('click', () => connect(t));
+    li.append(go);
+    if (isRemote(t)) {
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'pc-remove';
+      del.textContent = '×';
+      del.title = `Forget ${t.name}`;
+      del.setAttribute('aria-label', `Forget ${t.name}`);
+      del.addEventListener('click', () => forgetPc(t));
+      li.append(del);
+    }
+    return li;
+  }));
+  if (!localPaired && savedPcs.length) {
+    const li = document.createElement('li');
+    const pair = document.createElement('button');
+    pair.type = 'button';
+    pair.className = 'pc-connect';
+    pair.textContent = `Pair ${hosts.localName() || hosts.hostLabel(location.origin)}`;
+    pair.addEventListener('click', () => setPairForm(true));
+    li.append(pair);
+    ui.pcList.append(li);
+  }
+  ui.pcQuick.replaceChildren(...list.map((t) => {
+    const o = document.createElement('option');
+    o.value = t.id;
+    o.textContent = t.name;
+    return o;
+  }));
+  ui.pcQuick.hidden = list.length < 2;
+  if (target) ui.pcQuick.value = target.id;
+  ui.connectBig.textContent = target && list.length > 1 ? `Connect to ${target.name}` : 'Connect';
+  ui.unpair.hidden = !target;
+}
+
+async function forgetPc(t) {
+  if (!confirm(`Forget ${t.name}? You will need a new code from it to connect again.`)) return;
+  if (target?.id === t.id) disconnect();
+  pairing.unpair(remoteOf(t)).catch(() => {});
+  storePcs(hosts.removeHost(savedPcs, t.id));
+  if (target?.id === t.id) target = defaultTarget();
+  renderPcs();
+}
+
+// After a failed connection: tells an unreachable PC from one that no longer knows this device.
+async function recheck(t) {
+  if (!isRemote(t)) return checkPairing();
+  try {
+    const s = await pairing.getSession(remoteOf(t));
+    if (s.paired) return;
+    storePcs(hosts.forgetToken(savedPcs, t.id));
+    renderPcs();
+    showAddPc(t.origin, `${t.name} no longer knows this device. Pair it again.`);
+  } catch {
+    setStatus(`Can't reach ${t.name}`, 'failed');
+    showTrust(t.origin);
+  }
+}
+
+ui.pcQuick.addEventListener('change', () => {
+  const t = pickTarget(ui.pcQuick.value);
+  if (t && t.id !== target?.id) connect(t);
+});
+
+// Pairing this page's own host: the host sets an HttpOnly cookie once the code is confirmed.
 let pairingId = null;
 
-function showPairing(paired) {
-  document.body.classList.toggle('unpaired', !paired);
-  ui.pair.hidden = paired;
-  ui.unpair.hidden = !paired;
-  if (!paired) {
-    disconnect();
+function setPairForm(on) {
+  if (on) hideAddPc();
+  document.body.classList.toggle('unpaired', on);
+  ui.pair.hidden = !on;
+  if (on) {
     setStatus('Not paired', 'idle');
     if (!ui.deviceName.value) ui.deviceName.value = pairing.defaultDeviceName();
   }
+}
+
+function showPairing(paired) {
+  localPaired = paired;
+  if (!paired && target?.id === hosts.LOCAL) {
+    disconnect();
+    target = null;
+  }
+  setPairForm(!paired && savedPcs.length === 0);
+  if (!target) target = defaultTarget();
+  renderPcs();
 }
 
 async function checkPairing() {
@@ -1139,6 +1303,8 @@ async function checkPairing() {
     return s.paired;
   } catch {
     setStatus('Host unreachable', 'failed');
+    if (!target) target = defaultTarget();
+    renderPcs();
     return false;
   }
 }
@@ -1167,39 +1333,169 @@ ui.pair.addEventListener('submit', async (e) => {
     ui.pairCode.disabled = true;
     ui.pairConfirm.disabled = true;
     ui.pairMsg.textContent = '';
+    target = localTarget();
     showPairing(true);
-    connect();
+    connect(localTarget());
   } catch (err) {
     ui.pairMsg.textContent = err.message;
   }
 });
 
 ui.unpair.addEventListener('click', async () => {
+  if (isRemote(target)) {
+    forgetPc(target);
+    return;
+  }
   if (!confirm('Unpair this browser? You will need a new code from the host to connect again.')) return;
   disconnect();
   await pairing.unpair().catch(() => {});
   showPairing(false);
 });
 
-// A pairing link (the host's QR code) pairs this browser without a code.
+ui.pairOther.addEventListener('click', () => showAddPc());
+
 async function pairFromLink(link) {
   try {
     await pairing.pairWithLink(link, ui.deviceName.value.trim() || pairing.defaultDeviceName());
+    target = localTarget();
     showPairing(true);
     return true;
   } catch (err) {
-    // fetch's own TypeError means the host didn't answer at all; checkPairing has said so.
     if (!(err instanceof TypeError)) ui.pairMsg.textContent = err.message;
     return false;
   }
 }
 
+// Adding another PC: pairs with it from this page and keeps its device token.
+let adding = null;
+
+function showAddPc(address = '', message = '') {
+  setPairForm(false);
+  document.body.classList.add('adding');
+  ui.addPc.hidden = false;
+  ui.addAddress.value = address ? hosts.hostLabel(address) : ui.addAddress.value;
+  if (!ui.addDeviceName.value) ui.addDeviceName.value = pairing.defaultDeviceName();
+  ui.addMsg.textContent = message;
+  ui.addTrust.hidden = true;
+  resetAddCode();
+  ui.addAddress.focus();
+}
+
+function hideAddPc() {
+  document.body.classList.remove('adding');
+  ui.addPc.hidden = true;
+  adding = null;
+}
+
+function resetAddCode() {
+  adding = null;
+  ui.addCode.value = '';
+  ui.addCode.disabled = true;
+  ui.addConfirm.disabled = true;
+  syncAddStart();
+}
+
+function syncAddStart() {
+  ui.addStart.textContent = hosts.parseTarget(ui.addAddress.value)?.link ? 'Pair with link' : 'Request code';
+}
+
+function showTrust(origin) {
+  ui.addTrustHost.textContent = hosts.hostLabel(origin);
+  ui.addTrustCa.href = `${origin}/ca.crt`;
+  ui.addTrustOpen.href = `${origin}/`;
+  if (!ui.addPc.hidden) ui.addTrust.hidden = false;
+  else setStatus(`Can't reach ${hosts.hostLabel(origin)}: is it on, and does this device trust its certificate?`, 'failed');
+}
+
+function addFailed(err, origin) {
+  if (err instanceof TypeError) {
+    ui.addMsg.textContent = '';
+    showTrust(origin);
+  } else {
+    ui.addMsg.textContent = err.message;
+  }
+}
+
+async function finishAdd(origin, token) {
+  const [list, entry] = hosts.upsertHost(savedPcs, { origin, token });
+  storePcs(list);
+  hideAddPc();
+  if (!localPaired && !savedPcs.some((h) => h.id !== entry.id)) setPairForm(false);
+  await connect(entry);
+}
+
+ui.addAddress.addEventListener('input', () => {
+  ui.addTrust.hidden = true;
+  resetAddCode();
+});
+
+ui.addStart.addEventListener('click', async () => {
+  ui.addMsg.textContent = '';
+  ui.addTrust.hidden = true;
+  const t = hosts.parseTarget(ui.addAddress.value);
+  if (!t) {
+    ui.addMsg.textContent = 'That is not an address. Type it as shown in the PC\'s web-stream window, like 192.168.1.20:8443.';
+    return;
+  }
+  const name = ui.addDeviceName.value.trim() || pairing.defaultDeviceName();
+  if (t.origin === location.origin) {
+    hideAddPc();
+    if (t.link) await pairFromLink(t.link).then((ok) => ok && connect(localTarget()));
+    else setPairForm(true);
+    return;
+  }
+  try {
+    if (t.link) {
+      const token = await pairing.pairWithLink(t.link, name, { origin: t.origin });
+      await finishAdd(t.origin, token);
+      return;
+    }
+    const r = await pairing.startPairing(name, { origin: t.origin });
+    adding = { origin: t.origin, pairingId: r.pairingId };
+    ui.addCode.disabled = false;
+    ui.addConfirm.disabled = false;
+    ui.addCode.focus();
+    ui.addMsg.textContent = `Enter the code shown on ${hosts.hostLabel(t.origin)} (valid ${r.expiresIn ?? 120} s).`;
+  } catch (err) {
+    addFailed(err, t.origin);
+  }
+});
+
+ui.addPc.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  if (!adding) {
+    ui.addStart.click();
+    return;
+  }
+  const { origin, pairingId: id } = adding;
+  try {
+    const token = await pairing.confirmPairing(id, ui.addCode.value.trim(), { origin });
+    await finishAdd(origin, token);
+  } catch (err) {
+    addFailed(err, origin);
+  }
+});
+
+ui.addCancel.addEventListener('click', () => {
+  hideAddPc();
+  if (!localPaired && !savedPcs.length) checkPairing();
+});
+
+ui.pcAdd.addEventListener('click', () => showAddPc());
+
+if ('serviceWorker' in navigator && window.isSecureContext) {
+  navigator.serviceWorker.register('sw.js').catch(() => {});
+}
+navigator.storage?.persist?.().catch(() => {});
+
+target = pickTarget(hosts.lastHost());
 checkPairing().then(async (paired) => {
   if (!paired && pairingLink === '') {
     ui.pairMsg.textContent = 'That pairing link was damaged. Scan the QR code on the host again.';
   }
   if (!paired && pairingLink) paired = await pairFromLink(pairingLink);
-  // A paired page connects by itself unless "Connect automatically" is off (a pairing link always does).
-  // `?autoconnect` stays in the manifest for home-screen icons saved before the setting existed.
-  if (paired && (pairingLink || settings.autoconnect)) connect();
+  if (!target) target = defaultTarget();
+  renderPcs();
+  if (pairingLink && paired) connect(localTarget());
+  else if (target && settings.autoconnect) connect();
 });

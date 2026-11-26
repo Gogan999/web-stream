@@ -22,7 +22,8 @@ signaling itself, so there is no separate server to run.
 - **File transfer.** Send files from the PC to the browser, and optionally
   back.
 - **Phones and tablets.** Trackpad and direct-touch modes, pinch zoom,
-  on-screen keyboard and extra keys.
+  on-screen keyboard and extra keys. One home-screen app saves several PCs
+  and switches between them.
 - **Security.** Devices pair with a one-time code or QR code shown on the
   PC; nothing on the network can start pairing unattended. An optional
   Windows service reaches the sign-in screen and UAC prompts, with the
@@ -36,7 +37,13 @@ signaling itself, so there is no separate server to run.
 
 ## Get started
 
-Download **web-stream-setup-X.Y.Z.exe** from the
+In PowerShell on the PC:
+
+```
+irm https://github.com/Gogan999/web-stream/releases/latest/download/web-stream-install.ps1 | iex
+```
+
+The same line updates an installed host. Or download **web-stream-setup-X.Y.Z.exe** from the
 [latest release](https://github.com/Gogan999/web-stream/releases/latest)
 and follow [Getting started](docs/guide/getting-started.md).
 

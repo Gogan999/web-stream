@@ -1,24 +1,9 @@
 //! Decides when a captured desktop image gets encoded.
-//!
-//! Desktop Duplication hands us a frame whenever the desktop changes, which
-//! can be faster than the stream frame rate (a 144 Hz monitor streamed at
-//! 60 fps) or never (a static desktop). The pacer caps the encode rate with
-//! a deadline that advances by one frame interval per encode, so the average
-//! rate matches the target without bursts (a source barely faster than the
-//! target passes through, see [`NEAR_TARGET`]), and re-encodes the last
-//! image at a low rate while the desktop is idle so the stream stays alive
-//! and quality converges.
 
 use std::time::{Duration, Instant};
 
-/// A source whose frames come at least this fraction of the target interval
-/// apart (one up to about 5% faster than the target) is not capped: each of
-/// its frames is encoded as it arrives. A display's real refresh rate is
-/// rarely exactly its nominal one, and one running at 60.05 Hz, streamed at
-/// 60 fps, gained on a deadline at exactly 60 until every frame was held for
-/// most of a frame time before it was encoded (up to 16 ms of latency), with
-/// a frame skipped each time the drift wrapped round. Sources well above the
-/// target (120 or 240 Hz at 60 fps) keep the exact target rate.
+/// A source whose frames come at least this fraction of the target interval apart is not capped:
+/// each of its frames is encoded as it arrives.
 const NEAR_TARGET: f64 = 0.95;
 /// Weight of the newest interval in the source interval estimate.
 const SOURCE_SMOOTHING: f64 = 1.0 / 8.0;
@@ -27,14 +12,13 @@ const SOURCE_SMOOTHING: f64 = 1.0 / 8.0;
 pub(crate) struct Pacer {
     /// One frame at the target rate.
     interval: Duration,
-    /// A new frame up to this early is encoded immediately instead of held,
-    /// absorbing jitter between the display's refresh and our deadline.
+    /// A new frame up to this early is encoded immediately instead of held, absorbing jitter
+    /// between the display's refresh and our deadline.
     slack: Duration,
     idle_repeat: Duration,
     next_due: Option<Instant>,
     last_encode: Option<Instant>,
-    /// When the source last delivered a frame, and the smoothed time between
-    /// its frames.
+    /// When the source last delivered a frame, and the smoothed time between its frames.
     last_source: Option<Instant>,
     source_interval: Option<Duration>,
 }
@@ -61,7 +45,6 @@ impl Pacer {
     /// The source delivered a frame at `at`.
     pub(crate) fn source_frame(&mut self, at: Instant) {
         if let Some(last) = self.last_source.replace(at) {
-            // A pause (a still desktop) says nothing about the source's rate.
             let gap = at.saturating_duration_since(last);
             if gap <= self.interval * 2 {
                 self.source_interval = Some(match self.source_interval {
@@ -79,8 +62,8 @@ impl Pacer {
         self.source_interval = None;
     }
 
-    /// How far apart encodes are kept: the target interval, or just under
-    /// the source's own when that is close to it.
+    /// How far apart encodes are kept: the target interval, or just under the source's own when
+    /// that is close to it.
     fn pace(&self) -> Duration {
         match self.source_interval {
             Some(src) if src >= self.interval.mul_f64(NEAR_TARGET) => {
@@ -90,21 +73,19 @@ impl Pacer {
         }
     }
 
-    /// Whether a freshly captured frame may be encoded now; if not it should
-    /// be held and encoded once [`Self::wait`] elapses.
+    /// Whether a freshly captured frame may be encoded now; if not it should be held and encoded
+    /// once [`Self::wait`] elapses.
     pub(crate) fn ready(&self, now: Instant) -> bool {
         self.next_due.is_none_or(|due| now + self.slack >= due)
     }
 
-    /// Whether the last image should be re-encoded because nothing changed
-    /// for a while.
+    /// Whether the last image should be re-encoded.
     pub(crate) fn idle_repeat_due(&self, now: Instant) -> bool {
         self.last_encode
             .is_some_and(|t| now.saturating_duration_since(t) >= self.idle_repeat)
     }
 
-    /// How long to wait for the next desktop update. Never longer than one
-    /// frame interval so control commands are handled promptly.
+    /// How long to wait for the next desktop update.
     pub(crate) fn wait(&self, now: Instant, holding: bool) -> Duration {
         if holding {
             return self
@@ -120,8 +101,6 @@ impl Pacer {
     }
 
     pub(crate) fn encoded(&mut self, now: Instant) {
-        // After an idle period the old deadline is far in the past; restart
-        // from now so we don't burst to catch up.
         let base = match self.next_due {
             Some(due) => due.max(now.checked_sub(self.slack).unwrap_or(now)),
             None => now,
@@ -131,21 +110,13 @@ impl Pacer {
     }
 }
 
-/// Send queue age past which a due frame is held back instead of encoded:
-/// under half the transport's late cutoff (50 ms), so a frame encoded now
-/// still goes out in time, and well above the zero a healthy link shows.
+/// Send queue age past which a due frame is held back instead of encoded: under half the
+/// transport's late cutoff (50 ms).
 pub(crate) const HOLD_BACKLOG: Duration = Duration::from_millis(20);
-/// Longest a frame is held back while the send queue stays behind. Past
-/// this one frame is encoded anyway, so a queue that never drains still
-/// gets a picture now and then (and the transport's late drop decides).
+/// Longest a frame is held back while the send queue stays behind.
 pub(crate) const MAX_HOLD: Duration = Duration::from_millis(100);
 
-/// Holds frames back while the transport's send queue is behind, so the
-/// encoder sends fewer frames rather than frames that would be dropped as
-/// late. A late drop costs more than a skipped encode: the encoder has to
-/// repair it with a frame built on an older reference (several times the
-/// bits), and if the repair is late too, with a keyframe, which backs the
-/// queue up further. Skipping before the encoder leaves no gap to repair.
+/// Holds frames back while the transport's send queue is behind.
 #[derive(Debug, Default)]
 pub(crate) struct Backpressure {
     /// When the current hold began.
@@ -174,17 +145,12 @@ impl Backpressure {
     }
 }
 
-/// Least time between two bitrate changes to the encoder. The bandwidth
-/// estimate moves several times a second, and every change is an
-/// `nvEncReconfigureEncoder` on the capture thread (342 in one logged run).
+/// Least time between two bitrate changes to the encoder.
 pub(crate) const BITRATE_MIN_GAP: Duration = Duration::from_millis(250);
-/// A cut at least this deep goes through at once: an encoder above the send
-/// rate backs the queue up, and frames then go out late.
+/// A cut at least this deep goes through at once.
 pub(crate) const BITRATE_URGENT_CUT: f64 = 0.85;
 
-/// Coalesces bitrate changes so the encoder is reconfigured at most every
-/// [`BITRATE_MIN_GAP`], except for a deep cut. Only the newest request
-/// counts.
+/// Coalesces bitrate changes.
 #[derive(Debug)]
 pub(crate) struct BitrateGate {
     current: u32,
@@ -215,8 +181,7 @@ impl BitrateGate {
         (urgent || rested).then(|| self.pending.take()).flatten()
     }
 
-    /// Any waiting change, due or not: the encoder is being reconfigured
-    /// anyway.
+    /// Any waiting change, due or not.
     pub(crate) fn take_now(&mut self) -> Option<u32> {
         self.pending.take()
     }
@@ -228,19 +193,12 @@ impl BitrateGate {
     }
 }
 
-/// Most that may be owed, in time at the target bitrate, when the next
-/// frame starts: one frame's burst, as the other qualities' VBV allows.
+/// Most that may be owed, in time at the target bitrate, when the next frame starts: one frame's
+/// burst, as the other qualities' VBV allows.
 const BUDGET_SLACK: Duration = Duration::from_millis(20);
 
-/// Spends the bitrate by delaying frames, for the Source quality, where
-/// every frame costs what the picture needs and the frame rate gives.
-///
-/// Each frame's bits are added to what is owed, which drains at the target
-/// bitrate; a frame may start once no more than [`BUDGET_SLACK`] is owed. A
-/// still screen costs almost nothing and runs at the full frame rate; a
-/// frame that costs as much as the budget gives in 200 ms holds the next
-/// ones back for about that long. One frame at a time is in the encoder, so
-/// the next frame is never decided before the last one's cost is known.
+/// Spends the bitrate by delaying frames, for the Source quality, where every frame costs what the
+/// picture needs and the frame rate gives.
 #[derive(Debug)]
 pub(crate) struct RateBudget {
     bits_per_sec: f64,
@@ -252,8 +210,7 @@ pub(crate) struct RateBudget {
     submitted_at: Option<Instant>,
 }
 
-/// A frame still in the encoder after this long is taken as lost, so a
-/// missing completion can't stall the stream.
+/// A frame still in the encoder after this long is taken as lost.
 const IN_FLIGHT_MAX: Duration = Duration::from_millis(250);
 
 impl RateBudget {
@@ -286,7 +243,6 @@ impl RateBudget {
                 .submitted_at
                 .is_some_and(|t| now.saturating_duration_since(t) < IN_FLIGHT_MAX);
         if waiting {
-            // The cost isn't known yet; look again soon.
             return Duration::from_millis(1);
         }
         let over = self.owed_at(now) - BUDGET_SLACK.as_secs_f64() * self.bits_per_sec;
@@ -307,8 +263,7 @@ impl RateBudget {
         self.submitted_at = Some(now);
     }
 
-    /// A frame came out of the encoder at `now` and is `bytes` long (zero
-    /// if it never came out).
+    /// A frame came out of the encoder at `now` and is `bytes` long.
     pub(crate) fn completed(&mut self, now: Instant, bytes: usize) {
         self.in_flight = self.in_flight.saturating_sub(1);
         self.owed = self.owed_at(now) + bytes as f64 * 8.0;
@@ -324,18 +279,12 @@ impl RateBudget {
 /// What the capture thread should encode next.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct EncodeJob {
-    /// When the image being encoded was captured (now, for a repeat).
+    /// When the image being encoded was captured.
     pub captured: Instant,
     pub idr: bool,
 }
 
-/// The capture thread's encode decisions, kept free of GPU calls so they can
-/// be tested.
-///
-/// Only an explicit keyframe or repair request bypasses pacing. A frame dropped
-/// because the consumer's channel was full makes the *next paced* encode an
-/// IDR; it never triggers an immediate re-encode, so a stalled consumer
-/// can't make the thread spin on the same image.
+/// The capture thread's encode decisions, kept free of GPU calls.
 #[derive(Debug)]
 pub(crate) struct Scheduler {
     pacer: Pacer,
@@ -344,8 +293,7 @@ pub(crate) struct Scheduler {
     has_image: bool,
     pending: Option<Instant>,
     keyframe_requested: bool,
-    /// Frames were invalidated: encode the frame that skips them now, so
-    /// the picture moves again without waiting for a frame slot.
+    /// Frames were invalidated: encode the frame that skips them now.
     repair_requested: bool,
     idr_next: bool,
 }
@@ -363,8 +311,7 @@ impl Scheduler {
         }
     }
 
-    /// Spends `kbps` by delaying frames instead of leaving it to the
-    /// encoder (see [`RateBudget`]).
+    /// Spends `kbps` by delaying frames instead of leaving it to the encoder (see [`RateBudget`]).
     pub(crate) fn pace_by_bitrate(mut self, kbps: u32) -> Self {
         self.budget = Some(RateBudget::new(kbps));
         self
@@ -384,15 +331,14 @@ impl Scheduler {
         }
     }
 
-    /// The client asked for a keyframe: encode one as soon as there is an
-    /// image, ignoring the frame-rate cap.
+    /// The client asked for a keyframe: encode one as soon as there is an image, ignoring the
+    /// frame-rate cap.
     pub(crate) fn request_keyframe(&mut self) {
         self.keyframe_requested = true;
     }
 
-    /// Frames the browser never got were invalidated: encode the next frame
-    /// (not a keyframe) as soon as there is an image, ignoring the
-    /// frame-rate cap.
+    /// Frames the browser never got were invalidated: encode the next frame (not a keyframe) as
+    /// soon as there is an image, ignoring the frame-rate cap.
     pub(crate) fn request_repair(&mut self) {
         self.repair_requested = true;
     }
@@ -408,8 +354,7 @@ impl Scheduler {
         }
     }
 
-    /// Whether the next encode is a repair after invalidated frames
-    /// (diagnostics).
+    /// Whether the next encode is a repair after invalidated frames (diagnostics).
     pub(crate) fn repair_requested(&self) -> bool {
         self.repair_requested
     }
@@ -421,13 +366,11 @@ impl Scheduler {
         self.pending = Some(captured);
     }
 
-    /// The image source changed (display switch, encoder rebuilt): wait for
-    /// a fresh image and start it with an IDR.
+    /// The image source changed: wait for a fresh image and start it with an IDR.
     pub(crate) fn reset(&mut self) {
         self.has_image = false;
         self.pending = None;
         self.idr_next = true;
-        // Another display may refresh at another rate.
         self.pacer.forget_source();
         if let Some(b) = &mut self.budget {
             b.reset();
@@ -456,14 +399,12 @@ impl Scheduler {
         })
     }
 
-    /// A frame already encoded was dropped (the consumer's channel was
-    /// full) and can't be skipped: the next paced encode is an IDR.
+    /// A frame already encoded was dropped and can't be skipped: the next paced encode is an IDR.
     pub(crate) fn dropped(&mut self) {
         self.idr_next = true;
     }
 
-    /// Records the outcome of `job`. `delivered` is false when the frame was
-    /// dropped because the consumer's channel was full.
+    /// Records the outcome of `job`.
     pub(crate) fn encoded(&mut self, now: Instant, job: EncodeJob, delivered: bool) {
         self.pacer.encoded(now);
         if let Some(b) = &mut self.budget {
@@ -486,7 +427,6 @@ impl Scheduler {
         }
         let wait = self.pacer.wait(now, self.pending.is_some());
         match &self.budget {
-            // Not before the budget allows, and never a busy poll.
             Some(b) if !b.ready(now) => wait.max(b.wait(now)).max(Duration::from_millis(1)),
             _ => wait,
         }
@@ -503,9 +443,8 @@ mod tests {
         max_hold: Duration,
     }
 
-    /// Feeds frames at `source_hz` for `secs`, encoding when the pacer
-    /// allows (a newer frame replaces a held one), and reports how often it
-    /// encoded and how long encoded frames were held.
+    /// Feeds frames at `source_hz` for `secs`, encoding when the pacer allows, and reports how
+    /// often it encoded and how long encoded frames were held.
     fn simulate(source_hz: f64, target_fps: u32, secs: u64) -> Run {
         let start = Instant::now();
         let mut pacer = Pacer::new(target_fps);
@@ -545,9 +484,6 @@ mod tests {
 
     #[test]
     fn a_display_a_hair_faster_than_the_target_is_not_held() {
-        // A "60 Hz" monitor that really runs at 60.05 Hz, streamed at 60
-        // fps: frames must go out as they arrive, not drift into a hold
-        // of up to most of a frame time.
         for (hz, fps) in [
             (60.0, 60),
             (60.05, 60),
@@ -566,9 +502,6 @@ mod tests {
 
     #[test]
     fn a_much_faster_display_keeps_the_target_rate() {
-        // Holds no longer than a plain deadline at exactly the target rate
-        // gives (measured with this simulation before sources near the
-        // target were let through).
         for (hz, mean_ms, max_ms) in [(120.0, 4.2, 4.25), (144.0, 2.8, 5.6), (240.0, 1.4, 4.2)] {
             let r = simulate(hz, 60, 30);
             let fps = f64::from(r.encodes) / 30.0;
@@ -636,7 +569,6 @@ mod scheduler_tests {
         assert!(!b.hold(t, HOLD_BACKLOG));
         assert!(b.hold(t, behind));
         assert_eq!(b.holding_since(), Some(t));
-        // Caught up: encode at once.
         assert!(!b.hold(t + Duration::from_millis(5), Duration::ZERO));
         assert_eq!(b.holding_since(), None);
     }
@@ -693,8 +625,6 @@ mod scheduler_tests {
         s.new_image(t0);
         let job = s.poll(t0).unwrap();
         s.encoded(t0, job, false);
-        // No new image: nothing to do until the idle repeat, however often
-        // we ask.
         for ms in [0, 1, 5, 16, 50, 99] {
             assert_eq!(s.poll(t0 + Duration::from_millis(ms)), None, "at {ms} ms");
         }
@@ -717,7 +647,6 @@ mod scheduler_tests {
         s.new_image(t0);
         let job = s.poll(t0).unwrap();
         s.encoded(t0, job, true);
-        // Async encoding: the frame turned out undeliverable after the fact.
         s.dropped();
         let later = t0 + Duration::from_millis(17);
         s.new_image(later);
@@ -784,21 +713,17 @@ mod scheduler_tests {
         g.request(11_000);
         assert_eq!(g.take_due(t0), Some(11_000));
         g.applied(t0, 11_000);
-        // Too soon, and only the newest request counts.
         g.request(12_000);
         g.request(12_500);
         assert_eq!(g.take_due(t0 + Duration::from_millis(100)), None);
         assert_eq!(g.take_due(t0 + BITRATE_MIN_GAP), Some(12_500));
         g.applied(t0 + BITRATE_MIN_GAP, 12_500);
-        // A deep cut goes at once.
         let t1 = t0 + BITRATE_MIN_GAP + Duration::from_millis(10);
         g.request(9_000);
         assert_eq!(g.take_due(t1), Some(9_000));
         g.applied(t1, 9_000);
-        // Asking for what it already runs at is nothing to do.
         g.request(9_000);
         assert_eq!(g.take_due(t1 + Duration::from_secs(1)), None);
-        // A keyframe takes whatever waits.
         g.request(9_500);
         assert_eq!(g.take_now(), Some(9_500));
     }
@@ -809,7 +734,6 @@ mod scheduler_tests {
         let mut b = RateBudget::new(20_000);
         assert!(b.ready(now));
         b.submitted(now);
-        // The frame is not done yet: wait for its cost.
         assert!(!b.ready(now));
         // 2 KB at 20 Mb/s is under a millisecond of the budget.
         b.completed(now + Duration::from_millis(5), 2_000);

@@ -1,7 +1,4 @@
-//! The capture thread: duplicate -> convert -> queue for encoding, newest
-//! image wins. Frames come out of the encoder on its own thread, which
-//! hands them off ([`deliver`]); meanwhile the capture thread is already
-//! taking the next image.
+//! The capture thread: duplicate -> convert -> queue for encoding, newest image wins.
 
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Weak};
@@ -35,17 +32,13 @@ enum Command {
     Bitrate(u32),
 }
 
-/// Frames further back than this are not invalidated one by one; a
-/// keyframe is sent instead. Comfortably more than the encoder keeps as
-/// references, so nothing in the gap can still be referenced.
+/// Frames further back than this are not invalidated one by one; a keyframe is sent instead.
 const MAX_INVALIDATE: u64 = 16;
-/// While a due frame is held back for the send queue, how often the queue
-/// is looked at again (new desktop images are still taken meanwhile).
+/// While a due frame is held back for the send queue, how often the queue is looked at again.
 const HOLD_POLL_MS: u32 = 2;
 
 pub(crate) struct PipelineHandle {
-    /// The only strong reference: dropping it closes the channel, which
-    /// tells the thread to exit, however many [`Control`]s are around.
+    /// The only strong reference: dropping it closes the channel.
     commands: Option<Arc<std_mpsc::Sender<Command>>>,
     thread: Option<JoinHandle<()>>,
 }
@@ -59,7 +52,6 @@ impl PipelineHandle {
         backlog: SendBacklog,
     ) -> Result<Self> {
         init_process();
-        // Fix the shared clock's epoch before any frame timestamps exist.
         let _ = mono_now();
         let (cmd_tx, cmd_rx) = std_mpsc::channel();
         let (ready_tx, ready_rx) = std_mpsc::channel();
@@ -67,7 +59,7 @@ impl PipelineHandle {
             .name("ws-capture".into())
             .spawn(move || {
                 let _ = unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST) };
-                // The session may start on the lock screen.
+                super::enter_mmcss();
                 ws_desktop::follow_input_desktop();
                 let mut session = match Session::open(display, config, max, frames, backlog) {
                     Ok(s) => {
@@ -133,7 +125,6 @@ impl PipelineHandle {
 }
 
 /// Keyframe and repair requests for the capture thread, from any thread.
-/// Holding one doesn't keep the pipeline running.
 #[derive(Clone)]
 pub(crate) struct Control(Weak<std_mpsc::Sender<Command>>);
 
@@ -155,7 +146,6 @@ impl Control {
 
 impl Drop for PipelineHandle {
     fn drop(&mut self) {
-        // Closing the command channel tells the thread to exit.
         self.commands.take();
         if let Some(t) = self.thread.take() {
             let _ = t.join();
@@ -163,8 +153,8 @@ impl Drop for PipelineHandle {
     }
 }
 
-/// What the capture thread tags a frame with when it goes into the
-/// encoder, for [`deliver`] when it comes out.
+/// What the capture thread tags a frame with when it goes into the encoder, for [`deliver`] when it
+/// comes out.
 struct FrameMeta {
     index: u64,
     display: DisplayId,
@@ -172,19 +162,16 @@ struct FrameMeta {
     width: u32,
     height: u32,
     captured: Instant,
-    /// The frame skips frames from this index on (see `recovers_from` in
-    /// [`EncodedFrame`]).
+    /// The frame skips frames from this index on.
     recovers_from: Option<u64>,
     // For diagnostics.
     idr: bool,
     intra: bool,
     repair: bool,
     why: Option<&'static str>,
-    /// Re-encodes the last image because the desktop was still.
+    /// Re-encodes the last image.
     repeat: bool,
-    /// Captured -> the start of `encode`. It ends before the encoder's own
-    /// timing starts (slot wait, copy and encode call), which
-    /// `EncodeTiming` covers, with `pre_ms` bridging from `started`.
+    /// Captured -> the start of `encode`.
     held: Duration,
     /// Where `held` ends.
     started: Instant,
@@ -193,19 +180,16 @@ struct FrameMeta {
 
 /// From the encoder's output thread back to the capture thread.
 enum Report {
-    /// The frame `index` was not handed off (the consumer's channel was
-    /// full), nor anything after it still in the encoder that built on
-    /// it; frames from `from` on are missing.
+    /// The frame `index` was not handed off, nor anything after it still in the encoder that built
+    /// on it; frames from `from` on are missing.
     Lost { from: u64, keyframe: bool },
-    /// A frame left the encoder, `bytes` long (zero if it failed): what it
-    /// cost, for pacing by bitrate.
+    /// A frame left the encoder, `bytes` long: what it cost, for pacing by bitrate.
     Done { bytes: usize },
     /// The consumer has gone away.
     Closed,
 }
 
-/// GPU objects for one adapter. Field order is drop order: the encoder
-/// (whose output thread finishes first) before the device.
+/// GPU objects for one adapter.
 struct Encode {
     encoder: NvEncoder<FrameMeta>,
     converter: Converter,
@@ -249,7 +233,6 @@ struct Stats {
 }
 
 struct Session {
-    // Drop order: duplication before the device it was created on.
     dup: Option<Duplicator>,
     /// From the encoder's output thread.
     reports: std_mpsc::Receiver<Report>,
@@ -266,15 +249,11 @@ struct Session {
     backlog: SendBacklog,
     backpressure: Backpressure,
     frame_index: u64,
-    /// The next frame must not reference frames from this index on, which
-    /// were invalidated: it is tagged so the receiver can let it follow
-    /// the gap.
+    /// The next frame must not reference frames from this index on.
     recovers_from: Option<u64>,
-    /// Every reference the encoder kept was invalidated, so the next frame
-    /// is coded from scratch: give it a keyframe's budget.
+    /// Every reference the encoder kept was invalidated.
     intra_next: bool,
-    /// Recent GPU/encoder rebuilds, to give up on a persistently broken
-    /// device instead of looping.
+    /// Recent GPU/encoder rebuilds, to give up on a persistently broken device instead of looping.
     recoveries: Vec<Instant>,
     /// When Desktop Duplication last delivered an image (diagnostics).
     last_dxgi: Option<Instant>,
@@ -347,8 +326,7 @@ impl Session {
         }
     }
 
-    /// One iteration: encode if due, otherwise wait for a desktop update.
-    /// Returns false once the consumer or the handle has gone away.
+    /// One iteration: encode if due.
     fn step(&mut self, commands: &std_mpsc::Receiver<Command>) -> Result<bool> {
         let now = Instant::now();
         let mut holding = false;
@@ -385,7 +363,6 @@ impl Session {
         let Some(dup) = self.dup.as_mut() else {
             return self.reacquire(commands);
         };
-        // Round up so a sub-millisecond wait doesn't become a busy poll.
         let wait_ms = if holding {
             HOLD_POLL_MS
         } else {
@@ -419,9 +396,7 @@ impl Session {
         Ok(true)
     }
 
-    /// Rebuilds the device, converter and encoder after a GPU or encoder
-    /// error (driver reset, device removed). Gives up after repeated
-    /// failures in a short window.
+    /// Rebuilds the device, converter and encoder after a GPU or encoder error.
     fn recover(&mut self, error: CaptureError) -> Result<()> {
         let now = Instant::now();
         self.recoveries
@@ -432,7 +407,6 @@ impl Session {
         self.recoveries.push(now);
         diag!("capture_error", "rebuilding error={error}");
         tracing::warn!("capture error, rebuilding the encoder: {error}");
-        // Let a driver reset settle before touching the GPU again.
         std::thread::sleep(Duration::from_millis(250));
         self.switch_to(self.display, true)
     }
@@ -444,7 +418,6 @@ impl Session {
                 self.sched.request_keyframe()
             }
             Command::Recover(from) => self.recover_from(from),
-            // Applied with the next frame, at most so often (see BitrateGate).
             Command::Bitrate(kbps) => self.bitrate.request(kbps),
             Command::Resize(width, height, reply) => {
                 let result = self.resize(width, height);
@@ -467,10 +440,7 @@ impl Session {
         }
     }
 
-    /// Frames from `from` on never reached the browser. Invalidates every
-    /// one encoded so far, so the next frame builds only on frames the
-    /// browser has; falls back to a keyframe if the encoder can't, or the
-    /// gap is too long.
+    /// Frames from `from` on never reached the browser.
     fn recover_from(&mut self, from: u64) {
         let next = self.frame_index;
         if from >= next {
@@ -495,11 +465,7 @@ impl Session {
         }
     }
 
-    /// Lets every frame still in the encoder finish, so each one about to
-    /// be invalidated has its reconstructed picture: a driver may ignore an
-    /// invalidation for a frame it hasn't finished, and the next frame
-    /// would then still predict from it. Only on loss, so the wait is rare.
-    /// False if the encoder is stuck (a keyframe follows instead).
+    /// Lets every frame still in the encoder finish.
     fn settle_for_invalidate(&mut self) -> bool {
         match self.enc.encoder.drain() {
             Ok(()) => true,
@@ -510,11 +476,7 @@ impl Session {
         }
     }
 
-    /// A frame never reached the consumer, and nor will the frames after it
-    /// still in the encoder (they build on it). Invalidates all of them so
-    /// the next paced frame skips the gap, or makes it an IDR if the
-    /// encoder can't (or the lost frame was a keyframe). Not at once: a
-    /// stalled consumer must not make the thread spin.
+    /// A frame never reached the consumer, and nor will the frames after it still in the encoder.
     fn frame_lost(&mut self, from: u64, keyframe: bool) {
         let next = self.frame_index;
         let invalidated = !keyframe
@@ -537,12 +499,7 @@ impl Session {
         }
     }
 
-    /// Changes the stream size. In place where the encoder allows it: a new
-    /// converter output on the same device and the encoder reset to the new
-    /// size, so there is no stall for a new device and session. Otherwise
-    /// (larger than the encoder was opened for, or the driver refuses) the
-    /// encoder is rebuilt. Either way the next frame is an IDR, from a fresh
-    /// desktop image.
+    /// Changes the stream size.
     fn resize(&mut self, width: u32, height: u32) -> Result<()> {
         if (width, height) == (self.config.width, self.config.height) {
             return Ok(());
@@ -561,14 +518,7 @@ impl Session {
         match in_place {
             Ok(()) => {
                 self.enc.converter = converter;
-                // A new duplication hands over the whole desktop at once,
-                // which a still desktop otherwise wouldn't.
                 if let Err(e) = self.switch_to(self.display, false) {
-                    // The encoder is already at the new size, so the resize
-                    // has happened. Failing it here made the host restart the
-                    // whole video over a duplication that was only slow to
-                    // reopen; the capture loop keeps retrying it (and sends
-                    // an IDR with the first image) as after a lost one.
                     diag!("capture_resize", "dup_failed={e}");
                     tracing::warn!("reopening desktop duplication after resize: {e}");
                     self.dup = None;
@@ -583,10 +533,7 @@ impl Session {
         }
     }
 
-    /// Points capture at `id`. The encoder is rebuilt when the display is on
-    /// another adapter or `rebuild` is set; otherwise only the duplication is
-    /// replaced (the old one is released first, since DXGI may refuse a
-    /// second duplication of the same output).
+    /// Points capture at `id`.
     fn switch_to(&mut self, id: DisplayId, rebuild: bool) -> Result<()> {
         let output = display::find(id)?;
         if rebuild || !same_luid(output.adapter_luid, self.enc.luid) {
@@ -612,12 +559,7 @@ impl Session {
         Ok(())
     }
 
-    /// Reopens duplication after it was lost, retrying while the desktop is
-    /// unavailable (mode change, UAC prompt). Moves to the desktop that
-    /// shows now first: the lock screen and UAC prompts are on their own,
-    /// which only a host running as SYSTEM can capture (see the service).
-    /// If the display disappeared, falls back to the primary display.
-    /// Returns false on shutdown.
+    /// Reopens duplication after it was lost, retrying while the desktop is unavailable.
     fn reacquire(&mut self, commands: &std_mpsc::Receiver<Command>) -> Result<bool> {
         let started = Instant::now();
         let mut logged = false;
@@ -647,7 +589,6 @@ impl Session {
                     }
                 }
             }
-            // Keep honoring commands (and shutdown) while we wait.
             match commands.recv_timeout(Duration::from_millis(100)) {
                 Ok(cmd) => self.handle(cmd),
                 Err(std_mpsc::RecvTimeoutError::Timeout) => {}
@@ -659,13 +600,11 @@ impl Session {
         }
     }
 
-    /// Queues the converter's current image for encoding; it is handed off
-    /// once it comes out ([`deliver`]).
+    /// Queues the converter's current image for encoding; it is handed off once it comes out
+    /// ([`deliver`]).
     fn encode(&mut self, now: Instant, job: EncodeJob) -> Result<bool> {
         let start = Instant::now();
         let intra = std::mem::take(&mut self.intra_next);
-        // A keyframe already reconfigures the encoder (for its larger
-        // budget): a waiting bitrate change rides along with that.
         let kbps = if job.idr || intra {
             self.bitrate.take_now()
         } else {
@@ -678,8 +617,6 @@ impl Session {
             width: self.config.width,
             height: self.config.height,
             captured: job.captured,
-            // Only the first frame after an invalidation needs the tag;
-            // later ones build on it. A keyframe needs none.
             recovers_from: self.recovers_from.take().filter(|_| !job.idr),
             idr: job.idr,
             intra,
@@ -716,8 +653,8 @@ impl Session {
     }
 }
 
-/// Hands each frame out of the encoder to the consumer, on the encoder's
-/// output thread, and tells the capture thread about any that didn't go.
+/// Hands each frame out of the encoder to the consumer, on the encoder's output thread, and tells
+/// the capture thread about any that didn't go.
 fn deliver(
     frames: mpsc::Sender<EncodedFrame>,
     reports: std_mpsc::Sender<Report>,
@@ -762,8 +699,6 @@ fn deliver(
                 "sent"
             }
             Err(TrySendError::Full(frame)) => {
-                // The receiver sees a gap in frame_index: the capture
-                // thread has the next frame skip it, or be an IDR.
                 stats.dropped += 1;
                 let _ = reports.send(Report::Lost {
                     from: frame.recovers_from.unwrap_or(frame.frame_index),

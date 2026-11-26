@@ -1,8 +1,4 @@
 //! Maps USB HID keyboard usages (page 0x07) to what Windows injects.
-//!
-//! Most keys go in as PS/2 set-1 scan codes, because games reading raw input
-//! or DirectInput see scan codes, not virtual keys. Keys with no scan code
-//! SendInput can produce (Pause, volume, IME keys) go in as virtual keys.
 
 /// What to inject for one physical key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -46,7 +42,6 @@ const F13_F24: [u16; 12] = [
 pub fn lookup(usage: u16) -> Option<KeyTarget> {
     match usage {
         0x04..=0x1d => sc(LETTERS[(usage - 0x04) as usize]),
-        // 1..9 then 0.
         0x1e..=0x27 => sc(usage - 0x1e + 0x02),
         0x28 => sc(0x1c),                       // Enter
         0x29 => sc(0x01),                       // Escape
@@ -71,7 +66,6 @@ pub fn lookup(usage: u16) -> Option<KeyTarget> {
         0x45 => sc(0x58),                       // F12
         0x46 => ext(0x37),                      // PrintScreen
         0x47 => sc(0x46),                       // ScrollLock
-        // Pause's scan sequence (E1 1D 45) cannot be sent through SendInput.
         0x48 => vk(0x13),
         0x49 => ext(0x52), // Insert
         0x4a => ext(0x47), // Home
@@ -102,9 +96,7 @@ pub fn lookup(usage: u16) -> Option<KeyTarget> {
         0x63 => sc(0x53),  // NumpadDecimal
         0x64 => sc(0x56),  // IntlBackslash
         0x65 => ext(0x5d), // ContextMenu
-        // 0x66 Power is deliberately unmapped: a remote client must not be
-        // able to shut the host down with one key.
-        0x67 => sc(0x59), // NumpadEqual
+        0x67 => sc(0x59),  // NumpadEqual
         0x68..=0x73 => sc(F13_F24[(usage - 0x68) as usize]),
         0x7f => vk(0xad),  // AudioVolumeMute
         0x80 => vk(0xaf),  // AudioVolumeUp
@@ -158,8 +150,6 @@ mod tests {
 
     #[test]
     fn exactly_the_e0_keys_are_extended() {
-        // PrintScreen, Insert..ArrowUp, NumpadDivide, NumpadEnter, ContextMenu,
-        // right Ctrl/Alt and both Windows keys.
         let mut extended: Vec<u16> = vec![0x46, 0x54, 0x58, 0x65, 0xe3, 0xe4, 0xe6, 0xe7];
         extended.extend(0x49..=0x52);
         for u in 0..=0xffu16 {

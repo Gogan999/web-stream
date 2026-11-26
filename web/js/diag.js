@@ -1,7 +1,4 @@
-// Temporary diagnostic log for chasing freezes and unexpected keyframes. Off unless the page is
-// opened with ?diag (or localStorage 'ws-diag' is '1'). Samples the video receiver's stats every
-// 250 ms, notes every gap between shown frames over 50 ms, and keeps the host's videoStats, all
-// with wall-clock times to line up with the host's WS_DIAG log. "Save diag log" downloads it.
+// Temporary diagnostic log for chasing freezes and unexpected keyframes.
 
 const SAMPLE_MS = 250;
 const FREEZE_MS = 50;
@@ -21,8 +18,7 @@ export function diagEnabled(params, storage) {
   try { return storage?.getItem('ws-diag') === '1'; } catch { return false; }
 }
 
-// The fields above from an inbound-rtp video stats object, plus the decoder (logged when it
-// changes, since a fallback to software decode is itself a clue).
+// The fields above from an inbound-rtp video stats object, plus the decoder.
 export function videoSample(s) {
   const out = {};
   for (const k of VIDEO_FIELDS) if (s[k] != null) out[k] = typeof s[k] === 'number' ? +s[k].toFixed(4) : s[k];

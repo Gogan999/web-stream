@@ -1,8 +1,8 @@
-// Stream stats for the overlay, computed from successive RTCStatsReport snapshots
-// plus per-frame timing from requestVideoFrameCallback. What counts as unhealthy is in health.js.
+// Stream stats for the overlay, computed from successive RTCStatsReport snapshots plus per-frame
+// timing from requestVideoFrameCallback.
 import { lossLevel, rttLevel, bitrateReduced, decodeSlow, encodeSlow, decodeLimitMs, encodeLimitMs } from './health.js';
 
-// Pull the fields we need out of an RTCStatsReport (or any Map of stats objects).
+// Pull the fields we need out of an RTCStatsReport.
 export function snapshot(report, now) {
   const snap = { t: now, video: null, pair: null, codec: null, audio: null };
   for (const s of report.values()) {
@@ -15,7 +15,6 @@ export function snapshot(report, now) {
     const local = report.get(snap.pair.localCandidateId);
     const remote = report.get(snap.pair.remoteCandidateId);
     snap.relayed = local?.candidateType === 'relay' || remote?.candidateType === 'relay';
-    // ICE-TCP: the host's TCP fallback when UDP can't get through.
     snap.tcp = local?.protocol === 'tcp' || remote?.protocol === 'tcp';
     snap.route = `${local?.candidateType ?? '?'}/${local?.protocol ?? '?'} -> ${remote?.candidateType ?? '?'}/${remote?.protocol ?? '?'}`;
   }
@@ -41,8 +40,6 @@ export function compute(prev, cur) {
     lost: v?.packetsLost ?? 0, lostDelta: 0,
     lossPct: null,
     freezes: v?.freezeCount ?? 0, freezesDelta: 0,
-    // Repairs: resends asked for and received, and keyframes asked for when
-    // a resend didn't come in time.
     nackDelta: 0, rtxDelta: 0, pliDelta: 0,
     decoder: v?.decoderImplementation ?? null,
     // Running totals, for the debug level.
@@ -127,35 +124,28 @@ export function formatHost(h) {
   return [
     `host enc ${mb(h.encoderKbps)}/${mb(h.maxKbps)} Mb/s  bwe ${mb(h.bweKbps)}  sent ${mb(h.sentKbps)}`,
     `host fps ${f(h.fps)}  encode ${f(h.encodeMs, 1)} ms  keyframes ${h.keyframeRequests ?? '–'}  loss ${h.loss == null ? '–' : (h.loss * 100).toFixed(1) + '%'}`,
-    // Why keyframes happen: the browser lost a packet no resend repaired, the host's send queue fell
-    // behind, frames were dropped another way, or the host's socket refused packets. Late and dropped
-    // frames the encoder could skip over ("repaired") cost no keyframe.
     `host keyframes: browser ${h.browserKeyframeRequests ?? '–'}  late ${h.lateFrames ?? '–'}  dropped ${h.lostFrames ?? '–'}  repaired ${h.recoveredFrames ?? '–'}  send drops ${h.sendDrops ?? '–'}`,
   ].join('\n');
 }
 
-// Reporting levels for the overlay. Essential: is the stream healthy, and if not, why, in plain words.
-// Detailed: every browser and host figure. Debug: adds running totals, the ICE route and raw host stats.
+// Reporting levels for the overlay.
 export const LEVELS = Object.freeze(['essential', 'detailed', 'debug']);
 
 const LIMITERS = Object.freeze({ network: 'the network', hostEncode: 'the host encoder', clientDecode: 'this device (decode)' });
 
-// What is wrong with the stream right now, worst first. `s` is from compute(); `host` the host's last
-// videoStats; `config` the VideoConfig the host runs. Each has a key (to hold it on screen), a
-// severity ('warn' or 'bad') and the text.
+// What is wrong with the stream right now, worst first.
 export function assess(s, host, config, bottleneck = null) {
   const out = [];
   const add = (key, sev, text) => out.push({ key, sev, text });
   const mb = (k) => (k / 1000).toFixed(1);
-  // What the host found limiting the stream, and what it did (shrank the picture for the encoder or
-  // this decoder; the network is handled by the bitrate and resolution warnings below).
+  // What the host found limiting the stream, and what it did.
   if (bottleneck && bottleneck.limiter !== 'none') {
     const who = LIMITERS[bottleneck.limiter] ?? bottleneck.limiter;
     const act = bottleneck.relieving ? `, picture at ${bottleneck.scalePercent}% to keep up` : '';
     add('limiter', 'warn', `Limited by ${who}: ${bottleneck.detail}${act}`);
   }
   if (s.width && s.height && config?.width && config?.height && s.width * s.height < 0.9 * config.width * config.height) {
-    // The host also shrinks the picture for its encoder or this decoder; say which, not always the network.
+    // Names the end that limits the picture: the network, the host's encoder or this decoder.
     const cause = bottleneck?.relieving ? LIMITERS[bottleneck.relievingFor] : null;
     add('resolution', 'warn', `Reduced resolution ${s.width}x${s.height} (asked ${config.width}x${config.height}): host scaled down for ${cause ?? 'the network'}`);
   }
@@ -177,7 +167,7 @@ export function assess(s, host, config, bottleneck = null) {
   if (hostDropped > 0) add('host-dropped', 'warn', `Host dropped ${hostDropped} frame${hostDropped > 1 ? 's' : ''} (network fell behind)`);
   if (s.pliDelta > 0 || host?.keyframeRequests > 0) add('keyframe', 'warn', 'Keyframe needed to repair the picture (brief stutter)');
   if (host?.sendDrops > 0) add('send-drops', 'warn', `Host socket full: ${host.sendDrops} packets refused`);
-  // A still screen sends few frames, so a low rate only counts when the host sends more than is shown.
+  // A low frame rate counts only when the host sends more than is shown.
   if (s.fps != null && host?.fps > 10 && s.fps < 0.8 * host.fps) {
     add('fps', 'warn', `Showing ${s.fps.toFixed(0)} of ${host.fps.toFixed(0)} fps the host sends`);
   }
@@ -186,7 +176,7 @@ export function assess(s, host, config, bottleneck = null) {
   return out.sort((a, b) => (a.sev === b.sev ? 0 : a.sev === 'bad' ? -1 : 1));
 }
 
-// Keeps each warning on screen for `holdMs` after it was last seen, so a one-off drop can still be read.
+// Keeps each warning on screen for `holdMs` after it was last seen.
 export class Alerts {
   constructor(holdMs = 4000) {
     this.holdMs = holdMs;
@@ -209,7 +199,7 @@ function route(s) {
   return s.tcp ? 'TCP fallback' : 'direct UDP';
 }
 
-// The overlay's lines for a level, as { text, sev } (sev only on warnings). `alerts` from Alerts.update.
+// The overlay's lines for a level, as { text, sev }.
 export function render(level, s, recvToDisplayMs, host, config, alerts) {
   const lines = alerts.length ? alerts.map((a) => ({ text: `! ${a.text}`, sev: a.sev })) : [{ text: 'OK', sev: 'ok' }];
   const est = s.rttMs != null && recvToDisplayMs != null ? s.rttMs / 2 + recvToDisplayMs : null;

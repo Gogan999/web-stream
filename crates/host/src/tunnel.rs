@@ -1,10 +1,4 @@
-//! A Cloudflare Tunnel for the web page and signaling: the host runs
-//! cloudflared, which connects out to Cloudflare and passes the browser's
-//! HTTPS requests back to the host's own port. Browsers see Cloudflare's
-//! certificate, so there is nothing to click past, and the HTTPS port needs
-//! no forwarding. The tunnel only carries HTTP and WebSockets: the media
-//! still goes straight to this PC over UDP (or ICE-TCP), so its address is
-//! learned with STUN ([`public_ipv4`]) and put in the offer.
+//! A Cloudflare Tunnel for the web page and signaling: the host runs cloudflared.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::process::Stdio;
@@ -26,9 +20,8 @@ const STABLE: Duration = Duration::from_secs(120);
 /// How often the public address is looked up again.
 const PUBLIC_IP_EVERY: Duration = Duration::from_secs(5 * 60);
 
-/// Keeps cloudflared running for `opts` until dropped (which ends it), and
-/// tells the host user the public address through `signaling`'s notices.
-/// Also keeps this PC's public address, for the media.
+/// Keeps cloudflared running for `opts` until dropped (which ends it), and tells the host user the
+/// public address through `signaling`'s notices.
 pub(crate) struct Tunnel {
     cloudflared: tokio::task::JoinHandle<()>,
     lookups: tokio::task::JoinHandle<()>,
@@ -65,8 +58,7 @@ impl Tunnel {
         }
     }
 
-    /// The public IPv4 address, once known: the browser's way in through a
-    /// tunnel says nothing about it.
+    /// The public IPv4 address, once known.
     pub fn public_ip(&self) -> watch::Receiver<Option<IpAddr>> {
         self.public_ip.clone()
     }
@@ -95,7 +87,6 @@ async fn run_once(
     signaling: &SignalingHandle,
 ) -> anyhow::Result<()> {
     let mut cmd = Command::new(&opts.cloudflared);
-    // Its own output is all on stderr; it reads nothing.
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -124,8 +115,6 @@ async fn run_once(
                 "the tunnel token in {} is empty",
                 token_file.display()
             );
-            // In the environment, not on the command line, where any
-            // program on the PC could read it.
             cmd.env("TUNNEL_TOKEN", token)
                 .args(["tunnel", "--no-autoupdate", "run"]);
             hostname.clone()
@@ -133,8 +122,6 @@ async fn run_once(
         TunnelKind::Quick => {
             cmd.args(["tunnel", "--no-autoupdate", "--url"])
                 .arg(format!("https://127.0.0.1:{port}"))
-                // The host's own certificate is self-signed; cloudflared
-                // reaches it on this PC only.
                 .arg("--no-tls-verify");
             None
         }
@@ -194,9 +181,7 @@ fn quick_hostname(line: &str) -> Option<String> {
         .map(str::to_ascii_lowercase)
 }
 
-/// The first public name of a dashboard-made tunnel, from the
-/// configuration cloudflared logs (`"hostname":"pc.example.com"`, quotes
-/// escaped in the log).
+/// The first public name of a dashboard-made tunnel, from the configuration cloudflared logs.
 fn configured_hostname(line: &str) -> Option<String> {
     if !line.contains("Updated to new configuration") {
         return None;
@@ -222,8 +207,8 @@ fn host_ok(host: &str) -> bool {
 const STUN_SERVER: (&str, u16) = ("stun.cloudflare.com", 3478);
 const STUN_MAGIC: u32 = 0x2112_A442;
 
-/// This PC's public IPv4 address as a STUN server sees it, or `None` when
-/// the server can't be reached in time.
+/// This PC's public IPv4 address as a STUN server sees it, or `None` when the server can't be
+/// reached in time.
 pub(crate) async fn public_ipv4() -> Option<IpAddr> {
     let lookup = tokio::net::lookup_host(STUN_SERVER);
     let server = tokio::time::timeout(Duration::from_secs(2), lookup)
@@ -287,8 +272,7 @@ fn mapped_address(msg: &[u8], id: &[u8; 12]) -> Option<Ipv4Addr> {
     plain
 }
 
-/// cloudflared is ended with the host even when the host is killed: on
-/// Windows it goes in a job that closes with this process.
+/// cloudflared is ended with the host even when the host is killed.
 #[cfg(windows)]
 mod job {
     use windows::Win32::Foundation::{CloseHandle, HANDLE};
@@ -301,8 +285,8 @@ mod job {
 
     pub struct Job(HANDLE);
 
-    // SAFETY: a job handle is a plain kernel handle, usable from any
-    // thread; `Job` only closes it, once, on drop.
+    // SAFETY: a job handle is a plain kernel handle, usable from any thread; `Job` only closes it,
+    // once, on drop.
     unsafe impl Send for Job {}
 
     impl Drop for Job {
@@ -314,8 +298,8 @@ mod job {
 
     pub fn contain(child: &tokio::process::Child) -> Option<Job> {
         let process = HANDLE(child.raw_handle()?);
-        // SAFETY: an unnamed job, closed by `Job`; `process` is the child's
-        // handle, which tokio keeps open while `child` lives.
+        // SAFETY: an unnamed job, closed by `Job`; `process` is the child's handle, which tokio
+        // keeps open while `child` lives.
         unsafe {
             let job = Job(CreateJobObjectW(None, PCWSTR::null()).ok()?);
             let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
@@ -384,7 +368,6 @@ mod tests {
         let mut msg = vec![0x01, 0x01, 0, 20];
         msg.extend_from_slice(&STUN_MAGIC.to_be_bytes());
         msg.extend_from_slice(&id);
-        // SOFTWARE first (3 bytes, padded), then XOR-MAPPED-ADDRESS.
         msg.extend_from_slice(&[0x80, 0x22, 0, 3, b'a', b'b', b'c', 0]);
         msg.extend_from_slice(&[0x00, 0x20, 0, 8, 0, 1]);
         msg.extend_from_slice(&(8443u16 ^ 0x2112).to_be_bytes());

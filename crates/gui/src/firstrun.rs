@@ -1,7 +1,4 @@
-//! The first-run setup: reach the host from outside (a Cloudflare Tunnel,
-//! opt-in UPnP, the port test), then pair a device with a QR code. Shown when the app
-//! opens until the user finishes or hides it; "Setup" in the footer brings
-//! it back.
+//! The first-run setup: reach the host from outside, then pair a device with a QR code.
 
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
@@ -32,7 +29,7 @@ impl FirstRun {
         }
     }
 
-    /// Runs the port test on a thread of its own (it waits on the network).
+    /// Runs the port test on a thread of its own.
     pub fn start_check(&self, input: Input, ctx: egui::Context) {
         let check = self.check.clone();
         {
@@ -110,10 +107,8 @@ pub fn upnp_status_ui(ui: &mut egui::Ui, status: &upnp::Status) {
     }
 }
 
-/// Addresses a phone can open the client at, as `https://host[:port]`:
-/// the Cloudflare Tunnel first (no certificate warning, and it works away
-/// from home), then the LAN addresses, the host names and the public
-/// address.
+/// Addresses a phone can open the client at, as `https://host[:port]`: the Cloudflare Tunnel first,
+/// then the LAN addresses, the host names and the public address.
 pub fn addresses(
     settings: &Settings,
     port: u16,
@@ -161,9 +156,7 @@ fn host_part(ip: IpAddr) -> String {
     }
 }
 
-/// The client's address (`https://host[:port]`) with the pairing link on
-/// the end. The secret goes after `#`, which browsers never send to a
-/// server.
+/// The client's address (`https://host[:port]`) with the pairing link on the end.
 pub fn pairing_url(origin: &str, link: &str) -> String {
     format!("{origin}/#pair={link}")
 }

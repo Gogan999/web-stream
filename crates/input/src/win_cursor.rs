@@ -1,6 +1,5 @@
-//! Windows pointer reading: `GetCursorInfo` for the handle and position,
-//! the system cursors' shared handles for the standard shapes, and
-//! `GetIconInfo` + `GetDIBits` for the image of anything else.
+//! Windows pointer reading: `GetCursorInfo` for the handle and position, the system cursors' shared
+//! handles for the standard shapes, and `GetIconInfo` + `GetDIBits` for the image of anything else.
 
 use std::ffi::c_void;
 use std::time::{Duration, Instant};
@@ -20,11 +19,9 @@ use ws_proto::{CursorImage, CursorKind, MAX_CURSOR_SIDE};
 
 /// Largest pointer bitmap read; it is scaled to [`MAX_CURSOR_SIDE`].
 const MAX_READ_SIDE: u32 = 512;
-/// An unchanged handle is read again this often: a handle can be destroyed
-/// and reused for another image, and an animated cursor keeps its handle.
+/// An unchanged handle is read again this often.
 const REREAD: Duration = Duration::from_secs(1);
-/// How often the reader checks it is on the desktop that shows (the lock
-/// screen and UAC prompts have their own).
+/// How often the reader checks it is on the desktop that shows.
 const DESKTOP_CHECK: Duration = Duration::from_millis(250);
 
 use crate::cursor::{
@@ -33,12 +30,10 @@ use crate::cursor::{
 
 /// Reads the pointer; one per streaming session, polled from one thread.
 pub struct CursorReader {
-    /// The system cursors' handles. Windows hands out the same shared
-    /// handle to every window that uses one.
+    /// The system cursors' handles.
     standard: Vec<(usize, CursorKind)>,
     ids: ImageIds,
-    /// The handle last read and what it looked like, so an unchanged pointer
-    /// costs one call.
+    /// The handle last read and what it looked like.
     last: Option<(usize, Instant, CursorLook)>,
     desktop_checked: Option<Instant>,
 }
@@ -51,7 +46,6 @@ impl Default for CursorReader {
 
 impl CursorReader {
     pub fn new() -> Self {
-        // Positions in the same physical pixels as DXGI's display rects.
         crate::win::ensure_dpi_aware();
         let table: [(PCWSTR, CursorKind); 13] = [
             (IDC_ARROW, CursorKind::Default),
@@ -84,8 +78,7 @@ impl CursorReader {
         }
     }
 
-    /// The pointer now, or `None` when Windows won't say (the secure
-    /// desktop, say).
+    /// The pointer now, or `None` when Windows won't say.
     pub fn read(&mut self) -> Option<CursorState> {
         if self
             .desktop_checked
@@ -126,9 +119,8 @@ impl CursorReader {
         Some(CursorState { look, x, y })
     }
 
-    /// Standard shapes keep their name (the browser shows its own in
-    /// absolute mode) and carry the host's image too, for the overlay drawn
-    /// in relative mode.
+    /// Standard shapes keep their name and carry the host's image too, for the overlay drawn in
+    /// relative mode.
     fn look(&mut self, cursor: HCURSOR) -> CursorLook {
         let handle = cursor.0 as usize;
         let standard = self
@@ -185,7 +177,6 @@ fn image(cursor: HCURSOR) -> Option<CursorImage> {
     let dc = ScreenDc::get()?;
     let (width, mask_height) = size(info.hbmMask)?;
     let (width, height, rgba) = if info.hbmColor.is_invalid() {
-        // Monochrome: the mask holds the AND half on top of the XOR half.
         let height = mask_height / 2;
         let bits = pixels(&dc, info.hbmMask, width, mask_height)?;
         let (and, xor) = bits.split_at(width as usize * height as usize * 4);
@@ -250,8 +241,7 @@ fn pixels(dc: &ScreenDc, bitmap: HBITMAP, width: u32, height: u32) -> Option<Vec
         ..Default::default()
     };
     let mut buf = vec![0u8; width as usize * height as usize * 4];
-    // SAFETY: `buf` holds `height` rows of `width` 32-bit pixels, as `info`
-    // describes.
+    // SAFETY: `buf` holds `height` rows of `width` 32-bit pixels, as `info` describes.
     let lines = unsafe {
         GetDIBits(
             dc.0,

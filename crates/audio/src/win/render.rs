@@ -1,5 +1,5 @@
-//! Plays the browser microphone into a render device, normally a virtual
-//! cable whose other end games use as a microphone.
+//! Plays the browser microphone into a render device, normally a virtual cable whose other end
+//! games use as a microphone.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc as std_mpsc};
@@ -18,19 +18,18 @@ use crate::convert::CHANNELS;
 use crate::mic::{MicSource, mic_channel};
 use crate::{AudioError, MicConfig, MicReceiver, Result};
 
-/// 10 ms requested; the engine rounds up to what the device needs.
+/// 10 ms requested.
 const BUFFER_HNS: i64 = 100_000;
 
-/// Plays mic audio from a [`MicReceiver`] into the configured device until
-/// dropped.
+/// Plays mic audio from a [`MicReceiver`] into the configured device until dropped.
 pub struct MicPlayback {
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
 
 impl MicPlayback {
-    /// Opens the device (see [`MicConfig::device`]) and returns the handle to
-    /// feed with the browser's mic packets.
+    /// Opens the device (see [`MicConfig::device`]) and returns the handle to feed with the
+    /// browser's mic packets.
     pub fn start(config: MicConfig) -> Result<(Self, MicReceiver)> {
         let (receiver, source) = mic_channel(config.jitter)?;
         let stop = Arc::new(AtomicBool::new(false));
@@ -168,8 +167,8 @@ fn play(
     while !stop.load(Ordering::Relaxed) {
         // SAFETY: valid event handle owned by `output`.
         unsafe { WaitForSingleObject(output.event.0, 100) };
-        // SAFETY: COM calls on a started render client; the buffer returned by
-        // GetBuffer holds `frames` frames of stereo f32 until ReleaseBuffer.
+        // SAFETY: COM calls on a started render client; the buffer returned by GetBuffer holds
+        // `frames` frames of stereo f32 until ReleaseBuffer.
         unsafe {
             let padding = output.client.GetCurrentPadding()?;
             let frames = output.buffer_frames.saturating_sub(padding) as usize;

@@ -1,21 +1,4 @@
 //! Files the host user shares with the connected browser.
-//!
-//! The host user picks files (tray app or console); each is opened right
-//! then and offered to the browser under a random id. The browser can only
-//! ask for those ids, never for a path. The handle opened at pick time is
-//! the one read from, so a file renamed or replaced afterwards can't
-//! redirect a transfer, and on Windows it is opened with read sharing only,
-//! so nobody can change it while it is on offer.
-//!
-//! One file is sent at a time on the `file` channel, in [`file_chunk`]s.
-//! The browser acks what it has stored and the host keeps at most
-//! [`FILE_WINDOW`] past that in flight, so a slow disk in the browser never
-//! piles up memory. File data is not part of the video's bandwidth
-//! estimate, so while video streams it is paced to a share of that
-//! estimate to leave the game stream its room.
-//!
-//! Everything lives in one task per browser session; dropping the
-//! [`FileSession`] ends it, and with it every offer.
 
 use std::collections::{HashMap, VecDeque};
 use std::fs::File;
@@ -35,13 +18,12 @@ use crate::serve::Event;
 const READ_BLOCK: usize = 256 * 1024;
 /// Share of the bandwidth estimate a file may use.
 const BWE_SHARE: f64 = 0.25;
-/// Least a file is paced to, in bits per second: enough to finish a small
-/// file on a link too weak to spare a quarter of itself.
+/// Least a file is paced to, in bits per second.
 const MIN_RATE_BPS: f64 = 100_000.0;
 /// Bytes the pacer lets out in one burst.
 const BURST: f64 = 64.0 * 1024.0;
-/// After the channel refused a write, the next try waits for
-/// `ChannelLow` or this long, whichever is first.
+/// After the channel refused a write, the next try waits for `ChannelLow` or this long, whichever
+/// is first.
 const RETRY: Duration = Duration::from_millis(50);
 /// Progress reaches the front end at most this often per file.
 const PROGRESS_EVERY: Duration = Duration::from_millis(250);
@@ -62,9 +44,9 @@ pub enum FileEvent {
     },
     /// The browser has all of it.
     Sent { id: FileId, name: String },
-    /// The browser stopped the transfer. Still on offer.
+    /// The browser stopped the transfer.
     Cancelled { id: FileId, name: String },
-    /// A transfer failed. Still on offer.
+    /// A transfer failed.
     Failed {
         id: FileId,
         name: String,
@@ -101,14 +83,12 @@ pub enum FileMsg {
     Cancel(FileId),
     /// The `file` channel drained.
     ChannelLow,
-    /// Bandwidth estimate, bits per second, while video streams; `None`
-    /// without video, when there is nothing to leave room for.
+    /// Bandwidth estimate, bits per second, while video streams; `None` without video.
     Bitrate(Option<u64>),
-    /// The same browser is on a new peer connection: what was being sent
-    /// went with the old one's channel. The offers stay.
+    /// The same browser is on a new peer connection: what was being sent went with the old one's
+    /// channel.
     Reconnected,
-    /// The new connection's `control` channel is open: offer everything
-    /// again (the browser starts with an empty list).
+    /// The new connection's `control` channel is open: offer everything again.
     Reoffer,
 }
 
@@ -192,8 +172,7 @@ struct Sending {
     last_progress: Instant,
 }
 
-/// A token bucket over file bytes; no limit until a bandwidth estimate is
-/// known.
+/// A token bucket over file bytes; no limit until a bandwidth estimate is known.
 #[derive(Debug, Default)]
 struct Pacer {
     /// Bytes per second.
@@ -366,7 +345,6 @@ impl<O: ChunkOut> Sender<O> {
         }
         if let Some(cur) = &self.current {
             if cur.id == id {
-                // Asked again: start over.
                 self.start(id);
             } else if !self.queue.contains(&id) {
                 self.queue.push_back(id);
@@ -462,8 +440,7 @@ impl<O: ChunkOut> Sender<O> {
         }
     }
 
-    /// Sends what the window, the pacer and the channel allow. Returns when
-    /// to try again without being asked.
+    /// Sends what the window, the pacer and the channel allow.
     async fn pump(&mut self) -> Option<Instant> {
         loop {
             let cur = self.current.as_ref()?;
@@ -472,8 +449,6 @@ impl<O: ChunkOut> Sender<O> {
             let size = offer.size;
             let now = Instant::now();
             if let Some(at) = cur.blocked {
-                // `ChannelLow` may never come when the buffer that was full
-                // is the one all channels share: try again after a while.
                 if now < at + RETRY {
                     return Some(at + RETRY);
                 }
@@ -572,8 +547,6 @@ fn open_offer(path: &Path) -> Result<Offer, String> {
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;
-        // FILE_SHARE_READ: others may read it but not change, rename or
-        // delete it while it is on offer.
         opts.share_mode(0x1);
     }
     let file = opts.open(path).map_err(|e| open_error(&e))?;
@@ -589,7 +562,6 @@ fn open_offer(path: &Path) -> Result<Offer, String> {
 }
 
 fn open_error(e: &std::io::Error) -> String {
-    // ERROR_SHARING_VIOLATION: another program has it open for writing.
     if cfg!(windows) && e.raw_os_error() == Some(32) {
         return "another program is writing to it; close it there first".into();
     }
@@ -611,8 +583,8 @@ fn read_block(file: &File, offset: u64, len: usize) -> std::io::Result<Vec<u8>> 
     Ok(block)
 }
 
-/// The bare file name, without control characters, for the browser to show
-/// and suggest; it cleans it again before saving.
+/// The bare file name, without control characters, for the browser to show and suggest; it cleans
+/// it again before saving.
 fn display_name(path: &Path) -> String {
     let name: String = path
         .file_name()
@@ -767,7 +739,6 @@ mod tests {
 
         h.msg(FileMsg::Request(id)).await;
         assert_eq!(h.received(id).len() as u64, FILE_WINDOW);
-        // An ack past what was sent counts only what was sent.
         h.msg(FileMsg::Ack {
             id,
             received: u64::MAX,
@@ -820,7 +791,6 @@ mod tests {
         h.msg(FileMsg::Ack { id: a, received: 4 }).await;
         assert_eq!(h.received(c), b"cccc");
         assert!(h.received(b).is_empty());
-        // A withdrawn file can't be asked for again.
         h.msg(FileMsg::Request(b)).await;
         assert!(matches!(
             h.control.try_recv().unwrap(),
@@ -853,7 +823,6 @@ mod tests {
             retry > Instant::now(),
             "the retry is in the future, not a spin"
         );
-        // The shared buffer drains, but no ChannelLow comes for this channel.
         *h.out.room.lock().unwrap() = None;
         tokio::time::sleep_until(retry.into()).await;
         assert_eq!(h.sender.pump().await, None);
@@ -924,10 +893,8 @@ mod tests {
             "{wait:?}"
         );
         assert_eq!(p.wait(FILE_CHUNK_MAX, at + Duration::from_millis(1)), None);
-        // Never below the floor.
         p.set_estimate(Some(100_000));
         assert_eq!(p.rate, Some(MIN_RATE_BPS / 8.0));
-        // No video, no limit.
         p.set_estimate(None);
         assert_eq!(p.wait(1 << 20, at), None);
     }
@@ -960,7 +927,6 @@ mod tests {
             h.control.try_recv().unwrap(),
             HostControl::FileOffer { id: i, .. } if i == id
         ));
-        // And it can be asked for again.
         h.msg(FileMsg::Request(id)).await;
         assert!(h.sender.current.is_some());
     }

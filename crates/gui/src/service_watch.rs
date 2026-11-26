@@ -1,8 +1,4 @@
-//! Windows only: keeps up with the web-stream service. While it is
-//! installed, this app never runs a host of its own (they would share the
-//! ports, and a browser would reach whichever got them first). Run as an
-//! elevated administrator, it attaches to the service's host instead and
-//! shows it as its own: pairing, the connected browser, files.
+//! Windows only: keeps up with the web-stream service.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -22,16 +18,13 @@ pub struct Watcher {
     /// The service: installed (`Some`), and running.
     installed: Arc<Mutex<Option<bool>>>,
     poke: mpsc::Sender<()>,
-    /// Open pairing once attached (`--pair`, or "Pair a device" in the
-    /// copy that handed over).
+    /// Open pairing once attached.
     pair: Arc<AtomicBool>,
     pub elevated: bool,
 }
 
 impl Watcher {
-    /// Asks about the service once before returning, so the app knows
-    /// whether it may host, then keeps asking on a thread of its own: the
-    /// window doesn't run frames while it is hidden in the tray.
+    /// Asks about the service once before returning.
     pub fn start(host: Host, pair: bool, repaint: impl Fn() + Send + 'static) -> Self {
         let (poke, pokes) = mpsc::channel();
         let watcher = Self {
@@ -71,7 +64,7 @@ impl Watcher {
         *self.installed.lock().expect("service lock")
     }
 
-    /// Asks about the service again now (after starting a change to it).
+    /// Asks about the service again now.
     pub fn refresh(&self) {
         let _ = self.poke.send(());
     }
@@ -97,8 +90,6 @@ impl Watcher {
                     && matches!(host.state().status, Status::Running { .. })
                     && self.pair.swap(false, Ordering::Relaxed)
                 {
-                    // Only once attached: an attempt that fails would lose
-                    // the command.
                     host.command(Command::OpenPairing);
                 }
             }

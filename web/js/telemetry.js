@@ -1,12 +1,10 @@
-// Tells the host how this browser is coping, once a second, so the host can tell which end of the
-// stream is the bottleneck (its encoder, the network, or this decoder) and adapt. Runs whenever
-// the control channel is open, with or without the stats overlay.
+// Tells the host how this browser is coping, once a second.
 
 import { snapshot, compute } from './stats.js';
 
 export const INTERVAL_MS = 1000;
 
-// The message for one interval, from stats.compute(). Pure, for testing.
+// The message for one interval, from stats.compute().
 export function clientStats(s, hidden) {
   const num = (v) => (v != null && Number.isFinite(v) ? v : null);
   return {

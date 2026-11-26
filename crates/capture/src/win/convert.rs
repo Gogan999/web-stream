@@ -1,6 +1,4 @@
-//! BGRA desktop image -> NV12 at the stream size, on the GPU, using the
-//! D3D11 video processor (fixed-function hardware on all three vendors).
-//! Output is BT.709 limited range, which is what the encoder signals.
+//! BGRA desktop image -> NV12 at the stream size, on the GPU, using the D3D11 video processor.
 
 use std::mem::ManuallyDrop;
 
@@ -40,8 +38,7 @@ pub(crate) struct Converter {
 /// Everything that depends on the captured image's size and format.
 struct Input {
     desc: D3D11_TEXTURE2D_DESC,
-    /// Our own copy of the desktop image so the duplication frame can be
-    /// released immediately.
+    /// Our own copy of the desktop image.
     copy: ID3D11Texture2D,
     processor: ID3D11VideoProcessor,
     in_view: ID3D11VideoProcessorInputView,
@@ -118,7 +115,6 @@ impl Converter {
                 0,
                 &streams,
             );
-            // The stream struct holds an extra reference we must release.
             let [mut stream] = streams;
             ManuallyDrop::drop(&mut stream.pInputSurface);
             result.map_err(win_err("VideoProcessorBlt"))

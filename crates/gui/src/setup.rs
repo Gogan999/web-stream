@@ -1,15 +1,4 @@
-//! `ws-host-gui setup ...`: the steps the installer and uninstaller run.
-//!
-//! ```text
-//! setup autostart on|off   start with Windows for this user (run as the user)
-//! setup mic-driver         install Steam's virtual microphone (elevated)
-//! setup upnp-remove        remove this host's port mappings from the router
-//! ```
-//!
-//! None of them take a path or anything else to act on from the command
-//! line: the elevated ones only touch fixed places. Their log, setup.log,
-//! goes to the data folder of whoever runs them: for the elevated steps,
-//! the administrator account UAC ran them as.
+//! `ws-host-gui setup...`: the steps the installer and uninstaller run.
 
 use anyhow::bail;
 
@@ -75,8 +64,7 @@ fn mic_driver() -> anyhow::Result<String> {
     bail!("Windows only")
 }
 
-/// Bounded, so a slow router can't hold up the uninstaller; whatever is
-/// left expires within the hour anyway (the leases aren't renewed).
+/// Bounded.
 fn upnp_remove() -> anyhow::Result<String> {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::Builder::new()

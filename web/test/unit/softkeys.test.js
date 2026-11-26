@@ -29,7 +29,6 @@ test('typed text becomes key presses', () => {
     [HID.KeyI, true], [HID.KeyI, false],
     [S, true], [HID.Digit1, true], [HID.Digit1, false], [S, false],
   ]);
-  // With a sticky Shift already down, no extra Shift presses.
   sent.length = 0;
   typeDiff({ backspaces: 0, text: 'A' }, (u, d) => sent.push([u, d]), true);
   assert.deepEqual(sent, [[HID.KeyA, true], [HID.KeyA, false]]);
@@ -60,7 +59,7 @@ test('chord keys press the modifier around the key, and respect a held sticky on
   kb.chord('ctrl+c');
   assert.deepEqual(log, [[HID.ControlLeft, true], [HID.KeyC, true], [HID.KeyC, false], [HID.ControlLeft, false]]);
   log.length = 0;
-  kb.sticky.add(HID.ControlLeft); // Ctrl already down from the Ctrl key
+  kb.sticky.add(HID.ControlLeft);
   kb.chord('ctrl+v');
   assert.deepEqual(log.slice(0, 2), [[HID.KeyV, true], [HID.KeyV, false]]);
   assert.deepEqual(log.at(-1), [HID.ControlLeft, false]); // sticky released afterwards

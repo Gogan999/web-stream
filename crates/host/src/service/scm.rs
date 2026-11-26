@@ -1,5 +1,5 @@
-//! Installing the service, and the service itself: a supervisor that keeps
-//! one session host running on the PC's own screen.
+//! Installing the service, and the service itself: a supervisor that keeps one session host running
+//! on the PC's own screen.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -28,8 +28,7 @@ pub const SERVICE_NAME: &str = "web-stream";
 const DISPLAY_NAME: &str = "web-stream host";
 const DESCRIPTION: &str = "Streams this PC to a paired browser, including the sign-in \
      screen, UAC prompts and programs running as administrator.";
-/// The service's copy of the tray app's exe. Named after the console
-/// program it used to be, so installs from then update in place.
+/// The service's copy of the tray app's exe.
 const EXE_NAME: &str = "ws-host.exe";
 const ACCESS: ServiceAccess = ServiceAccess::QUERY_STATUS
     .union(ServiceAccess::START)
@@ -39,8 +38,7 @@ const ACCESS: ServiceAccess = ServiceAccess::QUERY_STATUS
 
 /// How often the supervisor checks the console session and the host.
 const POLL: Duration = Duration::from_millis(500);
-/// How long the host gets to quit (putting back a changed resolution)
-/// before it is killed.
+/// How long the host gets to quit before it is killed.
 const QUIT_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn known_folder(id: &GUID) -> anyhow::Result<PathBuf> {
@@ -54,41 +52,26 @@ fn known_folder(id: &GUID) -> anyhow::Result<PathBuf> {
     Ok(path?)
 }
 
-/// Where the service's copy of the host lives: under Program Files, so
-/// only administrators can replace what runs as SYSTEM. (Not from an
-/// environment variable, which the user could point elsewhere.)
+/// Where the service's copy of the host lives: under Program Files.
 fn install_dir() -> anyhow::Result<PathBuf> {
     Ok(known_folder(&FOLDERID_ProgramFiles)?.join("web-stream"))
 }
 
-/// The service's data: certificate, paired browsers, logs, the control
-/// pipe's name. SYSTEM's own profile, which only SYSTEM and administrators
-/// can read; the same folder whoever asks (the service, or an
-/// administrator's `install` or `console`).
+/// The service's data: certificate, paired browsers, logs, the control pipe's name.
 pub fn data_dir() -> anyhow::Result<PathBuf> {
     Ok(known_folder(&FOLDERID_Windows)?
         .join(r"System32\config\systemprofile\AppData\Local\web-stream"))
 }
 
-/// The network host's data (certificate, paired browsers), which it can
-/// read and write as LocalService: a folder in [`data_dir`], with its own
-/// permissions.
+/// The network host's data (certificate, paired browsers).
 pub fn network_dir() -> anyhow::Result<PathBuf> {
     Ok(data_dir()?.join("network"))
 }
 
-/// Makes the network host's folder and sets its permissions, and moves in
-/// what the service kept in its own folder before the split.
-///
-/// LocalService can write in it, so nothing here goes by a path in it
-/// that could lead elsewhere: the folder's own permissions are set through
-/// a handle that refuses a junction, its files are never re-permitted (one
-/// could be a hard link to a SYSTEM file), and files are only ever created
-/// new, never written through what is there.
+/// Makes the network host's folder and sets its permissions, and moves in what the service kept in
+/// its own folder before the split.
 pub(super) fn prepare_network_dir() -> anyhow::Result<(PathBuf, bool)> {
     let dir = network_dir()?;
-    // Inside the service's own folder, which only SYSTEM and administrators
-    // can change: making it can't be redirected.
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     launch::secure_dir(&dir, launch::NETWORK_DIR_SDDL)?;
     let low = label_network_dir(&dir);
@@ -100,7 +83,6 @@ pub(super) fn prepare_network_dir() -> anyhow::Result<(PathBuf, bool)> {
         };
         match write_new(&dir.join(name), &contents) {
             Ok(()) => {}
-            // Already moved: the network host's copy is the current one.
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(e) => return Err(e).with_context(|| format!("move {name} for the network host")),
         }
@@ -109,12 +91,7 @@ pub(super) fn prepare_network_dir() -> anyhow::Result<(PathBuf, bool)> {
     Ok((dir, low))
 }
 
-/// Labels the network host's folder, and the files already in it, low
-/// integrity, so that a network host at low integrity (see
-/// `launch::network_token`) can still write there. Whether it all worked: if
-/// not, the network host must not be given a low integrity token, which
-/// couldn't write its own data. Never fails, because failing here would
-/// leave the stream down for want of a hardening step.
+/// Labels the network host's folder, and the files already in it, low integrity.
 fn label_network_dir(dir: &Path) -> bool {
     if let Err(e) = launch::label_dir(dir, launch::NETWORK_DIR_LABEL_SDDL) {
         tracing::warn!("the network host runs without low integrity: {e:#}");
@@ -125,9 +102,6 @@ fn label_network_dir(dir: &Path) -> bool {
     };
     let mut all = true;
     for entry in entries.flatten() {
-        // Folders aren't made in here; a link (or anything else that can't
-        // be labelled) is one the network host can't write, so low integrity
-        // can't be used.
         if let Err(e) = launch::label_file(&entry.path(), launch::NETWORK_FILE_LABEL_SDDL) {
             tracing::warn!("the network host runs without low integrity: {e:#}");
             all = false;
@@ -136,9 +110,7 @@ fn label_network_dir(dir: &Path) -> bool {
     all
 }
 
-/// Creates `path` with `contents`, failing if anything is there already
-/// (so never writing through a link someone put there). The new file takes
-/// its folder's permissions.
+/// Creates `path` with `contents`, failing if anything is there already.
 fn write_new(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     let mut file = std::fs::OpenOptions::new()
@@ -208,7 +180,6 @@ pub fn install(args: &[String]) -> anyhow::Result<String> {
             .context("create the service")?,
     };
     service.set_description(DESCRIPTION)?;
-    // The supervisor restarts the host itself; this covers the supervisor.
     service.update_failure_actions(ServiceFailureActions {
         reset_period: ServiceFailureResetPeriod::After(Duration::from_secs(24 * 3600)),
         reboot_msg: None,
@@ -233,12 +204,8 @@ pub fn install(args: &[String]) -> anyhow::Result<String> {
     ))
 }
 
-/// The service's data folder and the files directly in it: full access
-/// for SYSTEM and administrators, nobody else. The folder's inherited
-/// ACEs only reach what is created from now on, so the logs and the pipe
-/// file a build from before this fix left behind are set one by one.
-/// Subfolders are left alone: `network` has its own permissions, which
-/// also let LocalService write there.
+/// The service's data folder and the files directly in it: full access for SYSTEM and
+/// administrators, nobody else.
 fn secure_data_dir(dir: &Path) -> anyhow::Result<()> {
     launch::secure_dir(dir, launch::DATA_DIR_SDDL)?;
     for entry in std::fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))? {
@@ -262,12 +229,8 @@ pub fn query() -> anyhow::Result<Option<bool>> {
     }
 }
 
-/// The host reads `--cert` and `--key` as LocalService (or SYSTEM): copies
-/// them into the network host's data folder, which only administrators (and
-/// that host) can change, so a user who can write where they came from
-/// can't swap them later.
-/// The same goes for a named tunnel's token, which is always passed as a
-/// file in that folder.
+/// The host reads `--cert` and `--key` as LocalService (or SYSTEM): copies them into the network
+/// host's data folder.
 fn copy_certificate(
     args: &[String],
     opts: &crate::options::ServeOptions,
@@ -295,11 +258,8 @@ fn copy_certificate(
     let (dir, _) = prepare_network_dir()?;
     for (flag, src, name) in copies {
         let dest = dir.join(name);
-        // Installing again with the copy itself: nothing to copy.
         if !same_file(src, &dest) {
             let contents = std::fs::read(src).with_context(|| format!("read {}", src.display()))?;
-            // Whatever is there goes (a link goes, not what it points at),
-            // and the copy is made new.
             match std::fs::remove_file(&dest) {
                 Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
                     return Err(e).with_context(|| format!("replace {}", dest.display()));
@@ -328,7 +288,7 @@ pub fn update() -> anyhow::Result<String> {
     ))
 }
 
-/// Starts the installed service (it also starts with Windows).
+/// Starts the installed service.
 pub fn start() -> anyhow::Result<String> {
     let manager = manager(ServiceManagerAccess::CONNECT)?;
     let Some(service) = open_installed(&manager)? else {
@@ -385,7 +345,7 @@ fn stop_and_wait(service: &Service) -> anyhow::Result<()> {
     bail!("the service did not stop")
 }
 
-/// Copies this exe to the install folder (unless it is that copy).
+/// Copies this exe to the install folder.
 fn install_exe() -> anyhow::Result<PathBuf> {
     let src = std::env::current_exe()?;
     let dir = install_dir()?;
@@ -396,7 +356,6 @@ fn install_exe() -> anyhow::Result<PathBuf> {
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     let tmp = dir.join("ws-host.exe.new");
     std::fs::copy(&src, &tmp).with_context(|| format!("copy to {}", tmp.display()))?;
-    // The old host may take a moment to let go of the file after stopping.
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         match std::fs::rename(&tmp, &dest) {
@@ -417,8 +376,8 @@ fn same_file(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// The serve options from the service's command line (`service run ...`),
-/// for the service thread the dispatcher starts.
+/// The serve options from the service's command line (`service run...`), for the service thread the
+/// dispatcher starts.
 static SERVE_ARGS: OnceLock<Vec<String>> = OnceLock::new();
 
 define_windows_service!(ffi_service_main, service_main);
@@ -489,7 +448,6 @@ fn run_service() -> anyhow::Result<()> {
         );
         s.stop_host();
     });
-    // A failure exit code lets the failure actions restart the service.
     let code = match result {
         Ok(()) => ok,
         Err(_) => ServiceExitCode::ServiceSpecific(1),
@@ -505,8 +463,7 @@ fn run_service() -> anyhow::Result<()> {
 
 struct Host {
     child: launch::Child,
-    /// The network host it serves the browser through, unless it runs the
-    /// whole host itself.
+    /// The network host it serves the browser through, unless it runs the whole host itself.
     network: Option<Network>,
     pipe: String,
     started: Instant,
@@ -527,8 +484,8 @@ enum NetworkStart {
     Failed(anyhow::Error),
 }
 
-/// How long the network host gets to end the session and close its
-/// sockets once the session host has gone.
+/// How long the network host gets to end the session and close its sockets once the session host
+/// has gone.
 const NETWORK_QUIT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Keeps one session host running in the console session.
@@ -539,8 +496,8 @@ struct Supervisor {
     /// Set by the host to ask for Ctrl+Alt+Del; 0 if it couldn't be made.
     sas_event: usize,
     host: Option<Host>,
-    /// The network host can't start on this PC (see [`STARTUP_FAILED`]):
-    /// the session host runs the whole host until the service restarts.
+    /// The network host can't start on this PC (see [`STARTUP_FAILED`]): the session host runs the
+    /// whole host until the service restarts.
     split_broken: bool,
     backoff: Duration,
     next_start: Instant,
@@ -551,11 +508,6 @@ impl Supervisor {
         let data_dir = data_dir()?;
         std::fs::create_dir_all(&data_dir)
             .with_context(|| format!("create {}", data_dir.display()))?;
-        // Every start, not just the first: a host that ran as SYSTEM
-        // before this was fixed left the folder, and the files in it,
-        // readable by SYSTEM alone, and the tray app then can't read the
-        // control pipe's name to attach. Not fatal: the folder is inside
-        // SYSTEM's profile either way, so the service can still host.
         if let Err(e) = secure_data_dir(&data_dir) {
             tracing::warn!(
                 "could not set the permissions of {}: {e:#}. The tray app may not be \
@@ -614,10 +566,7 @@ impl Supervisor {
         }
     }
 
-    /// Starts the network host. Only a refused LocalService logon (or, see
-    /// [`stop_network`], a window station) means running the whole host as
-    /// SYSTEM instead: anything else could be the network host's own doing,
-    /// from a previous run (its folder is writable to it), and is retried.
+    /// Starts the network host.
     fn start_network(&self) -> NetworkStart {
         if self.split_broken {
             tracing::warn!(
@@ -670,9 +619,6 @@ impl Supervisor {
         };
         let started = super::random_pipe_name().and_then(|pipe| {
             let link = network.as_ref().map_or(0, |(_, link)| link.value());
-            // The service's own folder, never the network host's: in the
-            // fallback this process keeps the certificate and paired
-            // browsers, as SYSTEM, where LocalService can't reach.
             let args =
                 super::session_host_args(&pipe, self.sas_event, link, &self.args, &self.data_dir);
             let inherit: Vec<usize> = [self.sas_event, link]
@@ -681,14 +627,11 @@ impl Supervisor {
                 .collect();
             let log = self.data_dir.join("host.log");
             let child = launch::spawn(session, &self.exe, &args, &log, &inherit)?;
-            // For `console`, which checks the pipe is served by this process.
             let file = self.pipe_file();
             std::fs::write(&file, super::pipe_file_contents(&pipe, child.pid))
                 .with_context(|| format!("write {}", file.display()))?;
             Ok((child, pipe))
         });
-        // The children have their ends of the link; this process's copy of
-        // the session host's goes (the network host's went with `theirs`).
         let network = network.take().map(|(child, _link)| child);
         match started {
             Ok((child, pipe)) => {
@@ -719,9 +662,8 @@ impl Supervisor {
         let _ = std::fs::remove_file(self.pipe_file());
     }
 
-    /// Notices a host that exited and schedules the next start: right away
-    /// after a long run, backing off while it keeps failing (say, the tray
-    /// app holds the port).
+    /// Notices a host that exited and schedules the next start: right away after a long run,
+    /// backing off while it keeps failing.
     fn reap(&mut self) {
         let Some(host) = &self.host else {
             return;
@@ -748,10 +690,7 @@ impl Supervisor {
         self.next_start = Instant::now() + self.backoff;
     }
 
-    /// Asks the host to quit, so it puts back a changed resolution, and
-    /// kills it if it doesn't.
-    /// Starts the next host right away with a fresh backoff: a stop is not
-    /// a failure.
+    /// Asks the host to quit.
     fn stop_host(&mut self) {
         let Some(host) = self.host.take() else {
             return;
@@ -772,18 +711,10 @@ impl Supervisor {
     }
 }
 
-/// STATUS_DLL_INIT_FAILED: a process that died before any of its own code
-/// ran, which for the network host means Windows wouldn't give it a window
-/// station. It is the one exit that makes the service stop splitting the
-/// host (falling back on a crash would let whoever can crash it get the
-/// network code running as SYSTEM), and only when the network host never
-/// wrote to its alive pipe: once its code has run, a network host taken
-/// over from the network could exit with this code itself.
+/// STATUS_DLL_INIT_FAILED: a process that died before any of its own code ran.
 const STARTUP_FAILED: u32 = 0xC000_0142;
 
-/// Waits for the network host to stop, which it does once the session host
-/// is gone (its link closes), and kills it if it doesn't: the next one
-/// needs its ports. True if it never started ([`STARTUP_FAILED`]).
+/// Waits for the network host to stop.
 fn stop_network(
     Network {
         child: network,

@@ -5,9 +5,7 @@ use crate::{DisplayId, MicrosMono};
 
 static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
 
-/// Converts an [`Instant`](std::time::Instant) to [`MicrosMono`]. The epoch is
-/// fixed the first time this (or [`mono_now`]) is called; earlier instants
-/// clamp to 0.
+/// Converts an [`Instant`](std::time::Instant) to [`MicrosMono`].
 pub fn mono_micros(at: std::time::Instant) -> MicrosMono {
     let epoch = *EPOCH.get_or_init(std::time::Instant::now);
     at.saturating_duration_since(epoch).as_micros() as MicrosMono
@@ -26,8 +24,7 @@ pub enum VideoCodec {
     Av1,
 }
 
-/// How the encoder trades picture quality against encode time. The bitrate
-/// is set separately; this picks how hard the encoder works to spend it well.
+/// How the encoder trades picture quality against encode time.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum VideoQuality {
@@ -35,24 +32,17 @@ pub enum VideoQuality {
     Speed,
     #[default]
     Balanced,
-    /// Slowest encode the frame rate allows, and a little room for large
-    /// frames (fast motion, keyframes) to take longer than one frame time.
+    /// Slowest encode the frame rate allows, and a little room for large frames (fast motion,
+    /// keyframes) to take longer than one frame time.
     Clarity,
-    /// For reading and working: every frame is coded as close to the
-    /// desktop as the encoder allows (a low quantizer ceiling, slowest
-    /// presets), and the frame rate falls as needed to stay within the
-    /// bitrate: a still or slowly changing screen stays sharp at a high
-    /// frame rate, fast motion drops frames instead of going soft.
-    /// Older clients and hosts called this `text`.
+    /// For reading and working: every frame is coded as close to the desktop as the encoder allows,
+    /// and the frame rate falls as needed to stay within the bitrate.
     #[serde(alias = "text")]
     Source,
 }
 
-/// How long the oldest video packet has waited in the transport's send
-/// queue, shared with the encoder: a frame encoded while the queue is
-/// behind would only be dropped as late, and the frames repairing that drop
-/// cost more bits still, so the encoder skips a frame instead. Cheap to
-/// clone; zero until the transport sets it.
+/// How long the oldest video packet has waited in the transport's send queue, shared with the
+/// encoder.
 #[derive(Debug, Clone, Default)]
 pub struct SendBacklog(std::sync::Arc<std::sync::atomic::AtomicU64>);
 
@@ -80,19 +70,15 @@ pub struct VideoConfig {
     #[serde(default)]
     pub quality: VideoQuality,
     /// How many times an ordinary frame's bits a keyframe may use, 1..=4.
-    /// A bigger keyframe looks sharper the moment it arrives but takes that
-    /// many frame times to send.
     #[serde(default = "default_keyframe_scale")]
     pub keyframe_scale: u8,
-    /// Repair a frame the host itself dropped (sent too late, queue full)
-    /// by telling the encoder to stop referencing it, instead of sending a
-    /// keyframe. Loss on the network still needs a keyframe.
+    /// Repair a frame the host itself dropped by telling the encoder to stop referencing it,
+    /// instead of sending a keyframe.
     #[serde(default = "default_true")]
     pub recover_drops: bool,
-    /// The smallest the host may shrink the encode size to when the
-    /// bitrate is too low for it, as a percent of the width and height:
-    /// 100 turns automatic scaling off, 0 lets it go as low as it ever does
-    /// (360 lines).
+    /// The smallest the host may shrink the encode size to when the bitrate is too low for it, as a
+    /// percent of the width and height: 100 turns automatic scaling off, 0 lets it go as low as it
+    /// ever does (360 lines).
     #[serde(default)]
     pub min_scale_percent: u8,
 }
@@ -108,9 +94,9 @@ fn default_true() -> bool {
 }
 
 impl VideoConfig {
-    /// Clamps a client-supplied config to values the host will run: even
-    /// sizes from 320x180 to 7680x4320, 1..=240 fps, 500..=200000 kbps,
-    /// keyframes 1..=4 frames' worth of bits, a scale floor of at most 100%.
+    /// Clamps a client-supplied config to values the host will run: even sizes from 320x180 to
+    /// 7680x4320, 1..=240 fps, 500..=200000 kbps, keyframes 1..=4 frames' worth of bits, a scale
+    /// floor of at most 100%.
     pub fn clamped(&self) -> Self {
         let even = |v: u32, lo: u32, hi: u32| v.clamp(lo, hi) & !1;
         Self {
@@ -143,38 +129,24 @@ impl Default for VideoConfig {
     }
 }
 
-/// One encoded access unit, produced by the capture/encode crate and consumed
-/// by the transport crate.
-///
-/// `data` is Annex-B for H.264/H.265 and a temporal unit (OBU stream) for AV1.
-/// Nothing queues frames. If the transport's channel is full when a frame
-/// finishes encoding, the capture side drops that frame, keeps
-/// `frame_index` advancing (so the drop shows as a gap) and makes the next
-/// frame a keyframe, or a frame that references nothing from the gap (see
-/// [`EncodedFrame::recovers_from`]). If the transport itself falls behind
-/// it skips to the newest frame and asks for one of those.
+/// One encoded access unit, produced by the capture/encode crate and consumed by the transport
+/// crate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncodedFrame {
-    /// Which video stream carries it: 0 is the main one, 1 the second
-    /// monitor's. Each stream has its own `frame_index` count.
+    /// Which video stream carries it: 0 is the main one, 1 the second monitor's.
     pub lane: u8,
     pub display: DisplayId,
     pub codec: VideoCodec,
-    /// Monotonic, gap-free per encoder session; a gap on the receive side
-    /// means a frame was dropped.
+    /// Monotonic, gap-free per encoder session; a gap on the receive side means a frame was
+    /// dropped.
     pub frame_index: u64,
     pub keyframe: bool,
-    /// Set on the first frame encoded after the encoder was told to stop
-    /// referencing frames from this index on: it builds only on frames
-    /// before it, so it can follow a gap that starts there without a
-    /// keyframe.
+    /// Set on the first frame encoded after the encoder was told to stop referencing frames from
+    /// this index on: it builds only on frames before it.
     pub recovers_from: Option<u64>,
     /// When the desktop image was captured.
     pub capture_time: MicrosMono,
-    /// When the frame went into the encoder, after any time the pacer held
-    /// it back (Source quality holds an image to meet its bitrate).
-    /// `encode_done_time` less this is what the encoder itself took; less
-    /// `capture_time` it includes the hold.
+    /// When the frame went into the encoder, after any time the pacer held it back.
     pub encode_start_time: MicrosMono,
     /// When the encoder returned the bitstream.
     pub encode_done_time: MicrosMono,

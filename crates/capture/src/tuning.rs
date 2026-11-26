@@ -1,18 +1,4 @@
-//! How hard the encoder works for a [`VideoQuality`], kept free of GPU calls
-//! so it can be tested.
-//!
-//! NVENC presets run from P1 (fastest) to P7 (best picture per bit). Slower
-//! presets cost encode time per frame, which grows with the pixel rate, so
-//! each quality steps down a preset or two as resolution and frame rate go
-//! up. The VBV (how many bits one frame may take) stays at one frame time
-//! except for Clarity, which lets a large frame (fast motion, a keyframe)
-//! take a little longer but never more than 20 ms on the wire, so the
-//! transport's late-frame cutoff (50 ms) is not hit by design.
-//!
-//! A keyframe may take [`VideoConfig::keyframe_scale`] times the VBV, but
-//! never more than 200 ms on the wire: the frames queued behind it are only
-//! exempt from the late-frame cutoff for 250 ms (the transport's
-//! `KEYFRAME_DRAIN_MAX`), so a longer one would cost the frames after it.
+//! How hard the encoder works for a [`VideoQuality`], kept free of GPU calls.
 
 use ws_proto::{VideoConfig, VideoQuality};
 
@@ -28,15 +14,13 @@ const MAX_KEYFRAME_SECS: f64 = 0.200;
 pub(crate) struct Tuning {
     /// NVENC preset number, 1..=7.
     pub preset: u8,
-    /// VBV size in frames: the most one frame may take is `bitrate / fps *
-    /// vbv_frames` bits.
+    /// VBV size in frames: the most one frame may take is `bitrate / fps * vbv_frames` bits.
     pub vbv_frames: f64,
     /// A keyframe's VBV is this many times `vbv_frames`, 1..=4.
     pub keyframe_scale: u8,
-    /// The picture is held to a fixed high quality and the *frame rate*
-    /// absorbs the bitrate limit (see [`ws_proto::VideoQuality::Source`]):
-    /// the encoder gets a quantizer ceiling instead of a constant bitrate,
-    /// and the pacer spends the bitrate by delaying frames.
+    /// The picture is held to a fixed high quality and the *frame rate* absorbs the bitrate limit
+    /// (see [`ws_proto::VideoQuality::Source`]): the encoder gets a quantizer ceiling instead of a
+    /// constant bitrate, and the pacer spends the bitrate by delaying frames.
     pub source: bool,
 }
 
@@ -78,9 +62,6 @@ fn effort(config: &VideoConfig) -> (u8, f64) {
             by_rate(6, 4, 2),
             (MAX_BURST_SECS * f64::from(config.fps.max(1))).clamp(1.0, 2.0),
         ),
-        // Source codes each frame as well as the encoder can, so it takes
-        // the slowest presets its pixel rate allows. It rarely runs at the
-        // full frame rate: the pacer delays frames to fit the bitrate.
         VideoQuality::Source => (
             if rate <= P1440_60 {
                 7
@@ -154,7 +135,6 @@ mod tests {
         // 15 fps: 3 frames is 200 ms.
         assert_eq!(scale(15, 4, Balanced), 3);
         assert_eq!(scale(10, 4, Balanced), 2);
-        // Always allowed one frame's worth, and never more than asked.
         assert_eq!(scale(1, 4, Balanced), 1);
         assert_eq!(scale(60, 2, Speed), 2);
         for fps in [1, 5, 10, 15, 30, 60, 144] {

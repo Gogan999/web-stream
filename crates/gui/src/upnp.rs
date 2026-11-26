@@ -1,11 +1,4 @@
-//! Opt-in UPnP port mapping: asks the router to forward the host's ports
-//! to this PC, so a friend doesn't have to find the router's forwarding
-//! page. Off unless the user turns it on in the first-run setup. Mappings
-//! are leased for an hour and renewed while the tray app runs, so a PC
-//! that is switched off, or gets another address, stops being forwarded
-//! to within the hour; quitting and uninstalling also remove them. A
-//! router that only takes permanent forwards is refused: one left behind
-//! would forward to whatever device gets this address next.
+//! Opt-in UPnP port mapping: asks the router to forward the host's ports to this PC.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -15,15 +8,14 @@ use std::time::Duration;
 use anyhow::Context;
 use igd_next::{AddPortError, Gateway, PortMappingProtocol, SearchOptions};
 
-/// How the mappings are marked on the router, so only ours are removed.
+/// How the mappings are marked on the router.
 pub const DESCRIPTION: &str = "web-stream host";
 const LEASE_SECS: u32 = 3600;
 const RENEW: Duration = Duration::from_secs(20 * 60);
 const SEARCH: Duration = Duration::from_secs(3);
 /// Mapping entries looked through for ours; home routers keep few.
 const MAX_ENTRIES: u32 = 64;
-/// How long removing them may take at most (each UPnP call can wait on a
-/// slow router for half a minute).
+/// How long removing them may take at most.
 pub const REMOVE_DEADLINE: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,9 +35,8 @@ impl Proto {
 
 pub type Port = (Proto, u16);
 
-/// The ports the host needs forwarded: HTTPS (unless a Cloudflare Tunnel
-/// carries the web page) and media on `port`, and the ICE-TCP fallback
-/// when it is on, and any extra UDP media ports.
+/// The ports the host needs forwarded: HTTPS and media on `port`, and the ICE-TCP fallback when it
+/// is on, and any extra UDP media ports.
 pub fn ports(port: u16, https: bool, ice_tcp: Option<u16>, extra_udp: &[u16]) -> Vec<Port> {
     let mut out = Vec::new();
     if https {
@@ -67,8 +58,7 @@ pub enum Status {
     Off,
     Working,
     Mapped {
-        /// As the router reports it (unverified: any device on the network
-        /// can answer UPnP).
+        /// As the router reports it.
         external_ip: Option<IpAddr>,
         lan_ip: Ipv4Addr,
     },
@@ -82,8 +72,7 @@ pub struct Router {
     pub lan_ip: Ipv4Addr,
 }
 
-/// The router on this network, or `None` if none answers UPnP (it is off on
-/// many routers, or not supported).
+/// The router on this network, or `None` if none answers UPnP.
 pub fn find_router() -> anyhow::Result<Option<Router>> {
     let gateway = match igd_next::search_gateway(SearchOptions {
         timeout: Some(SEARCH),
@@ -147,15 +136,12 @@ impl Router {
         Ok(())
     }
 
-    /// Removes every mapping marked as ours that points at this PC's
-    /// address; how many went.
+    /// Removes every mapping marked as ours that points at this PC's address; how many went.
     pub fn unmap_ours(&self) -> usize {
         self.unmap_where(|client| client == Some(self.lan_ip))
     }
 
-    /// Removes every mapping marked as ours, whatever address it points at
-    /// (an old one of this PC's, say). For uninstalling; another web-stream
-    /// host on the network renews its own within 20 minutes.
+    /// Removes every mapping marked as ours, whatever address it points at.
     pub fn unmap_all_ours(&self) -> usize {
         self.unmap_where(|_| true)
     }
@@ -205,7 +191,7 @@ pub fn mapper(changed: impl Fn() + Send + 'static) -> &'static Mapper {
     })
 }
 
-/// Removes the mappings before the app exits (waits up to a few seconds).
+/// Removes the mappings before the app exits.
 pub fn shutdown() {
     if let Some(m) = MAPPER.get() {
         let (ack, done) = mpsc::channel();
@@ -216,8 +202,7 @@ pub fn shutdown() {
 }
 
 impl Mapper {
-    /// `Some(ports)` maps them (replacing what was mapped); `None` removes
-    /// the mappings.
+    /// `Some(ports)` maps them; `None` removes the mappings.
     pub fn want(&self, ports: Option<Vec<Port>>) {
         let _ = self.tx.send(Msg::Want(ports));
     }
@@ -278,8 +263,6 @@ fn run(rx: mpsc::Receiver<Msg>, status: Arc<Mutex<Status>>, changed: impl Fn()) 
                 continue;
             }
         };
-        // Different ports, or a different PC address: drop the old ones,
-        // through what they were mapped with (the old address).
         if let Some((old, old_ports)) = &mapped {
             if old_ports != ports || old.lan_ip != router.lan_ip {
                 old.unmap_ours();
@@ -321,7 +304,6 @@ mod tests {
 
     #[test]
     fn lan_address_towards_a_peer() {
-        // Loopback always routes; nothing is sent.
         assert_eq!(
             lan_ip_towards("127.0.0.1:1900".parse().unwrap()).unwrap(),
             Ipv4Addr::LOCALHOST

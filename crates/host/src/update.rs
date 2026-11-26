@@ -1,15 +1,5 @@
-//! Updating and restarting the host from the browser
-//! (`--allow-remote-update`): runs `scripts\update.ps1` from the checkout
-//! the running host was built in. The script pulls `main` and builds beside
-//! the running host (`-FromHost`); once the build succeeded it exits with
-//! [`RESTART_EXIT`] and the tray app restarts itself on the new build, so
-//! the browser drops for a few seconds and reconnects. The script never
-//! stops or starts the tray app itself: it is the tray app's child, and
-//! the program that restarts the host must not be one the restart kills.
-//!
-//! Only the tray app can restart itself, so it says how with [`enable`];
-//! the service answers with an error. The browser chooses nothing: no
-//! flags, no branch, no path.
+//! Updating and restarting the host from the browser (`--allow-remote-update`): runs
+//! `scripts\update.ps1` from the checkout the running host was built in.
 
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -26,29 +16,23 @@ static RESTART: OnceLock<Restart> = OnceLock::new();
 /// An update runs; another is refused until it exits.
 static RUNNING: AtomicBool = AtomicBool::new(false);
 
-/// Called by the tray app with how to restart it on the new build; called
-/// on the update's thread, it does not return.
+/// Called by the tray app with how to restart it on the new build; called on the update's thread,
+/// it does not return.
 pub fn enable(restart: impl Fn() + Send + Sync + 'static) {
     let _ = RESTART.set(Box::new(restart));
 }
 
-/// Whether this host can update itself at all (it still needs
-/// `--allow-remote-update`).
+/// Whether this host can update itself at all.
 pub fn available() -> bool {
     RESTART.get().is_some()
 }
 
-/// Whether the running program was built in a git clone that has
-/// `scripts\update.ps1`: the only kind of install that can update from the
-/// browser. An installed build (Program Files) can't, so the browser's
-/// "Update host" and the host window's tick box stay hidden for it.
+/// Whether the running program was built in a git clone that has `scripts\update.ps1`.
 pub fn can_update_from_source() -> bool {
     std::env::current_exe().is_ok_and(|exe| script_for(&exe).is_ok())
 }
 
-/// Starts update.ps1 with its output in `log`. `done` gets how it ended;
-/// after a build, the host restarts right after. The error and the
-/// returned message are for the browser.
+/// Starts update.ps1 with its output in `log`.
 pub fn start(
     log: &Path,
     done: impl FnOnce(UpdateState, String) + Send + 'static,
@@ -103,8 +87,7 @@ pub fn start(
     }
 }
 
-/// `scripts\update.ps1` of the checkout that built `exe`, which lives in its
-/// `target\release`. Never from the working directory or the environment.
+/// `scripts\update.ps1` of the checkout that built `exe`.
 fn script_for(exe: &Path) -> Result<PathBuf, String> {
     let not_checkout = || {
         format!(
@@ -150,7 +133,6 @@ fn spawn(script: &Path, log: &Path) -> Result<std::process::Child, String> {
         .try_clone()
         .map_err(|e| format!("can't write {}: {e}", log.display()))?;
     let repo = script.parent().and_then(Path::parent).unwrap_or(script);
-    // A process group of its own and no console window.
     Command::new(powershell)
         .args([
             "-NoProfile",
@@ -170,8 +152,7 @@ fn spawn(script: &Path, log: &Path) -> Result<std::process::Child, String> {
         .map_err(|e| format!("couldn't start update.ps1: {e}"))
 }
 
-/// System32, from the shell rather than `%SystemRoot%`, which the
-/// environment could point elsewhere.
+/// System32, from the shell rather than `%SystemRoot%`.
 #[cfg(windows)]
 fn system_dir() -> Result<PathBuf, String> {
     use windows::Win32::System::Com::CoTaskMemFree;
@@ -196,8 +177,7 @@ fn wait(mut child: std::process::Child) -> Option<i32> {
     child.wait().ok().and_then(|s| s.code())
 }
 
-/// How a script that exited (while this host still runs) went: its last
-/// line of output, which says why it didn't restart the host.
+/// How a script that exited went: its last line of output.
 fn outcome(code: Option<i32>, log: &Path) -> (UpdateState, String) {
     let lines: Vec<String> = std::fs::File::open(log)
         .map(|f| {
@@ -222,9 +202,6 @@ fn summarize(code: Option<i32>, lines: &[String], log: &Path) -> (UpdateState, S
             format!("{} Restarting the host on the new build.", clip(last)),
         ),
         _ => {
-            // A PowerShell error prints its message first, then where it
-            // happened; the first line that isn't one of update.ps1's own
-            // "==> step" lines or the location is the message.
             let message = lines
                 .iter()
                 .rev()
@@ -255,18 +232,15 @@ mod tests {
         std::fs::create_dir_all(root.join("scripts")).unwrap();
         let exe = bin.join("ws-host-gui.exe");
 
-        // No Cargo.toml or script: not a checkout.
         assert!(script_for(&exe).is_err());
         std::fs::write(root.join("Cargo.toml"), "").unwrap();
         std::fs::write(root.join("scripts").join("update.ps1"), "").unwrap();
-        // A ZIP download has no .git.
         assert!(script_for(&exe).unwrap_err().contains("not a git clone"));
         std::fs::create_dir_all(root.join(".git")).unwrap();
         assert_eq!(
             script_for(&exe).unwrap(),
             root.join("scripts").join("update.ps1")
         );
-        // Anywhere else (a copy in Program Files, a debug build) is refused.
         assert!(script_for(&root.join("target").join("debug").join("x.exe")).is_err());
         assert!(script_for(&root.join("x.exe")).is_err());
         // An installed build.

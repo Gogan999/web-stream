@@ -11,7 +11,6 @@ test('auto bitrate is 20 Mb/s at 1080p60 and grows with pixel rate', () => {
 });
 
 test('screen size is fitted to the display shape and never upscaled', () => {
-  // 16:10 laptop screen, 16:9 host display: full width, shorter height.
   assert.deepEqual(fitToDisplay(2560, 1600, 2560, 1440), { width: 2560, height: 1440 });
   // Small screen, big display: scaled down to fit.
   assert.deepEqual(fitToDisplay(1366, 768, 3840, 2160), { width: 1364, height: 768 });
@@ -26,7 +25,6 @@ test('stream size for each resolution setting', () => {
   assert.deepEqual(streamSize('native', screen, display), { width: 2560, height: 1440 });
   assert.deepEqual(streamSize('1080', screen, display), { width: 1920, height: 1080 });
   assert.deepEqual(streamSize('2160', screen, display), { width: 2560, height: 1440 });
-  // An ultrawide display keeps its shape and the height.
   assert.deepEqual(streamSize('1080', screen, { width: 3440, height: 1440 }), { width: 2580, height: 1080 });
   assert.deepEqual(streamSize('1440', screen, { width: 3440, height: 1440 }), { width: 3440, height: 1440 });
 });
@@ -35,9 +33,7 @@ test('a phone held upright is fitted as it will be turned', () => {
   const display = { width: 1920, height: 1080 };
   assert.deepEqual(streamSize('screen', { width: 1080, height: 2400 }, display, true), { width: 1920, height: 1080 });
   assert.deepEqual(streamSize('screen', { width: 2400, height: 1080 }, display, true), { width: 1920, height: 1080 });
-  // A portrait display is fitted to a portrait box even when the screen is landscape.
   assert.deepEqual(streamSize('screen', { width: 1920, height: 1080 }, { width: 1080, height: 1920 }, true), { width: 1080, height: 1920 });
-  // Desktop (no rotate): a portrait monitor keeps a portrait-fitted stream.
   assert.deepEqual(streamSize('screen', { width: 1080, height: 1920 }, display), { width: 1080, height: 606 });
 });
 
@@ -59,7 +55,6 @@ test('video config from settings', () => {
   const sharp = videoConfig({ ...DEFAULTS, keyframeScale: 4, recoverDrops: false }, { screen: { width: 1920, height: 1080 }, display: null });
   assert.equal(sharp.keyframeScale, 4);
   assert.equal(sharp.recoverDrops, false);
-  // Auto resolution off: the host never shrinks the stream.
   assert.equal(videoConfig({ ...DEFAULTS, minScale: 100 }, { screen: { width: 1920, height: 1080 }, display: null }).minScalePercent, 100);
 });
 
@@ -135,14 +130,13 @@ test('settings saved before Priority are migrated', () => {
     assert.deepEqual([m.priority, m.bitrate, m.fps, m.resolution, m.minScale], [priority, '42500', 90, '1080', 75]);
     assert.equal(m.quality, undefined);
   }
-  // Source (and its older name, text): stays Source, host-native pixels, automatic shrinking off.
+  // Source: stays Source, host-native pixels, automatic shrinking off.
   for (const quality of ['source', 'text']) {
     const m = sanitize({ quality, resolution: '720', minScale: 50, bitrate: 'auto' });
     assert.deepEqual([m.priority, m.resolution, m.minScale], ['source', 'native', 100]);
     const cfg = videoConfig(m, { screen: { width: 1280, height: 720 }, display: { width: 2560, height: 1440 } });
     assert.deepEqual([cfg.width, cfg.height, cfg.minScalePercent, cfg.quality], [2560, 1440, 100, 'source']);
   }
-  // A saved 2160 setting (no longer in the menu) and fixed bitrates still load.
   assert.equal(sanitize({ resolution: '2160', bitrate: '80000' }).resolution, '2160');
   assert.equal(sanitize({ resolution: '2160', bitrate: '80000' }).bitrate, '80000');
   // Migrating twice changes nothing, and a stored priority beats a leftover quality.

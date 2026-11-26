@@ -19,14 +19,11 @@ const RETRIES: u32 = 5;
 const RETRY_WAIT: Duration = Duration::from_millis(60);
 
 pub(crate) enum Acquired {
-    /// The desktop image changed. Valid until the next `acquire` call. The
-    /// count is how many desktop updates DWM folded into it (more than one
-    /// means updates were missed while we weren't waiting).
+    /// The desktop image changed.
     Frame(ID3D11Texture2D, u32),
     /// Timed out, or only the pointer moved.
     Nothing,
-    /// The duplication is gone (mode change, fullscreen transition, secure
-    /// desktop); create a new one.
+    /// The duplication is gone; create a new one.
     Lost,
 }
 
@@ -37,11 +34,6 @@ pub(crate) struct Duplicator {
 
 impl Duplicator {
     pub(crate) fn new(output: &IDXGIOutput1, gpu: &Gpu) -> Result<Self> {
-        // Right after another duplication of this output was released (a
-        // resize, a display switch) or while the desktop settles after a mode
-        // change, DXGI answers E_INVALIDARG or "not currently available" for
-        // a moment; a short wait gets through where failing at once made the
-        // caller rebuild everything.
         let mut tries = 0;
         let dup = loop {
             match unsafe { output.DuplicateOutput(&gpu.device) } {
@@ -75,9 +67,7 @@ impl Duplicator {
         })
     }
 
-    /// Waits up to `timeout_ms` for a new desktop image. Releases the frame
-    /// returned by the previous call first, so copy it out before calling
-    /// again.
+    /// Waits up to `timeout_ms` for a new desktop image.
     pub(crate) fn acquire(&mut self, timeout_ms: u32) -> Result<Acquired> {
         self.release();
         let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
@@ -92,7 +82,6 @@ impl Duplicator {
             Err(e) => return Err(win_err("AcquireNextFrame")(e)),
         }
         self.holding = true;
-        // LastPresentTime == 0 means only the pointer changed.
         if info.LastPresentTime == 0 {
             return Ok(Acquired::Nothing);
         }
@@ -105,8 +94,7 @@ impl Duplicator {
         Ok(Acquired::Frame(texture, info.AccumulatedFrames))
     }
 
-    /// Hands the frame back to DWM. Doing this right after copying keeps
-    /// DWM from stalling on us.
+    /// Hands the frame back to DWM.
     pub(crate) fn release(&mut self) {
         if std::mem::take(&mut self.holding) {
             let _ = unsafe { self.dup.ReleaseFrame() };

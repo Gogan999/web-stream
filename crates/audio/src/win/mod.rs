@@ -34,8 +34,8 @@ impl From<windows::core::Error> for AudioError {
     }
 }
 
-/// Per-thread setup for an audio thread: COM, 1 ms timer resolution so short
-/// waits are accurate, and the MMCSS "Pro Audio" scheduling class.
+/// Per-thread setup for an audio thread: COM, 1 ms timer resolution, and the MMCSS "Pro Audio"
+/// scheduling class.
 pub(crate) struct AudioThread {
     mmcss: Option<HANDLE>,
 }
@@ -136,8 +136,8 @@ pub fn list_render_devices() -> Result<Vec<String>> {
     Ok(render_devices()?.into_iter().map(|(_, n)| n).collect())
 }
 
-/// The default output device, or the first active output whose name contains
-/// `name` (case-insensitive).
+/// The default output device, or the first active output whose name contains `name`
+/// (case-insensitive).
 pub(crate) fn find_render_device(name: Option<&str>) -> Result<IMMDevice> {
     let Some(name) = name else {
         // SAFETY: COM call on a valid enumerator.
@@ -158,8 +158,8 @@ pub(crate) fn find_render_device(name: Option<&str>) -> Result<IMMDevice> {
     )))
 }
 
-/// The device the browser mic plays into: the named one, or for
-/// [`AUTO_MIC_DEVICE`] the first of [`MIC_CABLES`] that is installed.
+/// The device the browser mic plays into: the named one, or for [`AUTO_MIC_DEVICE`] the first of
+/// [`MIC_CABLES`] that is installed.
 pub(crate) fn find_mic_device(name: &str) -> Result<IMMDevice> {
     if !name.eq_ignore_ascii_case(AUTO_MIC_DEVICE) {
         return find_render_device(Some(name));
@@ -216,8 +216,8 @@ pub(crate) fn native_format() -> WAVEFORMATEXTENSIBLE {
 
 /// Reads the device's mix format and frees it.
 pub(crate) fn mix_format(client: &IAudioClient) -> Result<(InputFormat, Vec<u8>)> {
-    // SAFETY: GetMixFormat returns a CoTaskMem WAVEFORMATEX(+extension) that we
-    // copy byte for byte and then free.
+    // SAFETY: GetMixFormat returns a CoTaskMem WAVEFORMATEX(+extension) that we copy byte for byte
+    // and then free.
     unsafe {
         let p = client.GetMixFormat()?;
         let len = size_of::<WAVEFORMATEX>() + (*p).cbSize as usize;
@@ -228,8 +228,8 @@ pub(crate) fn mix_format(client: &IAudioClient) -> Result<(InputFormat, Vec<u8>)
 }
 
 fn parse_format(raw: &[u8]) -> Result<InputFormat> {
-    // SAFETY: `raw` holds at least a WAVEFORMATEX, and a full
-    // WAVEFORMATEXTENSIBLE when the tag says so; reads are unaligned-safe.
+    // SAFETY: `raw` holds at least a WAVEFORMATEX, and a full WAVEFORMATEXTENSIBLE when the tag
+    // says so; reads are unaligned-safe.
     let base: WAVEFORMATEX = unsafe { std::ptr::read_unaligned(raw.as_ptr() as *const _) };
     let (tag, bits) = (base.wFormatTag as u32, base.wBitsPerSample);
     let float = if tag == WAVE_FORMAT_EXTENSIBLE && raw.len() >= size_of::<WAVEFORMATEXTENSIBLE>() {

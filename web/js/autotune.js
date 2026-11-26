@@ -1,15 +1,11 @@
 // Auto-tune (test): steps the stream through bitrates, then encoder qualities, and keeps the best
-// that streams cleanly. Run it while something is moving on screen: a still desktop needs few bits,
-// so the network is never really loaded, and the result says so.
-//
-// What counts as a problem is health.js, shared with the stats overlay.
-// The policy lives here; main.js supplies apply(config), measure(ms) and wait(ms).
+// that streams cleanly.
 
 import { LIMITS, lossLevel, bandwidthShort, decodeSlow, encodeSlow, moving as isMoving } from './health.js';
 
 export const LADDER_KBPS = Object.freeze([10000, 20000, 30000, 50000, 80000, 120000, 150000]);
 export const FLOOR_KBPS = 5000;
-// Keep this much below the highest bitrate that passed, for the network's bad moments.
+// Keep this much below the highest bitrate that passed.
 export const HEADROOM = 0.85;
 const SETTLE_MS = 3000;
 const MEASURE_MS = 4000;
@@ -19,11 +15,6 @@ export class Cancelled extends Error {
 }
 
 // Why a measurement window is not good enough, or null if it is.
-// m: { freezes, keyframeRequests, loss, bweKbps, hostFps, decodeMs, encodeMs } over the window
-// (any may be null).
-// `encode` says whether encode time counts: not while stepping bitrate, since it doesn't depend on
-// bitrate (a host whose encoder is slow at any bitrate would otherwise fail every step and end on the
-// floor), only while picking the encoder quality.
 export function problem(m, config, { encode = true } = {}) {
   if (m.freezes > 0) return 'the picture froze';
   if (m.keyframeRequests > LIMITS.keyframesTolerated) return 'frames were dropped on the way';
@@ -36,7 +27,7 @@ export function problem(m, config, { encode = true } = {}) {
   return null;
 }
 
-// Whether the picture was moving: the host encodes at the full frame rate only then.
+// Whether the picture was moving.
 export function moving(m, config) {
   return isMoving(m.hostFps, config.fps);
 }
@@ -68,9 +59,9 @@ export class AutoTune {
     return !why;
   }
 
-  // Resolves to { config, summary }. Rejects with Cancelled if cancel() was called.
+  // Resolves to { config, summary }.
   async run() {
-    // Bitrate first, at the fastest encoder setting so encode time doesn't cloud the network test.
+    // Bitrate first, at the fastest encoder setting.
     let best = null;
     for (const kbps of LADDER_KBPS) {
       if (!(await this.trial({ ...this.base, bitrateKbps: kbps, quality: 'speed' }, mbps(kbps), { encode: false }))) break;

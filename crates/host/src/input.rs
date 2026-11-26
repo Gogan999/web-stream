@@ -1,14 +1,4 @@
-//! Input injection on its own thread, so a slow `SendInput` or a ViGEm
-//! plug-in never holds up the media loop. One thread per connection:
-//! dropping [`InputThread`] releases every held key, button and stick and
-//! unplugs the virtual gamepads.
-//!
-//! Presses and releases (the reliable `input` channel) are never dropped: a
-//! lost key-up would leave the key held. Motion (`input-motion`) is never
-//! replayed as a backlog: the thread takes everything waiting at once and
-//! merges each run of motion between two presses (relative deltas summed,
-//! the newest absolute position and the newest state per gamepad kept), so
-//! order against presses holds and a backlog cannot turn into lag.
+//! Input injection on its own thread.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError, channel};
@@ -21,14 +11,12 @@ use ws_proto::{GamepadState, HostControl, InputEvent, MAX_GAMEPADS, seq_newer};
 
 use crate::platform;
 
-/// Input events waiting for the thread (stuck in an injection call) before
-/// more are refused: motion is dropped, and a refused press or release makes
-/// the thread release everything once it catches up, so nothing stays held.
+/// Input events waiting for the thread before more are refused: motion is dropped, and a refused
+/// press or release makes the thread release everything once it catches up.
 const MAX_BACKLOG: usize = 4096;
-/// How often stale gamepads are centred (the handler requires a timer).
+/// How often stale gamepads are centred.
 const TICK: Duration = Duration::from_millis(100);
-/// Injection errors (usually an elevated window in front) are logged at most
-/// this often.
+/// Injection errors are logged at most this often.
 const ERROR_LOG_EVERY: Duration = Duration::from_secs(5);
 
 #[derive(Debug, PartialEq)]
@@ -47,9 +35,8 @@ struct Motion {
     pads: [Option<(GamepadState, Option<u16>)>; MAX_GAMEPADS as usize],
 }
 
-/// Whether a motion event numbered `new` should replace one numbered `old`
-/// in a merge: unless both are numbered and `new` is the older one (it was
-/// overtaken on the unordered channel).
+/// Whether a motion event numbered `new` should replace one numbered `old` in a merge: unless both
+/// are numbered and `new` is the older one.
 fn replaces(new: Option<u16>, old: Option<u16>) -> bool {
     match (new, old) {
         (Some(new), Some(old)) => seq_newer(new, old),
@@ -113,8 +100,8 @@ impl Motion {
 }
 
 pub struct InputThread {
-    /// The only strong reference: once it drops, senders handed out by
-    /// [`Self::sink`] stop working and the thread can end.
+    /// The only strong reference: once it drops, senders handed out by [`Self::sink`] stop working
+    /// and the thread can end.
     tx: Option<Arc<Queue>>,
     thread: Option<JoinHandle<()>>,
 }
@@ -159,15 +146,11 @@ fn is_motion(event: &InputEvent) -> bool {
 
 impl InputThread {
     /// `gamepad` is the virtual controller browser gamepads become.
-    /// `rumble` is called from another thread with messages for the
-    /// `control` channel.
     pub fn start(
         display: Option<DisplayRect>,
         gamepad: GamepadKind,
         rumble: impl Fn(HostControl) + Send + Sync + 'static,
     ) -> std::io::Result<Self> {
-        // Bounded by MAX_BACKLOG events, counted rather than by the
-        // channel, so display changes always get through.
         let (tx, rx) = channel();
         let backlog = Arc::new(Backlog::default());
         let thread_backlog = backlog.clone();
@@ -180,8 +163,8 @@ impl InputThread {
         })
     }
 
-    /// Takes `input` and `input-motion` messages from any thread, for as
-    /// long as this thread runs; holding it does not keep the thread alive.
+    /// Takes `input` and `input-motion` messages from any thread, for as long as this thread runs;
+    /// holding it does not keep the thread alive.
     pub fn sink(&self) -> impl Fn(&[u8]) + Send + Sync + 'static {
         let tx = self.tx.as_ref().map(Arc::downgrade).unwrap_or_default();
         move |data: &[u8]| {
@@ -191,8 +174,7 @@ impl InputThread {
         }
     }
 
-    /// The display streamed on video stream `lane` (0 is the main one)
-    /// moved; absolute mouse positions on it follow.
+    /// The display streamed on video stream `lane` moved; absolute mouse positions on it follow.
     pub fn set_display(&self, lane: u8, rect: DisplayRect) {
         self.push(Msg::Display(lane, rect));
     }
@@ -206,8 +188,6 @@ impl InputThread {
 
 impl Drop for InputThread {
     fn drop(&mut self) {
-        // Closing the channel ends the thread, which releases everything. A
-        // sink caller holds the sender only for the length of one send.
         self.tx.take();
         if let Some(t) = self.thread.take() {
             let _ = t.join();
@@ -224,8 +204,6 @@ fn run(
 ) {
     let mut handler = InputHandler::new(platform::input_sink(rumble));
     handler.set_gamepad_kind(gamepad);
-    // Where each stream's display is, and which one the handler's rectangle
-    // is for now.
     let mut rects: [Option<DisplayRect>; ws_proto::MAX_LANES as usize] = [display, None];
     let mut active = 0u8;
     if let Some(rect) = display {
@@ -241,7 +219,6 @@ fn run(
             Err(RecvTimeoutError::Timeout) => Vec::new(),
             Err(RecvTimeoutError::Disconnected) => break,
         };
-        // Everything else already waiting, merged together.
         loop {
             match rx.try_recv() {
                 Ok(msg) => batch.push(msg),
@@ -255,7 +232,6 @@ fn run(
         let events = batch.iter().filter(|m| matches!(m, Msg::Event(_))).count();
         backlog.events.fetch_sub(events, Ordering::Relaxed);
         if backlog.overflowed.swap(false, Ordering::Relaxed) {
-            // A press or release was lost: start over from nothing held.
             batch.push(Msg::Event(InputEvent::ReleaseAll));
         }
         let now = Instant::now();
@@ -293,8 +269,8 @@ fn run(
     drop(handler);
 }
 
-/// Merges each run of motion in `batch`, keeping it in order with the
-/// presses and display changes around it.
+/// Merges each run of motion in `batch`, keeping it in order with the presses and display changes
+/// around it.
 fn coalesce(batch: Vec<Msg>) -> Vec<Msg> {
     let mut out = Vec::with_capacity(batch.len());
     let mut motion = Motion::default();
@@ -411,8 +387,6 @@ mod tests {
         }
         .encode();
         sink(&key);
-        // Joins even though the sink outlives it, and the sink then does
-        // nothing.
         drop(thread);
         sink(&key);
     }
@@ -481,8 +455,6 @@ mod tests {
                 down,
             })
         };
-        // Move to A, press, move to B (twice), release: the click is at A,
-        // the release at B.
         let out = coalesce(vec![abs(1), button(true), abs(2), abs(3), button(false)]);
         assert_eq!(out, vec![abs(1), button(true), abs(3), button(false)]);
         assert_eq!(coalesce(vec![abs(1), abs(2)]), vec![abs(2)]);
@@ -498,11 +470,8 @@ mod tests {
             lane: 0,
         };
         assert!(m.merge(abs(1, 7)).is_none());
-        // Overtaken: arrived later but older.
         assert!(m.merge(abs(2, 6)).is_none());
         assert_eq!(m.drain(), [abs(1, 7)]);
-        // Button changes on the reliable channel are not motion: they pass
-        // through and are never merged away.
         let edge = InputEvent::GamepadButtons {
             index: 0,
             state: GamepadState::default(),

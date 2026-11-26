@@ -35,7 +35,6 @@ test('phone: touch input, on-screen keyboard and small-screen toolbar', { timeou
   await client.waitForFunction(() => document.getElementById('status').dataset.state === 'connected', null, { timeout: 15000 });
   await client.waitForFunction(() => document.getElementById('video').videoWidth > 0, null, { timeout: 15000 });
 
-  // Settings fold away behind one button; the overlay buttons show.
   assert.equal(await client.isVisible('#priority'), false);
   assert.equal(await client.isVisible('#touchbar'), true);
   await client.tap('#more-toggle');
@@ -43,12 +42,10 @@ test('phone: touch input, on-screen keyboard and small-screen toolbar', { timeou
   assert.equal(await client.isVisible('#bitrate'), false); // Advanced is folded
   await client.tap('#more-toggle');
 
-  // The toolbar fits a 360 px phone: nothing makes the page scroll sideways.
   assert.equal(await client.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
   assert.equal(await client.evaluate(() => [...document.querySelectorAll('#bar > button, #bar > select')].every((b) => b.hidden || b.getBoundingClientRect().right <= window.innerWidth)), true);
   assert.equal(await client.textContent('#mouse-label'), 'Trackpad');
 
-  // The toolbar fits a 360 px phone: nothing makes the page scroll sideways.
   await client.setViewportSize({ width: 360, height: 740 });
   assert.equal(await client.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
   assert.equal(await client.evaluate(() => [...document.querySelectorAll('#bar > button, #bar > select')].every((b) => b.hidden || b.getBoundingClientRect().right <= window.innerWidth)), true);
@@ -62,7 +59,6 @@ test('phone: touch input, on-screen keyboard and small-screen toolbar', { timeou
   const cdp = await ctx.newCDPSession(client);
   const touch = (type, points) => cdp.send('Input.dispatchTouchEvent', { type, touchPoints: points });
 
-  // Trackpad (relative mode): a tap is a left click, a drag is relative motion with no click.
   await clearLog();
   await client.touchscreen.tap(cx, cy);
   await host.waitForFunction(() => window.mockLog.some((e) => e.type === 'mouse-button' && !e.down));
@@ -77,7 +73,6 @@ test('phone: touch input, on-screen keyboard and small-screen toolbar', { timeou
   assert.ok(dx > 50, `relative motion ${dx}`); // 50 CSS px, scaled up to picture pixels
   assert.ok(!got.some((e) => e.type === 'mouse-abs'));
 
-  // Tap, then touch again and drag: the left button is held for the drag, pressed after moving.
   await clearLog();
   await touch('touchStart', [{ x: cx, y: cy }]);
   await touch('touchEnd', []);
@@ -110,7 +105,6 @@ test('phone: touch input, on-screen keyboard and small-screen toolbar', { timeou
   await client.waitForSelector('#cursor:not([hidden])');
   const pointer = await client.locator('#cursor').boundingBox();
 
-  // Pinch out zooms the view (not the host) and shows Fit; Fit zooms back out.
   await clearLog();
   await touch('touchStart', [{ x: cx - 40, y: cy, id: 1 }, { x: cx + 40, y: cy, id: 2 }]);
   for (let i = 1; i <= 8; i++) await touch('touchMove', [{ x: cx - 40 - i * 10, y: cy, id: 1 }, { x: cx + 40 + i * 10, y: cy, id: 2 }]);
@@ -155,11 +149,9 @@ test('phone: touch input, on-screen keyboard and small-screen toolbar', { timeou
   got = await inputs();
   const abs = got.find((e) => e.type === 'mouse-abs');
   assert.ok(abs && Math.abs(abs.x - 32768) < 700 && Math.abs(abs.y - 32768) < 700, JSON.stringify(abs));
-  // The click position goes on the reliable channel, ahead of the button.
   assert.equal(abs.ch, 'input');
   assert.ok(got.indexOf(abs) < got.findIndex((e) => e.type === 'mouse-button'));
 
-  // A real pinch: the first finger slides before the second lands. Still a zoom, no drag on the host.
   await clearLog();
   await touch('touchStart', [{ x: cx - 40, y: cy, id: 1 }]);
   await touch('touchMove', [{ x: cx - 60, y: cy, id: 1 }]);
@@ -182,7 +174,6 @@ test('phone: touch input, on-screen keyboard and small-screen toolbar', { timeou
   assert.ok(Math.abs(zabs.x - want.x) < 300 && Math.abs(zabs.y - want.y) < 300, JSON.stringify({ zabs, want }));
   await client.tap('#zoom-reset');
 
-  // On-screen keyboard: text typed by an IME (no key codes) arrives as key presses, with Shift.
   await clearLog();
   await client.tap('#kbd-toggle');
   assert.ok(await client.evaluate(() => document.activeElement.id === 'kbd-input'));
@@ -190,7 +181,6 @@ test('phone: touch input, on-screen keyboard and small-screen toolbar', { timeou
   await host.waitForFunction(() => window.mockLog.filter((e) => e.type === 'key').length >= 6);
   got = (await inputs()).filter((e) => e.type === 'key').map((e) => [e.usage, e.down]);
   assert.deepEqual(got, [[0xe1, true], [0x0b, true], [0x0b, false], [0xe1, false], [0x0c, true], [0x0c, false]]);
-  // Keys row: tapping it keeps the keyboard open; sticky Ctrl then Esc sends Ctrl+Esc.
   await clearLog();
   await client.tap('#keys-toggle');
   await client.tap('#keys [data-key="ControlLeft"]');
@@ -206,20 +196,17 @@ test('phone: touch input, on-screen keyboard and small-screen toolbar', { timeou
   await host.waitForFunction(() => window.mockLog.filter((e) => e.type === 'key').length >= 6);
   got = (await inputs()).filter((e) => e.type === 'key').map((e) => [e.usage, e.down]);
   assert.deepEqual(got, [[0x3e, true], [0x3e, false], [0xe0, true], [0x06, true], [0x06, false], [0xe0, false]]);
-  // A hardware shortcut while the keyboard is open goes through whole, not as Ctrl alone.
   await clearLog();
   await client.keyboard.press('Control+KeyC');
   await host.waitForFunction(() => window.mockLog.filter((e) => e.type === 'key').length >= 4);
   got = (await inputs()).filter((e) => e.type === 'key').map((e) => [e.usage, e.down]);
   assert.deepEqual(got, [[0xe0, true], [0x06, true], [0x06, false], [0xe0, false]]);
   assert.equal(await client.inputValue('#kbd-input').then((v) => v.replace(/\u200b/g, '')), '');
-  // Backspace from the IME (deleting the hidden text) is a Backspace press.
   await clearLog();
   await client.keyboard.press('Backspace');
   await host.waitForFunction(() => window.mockLog.some((e) => e.type === 'key' && e.usage === 0x2a && !e.down));
   await client.tap('#kbd-toggle');
   assert.ok(await client.evaluate(() => document.activeElement.id !== 'kbd-input'));
-  // A sticky Ctrl ends with the next touch click, not just the next key.
   await clearLog();
   await client.tap('#keys [data-key="ControlLeft"]');
   await client.touchscreen.tap(cx, cy);

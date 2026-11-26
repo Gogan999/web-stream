@@ -18,8 +18,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Windows is the host platform; Linux covers the signaling server.
-        os: [windows-latest, ubuntu-latest]
+        os: [windows-latest, ubuntu-24.04]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -33,13 +32,12 @@ jobs:
         run: cargo clippy --workspace --all-targets
       - name: test
         run: cargo test --workspace
-      # The browser client against the real host: shared files reach the browser's downloads.
       - uses: actions/setup-node@v4
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-24.04'
         with:
           node-version: 22
       - name: web client with the host
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-24.04'
         working-directory: web
         run: |
           cargo build -p ws-host --example test-host
@@ -49,14 +47,10 @@ jobs:
       - name: build release
         if: matrix.os == 'windows-latest'
         run: cargo build --workspace --release
-      # The service's network host: label on its folder, and what a process
-      # with its token can and can't write, run as SYSTEM.
       - name: network host sandbox
         if: matrix.os == 'windows-latest'
         shell: pwsh
         run: ./installer/test-network-sandbox.ps1 -Exe target/release/ws-host-gui.exe
-      # The installer friends download: built, installed silently, started,
-      # uninstalled, and checked for leftovers.
       - name: installer
         if: matrix.os == 'windows-latest'
         shell: pwsh
@@ -64,11 +58,21 @@ jobs:
           ./installer/fetch-redist.ps1
           ./installer/build.ps1 -Version 0.0.0-ci
           ./installer/test-install.ps1 -Setup target/installer/web-stream-setup-0.0.0-ci.exe
+      - name: one-line installer
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: ./installer/test-web-install.ps1 -Setup target/installer/web-stream-setup-0.0.0-ci.exe
+      - name: keep the installer
+        if: matrix.os == 'windows-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-stream-setup-ci
+          path: target/installer/web-stream-setup-0.0.0-ci.exe
+          if-no-files-found: error
+          retention-days: 14
 
-  # Headless Chromium against the transport's test pattern host: UDP, forced
-  # ICE-TCP, and UDP firewalled so the browser has to fall back by itself.
   transport-e2e:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -80,10 +84,11 @@ jobs:
         working-directory: web
       - run: npx playwright install --with-deps chromium
         working-directory: web
-      - run: cargo build -p ws-transport --example test_pattern
+      - name: build the test pattern host (release, so its software AV1 encoder keeps up on a shared runner)
+        run: cargo build --release -p ws-transport --example test_pattern
       - name: e2e
         run: node crates/transport/examples/e2e/run.mjs 18443
         env:
           TEST_BLOCK_UDP: '1'
-          TEST_PATTERN_BIN: ${{ github.workspace }}/target/debug/examples/test_pattern
+          TEST_PATTERN_BIN: ${{ github.workspace }}/target/release/examples/test_pattern
           PLAYWRIGHT_PATH: ${{ github.workspace }}/web/node_modules/playwright

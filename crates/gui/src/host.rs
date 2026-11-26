@@ -73,8 +73,7 @@ pub struct State {
     /// Where the Cloudflare Tunnel serves the client, while it is up.
     pub tunnel_url: Option<String>,
     pub log: VecDeque<String>,
-    /// What runs (or ran last) is the Windows service's host, attached to,
-    /// not this app's own.
+    /// What runs (or ran last) is the Windows service's host, attached to, not this app's own.
     pub service: bool,
 }
 
@@ -148,8 +147,6 @@ impl State {
                 Notice::PairingFailed { attempts_left } => {
                     self.log(format!("wrong pairing code; {attempts_left} attempts left"))
                 }
-                // Codes stop; the QR code's link still works until pairing
-                // closes.
                 Notice::PairingLocked => {
                     self.code = None;
                     self.pairing_locked = true;
@@ -253,8 +250,6 @@ impl State {
             Err(e) => {
                 let e = format!("{e:#}");
                 let line = format!("{what}: {e}");
-                // Attaching is tried again every few seconds while the
-                // service's host is down: once in the log is enough.
                 if self.log.back() != Some(&line) {
                     self.log(line);
                 }
@@ -264,9 +259,8 @@ impl State {
     }
 }
 
-/// Called on the host's thread after each event, and with `None` when the
-/// host has stopped, for the window to repaint (and to come forward when a
-/// pairing code arrives).
+/// Called on the host's thread after each event, and with `None` when the host has stopped, for the
+/// window to repaint.
 pub type OnChange = Arc<dyn Fn(Option<&Event>) + Send + Sync>;
 
 struct Shared {
@@ -313,7 +307,7 @@ impl Host {
         self.state().log(line);
     }
 
-    /// True while a host thread exists (starting, running or stopping).
+    /// True while a host thread exists.
     pub fn is_active(&self) -> bool {
         let mut thread = self.shared.thread.lock().expect("host thread lock");
         match thread.as_ref() {
@@ -333,10 +327,8 @@ impl Host {
         self.spawn(false, move |host, commands| host.run(opts, commands));
     }
 
-    /// Attaches to the Windows service's host on its control pipe, unless
-    /// a host (this app's own, or the service's) is still active: it shows
-    /// and takes commands as this app's own would. Needs an elevated
-    /// administrator. Ends when the service's host stops.
+    /// Attaches to the Windows service's host on its control pipe, unless a host is still active:
+    /// it shows and takes commands as this app's own would.
     #[cfg(windows)]
     pub fn attach(&self) {
         self.spawn(true, |host, commands| host.run_attached(commands));
@@ -397,8 +389,7 @@ impl Host {
         result
     }
 
-    /// One runtime per run: dropping it closes every socket the host opened,
-    /// so the next start can bind the same ports.
+    /// One runtime per run: dropping it closes every socket the host opened.
     fn run(&self, opts: ServeOptions, commands: mpsc::Receiver<Command>) -> anyhow::Result<()> {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -412,7 +403,6 @@ impl Host {
             }
         });
         let result = rt.block_on(serve::serve(opts, commands, events_tx));
-        // Show what the host said last (a final error, say) before stopping.
         rt.block_on(async {
             let _ = tokio::time::timeout(Duration::from_millis(500), pump).await;
         });
@@ -435,7 +425,6 @@ impl Host {
     }
 
     /// Asks the host to stop; [`Host::is_active`] turns false when it has.
-    /// Attached to the service's host, only detaches.
     pub fn stop(&self) {
         if !self.is_active() {
             return;
@@ -449,8 +438,7 @@ impl Host {
             .take();
     }
 
-    /// Stops the host and waits for it, so capture is stopped and a changed
-    /// display resolution put back before the app exits.
+    /// Stops the host and waits for it.
     pub fn stop_and_wait(&self, timeout: Duration) {
         self.stop();
         let end = Instant::now() + timeout;

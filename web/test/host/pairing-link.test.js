@@ -1,5 +1,5 @@
 // End-to-end against the real host: the pairing link the host's QR code holds pairs a phone and
-// connects it, once. Runs when WS_HOST_BIN names a built test host (see download.test.js).
+// connects it, once.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -49,7 +49,6 @@ test('the pairing link pairs and connects once', { skip: !bin && 'WS_HOST_BIN no
   assert.equal(new URL(page.url()).hash, '');
   assert.deepEqual(errors, []);
 
-  // A second browser can't reuse it. (One at a time: the host allows 8 connections per address.)
   await phone.close();
   const other = await browser.newContext({ ignoreHTTPSErrors: true });
   const page2 = await other.newPage();

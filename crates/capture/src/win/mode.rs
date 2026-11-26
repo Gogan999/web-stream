@@ -1,7 +1,5 @@
-//! Changes a display's desktop resolution, temporarily (`CDS_FULLSCREEN`):
-//! the change is never written to the registry, so restoring or a reboot
-//! puts the user's own setting back (and Windows is expected to when the
-//! host process ends, though that is not documented).
+//! Changes a display's desktop resolution, temporarily (`CDS_FULLSCREEN`): the change is never
+//! written to the registry.
 
 use windows::Win32::Graphics::Gdi::{
     CDS_FULLSCREEN, CDS_TYPE, ChangeDisplaySettingsExW, DEVMODEW, DISP_CHANGE,
@@ -62,7 +60,6 @@ pub(crate) fn set_display_mode(id: DisplayId, width: u32, height: u32) -> Result
 pub(crate) fn restore_display_mode(id: DisplayId) -> Result<()> {
     init_process();
     let name = HSTRING::from(display::find(id)?.gdi_name);
-    // No mode: go back to what the registry holds, the user's own setting.
     let rc = unsafe { ChangeDisplaySettingsExW(&name, None, None, CDS_TYPE(0), None) };
     check(rc, "restore resolution")?;
     tracing::info!(display = id.0, "display resolution restored");

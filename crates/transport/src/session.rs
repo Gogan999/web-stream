@@ -16,56 +16,42 @@ use ws_proto::{AudioPacket, EncodedFrame, VideoCodec, channels};
 
 use crate::{Error, TransportConfig, TransportEvent, TransportStats};
 
-/// RTP header extension id for playout-delay. Any free id works; str0m's
-/// standard map leaves 5 unused.
+/// RTP header extension id for playout-delay.
 const PLAYOUT_DELAY_EXT_ID: u8 = 5;
-/// The file channel may hold at most this much unsent data, so transfers
-/// leave room in the shared SCTP buffer (128 KiB) for control and input.
+/// The file channel may hold at most this much unsent data.
 const FILE_MAX_BUFFERED: usize = 64 * 1024;
-/// Longest the frames behind a keyframe (or a repair) are exempt from the late-frame
-/// drop. Several frame times: enough for a keyframe at a few times the
-/// frame budget to drain at the pacing rate.
+/// Longest the frames behind a keyframe (or a repair) are exempt from the late-frame drop.
 const KEYFRAME_DRAIN_MAX: Duration = Duration::from_millis(250);
-/// Timeouts due within this are run at once rather than slept for (see
-/// [`Session::poll`]).
+/// Timeouts due within this are run at once rather than slept for (see [`Session::poll`]).
 const TIMER_SLACK: Duration = Duration::from_millis(1);
-/// Most timeouts [`Session::poll`] runs early before it returns, so a busy
-/// pacer can't hold up the rest of the run loop.
+/// Most timeouts [`Session::poll`] runs early before it returns.
 const MAX_EARLY_TIMEOUTS: usize = 256;
 /// When the file channel drains below this, [`TransportEvent::ChannelLow`].
 const FILE_LOW: usize = 16 * 1024;
-/// Sent video packets kept for resends: [`TransportConfig::max_resend_age`]
-/// of video at 150 Mb/s.
+/// Sent video packets kept for resends: [`TransportConfig::max_resend_age`] of video at 150 Mb/s.
 const RTX_CACHE_PACKETS: usize = 4096;
 
 /// What happened to a frame handed to [`Session::write_video`].
 #[derive(Debug, PartialEq, Eq)]
 pub enum VideoWrite {
     Sent,
-    /// The send queue was too far behind, so the frame was dropped; the
-    /// encoder must send a frame that skips it, or a keyframe.
+    /// The send queue was too far behind.
     Late,
-    /// An earlier frame this one builds on never went out, so the browser
-    /// would decode it against the wrong picture (smeared, ghosted motion).
-    /// Dropped; the encoder must send a frame that skips the gap, or a
-    /// keyframe.
+    /// An earlier frame this one builds on never went out.
     Broken,
     /// Not connected, or a codec the browser did not accept.
     Skipped,
 }
 
-/// How many video streams a session carries: the main display, and a second
-/// monitor.
+/// How many video streams a session carries: the main display, and a second monitor.
 pub const LANES: usize = 2;
 
 /// What a session tracks for one video stream.
 #[derive(Default)]
 struct LaneState {
-    /// When the last keyframe went into the send queue, while the queue
-    /// has not emptied since.
+    /// When the last keyframe went into the send queue, while the queue has not emptied since.
     keyframe_draining: Option<Instant>,
-    /// `frame_index` a non-keyframe must have to be sent: the one right
-    /// after the last frame sent. `None` until a keyframe goes out.
+    /// `frame_index` a non-keyframe must have to be sent: the one right after the last frame sent.
     next_index: Option<u64>,
     /// Codec of the last frame we could not send, to log once.
     unsupported_codec: Option<VideoCodec>,
@@ -88,9 +74,7 @@ pub struct Session {
     max_bitrate_bps: u64,
 }
 
-/// One thing str0m produced, handed to the sink given to [`Session::poll`] as
-/// it is produced. A transmit borrows str0m's own packet buffer, so the media
-/// path makes no copy of its own: the sink sends it before polling goes on.
+/// One thing str0m produced, handed to the sink given to [`Session::poll`] as it is produced.
 pub enum Step<'a> {
     Transmit {
         proto: Protocol,
@@ -178,14 +162,11 @@ impl Session {
             .sdp_api()
             .accept_answer(pending, answer)
             .map_err(|e| Error::Negotiation(e.to_string()))?;
-        // Answer a NACK only while the packet is fresh enough for the resend
-        // to still be useful; older losses are repaired by a keyframe.
         for mid in self.video {
             if let Some(tx) = self.rtc.direct_api().stream_tx_by_mid(mid, None) {
                 tx.set_rtx_cache(RTX_CACHE_PACKETS, self.max_resend_age, Some(0.15));
             }
         }
-        // Probe up towards what the encoder can use, not just the start rate.
         self.set_max_bitrate(self.max_bitrate_bps);
         Ok(())
     }
@@ -197,13 +178,12 @@ impl Session {
         }
     }
 
-    /// The local ICE ufrag, which the browser's checks must name.
+    /// The local ICE ufrag.
     pub fn local_ufrag(&mut self) -> String {
         self.rtc.direct_api().local_ice_credentials().ufrag
     }
 
-    /// Mark the session down; true if that is news (Disconnected not yet
-    /// reported).
+    /// Mark the session down; true if that is news.
     pub fn mark_down(&mut self) -> bool {
         self.connected = false;
         !std::mem::replace(&mut self.down, true)
@@ -277,13 +257,6 @@ impl Session {
     }
 
     /// How long the oldest unsent video packet has waited in the pacer.
-    /// Zero while the queue is still draining the last keyframe: a keyframe
-    /// is several frames' worth of data, so the frames right behind it
-    /// always wait, and dropping them would only ask for another keyframe,
-    /// which backs the queue up again (the stream then "pulses" between a
-    /// soft keyframe and sharper frames a few times a second). The pass
-    /// ends when the queue empties, or after [`KEYFRAME_DRAIN_MAX`] so real
-    /// congestion still drops frames.
     fn video_backlog(&mut self, lane: usize, now: Instant) -> Duration {
         let draining_since = self.lanes[lane].keyframe_draining;
         let mut api = self.rtc.direct_api();
@@ -303,8 +276,7 @@ impl Session {
         now.saturating_duration_since(first_unsent)
     }
 
-    /// The video pacer queue: age of the oldest unsent packet, and bytes and
-    /// packets waiting (the last two for diagnostics).
+    /// The video pacer queue: age of the oldest unsent packet, and bytes and packets waiting.
     pub fn queue_diag(&mut self, lane: usize, now: Instant) -> (Duration, usize, usize) {
         let mut api = self.rtc.direct_api();
         let Some(q) = api
@@ -324,10 +296,6 @@ impl Session {
         if !self.connected || lane >= LANES {
             return VideoWrite::Skipped;
         }
-        // Every frame references the one before it, and the browser can't
-        // tell one went missing (RTP sequence numbers stay continuous), so
-        // after any gap only a keyframe, or a frame the encoder built
-        // without the missing ones, may go out.
         if !follows(self.lanes[lane].next_index, frame) {
             ws_diag::diag!(
                 "broken_drop",
@@ -342,12 +310,6 @@ impl Session {
             );
             return VideoWrite::Broken;
         }
-        // Drop rather than queue: a frame that would wait behind older ones
-        // arrives late, and every frame after it would too. Not a keyframe
-        // or a repair, though: dropping either only asks for another one,
-        // bigger still, and the queue backs up further (in a real run a
-        // late drop led to late repairs and then a keyframe several times
-        // a second).
         if !frame.keyframe && frame.recovers_from.is_none() {
             let backlog = self.video_backlog(lane, now);
             if backlog > self.max_send_delay {
@@ -372,8 +334,6 @@ impl Session {
             return VideoWrite::Skipped;
         };
         let rtp_time = MediaTime::from_micros(frame.capture_time).rebase(Frequency::NINETY_KHZ);
-        // Wallclock is when the image was captured: now, minus the time the
-        // frame spent in the encoder.
         let in_pipeline =
             Duration::from_micros(frame.encode_done_time.saturating_sub(frame.capture_time));
         let wallclock = now.checked_sub(in_pipeline).unwrap_or(now);
@@ -383,8 +343,6 @@ impl Session {
             .write(pt, wallclock, rtp_time, frame.data.to_vec())
         {
             Ok(()) => {
-                // A repair is several frames' worth too: let the frames
-                // right behind it wait for it, as for a keyframe.
                 if frame.keyframe || frame.recovers_from.is_some() {
                     self.lanes[lane].keyframe_draining = Some(now);
                 }
@@ -398,8 +356,7 @@ impl Session {
         }
     }
 
-    /// The first frame the browser has not been sent, once a keyframe has
-    /// gone out: a frame after a gap must not build on it or anything later.
+    /// The first frame the browser has not been sent, once a keyframe has gone out.
     pub fn next_index(&self, lane: usize) -> Option<u64> {
         self.lanes[lane].next_index
     }
@@ -420,8 +377,6 @@ impl Session {
         };
         let rtp_time =
             MediaTime::from_micros(packet.capture_time).rebase(Frequency::FORTY_EIGHT_KHZ);
-        // Wallclock is when the audio was captured, as for video, so the
-        // two streams' sender reports agree on what happened when.
         let age = Duration::from_micros(ws_proto::mono_now().saturating_sub(packet.capture_time));
         let wallclock = now.checked_sub(age).unwrap_or(now);
         if let Err(e) = writer.write(pt, wallclock, rtp_time, packet.data.to_vec()) {
@@ -429,8 +384,7 @@ impl Session {
         }
     }
 
-    /// `Ok(false)` when the channel's buffer is full; wait for
-    /// [`TransportEvent::ChannelLow`].
+    /// `Ok(false)` when the channel's buffer is full; wait for [`TransportEvent::ChannelLow`].
     pub fn write_data(&mut self, label: &str, binary: bool, data: &[u8]) -> Result<bool, Error> {
         let id = self
             .channels
@@ -449,22 +403,13 @@ impl Session {
     }
 
     /// Drain everything str0m has to say until it only has a timeout left.
-    /// Each step goes to `out` the moment str0m yields it, so packets and
-    /// events keep str0m's order and a transmit never outlives its poll.
     pub fn poll(&mut self, mut out: impl FnMut(Step<'_>)) -> Instant {
         let mut early = 0;
         let mut fed: Option<Instant> = None;
         loop {
             match self.rtc.poll_output() {
                 Ok(Output::Timeout(t)) => {
-                    // A sleep can't be shorter than the OS timer tick (1 ms
-                    // at best), so the pacer, which spaces packets a fraction
-                    // of a millisecond apart at high rates, would release
-                    // about one per tick: some 10 Mb/s. Run timeouts that
-                    // are almost due now instead.
                     let now = Instant::now();
-                    // Not past a time already fed: str0m's clock can't go
-                    // back, so feeding it again would change nothing.
                     if t > now + TIMER_SLACK
                         || early == MAX_EARLY_TIMEOUTS
                         || fed.is_some_and(|f| t <= f)
@@ -516,8 +461,6 @@ impl Session {
                 }
                 TransportEvent::Disconnected
             }
-            // ICE came back (consent restored, or a new pair) after a
-            // disconnect; DTLS state survived it.
             Event::IceConnectionStateChange(
                 IceConnectionState::Connected | IceConnectionState::Completed,
             ) if self.dtls_up && !self.connected => {
@@ -547,7 +490,6 @@ impl Session {
                 TransportEvent::TargetBitrate(estimate.as_u64())
             }
             Event::MediaEgressStats(s) if self.video.contains(&s.mid) => {
-                // Totals since the stream started.
                 ws_diag::diag!(
                     "video_egress",
                     "nacks={} plis={} firs={} packets={} bytes={} loss={:?} rtt_ms={:?}",
@@ -612,8 +554,7 @@ fn follows(next_index: Option<u64>, frame: &EncodedFrame) -> bool {
         })
 }
 
-/// Pick the payload type for the encoder's codec. For H.264 prefer
-/// packetization-mode 1, which is what NVENC/AMF/QSV slices need.
+/// Pick the payload type for the encoder's codec.
 fn video_pt<'a>(
     params: impl Iterator<Item = &'a str0m::format::PayloadParams>,
     codec: VideoCodec,
@@ -637,14 +578,8 @@ fn video_pt<'a>(
     best.map(|(pt, _)| pt)
 }
 
-/// Local ICE candidates for the bound sockets, plus candidates for public
-/// addresses that port-forward to them.
-///
-/// The public ones are host candidates, not server-reflexive: str0m drops
-/// non-host local candidates in ICE-lite mode, so a srflx one never reached
-/// the offer. As host candidates they are only advertised; checks sent to
-/// them arrive (after the router's port forward) on the bound address and
-/// match its candidate there.
+/// Local ICE candidates for the bound sockets, plus candidates for public addresses that
+/// port-forward to them.
 pub fn candidates(
     udp: &[SocketAddr],
     tcp: &[SocketAddr],
@@ -661,7 +596,6 @@ pub fn candidates(
     };
     let mut out: Vec<Candidate> = udp.iter().filter_map(|a| udp_host(*a)).collect();
     out.extend(tcp.iter().filter_map(|a| tcp_host(*a)));
-    // The router forwards each media port to the same port on the host.
     let mut ports: Vec<u16> = Vec::new();
     for a in udp {
         if !ports.contains(&a.port()) {
@@ -709,10 +643,8 @@ mod tests {
 
     #[test]
     fn only_a_keyframe_follows_a_gap() {
-        // Nothing sent yet: the browser needs a keyframe first.
         assert!(!follows(None, &frame(0, false)));
         assert!(follows(None, &frame(0, true)));
-        // Frame 4 went out; 5 may follow, 6 (5 was dropped) may not.
         assert!(follows(Some(5), &frame(5, false)));
         assert!(!follows(Some(5), &frame(6, false)));
         assert!(follows(Some(5), &frame(9, true)));
@@ -726,22 +658,14 @@ mod tests {
             recovers_from: Some(from),
             ..frame(index, false)
         };
-        // 5..=7 never went out; 8 builds only on frames before 5.
         assert!(follows(Some(5), &repair(8, 5)));
-        // ...or before 3, which the browser also has.
         assert!(follows(Some(5), &repair(8, 3)));
-        // 8 may still use 6, which the browser lacks.
         assert!(!follows(Some(5), &repair(8, 6)));
-        // Still nothing to build on before the first keyframe.
         assert!(!follows(None, &repair(8, 0)));
     }
 
-    /// The sink fires, at least one packet reaches it before `Connected`, and
-    /// replaying the packets to the client in the order the sink saw them
-    /// completes the handshake. Ordering needs no test of its own: the sink
-    /// runs in str0m's yield order, just as the old code pushed to and drained
-    /// a `Vec` in that order, so there is no reordering to regress;
-    /// `tests/loopback.rs` is the behavioural net.
+    /// The sink fires, at least one packet reaches it before `Connected`, and replaying the packets
+    /// to the client in the order the sink saw them completes the handshake.
     #[test]
     fn poll_hands_packets_to_the_sink_before_connecting() {
         use str0m::change::SdpOffer;
@@ -763,8 +687,6 @@ mod tests {
             .unwrap();
         session.accept_answer(&answer.to_sdp_string()).unwrap();
 
-        // What the client says goes to the session; what the session's sink
-        // sees goes back, in the order the sink saw it.
         let mut sent_before_connected = 0;
         let mut connected = false;
         for _ in 0..200 {

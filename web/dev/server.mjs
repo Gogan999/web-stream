@@ -1,11 +1,6 @@
-// Development server standing in for the host's built-in HTTPS listener: serves web/,
-// implements the pairing API (docs/dev/signaling.md) in memory, and relays /ws between one
-// mock host page (/ws?role=host) and one paired client. Not for production.
-//
-//   node dev/server.mjs [port]     then open http://localhost:8080/dev/mock-host.html
-//                                  and http://localhost:8080/
-//
-// The pairing code is printed here and shown on the mock host page.
+// Development server standing in for the host's built-in HTTPS listener: serves web/, implements
+// the pairing API (docs/dev/signaling.md) in memory, and relays /ws between one mock host page
+// (/ws?role=host) and one paired client.
 
 import http from 'node:http';
 import fs from 'node:fs/promises';
@@ -19,14 +14,22 @@ const port = Number(process.argv[2] || process.env.PORT || 8080);
 const types = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.webmanifest': 'application/manifest+json' };
 
 const devices = new Map(); // cookie token -> device name
-const pairings = new Map(); // pairing_id -> { code, name, expires, attempts }
+const pairings = new Map();
 let host = null;
+let lastCode = null;
 let client = null;
 
-const cookieToken = (req) => /(?:^|;\s*)__Host-ws_device=([^;]+)/.exec(req.headers.cookie || '')?.[1];
-const paired = (req) => devices.has(cookieToken(req));
+// Plain HTTP: no Secure or __Host- prefix.
+const COOKIE = 'ws_device';
+const cookieToken = (req) => new RegExp(`(?:^|;\\s*)${COOKIE}=([^;]+)`).exec(req.headers.cookie || '')?.[1];
+const bearerToken = (req) => /^Bearer (.+)$/.exec(req.headers.authorization || '')?.[1];
+const protocolToken = (req) => (req.headers['sec-websocket-protocol'] || '').split(',').map((p) => p.trim())
+  .find((p) => p.startsWith('web-stream.auth.'))?.slice('web-stream.auth.'.length);
+const requestToken = (req) => bearerToken(req) ?? protocolToken(req) ?? cookieToken(req);
+const paired = (req) => devices.has(requestToken(req));
+let corsHeaders = {};
 const json = (res, status, body, headers = {}) => {
-  res.writeHead(status, { 'content-type': 'application/json', ...headers });
+  res.writeHead(status, { 'content-type': 'application/json', ...corsHeaders, ...headers });
   res.end(JSON.stringify(body));
 };
 const readBody = async (req) => {
@@ -37,8 +40,13 @@ const readBody = async (req) => {
 const toHost = (msg) => host?.send(JSON.stringify(msg));
 
 async function api(req, res, url) {
+  corsHeaders = req.headers.origin ? { 'access-control-allow-origin': req.headers.origin, vary: 'origin' } : {};
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204, { ...corsHeaders, 'access-control-allow-methods': 'GET, POST', 'access-control-allow-headers': 'content-type, authorization', 'access-control-max-age': '600' });
+    return res.end();
+  }
   if (req.method === 'GET' && url.pathname === '/api/session') {
-    return paired(req) ? json(res, 200, { paired: true, device: devices.get(cookieToken(req)) }) : json(res, 401, { paired: false });
+    return paired(req) ? json(res, 200, { paired: true, device: devices.get(requestToken(req)) }) : json(res, 401, { paired: false });
   }
   if (req.method !== 'POST') return json(res, 405, { error: 'method' });
   const body = await readBody(req);
@@ -46,6 +54,7 @@ async function api(req, res, url) {
     const id = crypto.randomUUID();
     const code = String(crypto.randomInt(0, 1e6)).padStart(6, '0');
     pairings.set(id, { code, name: String(body.device_name || 'unknown'), expires: Date.now() + 120000, attempts: 3 });
+    lastCode = code;
     console.log(`pairing code for "${body.device_name}": ${code}`);
     toHost({ type: 'dev-pairing-code', code });
     return json(res, 200, { pairing_id: id, expires_in: 120 });
@@ -61,11 +70,12 @@ async function api(req, res, url) {
     pairings.delete(body.pairing_id);
     const token = crypto.randomBytes(24).toString('base64url');
     devices.set(token, p.name);
-    return json(res, 200, { paired: true }, { 'set-cookie': `__Host-ws_device=${token}; HttpOnly; Secure; SameSite=Strict; Path=/` });
+    if (body.want_token) return json(res, 200, { paired: true, token });
+    return json(res, 200, { paired: true }, { 'set-cookie': `${COOKIE}=${token}; HttpOnly; SameSite=Strict; Path=/` });
   }
   if (url.pathname === '/api/unpair') {
-    devices.delete(cookieToken(req));
-    return json(res, 200, {}, { 'set-cookie': '__Host-ws_device=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0' });
+    devices.delete(requestToken(req));
+    return json(res, 200, {}, { 'set-cookie': `${COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0` });
   }
   return json(res, 404, { error: 'not_found' });
 }
@@ -73,6 +83,10 @@ async function api(req, res, url) {
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x');
   if (url.pathname.startsWith('/api/')) return api(req, res, url);
+  if (url.pathname === '/dev/last-code') {
+    res.writeHead(200, { 'content-type': 'text/plain', 'access-control-allow-origin': '*' });
+    return res.end(lastCode ?? '');
+  }
   const rel = url.pathname === '/' ? 'index.html' : decodeURIComponent(url.pathname).replace(/^\/+/, '');
   const file = path.resolve(root, rel);
   if (!file.startsWith(root + path.sep) || file.includes(`${path.sep}node_modules${path.sep}`)) {
@@ -80,7 +94,9 @@ const server = http.createServer(async (req, res) => {
     return;
   }
   try {
-    const body = await fs.readFile(file);
+    let body = await fs.readFile(file);
+    // Plain-HTTP dev servers stand in for other PCs.
+    if (rel === 'index.html') body = Buffer.from(body.toString().replace("connect-src 'self' https: wss:", "connect-src 'self' https: wss: http: ws:"));
     res.writeHead(200, { 'content-type': types[path.extname(file)] || 'application/octet-stream', 'cache-control': 'no-store' });
     res.end(body);
   } catch {
@@ -88,7 +104,7 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-const wss = new WebSocketServer({ noServer: true });
+const wss = new WebSocketServer({ noServer: true, handleProtocols: (protocols) => (protocols.has('web-stream') ? 'web-stream' : false) });
 server.on('upgrade', (req, socket, head) => {
   const url = new URL(req.url, 'http://x');
   const isHost = url.searchParams.get('role') === 'host';
@@ -105,7 +121,6 @@ server.on('upgrade', (req, socket, head) => {
     }
     ws.on('message', (data) => {
       (isHost ? client : host)?.send(data.toString());
-      // Like the real host: after a handoff the client's socket closes and the session goes on.
       if (!isHost && /"type":"handoff"/.test(data.toString())) ws.close(1000, 'handoff');
     });
     ws.on('close', () => {

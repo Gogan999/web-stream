@@ -55,7 +55,7 @@ fn axis(v: i16) -> u8 {
     ((v as i32 + 32768) >> 8) as u8
 }
 
-/// Y axes flip: XInput is up-positive, DS4 is down-positive. Rest maps to 128.
+/// Y axes flip: XInput is up-positive, DS4 is down-positive.
 fn axis_inverted(v: i16) -> u8 {
     ((32768 - v as i32).min(65535) >> 8) as u8
 }

@@ -6095,9 +6095,18 @@ name = "ws-host"
 version = "1.0.0-rc.1"
 dependencies = [
  "anyhow",
+ "axum",
+ "base64 0.22.1",
  "getrandom 0.3.4",
+ "hmac",
+ "igd-next",
+ "libc",
+ "qrcode",
  "serde",
  "serde_json",
+ "sha2",
+ "subtle",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",

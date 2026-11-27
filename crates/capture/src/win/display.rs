@@ -30,7 +30,8 @@ pub(crate) struct Output {
     pub gdi_name: String,
     pub adapter: IDXGIAdapter1,
     pub adapter_luid: LUID,
-    pub adapter_vendor: u32,
+    /// The adapter's description, as the encoder probe names it.
+    pub adapter_name: String,
     pub output: IDXGIOutput1,
 }
 
@@ -51,7 +52,7 @@ pub(crate) fn enumerate() -> Result<Vec<Output>> {
         if adesc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 != 0 {
             continue;
         }
-        let adapter_name = wide(&adesc.Description);
+        let adapter_name = adapter_name(&adesc.Description);
 
         for oi in 0.. {
             let output = match unsafe { adapter.EnumOutputs(oi) } {
@@ -101,7 +102,7 @@ pub(crate) fn enumerate() -> Result<Vec<Output>> {
                 gdi_name: gdi_name.clone(),
                 adapter: adapter.clone(),
                 adapter_luid: adesc.AdapterLuid,
-                adapter_vendor: adesc.VendorId,
+                adapter_name: adapter_name.clone(),
                 output,
             });
         }
@@ -120,6 +121,11 @@ pub(crate) fn find(id: DisplayId) -> Result<Output> {
 /// `\\.\DISPLAY3` -> 3.
 fn parse_display_number(gdi_name: &str) -> Option<u32> {
     gdi_name.strip_prefix(r"\\.\DISPLAY")?.parse().ok()
+}
+
+/// An adapter's name from its DXGI description.
+pub(crate) fn adapter_name(description: &[u16]) -> String {
+    wide(description)
 }
 
 fn wide(s: &[u16]) -> String {

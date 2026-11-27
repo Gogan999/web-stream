@@ -12,11 +12,7 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
-use windows::Win32::Graphics::Direct3D11::{
-    D3D11_BIND_RENDER_TARGET, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, ID3D11Device,
-    ID3D11DeviceContext, ID3D11Texture2D,
-};
-use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_NV12, DXGI_SAMPLE_DESC};
+use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D};
 use windows::Win32::System::LibraryLoader::{
     GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
 };
@@ -28,6 +24,10 @@ use ws_nvenc_sys as nv;
 use ws_proto::{VideoCodec, VideoConfig};
 
 use super::Gpu;
+use super::encode::{
+    EncodeTiming, Encoded, FAILED_SLOT, FRAME_TIMEOUT, Finished, SLOTS, nv12_texture, source_qp,
+};
+use crate::caps::CodecSupport;
 use crate::{CaptureError, Result};
 
 /// The NVENC entry points from the driver's DLL, loaded once per process.
@@ -102,11 +102,6 @@ macro_rules! call {
     }};
 }
 
-/// Frames in the encoder at once: one being encoded while the next is copied in and queued behind
-/// it.
-pub(crate) const SLOTS: usize = 2;
-/// A frame not out of the encoder in this long means the GPU hung.
-const FRAME_TIMEOUT: Duration = Duration::from_secs(2);
 /// How long after the completion event the lock is retried by yielding rather than sleeping.
 const LOCK_SPIN_WINDOW: Duration = Duration::from_micros(500);
 /// The sleep between attempts once the spin window has passed.
@@ -138,41 +133,6 @@ fn lock_backoff(since_completed: Duration, retries: u32) -> LockBackoff {
         LockBackoff::Sleep(LOCK_SLEEP)
     }
 }
-/// Sent in place of a slot once a frame has failed: the encoder is done for.
-const FAILED_SLOT: usize = usize::MAX;
-
-/// One frame out of the encoder, with what the capture thread tagged it with when it went in.
-pub(crate) struct Encoded<M> {
-    pub data: Bytes,
-    pub keyframe: bool,
-    pub meta: M,
-    /// From going in to the bitstream being ready.
-    pub encode_time: Duration,
-    /// Where the time in [`Self::encode_time`] and before it went.
-    pub timing: EncodeTiming,
-}
-
-/// The instants one frame passed through the encoder, kept as plain values and only reported later.
-#[derive(Clone, Copy)]
-pub(crate) struct EncodeTiming {
-    /// Just before a slot was asked for.
-    pub before_slot: Instant,
-    /// A slot was in hand.
-    pub slot_taken: Instant,
-    /// The encode call returned: the frame is in the encoder.
-    pub submitted: Instant,
-    /// The output thread got to the frame, before it waited for completion.
-    pub wait_at: Instant,
-    /// The wait for the completion event returned, before the bitstream was touched.
-    pub completed: Instant,
-    /// The bitstream was copied out and unlocked.
-    pub done: Instant,
-    /// How many times the lock answered `NV_ENC_ERR_LOCK_BUSY` and was tried again.
-    pub lock_retries: u32,
-}
-
-/// What the output thread hands on for each frame.
-pub(crate) type Finished<M> = std::result::Result<Encoded<M>, (M, CaptureError)>;
 
 /// An input texture registered with the encoder, and the bitstream buffer its frame comes out
 /// through.
@@ -816,20 +776,7 @@ impl<M: Send + 'static> NvEncoder<M> {
 
     /// One capability of this GPU's encoder for `codec`.
     fn cap(&self, codec: nv::GUID, cap: nv::NV_ENC_CAPS) -> Result<i32> {
-        let mut param = nv::NV_ENC_CAPS_PARAM {
-            version: nv::NV_ENC_CAPS_PARAM_VER,
-            capsToQuery: cap,
-            ..Default::default()
-        };
-        let mut value = 0;
-        let status = unsafe {
-            call!(
-                self.api,
-                nvEncGetEncodeCaps(self.encoder, codec, &mut param, &mut value)
-            )
-        };
-        self.check(status, "nvEncGetEncodeCaps")?;
-        Ok(value)
+        encode_cap(self.api, self.encoder, codec, cap)
     }
 
     fn last_error(&self, status: nv::NVENCSTATUS) -> String {
@@ -996,6 +943,110 @@ fn finish<M>(session: Session, p: &Pending<M>) -> Result<(Bytes, bool, Instant, 
     Ok((data, keyframe, completed, lock_retries))
 }
 
+/// One capability of the session's encoder for `codec`.
+fn encode_cap(
+    api: &nv::NV_ENCODE_API_FUNCTION_LIST,
+    encoder: *mut c_void,
+    codec: nv::GUID,
+    cap: nv::NV_ENC_CAPS,
+) -> Result<i32> {
+    let mut param = nv::NV_ENC_CAPS_PARAM {
+        version: nv::NV_ENC_CAPS_PARAM_VER,
+        capsToQuery: cap,
+        ..Default::default()
+    };
+    let mut value = 0;
+    let status = unsafe {
+        call!(
+            api,
+            nvEncGetEncodeCaps(encoder, codec, &mut param, &mut value)
+        )
+    };
+    if status != nv::NVENCSTATUS::NV_ENC_SUCCESS {
+        return Err(CaptureError::Platform(format!(
+            "nvEncGetEncodeCaps: {}",
+            last_error(api, encoder, status)
+        )));
+    }
+    Ok(value)
+}
+
+/// The codecs NVENC encodes on `gpu`, with their size limits.
+pub(crate) fn probe(gpu: &Gpu) -> Result<Vec<CodecSupport>> {
+    let api = api()?;
+    let mut session = nv::NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS {
+        version: nv::NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER,
+        deviceType: nv::NV_ENC_DEVICE_TYPE::NV_ENC_DEVICE_TYPE_DIRECTX,
+        device: gpu.device.as_raw(),
+        apiVersion: nv::NVENCAPI_VERSION,
+        ..Default::default()
+    };
+    let mut encoder = ptr::null_mut();
+    let status = unsafe { call!(api, nvEncOpenEncodeSessionEx(&mut session, &mut encoder)) };
+    if status != nv::NVENCSTATUS::NV_ENC_SUCCESS || encoder.is_null() {
+        return Err(CaptureError::NoEncoder(format!(
+            "NVENC session failed to open (NVENCSTATUS {})",
+            status.0
+        )));
+    }
+    let result = probe_session(api, encoder);
+    if let Some(f) = api.nvEncDestroyEncoder {
+        unsafe { f(encoder) };
+    }
+    result
+}
+
+fn probe_session(
+    api: &nv::NV_ENCODE_API_FUNCTION_LIST,
+    encoder: *mut c_void,
+) -> Result<Vec<CodecSupport>> {
+    let mut count = 0u32;
+    let status = unsafe { call!(api, nvEncGetEncodeGUIDCount(encoder, &mut count)) };
+    check(status, "nvEncGetEncodeGUIDCount")?;
+    let mut guids = vec![nv::GUID::default(); count as usize];
+    let mut filled = 0u32;
+    let status = unsafe {
+        call!(
+            api,
+            nvEncGetEncodeGUIDs(encoder, guids.as_mut_ptr(), count, &mut filled)
+        )
+    };
+    check(status, "nvEncGetEncodeGUIDs")?;
+    guids.truncate(filled.min(count) as usize);
+    let same = |a: &nv::GUID, b: &nv::GUID| {
+        a.Data1 == b.Data1 && a.Data2 == b.Data2 && a.Data3 == b.Data3 && a.Data4 == b.Data4
+    };
+    let mut out = Vec::new();
+    for (codec, guid) in [
+        (VideoCodec::H264, nv::NV_ENC_CODEC_H264_GUID),
+        (VideoCodec::H265, nv::NV_ENC_CODEC_HEVC_GUID),
+        (VideoCodec::Av1, nv::NV_ENC_CODEC_AV1_GUID),
+    ] {
+        if !guids.iter().any(|g| same(g, &guid)) {
+            continue;
+        }
+        let cap = |c| {
+            encode_cap(api, encoder, guid, c)
+                .inspect_err(|e| tracing::debug!(?codec, "NVENC capability query failed: {e}"))
+                .unwrap_or(0)
+        };
+        let (width, height) = (
+            cap(nv::NV_ENC_CAPS::NV_ENC_CAPS_WIDTH_MAX),
+            cap(nv::NV_ENC_CAPS::NV_ENC_CAPS_HEIGHT_MAX),
+        );
+        out.push(CodecSupport {
+            codec,
+            max_width: u32::try_from(width).ok().filter(|w| *w > 0).unwrap_or(4096),
+            max_height: u32::try_from(height)
+                .ok()
+                .filter(|h| *h > 0)
+                .unwrap_or(4096),
+            repair: cap(nv::NV_ENC_CAPS::NV_ENC_CAPS_SUPPORT_REF_PIC_INVALIDATION) > 0,
+        });
+    }
+    Ok(out)
+}
+
 fn last_error(
     api: &nv::NV_ENCODE_API_FUNCTION_LIST,
     encoder: *mut c_void,
@@ -1008,29 +1059,6 @@ fn last_error(
         .map(|p| unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned())
         .unwrap_or_default();
     format!("NVENCSTATUS {} {detail}", status.0)
-}
-
-/// An NV12 texture the encoder can read.
-fn nv12_texture(device: &ID3D11Device, width: u32, height: u32) -> Result<ID3D11Texture2D> {
-    let desc = D3D11_TEXTURE2D_DESC {
-        Width: width,
-        Height: height,
-        MipLevels: 1,
-        ArraySize: 1,
-        Format: DXGI_FORMAT_NV12,
-        SampleDesc: DXGI_SAMPLE_DESC {
-            Count: 1,
-            Quality: 0,
-        },
-        Usage: D3D11_USAGE_DEFAULT,
-        BindFlags: D3D11_BIND_RENDER_TARGET.0 as u32,
-        CPUAccessFlags: 0,
-        MiscFlags: 0,
-    };
-    let mut texture = None;
-    unsafe { device.CreateTexture2D(&desc, None, Some(&mut texture)) }
-        .map_err(|e| CaptureError::Platform(format!("CreateTexture2D NV12: {e}")))?;
-    texture.ok_or(CaptureError::Platform("no NV12 texture".into()))
 }
 
 /// Reference pictures kept when invalidation is on: how far back the encoder can reach for a
@@ -1063,14 +1091,6 @@ fn apply_rate(
     rc.maxBitRate = bps;
     rc.vbvBufferSize = (f64::from(bps) / f64::from(fps.max(1)) * vbv_frames) as u32;
     rc.vbvInitialDelay = rc.vbvBufferSize;
-}
-
-/// The fixed quantizer for the Source quality.
-fn source_qp(codec: VideoCodec) -> u32 {
-    match codec {
-        VideoCodec::H264 | VideoCodec::H265 => 18,
-        VideoCodec::Av1 => 72,
-    }
 }
 
 /// BT.709 limited range, matching what the video processor writes.

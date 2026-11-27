@@ -549,7 +549,11 @@ fn open_offer(path: &Path) -> Result<Offer, String> {
         use std::os::windows::fs::OpenOptionsExt;
         opts.share_mode(0x1);
     }
-    let file = opts.open(path).map_err(|e| open_error(&e))?;
+    #[cfg(target_os = "linux")]
+    let owner = crate::uploads::session_owner()?.map(|u| (u.uid, u.gid));
+    #[cfg(not(target_os = "linux"))]
+    let owner = None;
+    let file = crate::uploads::as_owner(owner, || opts.open(path)).map_err(|e| open_error(&e))?;
     let meta = file.metadata().map_err(|e| e.to_string())?;
     if !meta.is_file() {
         return Err("not a file".into());

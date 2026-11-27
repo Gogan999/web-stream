@@ -481,7 +481,18 @@ mod imp {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+mod wayland;
+#[cfg(target_os = "linux")]
+mod x11;
+#[cfg(target_os = "linux")]
+use linux as imp;
+#[cfg(target_os = "linux")]
+pub use linux::{HELPER_ARG, helper_main};
+
+#[cfg(not(any(windows, target_os = "linux")))]
 mod imp {
     use super::*;
 
@@ -568,7 +579,7 @@ mod tests {
 
     #[test]
     fn it_is_unavailable_off_windows() {
-        if cfg!(not(windows)) {
+        if cfg!(not(any(windows, target_os = "linux"))) {
             assert!(Clipboard::open(|_| ()).is_err());
         }
     }

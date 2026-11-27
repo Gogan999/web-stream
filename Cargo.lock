@@ -6144,6 +6144,7 @@ dependencies = [
 name = "ws-input"
 version = "1.0.0-rc.1"
 dependencies = [
+ "libc",
  "thiserror 2.0.21",
  "tracing",
  "vigem-client",

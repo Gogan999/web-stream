@@ -19,8 +19,10 @@ use ws_proto::{
 use super::convert::Converter;
 use super::display::{self, Output};
 use super::duplication::{Acquired, Duplicator};
-use super::nvenc::{DPB_FRAMES, Finished, NvEncoder};
+use super::encode::{Encoder, Finished};
+use super::nvenc::DPB_FRAMES;
 use super::{Gpu, init_process};
+use crate::caps::EncoderBackend;
 use crate::pacing::{Backpressure, BitrateGate, EncodeJob, Scheduler};
 use crate::{CaptureError, Result};
 
@@ -191,7 +193,7 @@ enum Report {
 
 /// GPU objects for one adapter.
 struct Encode {
-    encoder: NvEncoder<FrameMeta>,
+    encoder: Encoder<FrameMeta>,
     converter: Converter,
     gpu: Gpu,
     luid: LUID,
@@ -207,19 +209,51 @@ impl Encode {
     ) -> Result<Self> {
         let gpu = Gpu::new(&output.adapter)?;
         let converter = Converter::new(&gpu, config.width, config.height, config.fps)?;
-        let on_output = deliver(frames.clone(), reports.clone());
-        let encoder = NvEncoder::new(&gpu, config, max, on_output).map_err(|e| match e {
-            CaptureError::NoEncoder(msg) if output.adapter_vendor != 0x10de => CaptureError::NoEncoder(format!(
-                "{msg}; display {:?} is driven by a non-NVIDIA adapter (AMF/QSV not supported yet)",
-                output.info.id
-            )),
-            e => e,
-        })?;
-        Ok(Self {
-            encoder,
-            converter,
-            gpu,
-            luid: output.adapter_luid,
+        let backends = crate::caps::backends_on(
+            crate::encoders(),
+            &output.adapter_name,
+            config.codec,
+            config.width,
+            config.height,
+            &[EncoderBackend::Nvenc, EncoderBackend::MediaFoundation],
+        );
+        let mut errors = Vec::new();
+        let mut transient = false;
+        for backend in backends {
+            let on_output = deliver(frames.clone(), reports.clone());
+            match Encoder::open(backend, &gpu, config, max, on_output) {
+                Ok(encoder) => {
+                    return Ok(Self {
+                        encoder,
+                        converter,
+                        gpu,
+                        luid: output.adapter_luid,
+                    });
+                }
+                Err(e) => {
+                    tracing::debug!(backend = backend.name(), "encoder did not open: {e}");
+                    transient |= !matches!(e, CaptureError::NoEncoder(_));
+                    errors.push(format!("{}: {e}", backend.name()));
+                }
+            }
+        }
+        let message = if errors.is_empty() {
+            format!(
+                "no hardware encoder on {} produces {:?} at {}x{}",
+                output.adapter_name, config.codec, config.width, config.height
+            )
+        } else {
+            format!(
+                "display {:?} on {}: {}",
+                output.info.id,
+                output.adapter_name,
+                errors.join("; ")
+            )
+        };
+        Err(if transient {
+            CaptureError::Platform(message)
+        } else {
+            CaptureError::NoEncoder(message)
         })
     }
 }

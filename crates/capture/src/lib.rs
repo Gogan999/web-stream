@@ -1,5 +1,7 @@
 //! Display capture and hardware video encode for the host.
 
+#[cfg_attr(not(windows), allow(dead_code))]
+mod bitstream;
 pub mod caps;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod layout;

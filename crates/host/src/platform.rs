@@ -56,8 +56,8 @@ mod imp {
     use std::time::{Duration, Instant};
 
     pub type Sink = ws_input::LinuxInput;
-    pub enum Loopback {}
-    pub enum Mic {}
+    pub type Loopback = ws_audio::LoopbackCapture;
+    pub type Mic = ws_audio::MicPlayback;
 
     /// How long the box around all displays is trusted.
     const DESKTOP_TTL: Duration = Duration::from_secs(5);
@@ -108,14 +108,14 @@ mod imp {
     }
 
     pub fn start_loopback(
-        _: LoopbackConfig,
-        _: mpsc::Sender<AudioPacket>,
+        config: LoopbackConfig,
+        packets: mpsc::Sender<AudioPacket>,
     ) -> ws_audio::Result<Loopback> {
-        Err(unsupported())
+        ws_audio::LoopbackCapture::start(config, packets)
     }
 
-    pub fn start_mic(_: MicConfig) -> ws_audio::Result<(Mic, MicReceiver)> {
-        Err(unsupported())
+    pub fn start_mic(config: MicConfig) -> ws_audio::Result<(Mic, MicReceiver)> {
+        ws_audio::MicPlayback::start(config)
     }
 
     /// Reads the host pointer from the KMS cursor plane; called from the cursor thread only.
@@ -164,15 +164,12 @@ mod imp {
     }
 
     pub fn audio_devices() -> ws_audio::Result<Vec<String>> {
-        Err(unsupported())
+        ws_audio::list_render_devices()
     }
 
-    pub fn set_audio(capture: &Loopback, _: u32, _: u32) {
-        match *capture {}
-    }
-
-    fn unsupported() -> ws_audio::AudioError {
-        ws_audio::AudioError::Platform("audio is not available yet".into())
+    pub fn set_audio(capture: &Loopback, bitrate: u32, frame_ms: u32) {
+        capture.set_bitrate(bitrate);
+        capture.set_frame_ms(frame_ms);
     }
 
     #[cfg(test)]

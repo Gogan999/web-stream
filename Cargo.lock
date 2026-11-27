@@ -6051,6 +6051,8 @@ name = "ws-audio"
 version = "1.0.0-rc.1"
 dependencies = [
  "bytes",
+ "libc",
+ "libloading 0.8.9",
  "opus",
  "thiserror 2.0.21",
  "tokio",

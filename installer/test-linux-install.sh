@@ -48,6 +48,8 @@ wait_host() {
     return 1
 }
 
+user_exists() { id web-stream >/dev/null 2>&1; }
+
 service_pid() { pgrep -f 'web-stream service run' | head -n 1; }
 network_runs_unprivileged() { pgrep -u web-stream -f 'web-stream service network' >/dev/null; }
 
@@ -139,9 +141,12 @@ ok "installer succeeded" test -x /usr/local/lib/web-stream/web-stream
 ok "installed version is $version" test "$(/usr/local/lib/web-stream/web-stream version)" = "$version"
 ok "cloudflared installed" test -x /usr/local/lib/web-stream/cloudflared
 ok "web-stream on PATH" test -L /usr/local/bin/web-stream
-ok "web-stream user exists" id web-stream
+ok "web-stream user exists" user_exists
 ok "udev rule installed" test -f /etc/udev/rules.d/70-web-stream-uinput.rules
 ok "unit installed" test -f /etc/systemd/system/web-stream.service
+if command -v systemd-analyze >/dev/null; then
+    ok "unit verifies" systemd-analyze verify /etc/systemd/system/web-stream.service
+fi
 ok "service active" active
 ok "network side answers /api/session with 401" wait_host
 ok "network side runs as web-stream" network_runs_unprivileged
@@ -182,7 +187,7 @@ echo "$out"
 ok "program removed" not test -e /usr/local/lib/web-stream
 ok "unit removed" not test -e /etc/systemd/system/web-stream.service
 ok "udev rule removed" not test -e /etc/udev/rules.d/70-web-stream-uinput.rules
-ok "user removed" not id web-stream
+ok "user removed" not user_exists
 ok "service stopped" not active
 ok "nothing listens" test "$(session)" = 000
 ok "data kept" as_root test -d /var/lib/web-stream/network

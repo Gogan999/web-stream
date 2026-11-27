@@ -115,6 +115,7 @@ fn try_run(program: &str, args: &[&str]) {
             args.join(" "),
             String::from_utf8_lossy(&o.stderr).trim()
         ),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => eprintln!("warning: {program}: {e}"),
     }
 }

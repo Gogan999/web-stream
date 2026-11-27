@@ -1,0 +1,105 @@
+name: Linux input, audio and clipboard
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - crates/input/**
+      - crates/audio/**
+      - crates/host/src/platform.rs
+      - crates/host/src/clipboard*/**
+      - crates/host/src/clipboard.rs
+      - crates/host/src/uploads.rs
+      - crates/host/src/files.rs
+      - .github/workflows/linux-io.yml
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  linux-io:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pipewire pipewire-pulse wireplumber pulseaudio-utils dbus \
+            xvfb xclip sway wl-clipboard
+
+      - name: virtual devices through uinput and evdev
+        run: |
+          sudo modprobe uinput
+          test -c /dev/uinput
+          # The test creates devices and reads /dev/input/event*, so it runs as root.
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="sudo -E" \
+            cargo test -p ws-input --test linux_uinput -- --nocapture
+
+      - name: loopback capture and virtual microphone on PipeWire
+        run: |
+          export XDG_RUNTIME_DIR="$RUNNER_TEMP/xdg"
+          mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
+          cargo test -p ws-audio --test linux_pulse --no-run
+          dbus-run-session -- sh -ec '
+            pipewire & sleep 1
+            wireplumber & pipewire-pulse &
+            for i in $(seq 50); do pactl info >/dev/null 2>&1 && break; sleep 0.2; done
+            pactl info
+            cargo test -p ws-audio --test linux_pulse -- --nocapture
+          '
+
+      - name: clipboard helper on X11 and Wayland
+        run: |
+          cargo build -p ws-host --example test-host
+          cat > "$RUNNER_TEMP/clip.py" <<'EOF'
+          import os, select, struct, subprocess, sys, time
+          helper, mode = sys.argv[1], sys.argv[2]
+          def frame(kind, payload):
+              return kind + struct.pack('<I', len(payload)) + payload
+          def read_frame(f):
+              if not select.select([f], [], [], 5)[0]:
+                  return None
+              head = f.read(5)
+              return head[:1], f.read(struct.unpack('<I', head[1:])[0])
+          def paste():
+              cmd = ['xclip', '-o', '-selection', 'clipboard'] if mode == 'x11' else ['wl-paste', '-n']
+              return subprocess.run(cmd, capture_output=True, timeout=5).stdout
+          def copy(data):
+              cmd = ['xclip', '-i', '-selection', 'clipboard'] if mode == 'x11' else ['wl-copy']
+              subprocess.run(cmd, input=data, timeout=5, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+          p = subprocess.Popen([helper, 'clipboard-helper'], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+          time.sleep(0.5)
+          text = 'from browser é'.encode()
+          p.stdin.write(frame(b'S', text)); p.stdin.flush()
+          assert read_frame(p.stdout) == (b'W', b'\x01')
+          time.sleep(0.3)
+          assert paste() == text, paste()
+          copy(b'copied on host')
+          got = read_frame(p.stdout)
+          while got and got[1] == text:
+              got = read_frame(p.stdout)
+          assert got == (b'C', b'copied on host'), got
+          copy(b'x' * (256 * 1024 + 5))
+          assert read_frame(p.stdout) == (b'L', b''), 'size cap'
+          p.stdin.close()
+          assert p.wait(timeout=5) == 0
+          print(mode, 'ok')
+          EOF
+          Xvfb :99 -nolisten tcp & sleep 1
+          DISPLAY=:99 timeout 60 python3 "$RUNNER_TEMP/clip.py" target/debug/examples/test-host x11
+          export XDG_RUNTIME_DIR="$RUNNER_TEMP/xdgw"
+          mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
+          echo 'xwayland disable' > "$RUNNER_TEMP/sway.conf"
+          WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1 WLR_RENDERER=pixman \
+            sway -c "$RUNNER_TEMP/sway.conf" & sleep 2
+          WAYLAND_DISPLAY=$(basename "$(ls "$XDG_RUNTIME_DIR"/wayland-* | grep -v lock | head -1)") \
+            timeout 60 python3 "$RUNNER_TEMP/clip.py" target/debug/examples/test-host wayland

@@ -5,7 +5,9 @@ computer: its screen, sound, mouse, keyboard and controllers. It takes about
 ten minutes and needs no technical knowledge.
 
 **You need:** a Windows 10 or 11 PC with an NVIDIA graphics card, and a
-phone or computer with Chrome, Edge or Safari.
+phone or computer with Chrome, Edge or Safari. For a Linux PC, follow
+[Linux host](linux.md) instead: one line installs it, and pairing (step 2)
+works the same once `sudo web-stream pair` shows the QR code.
 
 ## 1. Install the host
 

@@ -31,11 +31,11 @@ STUN or TURN server is needed.
 | `crates/signaling` | `ws-signaling` | HTTPS server in the host: web client, device pairing, `/ws` signaling, certificates |
 | `crates/input` | `ws-input` | Keyboard, mouse and virtual gamepad injection |
 | `crates/audio` | `ws-audio` | Loopback capture and Opus encoding; browser mic to a virtual microphone |
-| `crates/host` | `ws-host` (lib) | Wires the crates together; the Windows service and its process split. `examples/` has a headless test host and a capture test |
+| `crates/host` | `ws-host` (lib, and the `web-stream` bin) | Wires the crates together; the Windows service and its process split; the headless Linux host (`src/linux/`: systemd service, settings page in `admin/`). `examples/` has a headless test host and a capture test |
 | `crates/gui` | `ws-host-gui` (bin) | The host program: tray app with the status and settings window, which also runs the Windows service |
 | `crates/diag` | `ws-diag` | Optional diagnostic logging (see [diagnostics.md](diagnostics.md)) |
 | `web/` | | Browser client: HTML, CSS and ES modules, no build step |
-| `installer/` | | Inno Setup installer |
+| `installer/` | | Inno Setup installer, the one-line installers (`web-stream-install.ps1`, `web-stream-install.sh`) and their tests |
 | `scripts/` | | Source install and update scripts for Windows |
 
 ## Data flow
@@ -67,3 +67,12 @@ Installed as a service, the host runs as two processes: the screen side
 signaling, the peer connection) as LocalService with no privileges. The
 screen side accepts only what a browser could send. See
 [Security](../guide/windows-service.md#security).
+
+## Linux service
+
+On Linux the `web-stream` binary runs as the systemd unit `web-stream.service`.
+`service run` (root) is the media side; it starts `service network` as the
+`web-stream` user with no capabilities, its stdin one end of a socket pair
+carrying the same bridge as the Windows service, and fd 3 a second socket for
+the settings page's requests, which the root side checks and saves before
+restarting both. See [Linux host](../guide/linux.md#security).

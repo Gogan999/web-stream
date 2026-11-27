@@ -118,8 +118,49 @@ mod imp {
         Err(unsupported())
     }
 
+    /// Reads the host pointer from the KMS cursor plane; called from the cursor thread only.
     pub fn cursor_reader() -> Option<impl FnMut() -> Option<CursorState>> {
-        None::<fn() -> Option<CursorState>>
+        if !std::path::Path::new("/dev/dri").exists() {
+            return None;
+        }
+        let mut reader = ws_input::cursor::KmsCursorReader::new();
+        let mut displays: Option<(Instant, Vec<ws_proto::DisplayInfo>)> = None;
+        Some(move || {
+            let c = reader.read()?;
+            if displays
+                .as_ref()
+                .is_none_or(|(at, _)| at.elapsed() >= DESKTOP_TTL)
+            {
+                displays = Some((
+                    Instant::now(),
+                    ws_capture::list_displays().unwrap_or_default(),
+                ));
+            }
+            let list = displays.as_ref().map_or(&[][..], |(_, d)| d.as_slice());
+            let (ox, oy) = origin_of(list, &c.connector);
+            Some(CursorState {
+                look: c.look,
+                x: c.x.saturating_add(ox),
+                y: c.y.saturating_add(oy),
+            })
+        })
+    }
+
+    /// Desktop position of the display on `connector`: the one named after it, else the only one.
+    fn origin_of(displays: &[ws_proto::DisplayInfo], connector: &str) -> (i32, i32) {
+        let named = (!connector.is_empty())
+            .then(|| {
+                displays.iter().find(|d| {
+                    d.name == connector
+                        || d.name.ends_with(&format!("-{connector}"))
+                        || d.name.contains(&format!("({connector})"))
+                })
+            })
+            .flatten();
+        match (named, displays) {
+            (Some(d), _) | (None, [d]) => (d.x, d.y),
+            _ => (0, 0),
+        }
     }
 
     pub fn audio_devices() -> ws_audio::Result<Vec<String>> {
@@ -155,6 +196,32 @@ mod imp {
             let c = rect(0, -1080, 1920, 1080);
             assert_eq!(union(a, c), rect(0, -1080, 1920, 2160));
             assert_eq!(union(a, a), a);
+        }
+
+        fn display(name: &str, x: i32) -> ws_proto::DisplayInfo {
+            ws_proto::DisplayInfo {
+                id: ws_proto::DisplayId(0),
+                name: name.into(),
+                x,
+                y: 0,
+                width: 1920,
+                height: 1080,
+                refresh_mhz: 0,
+                primary: false,
+            }
+        }
+
+        #[test]
+        fn cursor_origin_follows_the_connector_name() {
+            let two = [display("DP-1", 0), display("card1-HDMI-A-1", 1920)];
+            assert_eq!(origin_of(&two, "HDMI-A-1"), (1920, 0));
+            assert_eq!(origin_of(&two, "DP-1"), (0, 0));
+            assert_eq!(origin_of(&two, "DP-2"), (0, 0));
+            assert_eq!(
+                origin_of(&[display("Dell (DP-3)", 2560)], "DP-3"),
+                (2560, 0)
+            );
+            assert_eq!(origin_of(&[display("screen", 100)], ""), (100, 0));
         }
     }
 }

@@ -1,5 +1,6 @@
 //! Linux injection: uinput keyboard, relative mouse, absolute pointer and virtual pads.
 
+pub mod cursor;
 mod keys;
 mod pad;
 mod uinput;

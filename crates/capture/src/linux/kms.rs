@@ -91,7 +91,9 @@ pub(crate) enum Acquired {
 /// The scanout is taken as rendered in place once no flip has happened for this long.
 const FRONT_BUFFER_AFTER: Duration = Duration::from_secs(1);
 /// Polling interval when the CRTC gives no vblank events.
-const POLL_INTERVAL: Duration = Duration::from_millis(4);
+const POLL_INTERVAL: Duration = Duration::from_millis(16);
+/// How long to poll before asking for vblank events again.
+const VBLANK_RETRY: Duration = Duration::from_secs(1);
 
 /// Watches one CRTC's primary plane.
 pub(crate) struct KmsSource {
@@ -104,7 +106,9 @@ pub(crate) struct KmsSource {
     current: Option<(u32, Rc<Frame>)>,
     last_flip: Option<Instant>,
     vblank_pending: bool,
-    vblank_works: bool,
+    /// When vblank events last failed.
+    vblank_failed: Option<Instant>,
+    last_poll: Option<Instant>,
     fallback_crop: Crop,
 }
 
@@ -130,7 +134,8 @@ impl KmsSource {
             current: None,
             last_flip: None,
             vblank_pending: false,
-            vblank_works: true,
+            vblank_failed: None,
+            last_poll: None,
             fallback_crop: Crop {
                 x: crtc.x,
                 y: crtc.y,
@@ -138,6 +143,11 @@ impl KmsSource {
                 height: u32::from(mode.vdisplay),
             },
         })
+    }
+
+    /// Hands out the current scanout again on the next [`Self::acquire`].
+    pub(crate) fn refresh(&mut self) {
+        self.current = None;
     }
 
     /// Waits up to `timeout` for the next refresh and returns the scanout if it may have changed.
@@ -179,12 +189,21 @@ impl KmsSource {
     /// Waits for a vblank, or polls when the CRTC has none; false if nothing can have changed.
     fn wait(&mut self, timeout: Duration) -> bool {
         let ms = timeout.as_millis().min(1000) as i32;
-        if self.vblank_works && !self.vblank_pending {
+        let now = Instant::now();
+        let retry = self
+            .vblank_failed
+            .is_none_or(|t| now.saturating_duration_since(t) >= VBLANK_RETRY);
+        if retry && !self.vblank_pending {
             match self.card.request_vblank(self.pipe) {
-                Ok(()) => self.vblank_pending = true,
+                Ok(()) => {
+                    self.vblank_pending = true;
+                    self.vblank_failed = None;
+                }
                 Err(e) => {
-                    tracing::debug!(crtc = self.crtc_id, "no vblank events, polling: {e}");
-                    self.vblank_works = false;
+                    if self.vblank_failed.is_none() {
+                        tracing::debug!(crtc = self.crtc_id, "no vblank events, polling: {e}");
+                    }
+                    self.vblank_failed = Some(now);
                 }
             }
         }
@@ -197,12 +216,20 @@ impl KmsSource {
                 Ok(false) => self.current.is_none(),
                 Err(_) => {
                     self.vblank_pending = false;
-                    self.vblank_works = false;
+                    self.vblank_failed = Some(Instant::now());
                     true
                 }
             };
         }
-        std::thread::sleep(timeout.min(POLL_INTERVAL));
+        // Polling: one look per interval.
+        let due = self.last_poll.map_or(now, |t| t + POLL_INTERVAL);
+        let until = due.saturating_duration_since(now);
+        if until > timeout {
+            std::thread::sleep(timeout);
+            return false;
+        }
+        std::thread::sleep(until);
+        self.last_poll = Some(Instant::now());
         true
     }
 

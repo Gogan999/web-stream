@@ -474,6 +474,9 @@ impl Session {
         );
         let result = match in_place {
             Ok(()) => {
+                if let Some(source) = self.source.as_mut() {
+                    source.refresh();
+                }
                 self.sched.reset();
                 Ok(())
             }

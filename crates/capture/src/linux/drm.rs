@@ -76,7 +76,7 @@ struct WaitVblankRequest {
     kind: u32,
     sequence: u32,
     signal: u64,
-    /// The union's reply member is larger.
+    /// Room for the union's reply member.
     reply_pad: u64,
 }
 

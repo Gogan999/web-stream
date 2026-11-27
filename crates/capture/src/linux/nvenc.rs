@@ -172,7 +172,7 @@ impl<M: Send + 'static> GlNvenc<M> {
 impl<M: Send + 'static> Drop for GlNvenc<M> {
     fn drop(&mut self) {
         let _ = self.egl.make_current();
-        // Popped by cuCtxDestroy once the last field holding the context is gone.
+        // Current until the context is destroyed.
         self.ctx.push_forever();
     }
 }
@@ -201,7 +201,11 @@ pub(crate) fn probe(card: &std::path::Path) -> Option<crate::caps::EncoderInfo> 
             return None;
         }
     };
-    match crate::nvenc::probe(&Cuda(ctx)) {
+    let probed = match ctx.push() {
+        Ok(_cur) => crate::nvenc::probe(&Cuda(ctx.clone())),
+        Err(e) => Err(e),
+    };
+    match probed {
         Ok(codecs) if !codecs.is_empty() => Some(crate::caps::EncoderInfo {
             backend: crate::caps::EncoderBackend::Nvenc,
             adapter: format!("NVIDIA GPU {bus_id}"),

@@ -1,7 +1,7 @@
 //! NVENC encoder session, configured for interactive streaming: ultra-low-latency tuning at the
 //! preset [`crate::tuning`] picks for the config's quality, CBR with a VBV of about one frame and a
 //! quarter-resolution first pass, no B-frames, an infinite GOP, and parameter sets repeated on every
-//! IDR. The graphics API the frames come from is a [`Device`].
+//! IDR, reading frames from a [`Device`].
 
 use std::ffi::{CStr, c_void};
 use std::ptr;

@@ -206,7 +206,7 @@ impl Context {
             unsafe { (lib.cuCtxCreate_v2)(&mut ctx, CU_CTX_SCHED_BLOCKING_SYNC, device) },
             "cuCtxCreate",
         )?;
-        // cuCtxCreate leaves the new context current; it is pushed explicitly where used.
+        // Not current until pushed.
         let mut popped = std::ptr::null_mut();
         unsafe { (lib.cuCtxPopCurrent_v2)(&mut popped) };
         Ok(Arc::new(Self { lib, ctx }))

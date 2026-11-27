@@ -3,7 +3,7 @@
 pub mod caps;
 #[cfg(any(windows, target_os = "linux"))]
 mod encode;
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
 mod layout;
 #[cfg(target_os = "linux")]
 mod linux;
@@ -11,11 +11,11 @@ mod linux;
 mod modes;
 #[cfg(any(windows, target_os = "linux"))]
 mod nvenc;
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
 mod pacing;
 #[cfg(any(windows, target_os = "linux"))]
 mod session;
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
 mod tuning;
 #[cfg(windows)]
 mod win;

@@ -1,7 +1,6 @@
-//! VA-API encoder: VPP converts each scanout into a pool surface, the encoder reads it in place,
-//! and an output thread copies each bitstream out in order. Low-latency CBR (or a fixed quantizer
-//! for the Source quality), no B-frames, an infinite GOP, keyframes on demand, parameter sets on
-//! every IDR.
+//! VA-API encoder in low-latency CBR (or a fixed quantizer for the Source quality) with no
+//! B-frames and an infinite GOP, reading VPP's pool surfaces in place and copying each bitstream out
+//! on an output thread.
 
 use std::path::Path;
 use std::sync::mpsc as std_mpsc;

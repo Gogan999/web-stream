@@ -1,7 +1,5 @@
 //! AV1 sequence and frame header OBUs and VA-API parameter buffers: profile 0, 8-bit 4:2:0, 64x64
 //! superblocks, key frames and inter frames referencing the previous frame, BT.709 limited range.
-//! The driver rewrites the quantizer, loop filter and CDEF fields it chooses at the bit offsets
-//! given.
 
 use super::bits::{BitWriter, leb128};
 use super::encoder::{Codec, Pic, Stream, packed};
@@ -431,8 +429,8 @@ impl Codec for Av1 {
             p.bit_offset_cdef_params = header.cdef;
             p.size_in_bits_cdef_params = header.cdef_bits;
             p.size_in_bits_frame_hdr_obu = header.frame_header_bits;
+            p.byte_offset_frame_hdr_obu_size = header.obu_size_byte;
         }
-        p.byte_offset_frame_hdr_obu_size = header.obu_size_byte;
         unsafe { p.tile_group_obu_hdr_info.bits.set_obu_has_size_field(1) };
         out.push(display.buffer(context, VAEncPictureParameterBufferType, &p)?);
 

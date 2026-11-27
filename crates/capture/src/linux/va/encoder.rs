@@ -321,11 +321,6 @@ impl<M: Send + 'static> VaEncoder<M> {
         self.vpp.convert(frame, target)
     }
 
-    /// Whether there is an image to encode.
-    pub(crate) fn has_image(&self) -> bool {
-        self.vpp.current.is_some()
-    }
-
     /// Queues the newest image for encoding; it comes out on the output thread with `meta`.
     pub(crate) fn submit(&mut self, force_idr: bool, kbps: Option<u32>, meta: M) -> Result<()> {
         if let Some(e) = self.failed.lock().unwrap_or_else(|e| e.into_inner()).take() {

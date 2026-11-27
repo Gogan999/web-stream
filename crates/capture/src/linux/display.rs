@@ -17,12 +17,9 @@ pub(crate) struct Output {
     pub render: Option<PathBuf>,
     /// The kernel driver, e.g. `i915`.
     pub driver: String,
-    /// PCI vendor id, 0 if unknown.
-    pub vendor: u32,
     pub crtc_id: u32,
     /// The CRTC's index on its card.
     pub pipe: u32,
-    pub connector_id: u32,
     pub internal: bool,
 }
 
@@ -82,7 +79,6 @@ fn card_outputs(path: &std::path::Path) -> std::io::Result<Vec<Output>> {
     let res = card.resources()?;
     let key = drm::device_key(path);
     let render = drm::render_node(path);
-    let vendor = drm::vendor(path);
     let mut out = Vec::new();
     for &connector_id in &res.connectors {
         let Ok(c) = card.connector(connector_id) else {
@@ -127,10 +123,8 @@ fn card_outputs(path: &std::path::Path) -> std::io::Result<Vec<Output>> {
             card: path.to_owned(),
             render: render.clone(),
             driver: driver.clone(),
-            vendor,
             crtc_id,
             pipe: pipe as u32,
-            connector_id,
             internal: matches!(
                 c.kind,
                 drm::CONNECTOR_EDP | drm::CONNECTOR_LVDS | drm::CONNECTOR_DSI
@@ -143,7 +137,7 @@ fn card_outputs(path: &std::path::Path) -> std::io::Result<Vec<Output>> {
 /// An id from the GPU's device path and the connector's name, the same across boots.
 fn stable_id(device: &str, connector: &str) -> u32 {
     let mut h: u32 = 0x811c_9dc5;
-    for b in device.bytes().chain([b'/']).chain(connector.bytes()) {
+    for b in device.bytes().chain(*b"/").chain(connector.bytes()) {
         h ^= u32::from(b);
         h = h.wrapping_mul(0x0100_0193);
     }

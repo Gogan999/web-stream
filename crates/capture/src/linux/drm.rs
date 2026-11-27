@@ -14,6 +14,7 @@ const fn iow(nr: u32, size: usize) -> u64 {
     ((1u64) << 30) | ((size as u64) << 16) | ((b'd' as u64) << 8) | nr as u64
 }
 
+#[cfg(test)]
 const fn io(nr: u32) -> u64 {
     ((b'd' as u64) << 8) | nr as u64
 }
@@ -244,8 +245,6 @@ pub(crate) struct FbCmd2 {
 pub(crate) const FB_MODIFIERS: u32 = 2;
 /// `DRM_FORMAT_MOD_INVALID`.
 pub(crate) const MOD_INVALID: u64 = 0x00ff_ffff_ffff_ffff;
-/// `DRM_FORMAT_MOD_LINEAR`.
-pub(crate) const MOD_LINEAR: u64 = 0;
 
 #[repr(C)]
 #[derive(Default)]
@@ -257,6 +256,7 @@ struct ObjGetProperties {
     obj_type: u32,
 }
 
+#[cfg(test)]
 #[repr(C)]
 #[derive(Default)]
 pub(crate) struct CreateDumb {
@@ -269,6 +269,7 @@ pub(crate) struct CreateDumb {
     pub size: u64,
 }
 
+#[cfg(test)]
 #[repr(C)]
 #[derive(Default)]
 pub(crate) struct MapDumb {
@@ -280,29 +281,35 @@ pub(crate) struct MapDumb {
 const IOCTL_VERSION: u64 = iowr(0x00, size_of::<DrmVersion>());
 const IOCTL_GEM_CLOSE: u64 = iow(0x09, size_of::<GemClose>());
 const IOCTL_SET_CLIENT_CAP: u64 = iow(0x0d, size_of::<SetClientCap>());
+#[cfg(test)]
 const IOCTL_SET_MASTER: u64 = io(0x1e);
+#[cfg(test)]
 const IOCTL_DROP_MASTER: u64 = io(0x1f);
 const IOCTL_PRIME_HANDLE_TO_FD: u64 = iowr(0x2d, size_of::<PrimeHandle>());
 const IOCTL_WAIT_VBLANK: u64 = iowr(0x3a, size_of::<WaitVblankRequest>());
 const IOCTL_MODE_GETRESOURCES: u64 = iowr(0xa0, size_of::<CardRes>());
 const IOCTL_MODE_GETCRTC: u64 = iowr(0xa1, size_of::<ModeCrtc>());
+#[cfg(test)]
 const IOCTL_MODE_SETCRTC: u64 = iowr(0xa2, size_of::<ModeCrtc>());
 const IOCTL_MODE_GETENCODER: u64 = iowr(0xa6, size_of::<GetEncoder>());
 const IOCTL_MODE_GETCONNECTOR: u64 = iowr(0xa7, size_of::<GetConnector>());
 const IOCTL_MODE_GETPROPERTY: u64 = iowr(0xaa, size_of::<GetProperty>());
 const IOCTL_MODE_GETPROPBLOB: u64 = iowr(0xac, size_of::<GetBlob>());
+#[cfg(test)]
 const IOCTL_MODE_RMFB: u64 = iowr(0xaf, size_of::<u32>());
+#[cfg(test)]
 const IOCTL_MODE_CREATE_DUMB: u64 = iowr(0xb2, size_of::<CreateDumb>());
+#[cfg(test)]
 const IOCTL_MODE_MAP_DUMB: u64 = iowr(0xb3, size_of::<MapDumb>());
+#[cfg(test)]
 const IOCTL_MODE_DESTROY_DUMB: u64 = iowr(0xb4, size_of::<u32>());
 const IOCTL_MODE_GETPLANERESOURCES: u64 = iowr(0xb5, size_of::<GetPlaneRes>());
 const IOCTL_MODE_GETPLANE: u64 = iowr(0xb6, size_of::<GetPlane>());
+#[cfg(test)]
 const IOCTL_MODE_ADDFB2: u64 = iowr(0xb8, size_of::<FbCmd2>());
 const IOCTL_MODE_OBJ_GETPROPERTIES: u64 = iowr(0xb9, size_of::<ObjGetProperties>());
 const IOCTL_MODE_GETFB2: u64 = iowr(0xce, size_of::<FbCmd2>());
 
-pub(crate) const OBJECT_CRTC: u32 = 0xcccc_cccc;
-pub(crate) const OBJECT_CONNECTOR: u32 = 0xc0c0_c0c0;
 pub(crate) const OBJECT_PLANE: u32 = 0xeeee_eeee;
 
 const CLIENT_CAP_UNIVERSAL_PLANES: u64 = 2;
@@ -318,12 +325,13 @@ pub(crate) const PLANE_TYPE_PRIMARY: u64 = 1;
 /// A connector's state.
 #[derive(Debug, Clone)]
 pub(crate) struct Connector {
-    pub id: u32,
     pub kind: u32,
     pub kind_id: u32,
     pub connected: bool,
     pub encoder_id: u32,
+    #[cfg_attr(not(test), allow(dead_code))]
     pub encoders: Vec<u32>,
+    #[cfg_attr(not(test), allow(dead_code))]
     pub modes: Vec<ModeInfo>,
     pub props: Vec<(u32, u64)>,
 }
@@ -375,8 +383,6 @@ pub(crate) const CONNECTOR_DSI: u32 = 16;
 /// A CRTC's state.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Crtc {
-    pub id: u32,
-    pub fb_id: u32,
     pub x: u32,
     pub y: u32,
     pub mode: Option<ModeInfo>,
@@ -385,7 +391,6 @@ pub(crate) struct Crtc {
 /// A plane's state.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Plane {
-    pub id: u32,
     pub crtc_id: u32,
     pub fb_id: u32,
     pub possible_crtcs: u32,
@@ -401,7 +406,6 @@ pub(crate) struct Resources {
 /// An open DRM device node.
 pub(crate) struct Card {
     fd: OwnedFd,
-    path: PathBuf,
 }
 
 fn ioctl<T>(fd: RawFd, request: u64, arg: &mut T) -> io::Result<()> {
@@ -440,20 +444,13 @@ impl Card {
         }
         // SAFETY: `fd` was just opened and is owned here.
         let fd = unsafe { OwnedFd::from_raw_fd(fd) };
-        let card = Self {
-            fd,
-            path: path.to_owned(),
-        };
+        let card = Self { fd };
         let mut cap = SetClientCap {
             capability: CLIENT_CAP_UNIVERSAL_PLANES,
             value: 1,
         };
         let _ = ioctl(card.raw(), IOCTL_SET_CLIENT_CAP, &mut cap);
         Ok(card)
-    }
-
-    pub(crate) fn path(&self) -> &Path {
-        &self.path
     }
 
     pub(crate) fn raw(&self) -> RawFd {
@@ -526,7 +523,6 @@ impl Card {
                 continue;
             }
             return Ok(Connector {
-                id,
                 kind: c.connector_type,
                 kind_id: c.connector_type_id,
                 connected: c.connection == 1,
@@ -561,8 +557,6 @@ impl Card {
         };
         ioctl(self.raw(), IOCTL_MODE_GETCRTC, &mut c)?;
         Ok(Crtc {
-            id,
-            fb_id: c.fb_id,
             x: c.x,
             y: c.y,
             mode: (c.mode_valid != 0).then_some(c.mode),
@@ -594,7 +588,6 @@ impl Card {
         };
         ioctl(self.raw(), IOCTL_MODE_GETPLANE, &mut p)?;
         Ok(Plane {
-            id,
             crtc_id: p.crtc_id,
             fb_id: p.fb_id,
             possible_crtcs: p.possible_crtcs,
@@ -743,7 +736,11 @@ impl Card {
         }
         Ok(has_vblank_event(&buf[..len as usize]))
     }
+}
 
+/// Driving a display, for tests.
+#[cfg(test)]
+impl Card {
     pub(crate) fn set_master(&self) -> io::Result<()> {
         let mut unused = 0u32;
         ioctl(self.raw(), IOCTL_SET_MASTER, &mut unused)

@@ -27,10 +27,12 @@ pub(crate) struct H264 {
 
 impl H264 {
     pub(crate) fn new(profile: VAProfile, stream: &Stream, packed: u32) -> Self {
-        let (profile_idc, constraints, high) = match profile {
-            VAProfileH264High => (100, 0x0c, true),
-            VAProfileH264Main => (77, 0x00, false),
-            _ => (66, 0xc0, false),
+        let (profile_idc, constraints, high) = if profile == VAProfileH264High {
+            (100, 0x0c, true)
+        } else if profile == VAProfileH264Main {
+            (77, 0x00, false)
+        } else {
+            (66, 0xc0, false)
         };
         let width_mbs = stream.width.div_ceil(16);
         let height_mbs = stream.height.div_ceil(16);

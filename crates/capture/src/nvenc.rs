@@ -1015,6 +1015,97 @@ fn last_error(
     format!("NVENCSTATUS {} {detail}", status.0)
 }
 
+/// The codecs NVENC encodes on `device`, and the largest size for each.
+#[cfg_attr(windows, allow(dead_code))]
+pub(crate) fn probe<D: Device>(device: &D) -> Result<Vec<crate::caps::CodecSupport>> {
+    let api = api()?;
+    let mut session = nv::NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS {
+        version: nv::NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER,
+        deviceType: D::DEVICE_TYPE,
+        device: device.handle(),
+        apiVersion: nv::NVENCAPI_VERSION,
+        ..Default::default()
+    };
+    let mut encoder = ptr::null_mut();
+    let status = unsafe { call!(api, nvEncOpenEncodeSessionEx(&mut session, &mut encoder)) };
+    if status != nv::NVENCSTATUS::NV_ENC_SUCCESS {
+        return Err(CaptureError::NoEncoder(format!(
+            "NVENC session failed to open (NVENCSTATUS {})",
+            status.0
+        )));
+    }
+    let result = (|| {
+        let mut count = 0u32;
+        check(
+            unsafe { call!(api, nvEncGetEncodeGUIDCount(encoder, &mut count)) },
+            "nvEncGetEncodeGUIDCount",
+        )?;
+        let mut guids = vec![nv::GUID::default(); count as usize];
+        let mut n = 0u32;
+        check(
+            unsafe {
+                call!(
+                    api,
+                    nvEncGetEncodeGUIDs(encoder, guids.as_mut_ptr(), count, &mut n)
+                )
+            },
+            "nvEncGetEncodeGUIDs",
+        )?;
+        guids.truncate(n as usize);
+        let cap = |guid: nv::GUID, cap: nv::NV_ENC_CAPS| -> Result<i32> {
+            let mut param = nv::NV_ENC_CAPS_PARAM {
+                version: nv::NV_ENC_CAPS_PARAM_VER,
+                capsToQuery: cap,
+                ..Default::default()
+            };
+            let mut value = 0;
+            check(
+                unsafe {
+                    call!(
+                        api,
+                        nvEncGetEncodeCaps(encoder, guid, &mut param, &mut value)
+                    )
+                },
+                "nvEncGetEncodeCaps",
+            )?;
+            Ok(value)
+        };
+        let mut out = Vec::new();
+        for (codec, guid) in [
+            (VideoCodec::H264, nv::NV_ENC_CODEC_H264_GUID),
+            (VideoCodec::H265, nv::NV_ENC_CODEC_HEVC_GUID),
+            (VideoCodec::Av1, nv::NV_ENC_CODEC_AV1_GUID),
+        ] {
+            if !guids.iter().any(|g| same_guid(g, &guid)) {
+                continue;
+            }
+            let max_width = cap(guid, nv::NV_ENC_CAPS::NV_ENC_CAPS_WIDTH_MAX)?;
+            let max_height = cap(guid, nv::NV_ENC_CAPS::NV_ENC_CAPS_HEIGHT_MAX)?;
+            let repair = cap(
+                guid,
+                nv::NV_ENC_CAPS::NV_ENC_CAPS_SUPPORT_REF_PIC_INVALIDATION,
+            )?;
+            out.push(crate::caps::CodecSupport {
+                codec,
+                max_width: max_width.max(0) as u32,
+                max_height: max_height.max(0) as u32,
+                repair: repair > 0,
+            });
+        }
+        Ok(out)
+    })();
+    unsafe {
+        if let Some(f) = api.nvEncDestroyEncoder {
+            f(encoder);
+        }
+    }
+    result
+}
+
+fn same_guid(a: &nv::GUID, b: &nv::GUID) -> bool {
+    a.Data1 == b.Data1 && a.Data2 == b.Data2 && a.Data3 == b.Data3 && a.Data4 == b.Data4
+}
+
 /// Reference pictures kept when invalidation is on: how far back the encoder can reach for a
 /// picture the browser has.
 pub(crate) const DPB_FRAMES: u32 = 4;

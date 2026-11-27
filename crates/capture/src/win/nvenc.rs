@@ -18,7 +18,7 @@ use ws_nvenc_sys as nv;
 use super::Gpu;
 use crate::{CaptureError, Result};
 
-pub(crate) use crate::nvenc::{DPB_FRAMES, Finished};
+pub(crate) use crate::nvenc::DPB_FRAMES;
 
 /// The encoder for the capture thread's D3D11 device.
 pub(crate) type NvEncoder<M> = crate::nvenc::NvEncoder<D3d, M>;

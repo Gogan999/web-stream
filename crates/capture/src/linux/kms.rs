@@ -522,7 +522,7 @@ mod tests {
                     mode,
                     buffers: Vec::new(),
                 };
-                screen.show(|x, y| pattern(x, y))?;
+                screen.show(pattern)?;
                 return Some(screen);
             }
             None

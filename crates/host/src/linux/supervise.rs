@@ -53,9 +53,11 @@ fn prepare_dirs(paths: &Paths, uid: u32, gid: u32) -> anyhow::Result<()> {
     std::fs::create_dir_all(&paths.data)?;
     mode(&paths.data, 0o755)?;
     let network = paths.network();
-    std::fs::create_dir_all(&network)?;
+    if !network.exists() {
+        std::fs::create_dir(&network)?;
+        mode(&network, 0o700)?;
+    }
     chown_tree(&network, uid, gid).with_context(|| format!("{}", network.display()))?;
-    mode(&network, 0o700)?;
     std::fs::create_dir_all(&paths.run)?;
     mode(&paths.run, 0o700)?;
     Ok(())

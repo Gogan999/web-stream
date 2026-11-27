@@ -98,7 +98,7 @@ if [ -n "$fake" ]; then
     fakectl="$mirror/systemctl"
     cat >"$fakectl" <<'EOF'
 #!/bin/sh
-# Stands in for systemctl: runs the service in the background.
+# Stands in for systemctl: runs the service in the background with the unit's capabilities.
 pidfile=/run/web-stream-fake.pid
 stop() {
     if [ -f $pidfile ]; then
@@ -110,7 +110,9 @@ stop() {
     fi
 }
 start() {
-    setsid /usr/local/lib/web-stream/web-stream service run >>/var/log/web-stream-fake.log 2>&1 &
+    setsid setpriv --no-new-privs --inh-caps=-all \
+        --bounding-set=-all,+sys_admin,+sys_nice,+setuid,+setgid,+chown,+dac_read_search \
+        /usr/local/lib/web-stream/web-stream service run >>/var/log/web-stream-fake.log 2>&1 &
     echo $! >$pidfile
 }
 case "$1" in

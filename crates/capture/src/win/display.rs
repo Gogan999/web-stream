@@ -32,6 +32,7 @@ pub(crate) struct Output {
     pub adapter_luid: LUID,
     /// The adapter's description, as the encoder probe names it.
     pub adapter_name: String,
+    pub adapter_vendor: u32,
     pub output: IDXGIOutput1,
 }
 
@@ -103,6 +104,7 @@ pub(crate) fn enumerate() -> Result<Vec<Output>> {
                 adapter: adapter.clone(),
                 adapter_luid: adesc.AdapterLuid,
                 adapter_name: adapter_name.clone(),
+                adapter_vendor: adesc.VendorId,
                 output,
             });
         }

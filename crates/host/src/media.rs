@@ -1891,6 +1891,9 @@ impl Media {
                 self.config.codec = codec;
             }
         }
+        if auto {
+            block_in_place(ws_capture::encoders);
+        }
         self.decoders = Some(BrowserDecoders { decoders, auto });
         let choice = self.codec_choice();
         if auto {

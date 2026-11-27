@@ -97,16 +97,12 @@ pub fn backends_for(
             out.push(e.backend);
         }
     }
-    out.sort_by_key(|b| match b {
-        EncoderBackend::Nvenc => 0,
-        EncoderBackend::Vaapi => 1,
-        EncoderBackend::MediaFoundation => 2,
-    });
+    out.sort_by_key(|&b| preference(b));
     out
 }
 
-/// Backends to try on the GPU named `adapter`: those the probe found there for `codec` at this
-/// size, or `fallback` when the probe found no encoder at all on that GPU.
+/// Backends to try on the GPU named `adapter`, in order of preference: those the probe found there
+/// for `codec` at this size, and each of `fallback` the probe did not find there at all.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn backends_on(
     encoders: &[EncoderInfo],
@@ -121,10 +117,21 @@ pub(crate) fn backends_on(
         .filter(|e| e.adapter == adapter)
         .cloned()
         .collect();
-    if here.is_empty() {
-        fallback.to_vec()
-    } else {
-        backends_for(&here, codec, width, height)
+    let mut out = backends_for(&here, codec, width, height);
+    for &b in fallback {
+        if !here.iter().any(|e| e.backend == b) && !out.contains(&b) {
+            out.push(b);
+        }
+    }
+    out.sort_by_key(|&b| preference(b));
+    out
+}
+
+fn preference(backend: EncoderBackend) -> u8 {
+    match backend {
+        EncoderBackend::Nvenc => 0,
+        EncoderBackend::Vaapi => 1,
+        EncoderBackend::MediaFoundation => 2,
     }
 }
 
@@ -228,24 +235,34 @@ mod tests {
             &[(H264, 4096, 4096), (Av1, 8192, 8192)],
         );
         mf.adapter = "Arc".into();
-        let e = [nv, mf];
-        let fallback = [EncoderBackend::Nvenc, EncoderBackend::MediaFoundation];
+        let e = [nv.clone(), mf];
+        let nvidia = [EncoderBackend::Nvenc, EncoderBackend::MediaFoundation];
+        let other = [EncoderBackend::MediaFoundation];
         assert_eq!(
-            backends_on(&e, "Arc", H264, 1920, 1080, &fallback),
+            backends_on(&e, "Arc", H264, 1920, 1080, &other),
             [EncoderBackend::MediaFoundation]
         );
+        assert!(backends_on(&e, "Arc", H265, 1920, 1080, &other).is_empty());
         assert_eq!(
-            backends_on(&e, "RTX", H264, 1920, 1080, &fallback),
-            [EncoderBackend::Nvenc]
-        );
-        assert!(backends_on(&e, "RTX", Av1, 1920, 1080, &fallback).is_empty());
-        assert_eq!(
-            backends_on(&e, "Other", Av1, 1920, 1080, &fallback),
-            fallback
+            backends_on(&e, "RTX", H264, 1920, 1080, &nvidia),
+            [EncoderBackend::Nvenc, EncoderBackend::MediaFoundation]
         );
         assert_eq!(
-            backends_on(&[], "RTX", H264, 1920, 1080, &fallback),
-            fallback
+            backends_on(&e, "RTX", Av1, 1920, 1080, &nvidia),
+            [EncoderBackend::MediaFoundation]
+        );
+        assert_eq!(backends_on(&e, "Other", Av1, 1920, 1080, &nvidia), nvidia);
+        assert_eq!(backends_on(&[], "RTX", H264, 1920, 1080, &nvidia), nvidia);
+        // An NVENC probe that failed does not hand an NVIDIA GPU to Media Foundation.
+        let mut nv_mf = enc(EncoderBackend::MediaFoundation, &[(H264, 4096, 4096)]);
+        nv_mf.adapter = "RTX".into();
+        assert_eq!(
+            backends_on(&[nv_mf.clone()], "RTX", H264, 1920, 1080, &nvidia),
+            nvidia
+        );
+        assert_eq!(
+            backends_on(&[nv, nv_mf], "RTX", H264, 1920, 1080, &nvidia),
+            nvidia
         );
     }
 }

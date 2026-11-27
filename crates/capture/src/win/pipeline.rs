@@ -215,7 +215,11 @@ impl Encode {
             config.codec,
             config.width,
             config.height,
-            &[EncoderBackend::Nvenc, EncoderBackend::MediaFoundation],
+            if output.adapter_vendor == super::NVIDIA {
+                &[EncoderBackend::Nvenc, EncoderBackend::MediaFoundation]
+            } else {
+                &[EncoderBackend::MediaFoundation]
+            },
         );
         let mut errors = Vec::new();
         let mut transient = false;

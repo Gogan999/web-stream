@@ -24,7 +24,7 @@ STUN or TURN server is needed.
 | Path | Crate | What it does |
 |---|---|---|
 | `crates/proto` | `ws-proto` | Shared interface types: frames, displays, input events, control, pairing and signaling messages. The source of truth for the wire contract |
-| `crates/capture` | `ws-capture` | DXGI Desktop Duplication and hardware encoding (NVENC; AMF and QSV planned) |
+| `crates/capture` | `ws-capture` | DXGI Desktop Duplication and hardware encoding (NVENC, Media Foundation hardware encoders) |
 | `crates/nvenc-sys` | `ws-nvenc-sys` | Raw NVENC (NVIDIA Video Codec SDK 12.1) bindings, loaded at runtime |
 | `crates/desktop` | `ws-desktop` | Following the input desktop (lock screen, UAC) so capture and input work there |
 | `crates/transport` | `ws-transport` | WebRTC peer connection (str0m), media tracks, data channels, pacing and frame dropping |

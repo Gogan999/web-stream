@@ -196,11 +196,68 @@ impl SignalingHandle {
     pub async fn close_pairing(&self) {
         self.shared.pairing.lock().await.close();
     }
+
+    /// The paired device whose cookie or bearer token `headers` carry.
+    pub async fn paired_device(&self, headers: &HeaderMap) -> Option<PairedDevice> {
+        let token = bearer_token(headers).or_else(|| cookie_token(headers))?;
+        let store = self.shared.store.lock().await;
+        store
+            .check(&token, SystemTime::now())
+            .map(|d| paired_device(d, crate::store::hash(&token)))
+    }
+
+    /// Every paired device.
+    pub async fn devices(&self) -> Vec<PairedDevice> {
+        let store = self.shared.store.lock().await;
+        store
+            .list()
+            .iter()
+            .map(|d| paired_device(d, d.token_sha256.clone()))
+            .collect()
+    }
+
+    /// Forgets the device with this id, ending its session; false if there is none.
+    pub async fn revoke_device(&self, id: &str) -> Result<bool, Error> {
+        let removed = self.shared.store.lock().await.revoke_hash(id)?;
+        let mut current = self.shared.current.lock().await;
+        if current
+            .as_ref()
+            .is_some_and(|c| crate::store::hash(&c.token) == id)
+        {
+            let _ = current
+                .take()
+                .expect("checked")
+                .kick
+                .send(ByeReason::Revoked);
+        }
+        Ok(removed)
+    }
+}
+
+fn paired_device(d: &crate::store::Device, id: String) -> PairedDevice {
+    PairedDevice {
+        id,
+        name: d.name.clone(),
+        paired_at: d.paired_at,
+        last_used: d.last_used,
+    }
 }
 
 pub struct SignalingServer {
     shared: Arc<Shared>,
     tls: tls::LoadedTls,
+    /// Routes the host adds, served without the API's CORS.
+    extra: Option<Router>,
+}
+
+/// A paired device as the host's settings page lists it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct PairedDevice {
+    /// Its token's hash, as [`SignalingSession::device_id`].
+    pub id: String,
+    pub name: String,
+    pub paired_at: u64,
+    pub last_used: u64,
 }
 
 impl SignalingServer {
@@ -227,7 +284,14 @@ impl SignalingServer {
             notices: notices_tx,
             ca_der: tls.certs.ca_der().map(<[u8]>::to_vec),
         });
-        Ok((Self { shared, tls }, SignalingEvents { sessions, notices }))
+        Ok((
+            Self {
+                shared,
+                tls,
+                extra: None,
+            },
+            SignalingEvents { sessions, notices },
+        ))
     }
 
     /// The TLS certificate in use: its SHA-256 fingerprint is for the user to compare with what the
@@ -242,20 +306,28 @@ impl SignalingServer {
         }
     }
 
+    /// Adds routes of the host's own, served before the web client.
+    pub fn add_routes(&mut self, routes: Router) {
+        self.extra = Some(match self.extra.take() {
+            Some(r) => r.merge(routes),
+            None => routes,
+        });
+    }
+
     /// The HTTP routes without TLS, for tests or a custom listener.
     pub fn router(&self) -> Router {
-        router(self.shared.clone())
+        router(self.shared.clone(), self.extra.clone())
     }
 
     pub async fn serve(self) -> Result<(), Error> {
         let addr = self.shared.config.bind;
-        let app = router(self.shared.clone());
+        let app = router(self.shared.clone(), self.extra);
         tracing::info!(%addr, fingerprint = %self.tls.certs.info().fingerprint, "signaling listening");
         crate::listen::serve(addr, self.tls.config.clone(), app).await
     }
 }
 
-fn router(shared: Arc<Shared>) -> Router {
+fn router(shared: Arc<Shared>, extra: Option<Router>) -> Router {
     let api = Router::new()
         .route("/api/session", get(session_status))
         .route("/api/pair/start", post(pair_start))
@@ -267,6 +339,10 @@ fn router(shared: Arc<Shared>) -> Router {
         .layer(DefaultBodyLimit::max(MAX_API_BODY))
         .layer(axum::middleware::from_fn(cors))
         .with_state(shared.clone());
+    let api = match extra {
+        Some(extra) => api.merge(extra),
+        None => api,
+    };
 
     let embedded = shared.config.embedded_web;
     let app = match &shared.config.web_root {

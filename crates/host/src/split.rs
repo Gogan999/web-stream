@@ -421,6 +421,15 @@ pub async fn serve_network(
     opts: ServeOptions,
     link: impl AsyncRead + AsyncWrite + Send + 'static,
 ) -> anyhow::Result<()> {
+    serve_network_with(opts, link, None).await
+}
+
+/// [`serve_network`] with an [`Extension`](serve::Extension).
+pub async fn serve_network_with(
+    opts: ServeOptions,
+    link: impl AsyncRead + AsyncWrite + Send + 'static,
+    extension: Option<Box<dyn serve::Extension>>,
+) -> anyhow::Result<()> {
     let _ = mono_now();
     let (read, write) = tokio::io::split(link);
     let mut incoming = spawn_reader::<Up>(read, MAX_UP);
@@ -429,7 +438,7 @@ pub async fn serve_network(
         out.send(frame(msg, []));
     };
 
-    let mut net = Network::start(&opts).await?;
+    let mut net = Network::start(&opts, extension).await?;
     let transport = net.transport.clone();
     let mut events = net.transport_events.take().expect("events not taken yet");
     let mut notices = net.notices.take().expect("notices not taken yet");

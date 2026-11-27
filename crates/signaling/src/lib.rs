@@ -15,7 +15,8 @@ pub use config::{SignalingConfig, TlsSource, TurnServer};
 pub use pairing::DEFAULT_WINDOW;
 pub use probe::certificate_at;
 pub use server::{
-    Notice, SessionEvent, SignalingEvents, SignalingHandle, SignalingServer, SignalingSession,
+    Notice, PairedDevice, SessionEvent, SignalingEvents, SignalingHandle, SignalingServer,
+    SignalingSession,
 };
 pub use store::write_private;
 pub use tls::CertInfo;

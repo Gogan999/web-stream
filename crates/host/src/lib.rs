@@ -7,6 +7,8 @@ pub mod console;
 mod cursor;
 mod files;
 mod input;
+#[cfg(target_os = "linux")]
+pub mod linux;
 mod media;
 pub mod options;
 mod platform;

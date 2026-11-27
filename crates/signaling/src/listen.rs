@@ -8,12 +8,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::Router;
+use axum::extract::ConnectInfo;
 use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::service::TowerToHyperService;
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 use tokio_rustls::TlsAcceptor;
+use tower_http::add_extension::AddExtension;
 
 use crate::Error;
 
@@ -64,7 +66,7 @@ pub async fn serve_listener(
         };
         let _ = tcp.set_nodelay(true);
         let acceptor = acceptor.clone();
-        let service = TowerToHyperService::new(app.clone());
+        let service = TowerToHyperService::new(AddExtension::new(app.clone(), ConnectInfo(peer)));
         tokio::spawn(async move {
             let _slot = slot;
             let _ip = ip_guard;

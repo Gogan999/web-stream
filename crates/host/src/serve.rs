@@ -72,14 +72,35 @@ pub enum Event {
     Update(String),
 }
 
+/// Something the host adds to its HTTPS server, such as the Linux settings page.
+pub trait Extension: Send {
+    /// Adds routes to `server`; sees every notice in `notices` and returns them to pass on.
+    fn attach(
+        self: Box<Self>,
+        server: &mut SignalingServer,
+        started: &Event,
+        notices: mpsc::UnboundedReceiver<Notice>,
+    ) -> mpsc::UnboundedReceiver<Notice>;
+}
+
 /// Runs the host until [`Command::Quit`], until every command sender is dropped, or until the
 /// signaling server fails.
 pub async fn serve(
     opts: ServeOptions,
-    mut commands: mpsc::Receiver<Command>,
+    commands: mpsc::Receiver<Command>,
     events: mpsc::UnboundedSender<Event>,
 ) -> anyhow::Result<()> {
-    let mut net = Network::start(&opts).await?;
+    serve_with(opts, commands, events, None).await
+}
+
+/// [`serve`] with an [`Extension`].
+pub async fn serve_with(
+    opts: ServeOptions,
+    mut commands: mpsc::Receiver<Command>,
+    events: mpsc::UnboundedSender<Event>,
+    extension: Option<Box<dyn Extension>>,
+) -> anyhow::Result<()> {
+    let mut net = Network::start(&opts, extension).await?;
     let (media_stop, media_stop_rx) = oneshot::channel();
     let (files, files_rx) = mpsc::channel(8);
     let transport_events = net.transport_events.take().expect("events not taken yet");
@@ -148,7 +169,10 @@ pub(crate) struct Network {
 }
 
 impl Network {
-    pub async fn start(opts: &ServeOptions) -> anyhow::Result<Self> {
+    pub async fn start(
+        opts: &ServeOptions,
+        extension: Option<Box<dyn Extension>>,
+    ) -> anyhow::Result<Self> {
         let mut config = SignalingConfig::new(opts.bind(), opts.data_dir.clone());
         config.web_root = opts.web_root.clone();
         config.embedded_web = crate::web::WEB_FILES;
@@ -163,7 +187,7 @@ impl Network {
                 hostnames: opts.hostnames.clone(),
             },
         };
-        let (server, signaling_events) = SignalingServer::new(config)
+        let (mut server, signaling_events) = SignalingServer::new(config)
             .map_err(|e| data_dir_error(e, &opts.data_dir))
             .context("signaling server")?;
         let signaling = server.handle();
@@ -194,18 +218,6 @@ impl Network {
         .await
         .context("transport")?;
 
-        let server_task = tokio::spawn(server.serve());
-        let (codecs_tx, codecs) = watch::channel(None);
-        let (peers_tx, peers) = watch::channel(media::Peer::default());
-        let (signaling_stop, signaling_stop_rx) = oneshot::channel();
-        let sessions = tokio::spawn(run_signaling(
-            signaling_events.sessions,
-            transport.clone(),
-            codecs_tx,
-            peers_tx,
-            public_ip,
-            signaling_stop_rx,
-        ));
         let started = Event::Started {
             port: opts.port,
             ips: if opts.ips.is_empty() {
@@ -218,12 +230,28 @@ impl Network {
             web_root: opts.web_root.clone(),
             data_dir: opts.data_dir.clone(),
         };
+        let notices = match extension {
+            Some(ext) => ext.attach(&mut server, &started, signaling_events.notices),
+            None => signaling_events.notices,
+        };
+        let server_task = tokio::spawn(server.serve());
+        let (codecs_tx, codecs) = watch::channel(None);
+        let (peers_tx, peers) = watch::channel(media::Peer::default());
+        let (signaling_stop, signaling_stop_rx) = oneshot::channel();
+        let sessions = tokio::spawn(run_signaling(
+            signaling_events.sessions,
+            transport.clone(),
+            codecs_tx,
+            peers_tx,
+            public_ip,
+            signaling_stop_rx,
+        ));
         Ok(Self {
             signaling,
             server_task,
             transport,
             transport_events: Some(transport_events),
-            notices: Some(signaling_events.notices),
+            notices: Some(notices),
             codecs,
             peers,
             started,

@@ -13,10 +13,18 @@ pre-release) on a commit on `main`, with `version` in `Cargo.toml`'s
    `web-stream-host-X.Y.Z-windows-x64.zip`, the installer
    `web-stream-setup-X.Y.Z.exe` (Inno Setup, `installer/`), and the same
    silent install, start and uninstall test CI runs.
-3. **publish** waits for approval if the `release` environment has a
+3. **linux** (ubuntu-22.04, so glibc 2.35): `cargo build --release --locked
+   -p ws-host --bin web-stream` for x86_64 and, with the aarch64 cross
+   compiler, aarch64; a check that it links nothing beyond glibc; the
+   tarballs `web-stream-host-X.Y.Z-linux-ARCH.tar.gz` (the host and
+   cloudflared, from `installer/fetch-redist.sh`); and on x86_64
+   `installer/test-linux-install.sh` against a local mirror.
+4. **publish** waits for approval if the `release` environment has a
    required reviewer. It writes `manifest.json` (version, time, each file's
    size and SHA-256, and the tag's message as release notes) and
-   `SHA256SUMS.txt`, and creates the GitHub release with them and the files.
+   `SHA256SUMS.txt`, and creates the GitHub release with them, the files and
+   both one-line installers (`web-stream-install.ps1` and
+   `web-stream-install.sh`, which read `manifest.json`).
 
 Release files are not signed, and nothing needs a key or a secret. The
 hashes in `manifest.json` let the host's built-in updater check that a

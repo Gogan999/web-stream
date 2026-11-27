@@ -1154,6 +1154,7 @@ impl Media {
                 self.set_host_resolution(width, height)
             }
             ClientControl::RestoreHostResolution => self.restore_host_resolution(),
+            ClientControl::Decoders { .. } => {}
             ClientControl::SelectDisplay { id } => self.select_display(id),
             ClientControl::SelectSecondDisplay { id } => self.select_second_display(id),
             ClientControl::RequestKeyframe => {

@@ -6064,6 +6064,7 @@ name = "ws-capture"
 version = "1.0.0-rc.1"
 dependencies = [
  "bytes",
+ "serde",
  "thiserror 2.0.21",
  "tokio",
  "tracing",

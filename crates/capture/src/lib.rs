@@ -1,5 +1,6 @@
 //! Display capture and hardware video encode for the host.
 
+pub mod caps;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod layout;
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -43,6 +44,22 @@ pub enum CaptureError {
 }
 
 pub type Result<T> = std::result::Result<T, CaptureError>;
+
+/// The hardware encoders on this PC, probed once per process. Empty when none were found or the
+/// platform has no probe.
+pub fn encoders() -> &'static [caps::EncoderInfo] {
+    static PROBED: std::sync::OnceLock<Vec<caps::EncoderInfo>> = std::sync::OnceLock::new();
+    PROBED.get_or_init(|| {
+        #[cfg(windows)]
+        {
+            win::probe_encoders()
+        }
+        #[cfg(not(windows))]
+        {
+            Vec::new()
+        }
+    })
+}
 
 /// Lists every display the host can capture.
 pub fn list_displays() -> Result<Vec<DisplayInfo>> {

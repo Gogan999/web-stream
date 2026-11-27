@@ -32,6 +32,11 @@ pub(crate) fn list_displays() -> Result<Vec<DisplayInfo>> {
     Ok(display::enumerate()?.into_iter().map(|o| o.info).collect())
 }
 
+/// The hardware encoders on each adapter.
+pub(crate) fn probe_encoders() -> Vec<crate::caps::EncoderInfo> {
+    Vec::new()
+}
+
 /// Opts the process into per-monitor DPI awareness, once, before DXGI is used.
 fn init_process() {
     use windows::Win32::System::Threading::{

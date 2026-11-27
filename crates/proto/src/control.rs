@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{ByeReason, CursorShape, DisplayId, DisplayInfo, VideoConfig};
+use crate::{ByeReason, CursorShape, DecoderSupport, DisplayId, DisplayInfo, VideoConfig};
 
 /// Identifies a file the host has offered this session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -56,6 +56,12 @@ pub enum ClientControl {
     RequestKeyframe,
     SetVideoConfig {
         config: VideoConfig,
+    },
+    /// What this browser decodes, and whether the host picks the codec (`auto`) or keeps
+    /// [`VideoConfig::codec`].
+    Decoders {
+        decoders: Vec<DecoderSupport>,
+        auto: bool,
     },
     SetMicEnabled {
         enabled: bool,

@@ -67,7 +67,7 @@
       <summary>Advanced</summary>
       <div class="group">
         <h3>Video</h3>
-        <label title="H.265 and AV1 look better than H.264 at the same bitrate. Only codecs this browser can play are listed; if the host's GPU can't encode one, it streams H.264 and says so.">Codec <select id="codec"></select></label>
+        <label title="Auto: the host picks the codec its GPU encodes and this device decodes best, preferring hardware decoding. H.265 and AV1 look better than H.264 at the same bitrate. Only codecs this browser can play are listed; if the host's GPU can't encode one, it streams H.264 and says so.">Codec <select id="codec"></select></label>
         <label title="A ceiling, not a target: Auto picks a bitrate for the resolution and frame rate and the host lowers it when the connection can't carry it.">Max bitrate <select id="bitrate"></select></label>
         <label title="Lets the host lower the stream's resolution while the connection is too slow for it, and raise it again once there is room, down to this share of the size. Only when something moves on screen: a still desktop never lowers it.">Auto resolution floor <select id="min-scale"></select></label>
         <label title="How many ordinary frames' worth of data a keyframe may use. Keyframes restart the picture (on connect, or after a packet is lost for good); bigger ones look sharper straight away but take that many frames to send.">Keyframe size <select id="keyframe-scale"></select></label>

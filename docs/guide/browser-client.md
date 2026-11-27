@@ -94,8 +94,11 @@ In Settings:
 
 In Advanced:
 
-- **Codec:** overrides the host's codec for this browser. The host falls
-  back to H.264 if either side can't handle the choice.
+- **Codec:** *Auto* (the default) lets the host pick a codec its GPU encodes
+  and this device decodes well, preferring hardware decoding; the menu shows
+  which one it picked. Choosing a codec overrides the host's for this
+  browser. The host falls back to H.264 if either side can't handle the
+  choice.
 - **Max bitrate:** *Auto* picks from resolution and frame rate (20 Mb/s at
   1080p60). It is a ceiling: the host follows the network's measured
   bandwidth below it.

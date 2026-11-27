@@ -29,6 +29,7 @@ Pairing and signaling: [`docs/dev/signaling.md`](../docs/dev/signaling.md). Data
 | `js/health.js` | The one definition of a healthy stream (loss, round trip, decode and encode time, bandwidth), used by the stats overlay and auto-tune |
 | `js/stats.js` | Stats overlay numbers from `getStats()`, `requestVideoFrameCallback` and the host's `videoStats` |
 | `js/settings.js` | Priority, max resolution, max fps, max bitrate and the rest of the settings → the host's `VideoConfig`; kept in `localStorage` |
+| `js/decoders.js` | Which codecs this browser decodes, smoothly and in hardware, at the stream's size (RTCRtpReceiver, MediaCapabilities), for the host's Auto codec choice |
 | `js/autotune.js` | Auto-tune (test): bitrate ladder, then encoder quality; the result applies to the session and is saved only by Keep these |
 | `dev/` | Dev server (pairing API + `/ws` relay) and a mock host page (canvas + tone over real WebRTC) |
 

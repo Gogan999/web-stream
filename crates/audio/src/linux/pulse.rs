@@ -248,7 +248,10 @@ impl Conn {
             {
                 return Err(AudioError::Platform("audio mainloop stopped".into()));
             }
-            if (self.lib.pa_context_get_state)(self.context) != CONTEXT_READY {
+            if matches!(
+                (self.lib.pa_context_get_state)(self.context),
+                CONTEXT_FAILED | CONTEXT_TERMINATED
+            ) {
                 return Err(self.error("connection"));
             }
         }

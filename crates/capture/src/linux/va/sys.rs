@@ -41,6 +41,7 @@ pub type VAEncMiscParameterBuffer = _VAEncMiscParameterBuffer;
 pub type VAEncMiscParameterRateControl = _VAEncMiscParameterRateControl;
 pub type VAEncMiscParameterFrameRate = _VAEncMiscParameterFrameRate;
 pub type VAEncMiscParameterHRD = _VAEncMiscParameterHRD;
+pub type VAEncMiscParameterBufferQualityLevel = _VAEncMiscParameterBufferQualityLevel;
 pub type VAPictureH264 = _VAPictureH264;
 pub type VACodedBufferSegment = _VACodedBufferSegment;
 pub type VAPictureHEVC = _VAPictureHEVC;
@@ -163,6 +164,12 @@ pub struct _VAEncMiscParameterFrameRate__bindgen_ty_1__bindgen_ty_1 {
 pub struct _VAEncMiscParameterHRD {
     pub initial_buffer_fullness: u32,
     pub buffer_size: u32,
+    pub va_reserved: [u32; 4usize],
+}
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct _VAEncMiscParameterBufferQualityLevel {
+    pub quality_level: u32,
     pub va_reserved: [u32; 4usize],
 }
 #[repr(C)]
@@ -766,6 +773,9 @@ pub const VA_PADDING_LOW: u32 = 4;
 pub const VA_PADDING_MEDIUM: u32 = 8;
 pub const VA_PADDING_HIGH: u32 = 16;
 pub const VA_PADDING_LARGE: u32 = 32;
+pub const VA_FEATURE_NOT_SUPPORTED: u32 = 0;
+pub const VA_FEATURE_SUPPORTED: u32 = 1;
+pub const VA_FEATURE_REQUIRED: u32 = 2;
 pub const VA_RT_FORMAT_YUV420: u32 = 1;
 pub const VA_RT_FORMAT_YUV422: u32 = 2;
 pub const VA_RT_FORMAT_YUV444: u32 = 4;
@@ -809,6 +819,9 @@ pub const VA_ENC_SLICE_STRUCTURE_EQUAL_ROWS: u32 = 4;
 pub const VA_ENC_SLICE_STRUCTURE_MAX_SLICE_SIZE: u32 = 8;
 pub const VA_ENC_SLICE_STRUCTURE_ARBITRARY_ROWS: u32 = 16;
 pub const VA_ENC_SLICE_STRUCTURE_EQUAL_MULTI_ROWS: u32 = 32;
+pub const VA_PREDICTION_DIRECTION_PREVIOUS: u32 = 1;
+pub const VA_PREDICTION_DIRECTION_FUTURE: u32 = 2;
+pub const VA_PREDICTION_DIRECTION_BI_NOT_EMPTY: u32 = 4;
 pub const VA_ATTRIB_NOT_SUPPORTED: u32 = 2147483648;
 pub const VA_INVALID_ID: u32 = 4294967295;
 pub const VA_INVALID_SURFACE: u32 = 4294967295;
@@ -825,6 +838,7 @@ pub const VA_SURFACE_ATTRIB_USAGE_HINT_VPP_READ: u32 = 4;
 pub const VA_SURFACE_ATTRIB_USAGE_HINT_VPP_WRITE: u32 = 8;
 pub const VA_SURFACE_ATTRIB_USAGE_HINT_DISPLAY: u32 = 16;
 pub const VA_SURFACE_ATTRIB_USAGE_HINT_EXPORT: u32 = 32;
+pub const VA_PROGRESSIVE: u32 = 1;
 pub const VA_PICTURE_H264_INVALID: u32 = 1;
 pub const VA_PICTURE_H264_TOP_FIELD: u32 = 2;
 pub const VA_PICTURE_H264_BOTTOM_FIELD: u32 = 4;
@@ -942,112 +956,111 @@ const _: () = {
     ["Offset of field: _VARectangle::height"]
         [::core::mem::offset_of!(_VARectangle, height) - 6usize];
 };
-pub const VAProfile_VAProfileNone: VAProfile = -1;
-pub const VAProfile_VAProfileMPEG2Simple: VAProfile = 0;
-pub const VAProfile_VAProfileMPEG2Main: VAProfile = 1;
-pub const VAProfile_VAProfileMPEG4Simple: VAProfile = 2;
-pub const VAProfile_VAProfileMPEG4AdvancedSimple: VAProfile = 3;
-pub const VAProfile_VAProfileMPEG4Main: VAProfile = 4;
-pub const VAProfile_VAProfileH264Baseline: VAProfile = 5;
-pub const VAProfile_VAProfileH264Main: VAProfile = 6;
-pub const VAProfile_VAProfileH264High: VAProfile = 7;
-pub const VAProfile_VAProfileVC1Simple: VAProfile = 8;
-pub const VAProfile_VAProfileVC1Main: VAProfile = 9;
-pub const VAProfile_VAProfileVC1Advanced: VAProfile = 10;
-pub const VAProfile_VAProfileH263Baseline: VAProfile = 11;
-pub const VAProfile_VAProfileJPEGBaseline: VAProfile = 12;
-pub const VAProfile_VAProfileH264ConstrainedBaseline: VAProfile = 13;
-pub const VAProfile_VAProfileVP8Version0_3: VAProfile = 14;
-pub const VAProfile_VAProfileH264MultiviewHigh: VAProfile = 15;
-pub const VAProfile_VAProfileH264StereoHigh: VAProfile = 16;
-pub const VAProfile_VAProfileHEVCMain: VAProfile = 17;
-pub const VAProfile_VAProfileHEVCMain10: VAProfile = 18;
-pub const VAProfile_VAProfileVP9Profile0: VAProfile = 19;
-pub const VAProfile_VAProfileVP9Profile1: VAProfile = 20;
-pub const VAProfile_VAProfileVP9Profile2: VAProfile = 21;
-pub const VAProfile_VAProfileVP9Profile3: VAProfile = 22;
-pub const VAProfile_VAProfileHEVCMain12: VAProfile = 23;
-pub const VAProfile_VAProfileHEVCMain422_10: VAProfile = 24;
-pub const VAProfile_VAProfileHEVCMain422_12: VAProfile = 25;
-pub const VAProfile_VAProfileHEVCMain444: VAProfile = 26;
-pub const VAProfile_VAProfileHEVCMain444_10: VAProfile = 27;
-pub const VAProfile_VAProfileHEVCMain444_12: VAProfile = 28;
-pub const VAProfile_VAProfileHEVCSccMain: VAProfile = 29;
-pub const VAProfile_VAProfileHEVCSccMain10: VAProfile = 30;
-pub const VAProfile_VAProfileHEVCSccMain444: VAProfile = 31;
-pub const VAProfile_VAProfileAV1Profile0: VAProfile = 32;
-pub const VAProfile_VAProfileAV1Profile1: VAProfile = 33;
-pub const VAProfile_VAProfileHEVCSccMain444_10: VAProfile = 34;
-pub const VAProfile_VAProfileProtected: VAProfile = 35;
-pub const VAProfile_VAProfileH264High10: VAProfile = 36;
-pub const VAEntrypoint_VAEntrypointVLD: VAEntrypoint = 1;
-pub const VAEntrypoint_VAEntrypointIZZ: VAEntrypoint = 2;
-pub const VAEntrypoint_VAEntrypointIDCT: VAEntrypoint = 3;
-pub const VAEntrypoint_VAEntrypointMoComp: VAEntrypoint = 4;
-pub const VAEntrypoint_VAEntrypointDeblocking: VAEntrypoint = 5;
-pub const VAEntrypoint_VAEntrypointEncSlice: VAEntrypoint = 6;
-pub const VAEntrypoint_VAEntrypointEncPicture: VAEntrypoint = 7;
-pub const VAEntrypoint_VAEntrypointEncSliceLP: VAEntrypoint = 8;
-pub const VAEntrypoint_VAEntrypointVideoProc: VAEntrypoint = 10;
-pub const VAEntrypoint_VAEntrypointFEI: VAEntrypoint = 11;
-pub const VAEntrypoint_VAEntrypointStats: VAEntrypoint = 12;
-pub const VAEntrypoint_VAEntrypointProtectedTEEComm: VAEntrypoint = 13;
-pub const VAEntrypoint_VAEntrypointProtectedContent: VAEntrypoint = 14;
-pub const VAConfigAttribType_VAConfigAttribRTFormat: VAConfigAttribType = 0;
-pub const VAConfigAttribType_VAConfigAttribSpatialResidual: VAConfigAttribType = 1;
-pub const VAConfigAttribType_VAConfigAttribSpatialClipping: VAConfigAttribType = 2;
-pub const VAConfigAttribType_VAConfigAttribIntraResidual: VAConfigAttribType = 3;
-pub const VAConfigAttribType_VAConfigAttribEncryption: VAConfigAttribType = 4;
-pub const VAConfigAttribType_VAConfigAttribRateControl: VAConfigAttribType = 5;
-pub const VAConfigAttribType_VAConfigAttribDecSliceMode: VAConfigAttribType = 6;
-pub const VAConfigAttribType_VAConfigAttribDecJPEG: VAConfigAttribType = 7;
-pub const VAConfigAttribType_VAConfigAttribDecProcessing: VAConfigAttribType = 8;
-pub const VAConfigAttribType_VAConfigAttribEncPackedHeaders: VAConfigAttribType = 10;
-pub const VAConfigAttribType_VAConfigAttribEncInterlaced: VAConfigAttribType = 11;
-pub const VAConfigAttribType_VAConfigAttribEncMaxRefFrames: VAConfigAttribType = 13;
-pub const VAConfigAttribType_VAConfigAttribEncMaxSlices: VAConfigAttribType = 14;
-pub const VAConfigAttribType_VAConfigAttribEncSliceStructure: VAConfigAttribType = 15;
-pub const VAConfigAttribType_VAConfigAttribEncMacroblockInfo: VAConfigAttribType = 16;
-pub const VAConfigAttribType_VAConfigAttribMaxPictureWidth: VAConfigAttribType = 18;
-pub const VAConfigAttribType_VAConfigAttribMaxPictureHeight: VAConfigAttribType = 19;
-pub const VAConfigAttribType_VAConfigAttribEncJPEG: VAConfigAttribType = 20;
-pub const VAConfigAttribType_VAConfigAttribEncQualityRange: VAConfigAttribType = 21;
-pub const VAConfigAttribType_VAConfigAttribEncQuantization: VAConfigAttribType = 22;
-pub const VAConfigAttribType_VAConfigAttribEncIntraRefresh: VAConfigAttribType = 23;
-pub const VAConfigAttribType_VAConfigAttribEncSkipFrame: VAConfigAttribType = 24;
-pub const VAConfigAttribType_VAConfigAttribEncROI: VAConfigAttribType = 25;
-pub const VAConfigAttribType_VAConfigAttribEncRateControlExt: VAConfigAttribType = 26;
-pub const VAConfigAttribType_VAConfigAttribProcessingRate: VAConfigAttribType = 27;
-pub const VAConfigAttribType_VAConfigAttribEncDirtyRect: VAConfigAttribType = 28;
-pub const VAConfigAttribType_VAConfigAttribEncParallelRateControl: VAConfigAttribType = 29;
-pub const VAConfigAttribType_VAConfigAttribEncDynamicScaling: VAConfigAttribType = 30;
-pub const VAConfigAttribType_VAConfigAttribFrameSizeToleranceSupport: VAConfigAttribType = 31;
-pub const VAConfigAttribType_VAConfigAttribFEIFunctionType: VAConfigAttribType = 32;
-pub const VAConfigAttribType_VAConfigAttribFEIMVPredictors: VAConfigAttribType = 33;
-pub const VAConfigAttribType_VAConfigAttribStats: VAConfigAttribType = 34;
-pub const VAConfigAttribType_VAConfigAttribEncTileSupport: VAConfigAttribType = 35;
-pub const VAConfigAttribType_VAConfigAttribCustomRoundingControl: VAConfigAttribType = 36;
-pub const VAConfigAttribType_VAConfigAttribQPBlockSize: VAConfigAttribType = 37;
-pub const VAConfigAttribType_VAConfigAttribMaxFrameSize: VAConfigAttribType = 38;
-pub const VAConfigAttribType_VAConfigAttribPredictionDirection: VAConfigAttribType = 39;
-pub const VAConfigAttribType_VAConfigAttribMultipleFrame: VAConfigAttribType = 40;
-pub const VAConfigAttribType_VAConfigAttribContextPriority: VAConfigAttribType = 41;
-pub const VAConfigAttribType_VAConfigAttribDecAV1Features: VAConfigAttribType = 42;
-pub const VAConfigAttribType_VAConfigAttribTEEType: VAConfigAttribType = 43;
-pub const VAConfigAttribType_VAConfigAttribTEETypeClient: VAConfigAttribType = 44;
-pub const VAConfigAttribType_VAConfigAttribProtectedContentCipherAlgorithm: VAConfigAttribType = 45;
-pub const VAConfigAttribType_VAConfigAttribProtectedContentCipherBlockSize: VAConfigAttribType = 46;
-pub const VAConfigAttribType_VAConfigAttribProtectedContentCipherMode: VAConfigAttribType = 47;
-pub const VAConfigAttribType_VAConfigAttribProtectedContentCipherSampleType: VAConfigAttribType =
-    48;
-pub const VAConfigAttribType_VAConfigAttribProtectedContentUsage: VAConfigAttribType = 49;
-pub const VAConfigAttribType_VAConfigAttribEncHEVCFeatures: VAConfigAttribType = 50;
-pub const VAConfigAttribType_VAConfigAttribEncHEVCBlockSizes: VAConfigAttribType = 51;
-pub const VAConfigAttribType_VAConfigAttribEncAV1: VAConfigAttribType = 52;
-pub const VAConfigAttribType_VAConfigAttribEncAV1Ext1: VAConfigAttribType = 53;
-pub const VAConfigAttribType_VAConfigAttribEncAV1Ext2: VAConfigAttribType = 54;
-pub const VAConfigAttribType_VAConfigAttribEncPerBlockControl: VAConfigAttribType = 55;
-pub const VAConfigAttribType_VAConfigAttribTypeMax: VAConfigAttribType = 56;
+pub const VAProfileNone: VAProfile = -1;
+pub const VAProfileMPEG2Simple: VAProfile = 0;
+pub const VAProfileMPEG2Main: VAProfile = 1;
+pub const VAProfileMPEG4Simple: VAProfile = 2;
+pub const VAProfileMPEG4AdvancedSimple: VAProfile = 3;
+pub const VAProfileMPEG4Main: VAProfile = 4;
+pub const VAProfileH264Baseline: VAProfile = 5;
+pub const VAProfileH264Main: VAProfile = 6;
+pub const VAProfileH264High: VAProfile = 7;
+pub const VAProfileVC1Simple: VAProfile = 8;
+pub const VAProfileVC1Main: VAProfile = 9;
+pub const VAProfileVC1Advanced: VAProfile = 10;
+pub const VAProfileH263Baseline: VAProfile = 11;
+pub const VAProfileJPEGBaseline: VAProfile = 12;
+pub const VAProfileH264ConstrainedBaseline: VAProfile = 13;
+pub const VAProfileVP8Version0_3: VAProfile = 14;
+pub const VAProfileH264MultiviewHigh: VAProfile = 15;
+pub const VAProfileH264StereoHigh: VAProfile = 16;
+pub const VAProfileHEVCMain: VAProfile = 17;
+pub const VAProfileHEVCMain10: VAProfile = 18;
+pub const VAProfileVP9Profile0: VAProfile = 19;
+pub const VAProfileVP9Profile1: VAProfile = 20;
+pub const VAProfileVP9Profile2: VAProfile = 21;
+pub const VAProfileVP9Profile3: VAProfile = 22;
+pub const VAProfileHEVCMain12: VAProfile = 23;
+pub const VAProfileHEVCMain422_10: VAProfile = 24;
+pub const VAProfileHEVCMain422_12: VAProfile = 25;
+pub const VAProfileHEVCMain444: VAProfile = 26;
+pub const VAProfileHEVCMain444_10: VAProfile = 27;
+pub const VAProfileHEVCMain444_12: VAProfile = 28;
+pub const VAProfileHEVCSccMain: VAProfile = 29;
+pub const VAProfileHEVCSccMain10: VAProfile = 30;
+pub const VAProfileHEVCSccMain444: VAProfile = 31;
+pub const VAProfileAV1Profile0: VAProfile = 32;
+pub const VAProfileAV1Profile1: VAProfile = 33;
+pub const VAProfileHEVCSccMain444_10: VAProfile = 34;
+pub const VAProfileProtected: VAProfile = 35;
+pub const VAProfileH264High10: VAProfile = 36;
+pub const VAEntrypointVLD: VAEntrypoint = 1;
+pub const VAEntrypointIZZ: VAEntrypoint = 2;
+pub const VAEntrypointIDCT: VAEntrypoint = 3;
+pub const VAEntrypointMoComp: VAEntrypoint = 4;
+pub const VAEntrypointDeblocking: VAEntrypoint = 5;
+pub const VAEntrypointEncSlice: VAEntrypoint = 6;
+pub const VAEntrypointEncPicture: VAEntrypoint = 7;
+pub const VAEntrypointEncSliceLP: VAEntrypoint = 8;
+pub const VAEntrypointVideoProc: VAEntrypoint = 10;
+pub const VAEntrypointFEI: VAEntrypoint = 11;
+pub const VAEntrypointStats: VAEntrypoint = 12;
+pub const VAEntrypointProtectedTEEComm: VAEntrypoint = 13;
+pub const VAEntrypointProtectedContent: VAEntrypoint = 14;
+pub const VAConfigAttribRTFormat: VAConfigAttribType = 0;
+pub const VAConfigAttribSpatialResidual: VAConfigAttribType = 1;
+pub const VAConfigAttribSpatialClipping: VAConfigAttribType = 2;
+pub const VAConfigAttribIntraResidual: VAConfigAttribType = 3;
+pub const VAConfigAttribEncryption: VAConfigAttribType = 4;
+pub const VAConfigAttribRateControl: VAConfigAttribType = 5;
+pub const VAConfigAttribDecSliceMode: VAConfigAttribType = 6;
+pub const VAConfigAttribDecJPEG: VAConfigAttribType = 7;
+pub const VAConfigAttribDecProcessing: VAConfigAttribType = 8;
+pub const VAConfigAttribEncPackedHeaders: VAConfigAttribType = 10;
+pub const VAConfigAttribEncInterlaced: VAConfigAttribType = 11;
+pub const VAConfigAttribEncMaxRefFrames: VAConfigAttribType = 13;
+pub const VAConfigAttribEncMaxSlices: VAConfigAttribType = 14;
+pub const VAConfigAttribEncSliceStructure: VAConfigAttribType = 15;
+pub const VAConfigAttribEncMacroblockInfo: VAConfigAttribType = 16;
+pub const VAConfigAttribMaxPictureWidth: VAConfigAttribType = 18;
+pub const VAConfigAttribMaxPictureHeight: VAConfigAttribType = 19;
+pub const VAConfigAttribEncJPEG: VAConfigAttribType = 20;
+pub const VAConfigAttribEncQualityRange: VAConfigAttribType = 21;
+pub const VAConfigAttribEncQuantization: VAConfigAttribType = 22;
+pub const VAConfigAttribEncIntraRefresh: VAConfigAttribType = 23;
+pub const VAConfigAttribEncSkipFrame: VAConfigAttribType = 24;
+pub const VAConfigAttribEncROI: VAConfigAttribType = 25;
+pub const VAConfigAttribEncRateControlExt: VAConfigAttribType = 26;
+pub const VAConfigAttribProcessingRate: VAConfigAttribType = 27;
+pub const VAConfigAttribEncDirtyRect: VAConfigAttribType = 28;
+pub const VAConfigAttribEncParallelRateControl: VAConfigAttribType = 29;
+pub const VAConfigAttribEncDynamicScaling: VAConfigAttribType = 30;
+pub const VAConfigAttribFrameSizeToleranceSupport: VAConfigAttribType = 31;
+pub const VAConfigAttribFEIFunctionType: VAConfigAttribType = 32;
+pub const VAConfigAttribFEIMVPredictors: VAConfigAttribType = 33;
+pub const VAConfigAttribStats: VAConfigAttribType = 34;
+pub const VAConfigAttribEncTileSupport: VAConfigAttribType = 35;
+pub const VAConfigAttribCustomRoundingControl: VAConfigAttribType = 36;
+pub const VAConfigAttribQPBlockSize: VAConfigAttribType = 37;
+pub const VAConfigAttribMaxFrameSize: VAConfigAttribType = 38;
+pub const VAConfigAttribPredictionDirection: VAConfigAttribType = 39;
+pub const VAConfigAttribMultipleFrame: VAConfigAttribType = 40;
+pub const VAConfigAttribContextPriority: VAConfigAttribType = 41;
+pub const VAConfigAttribDecAV1Features: VAConfigAttribType = 42;
+pub const VAConfigAttribTEEType: VAConfigAttribType = 43;
+pub const VAConfigAttribTEETypeClient: VAConfigAttribType = 44;
+pub const VAConfigAttribProtectedContentCipherAlgorithm: VAConfigAttribType = 45;
+pub const VAConfigAttribProtectedContentCipherBlockSize: VAConfigAttribType = 46;
+pub const VAConfigAttribProtectedContentCipherMode: VAConfigAttribType = 47;
+pub const VAConfigAttribProtectedContentCipherSampleType: VAConfigAttribType = 48;
+pub const VAConfigAttribProtectedContentUsage: VAConfigAttribType = 49;
+pub const VAConfigAttribEncHEVCFeatures: VAConfigAttribType = 50;
+pub const VAConfigAttribEncHEVCBlockSizes: VAConfigAttribType = 51;
+pub const VAConfigAttribEncAV1: VAConfigAttribType = 52;
+pub const VAConfigAttribEncAV1Ext1: VAConfigAttribType = 53;
+pub const VAConfigAttribEncAV1Ext2: VAConfigAttribType = 54;
+pub const VAConfigAttribEncPerBlockControl: VAConfigAttribType = 55;
+pub const VAConfigAttribTypeMax: VAConfigAttribType = 56;
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of _VAConfigAttrib"][::core::mem::size_of::<_VAConfigAttrib>() - 8usize];
@@ -1075,10 +1088,10 @@ const _: () = {
     ["Offset of field: _VAConfigAttribValEncRateControlExt::value"]
         [::core::mem::offset_of!(_VAConfigAttribValEncRateControlExt, value) - 0usize];
 };
-pub const VAGenericValueType_VAGenericValueTypeInteger: VAGenericValueType = 1;
-pub const VAGenericValueType_VAGenericValueTypeFloat: VAGenericValueType = 2;
-pub const VAGenericValueType_VAGenericValueTypePointer: VAGenericValueType = 3;
-pub const VAGenericValueType_VAGenericValueTypeFunc: VAGenericValueType = 4;
+pub const VAGenericValueTypeInteger: VAGenericValueType = 1;
+pub const VAGenericValueTypeFloat: VAGenericValueType = 2;
+pub const VAGenericValueTypePointer: VAGenericValueType = 3;
+pub const VAGenericValueTypeFunc: VAGenericValueType = 4;
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of _VAGenericValue__bindgen_ty_1"]
@@ -1103,17 +1116,17 @@ const _: () = {
     ["Offset of field: _VAGenericValue::value"]
         [::core::mem::offset_of!(_VAGenericValue, value) - 8usize];
 };
-pub const VASurfaceAttribType_VASurfaceAttribNone: VASurfaceAttribType = 0;
-pub const VASurfaceAttribType_VASurfaceAttribPixelFormat: VASurfaceAttribType = 1;
-pub const VASurfaceAttribType_VASurfaceAttribMinWidth: VASurfaceAttribType = 2;
-pub const VASurfaceAttribType_VASurfaceAttribMaxWidth: VASurfaceAttribType = 3;
-pub const VASurfaceAttribType_VASurfaceAttribMinHeight: VASurfaceAttribType = 4;
-pub const VASurfaceAttribType_VASurfaceAttribMaxHeight: VASurfaceAttribType = 5;
-pub const VASurfaceAttribType_VASurfaceAttribMemoryType: VASurfaceAttribType = 6;
-pub const VASurfaceAttribType_VASurfaceAttribExternalBufferDescriptor: VASurfaceAttribType = 7;
-pub const VASurfaceAttribType_VASurfaceAttribUsageHint: VASurfaceAttribType = 8;
-pub const VASurfaceAttribType_VASurfaceAttribDRMFormatModifiers: VASurfaceAttribType = 9;
-pub const VASurfaceAttribType_VASurfaceAttribCount: VASurfaceAttribType = 10;
+pub const VASurfaceAttribNone: VASurfaceAttribType = 0;
+pub const VASurfaceAttribPixelFormat: VASurfaceAttribType = 1;
+pub const VASurfaceAttribMinWidth: VASurfaceAttribType = 2;
+pub const VASurfaceAttribMaxWidth: VASurfaceAttribType = 3;
+pub const VASurfaceAttribMinHeight: VASurfaceAttribType = 4;
+pub const VASurfaceAttribMaxHeight: VASurfaceAttribType = 5;
+pub const VASurfaceAttribMemoryType: VASurfaceAttribType = 6;
+pub const VASurfaceAttribExternalBufferDescriptor: VASurfaceAttribType = 7;
+pub const VASurfaceAttribUsageHint: VASurfaceAttribType = 8;
+pub const VASurfaceAttribDRMFormatModifiers: VASurfaceAttribType = 9;
+pub const VASurfaceAttribCount: VASurfaceAttribType = 10;
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of _VASurfaceAttrib"][::core::mem::size_of::<_VASurfaceAttrib>() - 24usize];
@@ -1125,80 +1138,77 @@ const _: () = {
     ["Offset of field: _VASurfaceAttrib::value"]
         [::core::mem::offset_of!(_VASurfaceAttrib, value) - 8usize];
 };
-pub const VABufferType_VAPictureParameterBufferType: VABufferType = 0;
-pub const VABufferType_VAIQMatrixBufferType: VABufferType = 1;
-pub const VABufferType_VABitPlaneBufferType: VABufferType = 2;
-pub const VABufferType_VASliceGroupMapBufferType: VABufferType = 3;
-pub const VABufferType_VASliceParameterBufferType: VABufferType = 4;
-pub const VABufferType_VASliceDataBufferType: VABufferType = 5;
-pub const VABufferType_VAMacroblockParameterBufferType: VABufferType = 6;
-pub const VABufferType_VAResidualDataBufferType: VABufferType = 7;
-pub const VABufferType_VADeblockingParameterBufferType: VABufferType = 8;
-pub const VABufferType_VAImageBufferType: VABufferType = 9;
-pub const VABufferType_VAProtectedSliceDataBufferType: VABufferType = 10;
-pub const VABufferType_VAQMatrixBufferType: VABufferType = 11;
-pub const VABufferType_VAHuffmanTableBufferType: VABufferType = 12;
-pub const VABufferType_VAProbabilityBufferType: VABufferType = 13;
-pub const VABufferType_VAEncCodedBufferType: VABufferType = 21;
-pub const VABufferType_VAEncSequenceParameterBufferType: VABufferType = 22;
-pub const VABufferType_VAEncPictureParameterBufferType: VABufferType = 23;
-pub const VABufferType_VAEncSliceParameterBufferType: VABufferType = 24;
-pub const VABufferType_VAEncPackedHeaderParameterBufferType: VABufferType = 25;
-pub const VABufferType_VAEncPackedHeaderDataBufferType: VABufferType = 26;
-pub const VABufferType_VAEncMiscParameterBufferType: VABufferType = 27;
-pub const VABufferType_VAEncMacroblockParameterBufferType: VABufferType = 28;
-pub const VABufferType_VAEncMacroblockMapBufferType: VABufferType = 29;
-pub const VABufferType_VAEncQPBufferType: VABufferType = 30;
-pub const VABufferType_VAProcPipelineParameterBufferType: VABufferType = 41;
-pub const VABufferType_VAProcFilterParameterBufferType: VABufferType = 42;
-pub const VABufferType_VAEncFEIMVBufferType: VABufferType = 43;
-pub const VABufferType_VAEncFEIMBCodeBufferType: VABufferType = 44;
-pub const VABufferType_VAEncFEIDistortionBufferType: VABufferType = 45;
-pub const VABufferType_VAEncFEIMBControlBufferType: VABufferType = 46;
-pub const VABufferType_VAEncFEIMVPredictorBufferType: VABufferType = 47;
-pub const VABufferType_VAStatsStatisticsParameterBufferType: VABufferType = 48;
-pub const VABufferType_VAStatsStatisticsBufferType: VABufferType = 49;
-pub const VABufferType_VAStatsStatisticsBottomFieldBufferType: VABufferType = 50;
-pub const VABufferType_VAStatsMVBufferType: VABufferType = 51;
-pub const VABufferType_VAStatsMVPredictorBufferType: VABufferType = 52;
-pub const VABufferType_VAEncMacroblockDisableSkipMapBufferType: VABufferType = 53;
-pub const VABufferType_VAEncFEICTBCmdBufferType: VABufferType = 54;
-pub const VABufferType_VAEncFEICURecordBufferType: VABufferType = 55;
-pub const VABufferType_VADecodeStreamoutBufferType: VABufferType = 56;
-pub const VABufferType_VASubsetsParameterBufferType: VABufferType = 57;
-pub const VABufferType_VAContextParameterUpdateBufferType: VABufferType = 58;
-pub const VABufferType_VAProtectedSessionExecuteBufferType: VABufferType = 59;
-pub const VABufferType_VAEncryptionParameterBufferType: VABufferType = 60;
-pub const VABufferType_VAEncDeltaQpPerBlockBufferType: VABufferType = 61;
-pub const VABufferType_VABufferTypeMax: VABufferType = 62;
-pub const VAEncMiscParameterType_VAEncMiscParameterTypeFrameRate: VAEncMiscParameterType = 0;
-pub const VAEncMiscParameterType_VAEncMiscParameterTypeRateControl: VAEncMiscParameterType = 1;
-pub const VAEncMiscParameterType_VAEncMiscParameterTypeMaxSliceSize: VAEncMiscParameterType = 2;
-pub const VAEncMiscParameterType_VAEncMiscParameterTypeAIR: VAEncMiscParameterType = 3;
-pub const VAEncMiscParameterType_VAEncMiscParameterTypeMaxFrameSize: VAEncMiscParameterType = 4;
-pub const VAEncMiscParameterType_VAEncMiscParameterTypeHRD: VAEncMiscParameterType = 5;
-pub const VAEncMiscParameterType_VAEncMiscParameterTypeQualityLevel: VAEncMiscParameterType = 6;
-pub const VAEncMiscParameterType_VAEncMiscParameterTypeRIR: VAEncMiscParameterType = 7;
-pub const VAEncMiscParameterType_VAEncMiscParameterTypeQuantization: VAEncMiscParameterType = 8;
-pub const VAEncMiscParameterType_VAEncMiscParameterTypeSkipFrame: VAEncMiscParameterType = 9;
-pub const VAEncMiscParameterType_VAEncMiscParameterTypeROI: VAEncMiscParameterType = 10;
-pub const VAEncMiscParameterType_VAEncMiscParameterTypeMultiPassFrameSize: VAEncMiscParameterType =
-    11;
-pub const VAEncMiscParameterType_VAEncMiscParameterTypeTemporalLayerStructure:
-    VAEncMiscParameterType = 12;
-pub const VAEncMiscParameterType_VAEncMiscParameterTypeDirtyRect: VAEncMiscParameterType = 13;
-pub const VAEncMiscParameterType_VAEncMiscParameterTypeParallelBRC: VAEncMiscParameterType = 14;
-pub const VAEncMiscParameterType_VAEncMiscParameterTypeSubMbPartPel: VAEncMiscParameterType = 15;
-pub const VAEncMiscParameterType_VAEncMiscParameterTypeEncQuality: VAEncMiscParameterType = 16;
-pub const VAEncMiscParameterType_VAEncMiscParameterTypeCustomRoundingControl:
-    VAEncMiscParameterType = 17;
-pub const VAEncMiscParameterType_VAEncMiscParameterTypeFEIFrameControl: VAEncMiscParameterType = 18;
-pub const VAEncMiscParameterType_VAEncMiscParameterTypeExtensionData: VAEncMiscParameterType = 19;
-pub const VAEncPackedHeaderType_VAEncPackedHeaderSequence: VAEncPackedHeaderType = 1;
-pub const VAEncPackedHeaderType_VAEncPackedHeaderPicture: VAEncPackedHeaderType = 2;
-pub const VAEncPackedHeaderType_VAEncPackedHeaderSlice: VAEncPackedHeaderType = 3;
-pub const VAEncPackedHeaderType_VAEncPackedHeaderRawData: VAEncPackedHeaderType = 4;
-pub const VAEncPackedHeaderType_VAEncPackedHeaderMiscMask: VAEncPackedHeaderType = 2147483648;
+pub const VAPictureParameterBufferType: VABufferType = 0;
+pub const VAIQMatrixBufferType: VABufferType = 1;
+pub const VABitPlaneBufferType: VABufferType = 2;
+pub const VASliceGroupMapBufferType: VABufferType = 3;
+pub const VASliceParameterBufferType: VABufferType = 4;
+pub const VASliceDataBufferType: VABufferType = 5;
+pub const VAMacroblockParameterBufferType: VABufferType = 6;
+pub const VAResidualDataBufferType: VABufferType = 7;
+pub const VADeblockingParameterBufferType: VABufferType = 8;
+pub const VAImageBufferType: VABufferType = 9;
+pub const VAProtectedSliceDataBufferType: VABufferType = 10;
+pub const VAQMatrixBufferType: VABufferType = 11;
+pub const VAHuffmanTableBufferType: VABufferType = 12;
+pub const VAProbabilityBufferType: VABufferType = 13;
+pub const VAEncCodedBufferType: VABufferType = 21;
+pub const VAEncSequenceParameterBufferType: VABufferType = 22;
+pub const VAEncPictureParameterBufferType: VABufferType = 23;
+pub const VAEncSliceParameterBufferType: VABufferType = 24;
+pub const VAEncPackedHeaderParameterBufferType: VABufferType = 25;
+pub const VAEncPackedHeaderDataBufferType: VABufferType = 26;
+pub const VAEncMiscParameterBufferType: VABufferType = 27;
+pub const VAEncMacroblockParameterBufferType: VABufferType = 28;
+pub const VAEncMacroblockMapBufferType: VABufferType = 29;
+pub const VAEncQPBufferType: VABufferType = 30;
+pub const VAProcPipelineParameterBufferType: VABufferType = 41;
+pub const VAProcFilterParameterBufferType: VABufferType = 42;
+pub const VAEncFEIMVBufferType: VABufferType = 43;
+pub const VAEncFEIMBCodeBufferType: VABufferType = 44;
+pub const VAEncFEIDistortionBufferType: VABufferType = 45;
+pub const VAEncFEIMBControlBufferType: VABufferType = 46;
+pub const VAEncFEIMVPredictorBufferType: VABufferType = 47;
+pub const VAStatsStatisticsParameterBufferType: VABufferType = 48;
+pub const VAStatsStatisticsBufferType: VABufferType = 49;
+pub const VAStatsStatisticsBottomFieldBufferType: VABufferType = 50;
+pub const VAStatsMVBufferType: VABufferType = 51;
+pub const VAStatsMVPredictorBufferType: VABufferType = 52;
+pub const VAEncMacroblockDisableSkipMapBufferType: VABufferType = 53;
+pub const VAEncFEICTBCmdBufferType: VABufferType = 54;
+pub const VAEncFEICURecordBufferType: VABufferType = 55;
+pub const VADecodeStreamoutBufferType: VABufferType = 56;
+pub const VASubsetsParameterBufferType: VABufferType = 57;
+pub const VAContextParameterUpdateBufferType: VABufferType = 58;
+pub const VAProtectedSessionExecuteBufferType: VABufferType = 59;
+pub const VAEncryptionParameterBufferType: VABufferType = 60;
+pub const VAEncDeltaQpPerBlockBufferType: VABufferType = 61;
+pub const VABufferTypeMax: VABufferType = 62;
+pub const VAEncMiscParameterTypeFrameRate: VAEncMiscParameterType = 0;
+pub const VAEncMiscParameterTypeRateControl: VAEncMiscParameterType = 1;
+pub const VAEncMiscParameterTypeMaxSliceSize: VAEncMiscParameterType = 2;
+pub const VAEncMiscParameterTypeAIR: VAEncMiscParameterType = 3;
+pub const VAEncMiscParameterTypeMaxFrameSize: VAEncMiscParameterType = 4;
+pub const VAEncMiscParameterTypeHRD: VAEncMiscParameterType = 5;
+pub const VAEncMiscParameterTypeQualityLevel: VAEncMiscParameterType = 6;
+pub const VAEncMiscParameterTypeRIR: VAEncMiscParameterType = 7;
+pub const VAEncMiscParameterTypeQuantization: VAEncMiscParameterType = 8;
+pub const VAEncMiscParameterTypeSkipFrame: VAEncMiscParameterType = 9;
+pub const VAEncMiscParameterTypeROI: VAEncMiscParameterType = 10;
+pub const VAEncMiscParameterTypeMultiPassFrameSize: VAEncMiscParameterType = 11;
+pub const VAEncMiscParameterTypeTemporalLayerStructure: VAEncMiscParameterType = 12;
+pub const VAEncMiscParameterTypeDirtyRect: VAEncMiscParameterType = 13;
+pub const VAEncMiscParameterTypeParallelBRC: VAEncMiscParameterType = 14;
+pub const VAEncMiscParameterTypeSubMbPartPel: VAEncMiscParameterType = 15;
+pub const VAEncMiscParameterTypeEncQuality: VAEncMiscParameterType = 16;
+pub const VAEncMiscParameterTypeCustomRoundingControl: VAEncMiscParameterType = 17;
+pub const VAEncMiscParameterTypeFEIFrameControl: VAEncMiscParameterType = 18;
+pub const VAEncMiscParameterTypeExtensionData: VAEncMiscParameterType = 19;
+pub const VAEncPackedHeaderSequence: VAEncPackedHeaderType = 1;
+pub const VAEncPackedHeaderPicture: VAEncPackedHeaderType = 2;
+pub const VAEncPackedHeaderSlice: VAEncPackedHeaderType = 3;
+pub const VAEncPackedHeaderRawData: VAEncPackedHeaderType = 4;
+pub const VAEncPackedHeaderMiscMask: VAEncPackedHeaderType = 2147483648;
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of _VAEncPackedHeaderParameterBuffer"]
@@ -1320,6 +1330,17 @@ const _: () = {
         [::core::mem::offset_of!(_VAEncMiscParameterHRD, buffer_size) - 4usize];
     ["Offset of field: _VAEncMiscParameterHRD::va_reserved"]
         [::core::mem::offset_of!(_VAEncMiscParameterHRD, va_reserved) - 8usize];
+};
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of _VAEncMiscParameterBufferQualityLevel"]
+        [::core::mem::size_of::<_VAEncMiscParameterBufferQualityLevel>() - 20usize];
+    ["Alignment of _VAEncMiscParameterBufferQualityLevel"]
+        [::core::mem::align_of::<_VAEncMiscParameterBufferQualityLevel>() - 4usize];
+    ["Offset of field: _VAEncMiscParameterBufferQualityLevel::quality_level"]
+        [::core::mem::offset_of!(_VAEncMiscParameterBufferQualityLevel, quality_level) - 0usize];
+    ["Offset of field: _VAEncMiscParameterBufferQualityLevel::va_reserved"]
+        [::core::mem::offset_of!(_VAEncMiscParameterBufferQualityLevel, va_reserved) - 4usize];
 };
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
@@ -2256,12 +2277,11 @@ const _: () = {
     ["Offset of field: _VAEncSegParamAV1::va_reserved"]
         [::core::mem::offset_of!(_VAEncSegParamAV1, va_reserved) - 140usize];
 };
-pub const VAEncTransformationTypeAV1_VAAV1EncTransformationIdentity: VAEncTransformationTypeAV1 = 0;
-pub const VAEncTransformationTypeAV1_VAAV1EncTransformationTranslation: VAEncTransformationTypeAV1 =
-    1;
-pub const VAEncTransformationTypeAV1_VAAV1EncTransformationRotzoom: VAEncTransformationTypeAV1 = 2;
-pub const VAEncTransformationTypeAV1_VAAV1EncTransformationAffine: VAEncTransformationTypeAV1 = 3;
-pub const VAEncTransformationTypeAV1_VAAV1EncTransformationCount: VAEncTransformationTypeAV1 = 4;
+pub const VAAV1EncTransformationIdentity: VAEncTransformationTypeAV1 = 0;
+pub const VAAV1EncTransformationTranslation: VAEncTransformationTypeAV1 = 1;
+pub const VAAV1EncTransformationRotzoom: VAEncTransformationTypeAV1 = 2;
+pub const VAAV1EncTransformationAffine: VAEncTransformationTypeAV1 = 3;
+pub const VAAV1EncTransformationCount: VAEncTransformationTypeAV1 = 4;
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of _VAEncWarpedMotionParamsAV1"]
@@ -2585,30 +2605,27 @@ const _: () = {
     ["Offset of field: _VAEncTileGroupBufferAV1::va_reserved"]
         [::core::mem::offset_of!(_VAEncTileGroupBufferAV1, va_reserved) - 4usize];
 };
-pub const _VAProcColorStandardType_VAProcColorStandardNone: _VAProcColorStandardType = 0;
-pub const _VAProcColorStandardType_VAProcColorStandardBT601: _VAProcColorStandardType = 1;
-pub const _VAProcColorStandardType_VAProcColorStandardBT709: _VAProcColorStandardType = 2;
-pub const _VAProcColorStandardType_VAProcColorStandardBT470M: _VAProcColorStandardType = 3;
-pub const _VAProcColorStandardType_VAProcColorStandardBT470BG: _VAProcColorStandardType = 4;
-pub const _VAProcColorStandardType_VAProcColorStandardSMPTE170M: _VAProcColorStandardType = 5;
-pub const _VAProcColorStandardType_VAProcColorStandardSMPTE240M: _VAProcColorStandardType = 6;
-pub const _VAProcColorStandardType_VAProcColorStandardGenericFilm: _VAProcColorStandardType = 7;
-pub const _VAProcColorStandardType_VAProcColorStandardSRGB: _VAProcColorStandardType = 8;
-pub const _VAProcColorStandardType_VAProcColorStandardSTRGB: _VAProcColorStandardType = 9;
-pub const _VAProcColorStandardType_VAProcColorStandardXVYCC601: _VAProcColorStandardType = 10;
-pub const _VAProcColorStandardType_VAProcColorStandardXVYCC709: _VAProcColorStandardType = 11;
-pub const _VAProcColorStandardType_VAProcColorStandardBT2020: _VAProcColorStandardType = 12;
-pub const _VAProcColorStandardType_VAProcColorStandardExplicit: _VAProcColorStandardType = 13;
-pub const _VAProcColorStandardType_VAProcColorStandardCount: _VAProcColorStandardType = 14;
-pub const _VAProcHighDynamicRangeMetadataType_VAProcHighDynamicRangeMetadataNone:
-    _VAProcHighDynamicRangeMetadataType = 0;
-pub const _VAProcHighDynamicRangeMetadataType_VAProcHighDynamicRangeMetadataHDR10:
-    _VAProcHighDynamicRangeMetadataType = 1;
-pub const _VAProcHighDynamicRangeMetadataType_VAProcHighDynamicRangeMetadataTypeCount:
-    _VAProcHighDynamicRangeMetadataType = 2;
-pub const _VAProcMode_VAProcDefaultMode: _VAProcMode = 0;
-pub const _VAProcMode_VAProcPowerSavingMode: _VAProcMode = 1;
-pub const _VAProcMode_VAProcPerformanceMode: _VAProcMode = 2;
+pub const VAProcColorStandardNone: _VAProcColorStandardType = 0;
+pub const VAProcColorStandardBT601: _VAProcColorStandardType = 1;
+pub const VAProcColorStandardBT709: _VAProcColorStandardType = 2;
+pub const VAProcColorStandardBT470M: _VAProcColorStandardType = 3;
+pub const VAProcColorStandardBT470BG: _VAProcColorStandardType = 4;
+pub const VAProcColorStandardSMPTE170M: _VAProcColorStandardType = 5;
+pub const VAProcColorStandardSMPTE240M: _VAProcColorStandardType = 6;
+pub const VAProcColorStandardGenericFilm: _VAProcColorStandardType = 7;
+pub const VAProcColorStandardSRGB: _VAProcColorStandardType = 8;
+pub const VAProcColorStandardSTRGB: _VAProcColorStandardType = 9;
+pub const VAProcColorStandardXVYCC601: _VAProcColorStandardType = 10;
+pub const VAProcColorStandardXVYCC709: _VAProcColorStandardType = 11;
+pub const VAProcColorStandardBT2020: _VAProcColorStandardType = 12;
+pub const VAProcColorStandardExplicit: _VAProcColorStandardType = 13;
+pub const VAProcColorStandardCount: _VAProcColorStandardType = 14;
+pub const VAProcHighDynamicRangeMetadataNone: _VAProcHighDynamicRangeMetadataType = 0;
+pub const VAProcHighDynamicRangeMetadataHDR10: _VAProcHighDynamicRangeMetadataType = 1;
+pub const VAProcHighDynamicRangeMetadataTypeCount: _VAProcHighDynamicRangeMetadataType = 2;
+pub const VAProcDefaultMode: _VAProcMode = 0;
+pub const VAProcPowerSavingMode: _VAProcMode = 1;
+pub const VAProcPerformanceMode: _VAProcMode = 2;
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of _VABlendState"][::core::mem::size_of::<_VABlendState>() - 16usize];

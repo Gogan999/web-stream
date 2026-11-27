@@ -1048,7 +1048,7 @@ fn apply_rate(
 }
 
 /// The fixed quantizer for the Source quality.
-fn source_qp(codec: VideoCodec) -> u32 {
+pub(crate) fn source_qp(codec: VideoCodec) -> u32 {
     match codec {
         VideoCodec::H264 | VideoCodec::H265 => 18,
         VideoCodec::Av1 => 72,

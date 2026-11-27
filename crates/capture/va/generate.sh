@@ -43,6 +43,7 @@ bindgen \
     --allowlist-type 'VAConfigAttribValEncAV1Ext2' \
     --allowlist-type 'VAConfigAttribValEncRateControlExt' \
     --allowlist-type 'VAMessageCallback' \
+    --allowlist-type 'VAEncMiscParameterBufferQualityLevel' \
     --allowlist-var 'VA_STATUS_.*' \
     --allowlist-var 'VA_RT_FORMAT_.*' \
     --allowlist-var 'VA_FOURCC_.*' \
@@ -61,9 +62,13 @@ bindgen \
     --allowlist-var 'VA_CHROMA_SITING_.*' \
     --allowlist-var 'VA_PADDING_.*' \
     --allowlist-var 'VA_EXPORT_SURFACE_.*' \
+    --allowlist-var 'VA_PROGRESSIVE' \
+    --allowlist-var 'VA_PREDICTION_DIRECTION_.*' \
+    --allowlist-var 'VA_FEATURE_.*' \
     --blocklist-function '.*' \
     --blocklist-type 'VADriver.*' \
     --default-enum-style=consts \
+    --no-prepend-enum-name \
     --no-doc-comments \
     --with-derive-default \
     --use-core \

@@ -3,6 +3,8 @@
 pub mod caps;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod layout;
+#[cfg(target_os = "linux")]
+mod linux;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod modes;
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -11,6 +13,11 @@ mod pacing;
 mod tuning;
 #[cfg(windows)]
 mod win;
+
+#[cfg(target_os = "linux")]
+use linux as platform;
+#[cfg(windows)]
+use win as platform;
 
 use thiserror::Error;
 use tokio::sync::mpsc;
@@ -63,11 +70,11 @@ pub fn encoders() -> &'static [caps::EncoderInfo] {
 
 /// Lists every display the host can capture.
 pub fn list_displays() -> Result<Vec<DisplayInfo>> {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     {
-        win::list_displays()
+        platform::list_displays()
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         Err(CaptureError::Unsupported)
     }
@@ -77,11 +84,11 @@ pub fn list_displays() -> Result<Vec<DisplayInfo>> {
 /// `height`, keeping the refresh rate where it can, and returns the size chosen and whether the
 /// mode actually changed.
 pub fn set_display_mode(display: DisplayId, width: u32, height: u32) -> Result<ModeChange> {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     {
-        win::set_display_mode(display, width, height)
+        platform::set_display_mode(display, width, height)
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = (display, width, height);
         Err(CaptureError::Unsupported)
@@ -90,11 +97,11 @@ pub fn set_display_mode(display: DisplayId, width: u32, height: u32) -> Result<M
 
 /// Puts `display` back to its saved resolution.
 pub fn restore_display_mode(display: DisplayId) -> Result<()> {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     {
-        win::restore_display_mode(display)
+        platform::restore_display_mode(display)
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = display;
         Err(CaptureError::Unsupported)

@@ -1,0 +1,51 @@
+name: Linux capture
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/capture/**"
+      - "crates/nvenc-sys/**"
+      - ".github/workflows/linux-capture.yml"
+  pull_request:
+    paths:
+      - "crates/capture/**"
+      - "crates/nvenc-sys/**"
+      - ".github/workflows/linux-capture.yml"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  kms:
+    name: KMS capture on vkms
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: load vkms
+        run: |
+          if ! sudo modprobe vkms; then
+            sudo apt-get update
+            sudo apt-get install -y "linux-modules-extra-$(uname -r)"
+            sudo modprobe vkms
+          fi
+          for _ in $(seq 50); do ls /dev/dri/card* >/dev/null 2>&1 && break; sleep 0.1; done
+          ls -l /dev/dri
+      - name: build tests
+        run: cargo test -p ws-capture --lib --no-run
+      # GETFB2 hands out framebuffer handles only to root; the test lights the vkms CRTC itself.
+      - name: capture test as root
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: sudo -E
+          WS_REQUIRE_KMS: "1"
+        run: cargo test -p ws-capture --lib linux:: -- --nocapture
+      - name: no GPU libraries
+        run: |
+          sudo apt-get remove -y --purge 'libva*' 'mesa-va-drivers' || true
+          cargo test -p ws-capture --lib linux:: -- --nocapture

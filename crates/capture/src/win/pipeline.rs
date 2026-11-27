@@ -19,7 +19,7 @@ use ws_proto::{
 use super::convert::Converter;
 use super::display::{self, Output};
 use super::duplication::{Acquired, Duplicator};
-use super::nvenc::{DPB_FRAMES, Finished, NvEncoder};
+use super::nvenc::{D3d, DPB_FRAMES, Finished, NvEncoder};
 use super::{Gpu, init_process};
 use crate::pacing::{Backpressure, BitrateGate, EncodeJob, Scheduler};
 use crate::{CaptureError, Result};
@@ -208,7 +208,7 @@ impl Encode {
         let gpu = Gpu::new(&output.adapter)?;
         let converter = Converter::new(&gpu, config.width, config.height, config.fps)?;
         let on_output = deliver(frames.clone(), reports.clone());
-        let encoder = NvEncoder::new(&gpu, config, max, on_output).map_err(|e| match e {
+        let encoder = NvEncoder::new(D3d::new(&gpu), config, max, on_output).map_err(|e| match e {
             CaptureError::NoEncoder(msg) if output.adapter_vendor != 0x10de => CaptureError::NoEncoder(format!(
                 "{msg}; display {:?} is driven by a non-NVIDIA adapter (AMF/QSV not supported yet)",
                 output.info.id
@@ -628,7 +628,6 @@ impl Session {
             kbps: kbps.unwrap_or(self.config.bitrate_kbps),
         };
         self.enc.encoder.submit(
-            &self.enc.gpu.context,
             self.enc.converter.output(),
             self.frame_index,
             job.idr,

@@ -1,0 +1,58 @@
+name: Linux host
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+  # Release build without the slow link-time optimization: this checks the install, not speed.
+  CARGO_PROFILE_RELEASE_LTO: 'false'
+  CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '16'
+
+jobs:
+  install:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: shellcheck
+        run: shellcheck -s sh installer/*.sh
+      - name: build
+        run: cargo build --release --locked -p ws-host --bin web-stream
+      - name: no GPU libraries linked
+        run: |
+          set -euo pipefail
+          needed=$(readelf -d target/release/web-stream | sed -n 's/.*Shared library: \[\(.*\)\]/\1/p')
+          echo "$needed"
+          if echo "$needed" | grep -Ev '^(libc|libm|libgcc_s|libpthread|libdl|librt|ld-linux[-a-z0-9_]*)\.so'; then
+            echo "::error::the host links a library beyond glibc; GPU libraries are loaded at run time"; exit 1
+          fi
+      - name: foreground host answers
+        run: |
+          set -euo pipefail
+          dir=$(mktemp -d)
+          sleep 120 | target/release/web-stream serve --port 18443 --data-dir "$dir" > "$dir/out.log" 2>&1 &
+          for i in $(seq 60); do
+            code=$(curl -ks -o /dev/null -w '%{http_code}' https://127.0.0.1:18443/api/session || true)
+            [ "$code" = 401 ] && break
+            sleep 1
+          done
+          cat "$dir/out.log"
+          [ "$code" = 401 ]
+          [ "$(curl -ks -o /dev/null -w '%{http_code}' https://127.0.0.1:18443/admin)" = 200 ]
+          [ "$(curl -ks -o /dev/null -w '%{http_code}' https://127.0.0.1:18443/api/admin/status)" = 401 ]
+          pkill -f 'web-stream serve --port 18443'
+      - name: tarball
+        run: |
+          ./installer/fetch-redist.sh
+          ./installer/linux-tarball.sh "$(target/release/web-stream version)" x86_64 \
+            target/release/web-stream installer/redist/cloudflared-linux-amd64 dist
+      - name: one-line installer with systemd
+        run: ./installer/test-linux-install.sh dist/web-stream-host-*-linux-x86_64.tar.gz

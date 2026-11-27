@@ -121,8 +121,62 @@ jobs:
           path: dist/
           if-no-files-found: error
 
+  linux:
+    needs: check
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: x86_64
+            target: x86_64-unknown-linux-gnu
+            cloudflared: amd64
+          - arch: aarch64
+            target: aarch64-unknown-linux-gnu
+            cloudflared: arm64
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+      RUST_VERSION: 1.97.0
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+      CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+      CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
+      AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar
+    steps:
+      - uses: actions/checkout@v4
+      - name: toolchain
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --target ${{ matrix.target }}
+          rustup override set "$RUST_VERSION"
+      - name: cross compiler
+        if: matrix.arch == 'aarch64'
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+      - name: build
+        run: cargo build --release --locked -p ws-host --bin web-stream --target ${{ matrix.target }}
+      - name: no GPU libraries linked
+        run: |
+          set -euo pipefail
+          needed=$(readelf -d target/${{ matrix.target }}/release/web-stream | sed -n 's/.*Shared library: \[\(.*\)\]/\1/p')
+          echo "$needed"
+          if echo "$needed" | grep -Ev '^(libc|libm|libgcc_s|libpthread|libdl|librt|ld-linux[-a-z0-9_]*)\.so'; then
+            echo "::error::the host links a library beyond glibc; GPU libraries are loaded at run time"; exit 1
+          fi
+      - name: tarball
+        run: |
+          ./installer/fetch-redist.sh
+          ./installer/linux-tarball.sh "$VERSION" ${{ matrix.arch }} \
+            target/${{ matrix.target }}/release/web-stream \
+            installer/redist/cloudflared-linux-${{ matrix.cloudflared }} dist
+      - name: installer works
+        if: matrix.arch == 'x86_64'
+        run: ./installer/test-linux-install.sh "dist/web-stream-host-$VERSION-linux-x86_64.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-linux-${{ matrix.arch }}
+          path: dist/
+          if-no-files-found: error
+
   publish:
-    needs: [check, build]
+    needs: [check, build, linux]
     runs-on: ubuntu-latest
     environment: release
     permissions:
@@ -136,7 +190,8 @@ jobs:
           fetch-depth: 0
       - uses: actions/download-artifact@v4
         with:
-          name: release-files
+          pattern: release-*
+          merge-multiple: true
           path: dist
       - name: tag
         if: github.event_name == 'workflow_dispatch'
@@ -152,12 +207,13 @@ jobs:
       - name: manifest
         run: |
           set -euo pipefail
+          cp installer/web-stream-install.sh dist/
           cd dist
           if [ "$(git cat-file -t "refs/tags/$TAG")" != tag ]; then
             echo "::error::$TAG is a lightweight tag: tag with git tag -a and the release notes as its message"; exit 1
           fi
           notes=$(git tag -l --format='%(contents:subject)%0a%0a%(contents:body)' "$TAG")
-          files=$(for f in *.zip *.exe; do
+          files=$(for f in *.zip *.exe *.tar.gz; do
             jq -n --arg name "$f" --argjson size "$(stat -c %s "$f")" \
               --arg sha256 "$(sha256sum "$f" | cut -d' ' -f1)" '{name: $name, size: $size, sha256: $sha256}'
           done | jq -s .)
@@ -165,7 +221,7 @@ jobs:
             --arg notes "$notes" --argjson files "$files" \
             '{product: "web-stream-host", version: $version, released: $released, files: $files, notes: $notes}' \
             > manifest.json
-          sha256sum *.zip *.exe *.ps1 manifest.json > SHA256SUMS.txt
+          sha256sum *.zip *.exe *.tar.gz *.ps1 *.sh manifest.json > SHA256SUMS.txt
           cat manifest.json
       - name: publish
         env:

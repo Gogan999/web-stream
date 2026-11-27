@@ -2,6 +2,7 @@
 
 mod bottleneck;
 pub mod clipboard;
+mod codec;
 pub mod console;
 mod cursor;
 mod files;

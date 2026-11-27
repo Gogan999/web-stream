@@ -147,6 +147,9 @@ pub enum HostControl {
     DisplayChanged {
         id: DisplayId,
         config: VideoConfig,
+        /// The host picked `config.codec` from the browser's [`ClientControl::Decoders`].
+        #[serde(default)]
+        auto_codec: bool,
     },
     Pong {
         client_time_ms: f64,
@@ -355,6 +358,54 @@ pub struct BottleneckReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decoder_messages_shape() {
+        let msg: ClientControl = serde_json::from_str(
+            r#"{"type":"decoders","decoders":[{"codec":"h265","smooth":true,"powerEfficient":false}],"auto":true}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            msg,
+            ClientControl::Decoders {
+                decoders: vec![DecoderSupport {
+                    codec: crate::VideoCodec::H265,
+                    smooth: true,
+                    power_efficient: false,
+                }],
+                auto: true,
+            }
+        );
+        let old: HostControl = serde_json::from_str(
+            r#"{"type":"displayChanged","id":0,"config":{"codec":"h264","width":1920,"height":1080,"fps":60,"bitrateKbps":20000}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            old,
+            HostControl::DisplayChanged {
+                auto_codec: false,
+                ..
+            }
+        ));
+        let json = serde_json::to_value(HostControl::DisplayChanged {
+            id: DisplayId(1),
+            config: VideoConfig {
+                codec: crate::VideoCodec::Av1,
+                width: 1920,
+                height: 1080,
+                fps: 60,
+                bitrate_kbps: 20000,
+                quality: Default::default(),
+                keyframe_scale: crate::DEFAULT_KEYFRAME_SCALE,
+                recover_drops: true,
+                min_scale_percent: 0,
+            },
+            auto_codec: true,
+        })
+        .unwrap();
+        assert_eq!(json["autoCodec"], true);
+        assert_eq!(json["config"]["codec"], "av1");
+    }
 
     #[test]
     fn secure_attention_shape() {

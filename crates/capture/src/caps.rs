@@ -105,6 +105,29 @@ pub fn backends_for(
     out
 }
 
+/// Backends to try on the GPU named `adapter`: those the probe found there for `codec` at this
+/// size, or `fallback` when the probe found no encoder at all on that GPU.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn backends_on(
+    encoders: &[EncoderInfo],
+    adapter: &str,
+    codec: VideoCodec,
+    width: u32,
+    height: u32,
+    fallback: &[EncoderBackend],
+) -> Vec<EncoderBackend> {
+    let here: Vec<EncoderInfo> = encoders
+        .iter()
+        .filter(|e| e.adapter == adapter)
+        .cloned()
+        .collect();
+    if here.is_empty() {
+        fallback.to_vec()
+    } else {
+        backends_for(&here, codec, width, height)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -194,5 +217,35 @@ mod tests {
         );
         assert_eq!(backends_for(&e, H264, 6000, 3000), [EncoderBackend::Nvenc]);
         assert!(backends_for(&e, Av1, 1920, 1080).is_empty());
+    }
+
+    #[test]
+    fn backends_on_one_adapter_or_the_fallback() {
+        let mut nv = enc(EncoderBackend::Nvenc, &[(H264, 4096, 4096)]);
+        nv.adapter = "RTX".into();
+        let mut mf = enc(
+            EncoderBackend::MediaFoundation,
+            &[(H264, 4096, 4096), (Av1, 8192, 8192)],
+        );
+        mf.adapter = "Arc".into();
+        let e = [nv, mf];
+        let fallback = [EncoderBackend::Nvenc, EncoderBackend::MediaFoundation];
+        assert_eq!(
+            backends_on(&e, "Arc", H264, 1920, 1080, &fallback),
+            [EncoderBackend::MediaFoundation]
+        );
+        assert_eq!(
+            backends_on(&e, "RTX", H264, 1920, 1080, &fallback),
+            [EncoderBackend::Nvenc]
+        );
+        assert!(backends_on(&e, "RTX", Av1, 1920, 1080, &fallback).is_empty());
+        assert_eq!(
+            backends_on(&e, "Other", Av1, 1920, 1080, &fallback),
+            fallback
+        );
+        assert_eq!(
+            backends_on(&[], "RTX", H264, 1920, 1080, &fallback),
+            fallback
+        );
     }
 }

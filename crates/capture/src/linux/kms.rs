@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use super::display::Output;
 use super::drm::{self, Card};
+use super::transform::{self, Transform};
 use crate::{CaptureError, Result};
 
 /// A scanout buffer shared with the GPU, never touched by the CPU.
@@ -23,6 +24,8 @@ pub(crate) struct Frame {
     pub modifier: u64,
     /// The part of the buffer the CRTC shows.
     pub crop: Crop,
+    /// From the cropped buffer to the picture as seen.
+    pub transform: Transform,
     /// Identifies the buffer across exports.
     pub inode: u64,
 }
@@ -103,12 +106,17 @@ pub(crate) struct KmsSource {
     plane: u32,
     /// `SRC_X`, `SRC_Y`, `SRC_W`, `SRC_H` property ids of the plane.
     src_props: Option<[u32; 4]>,
+    /// `rotation` property id of the plane.
+    rotation_prop: Option<u32>,
+    /// How the panel is mounted.
+    panel: Transform,
     current: Option<(u32, Rc<Frame>)>,
     last_flip: Option<Instant>,
     vblank_pending: bool,
     /// When vblank events last failed.
     vblank_failed: Option<Instant>,
     last_poll: Option<Instant>,
+    /// The CRTC's position in the buffer and its mode size.
     fallback_crop: Crop,
 }
 
@@ -124,13 +132,15 @@ impl KmsSource {
             .ok_or(CaptureError::DisplayNotFound(output.info.id))?;
         let plane = primary_plane(&card, output.crtc_id, output.pipe)
             .ok_or(CaptureError::DisplayNotFound(output.info.id))?;
-        let src_props = plane_src_props(&card, plane);
+        let (src_props, rotation_prop) = plane_props(&card, plane);
         Ok(Self {
             card,
             crtc_id: output.crtc_id,
             pipe: output.pipe,
             plane,
             src_props,
+            rotation_prop,
+            panel: output.panel,
             current: None,
             last_flip: None,
             vblank_pending: false,
@@ -276,7 +286,7 @@ impl KmsSource {
         } else {
             drm::MOD_INVALID
         };
-        let crop = self.crop(fb.width, fb.height);
+        let (crop, transform) = self.placement(fb.width, fb.height);
         Ok(Frame {
             objects,
             planes,
@@ -285,20 +295,28 @@ impl KmsSource {
             fourcc: fb.pixel_format,
             modifier,
             crop,
+            transform,
             inode,
         })
     }
 
-    /// The source rectangle of the plane, clamped to the framebuffer.
-    fn crop(&self, width: u32, height: u32) -> Crop {
+    /// The source rectangle of the plane, clamped to the framebuffer, and the transform to the
+    /// picture as seen.
+    fn placement(&self, width: u32, height: u32) -> (Crop, Transform) {
+        let props = if self.src_props.is_some() || self.rotation_prop.is_some() {
+            self.card
+                .properties(self.plane, drm::OBJECT_PLANE)
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let get = |id: u32| props.iter().find(|(p, _)| *p == id).map(|(_, v)| *v);
+        let rotation = self
+            .rotation_prop
+            .and_then(get)
+            .map_or(Transform::IDENTITY, Transform::from_drm_rotation);
         let from_props = self.src_props.and_then(|ids| {
-            let props = self.card.properties(self.plane, drm::OBJECT_PLANE).ok()?;
-            let get = |id: u32| {
-                props
-                    .iter()
-                    .find(|(p, _)| *p == id)
-                    .map(|(_, v)| (*v >> 16) as u32)
-            };
+            let get = |id: u32| get(id).map(|v| (v >> 16) as u32);
             Some(Crop {
                 x: get(ids[0])?,
                 y: get(ids[1])?,
@@ -306,7 +324,15 @@ impl KmsSource {
                 height: get(ids[3])?,
             })
         });
-        clamp_crop(from_props.unwrap_or(self.fallback_crop), width, height)
+        let crop = from_props.unwrap_or_else(|| {
+            let f = self.fallback_crop;
+            let (width, height) = rotation.size(f.width, f.height);
+            Crop { width, height, ..f }
+        });
+        (
+            clamp_crop(crop, width, height),
+            transform::upright(rotation, self.panel),
+        )
     }
 }
 
@@ -333,7 +359,7 @@ fn inode(fd: &OwnedFd) -> io::Result<u64> {
 }
 
 /// The primary plane showing `crtc_id`, or the primary plane that can.
-fn primary_plane(card: &Card, crtc_id: u32, pipe: u32) -> Option<u32> {
+pub(crate) fn primary_plane(card: &Card, crtc_id: u32, pipe: u32) -> Option<u32> {
     let mut candidate = None;
     for id in card.planes().ok()? {
         let Ok(plane) = card.plane(id) else { continue };
@@ -353,15 +379,29 @@ fn primary_plane(card: &Card, crtc_id: u32, pipe: u32) -> Option<u32> {
     candidate
 }
 
-fn plane_src_props(card: &Card, plane: u32) -> Option<[u32; 4]> {
-    let props = card.properties(plane, drm::OBJECT_PLANE).ok()?;
-    let id = |name: &str| {
-        props
-            .iter()
-            .map(|(p, _)| *p)
-            .find(|p| card.property_name(*p).is_ok_and(|n| n == name))
+/// The plane's `SRC_*` and `rotation` property ids.
+fn plane_props(card: &Card, plane: u32) -> (Option<[u32; 4]>, Option<u32>) {
+    let Ok(props) = card.properties(plane, drm::OBJECT_PLANE) else {
+        return (None, None);
     };
-    Some([id("SRC_X")?, id("SRC_Y")?, id("SRC_W")?, id("SRC_H")?])
+    let names: Vec<(u32, String)> = props
+        .iter()
+        .filter_map(|(p, _)| Some((*p, card.property_name(*p).ok()?)))
+        .collect();
+    let id = |name: &str| names.iter().find(|(_, n)| n == name).map(|(p, _)| *p);
+    let src = match (id("SRC_X"), id("SRC_Y"), id("SRC_W"), id("SRC_H")) {
+        (Some(x), Some(y), Some(w), Some(h)) => Some([x, y, w, h]),
+        _ => None,
+    };
+    (src, id("rotation"))
+}
+
+/// The rotation of `plane`, identity without a `rotation` property.
+pub(crate) fn plane_rotation(card: &Card, plane: u32) -> Transform {
+    card.properties(plane, drm::OBJECT_PLANE)
+        .ok()
+        .and_then(|props| card.find_property(&props, "rotation"))
+        .map_or(Transform::IDENTITY, Transform::from_drm_rotation)
 }
 
 #[cfg(test)]

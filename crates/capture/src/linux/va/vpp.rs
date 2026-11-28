@@ -1,17 +1,67 @@
-//! Scanout DMA-BUF to NV12 at the stream size with VA video processing: import, crop, scale,
-//! letterbox and colour conversion on the GPU.
+//! Scanout DMA-BUF to NV12 at the stream size with VA video processing: import, crop, rotate,
+//! mirror, scale, letterbox and colour conversion on the GPU.
 
 use std::os::fd::AsRawFd;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::sys::*;
 use super::{Config, Display, VAContextID};
 use crate::layout::letterbox;
 use crate::linux::kms::{Frame, FrameKey, fourcc};
+use crate::linux::transform::Transform;
 use crate::{CaptureError, Result};
 
 /// Scanout buffers kept imported: a compositor cycles through two to four.
 const IMPORT_CACHE: usize = 6;
+
+/// `VA_ROTATION_*`: quarter turns clockwise.
+const VA_ROTATION_NONE: u32 = 0;
+/// `VA_MIRROR_*`, applied after the rotation.
+const VA_MIRROR_NONE: u32 = 0;
+const VA_MIRROR_HORIZONTAL: u32 = 1;
+const VA_MIRROR_VERTICAL: u32 = 2;
+
+/// `VAProcPipelineCaps` (`va_vpp.h`) up to `mirror_flags`, with room for the rest.
+#[repr(C)]
+pub(crate) struct PipelineCaps {
+    pipeline_flags: u32,
+    filter_flags: u32,
+    num_forward_references: u32,
+    num_backward_references: u32,
+    input_color_standards: *mut VAProcColorStandardType,
+    num_input_color_standards: u32,
+    output_color_standards: *mut VAProcColorStandardType,
+    num_output_color_standards: u32,
+    rotation_flags: u32,
+    blend_flags: u32,
+    mirror_flags: u32,
+    rest: [u32; 64],
+}
+
+/// Rotations (`1 << VA_ROTATION_*`) and mirrors (`VA_MIRROR_*` bits) the pipeline supports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Orientations {
+    rotations: u32,
+    mirrors: u32,
+}
+
+/// The rotation and mirror state that applies `t`, if the pipeline can.
+fn va_state(t: Transform, caps: Orientations) -> Option<(u32, u32)> {
+    let q = u32::from(t.quarter());
+    let options: &[(u32, u32)] = if t.mirror() {
+        &[(q, VA_MIRROR_HORIZONTAL), ((q + 2) % 4, VA_MIRROR_VERTICAL)]
+    } else {
+        &[((4 - q) % 4, VA_MIRROR_NONE)]
+    };
+    options.iter().copied().find(|&(rotation, mirror)| {
+        (rotation == VA_ROTATION_NONE || caps.rotations & (1 << rotation) != 0)
+            && (mirror == VA_MIRROR_NONE || caps.mirrors & mirror != 0)
+    })
+}
+
+/// A transform the pipeline cannot apply was logged.
+static UNSUPPORTED_LOGGED: AtomicBool = AtomicBool::new(false);
 
 /// An NV12 surface the converter writes and the encoder reads.
 pub(crate) struct Pooled {
@@ -26,6 +76,7 @@ pub(crate) struct Vpp {
     context: VAContextID,
     width: u32,
     height: u32,
+    orientations: Orientations,
     imported: Vec<(FrameKey, VASurfaceID)>,
     pub pool: Vec<Pooled>,
     /// The pool surface holding the newest image.
@@ -80,12 +131,14 @@ impl Vpp {
                 return Err(e);
             }
         };
+        let orientations = query_orientations(&display, context);
         Ok(Self {
             display,
             config,
             context,
             width,
             height,
+            orientations,
             imported: Vec::new(),
             pool: surfaces
                 .into_iter()
@@ -110,7 +163,20 @@ impl Vpp {
             width: c.width as u16,
             height: c.height as u16,
         };
-        let r = letterbox(c.width, c.height, self.width, self.height);
+        let (transform, (rotation, mirror)) = match va_state(frame.transform, self.orientations) {
+            Some(state) => (frame.transform, state),
+            None => {
+                if !UNSUPPORTED_LOGGED.swap(true, Ordering::Relaxed) {
+                    tracing::warn!(
+                        transform = ?frame.transform,
+                        "VA-API video processing cannot rotate or mirror this way; streaming unrotated"
+                    );
+                }
+                (Transform::IDENTITY, (VA_ROTATION_NONE, VA_MIRROR_NONE))
+            }
+        };
+        let (upright_w, upright_h) = transform.size(c.width, c.height);
+        let r = letterbox(upright_w, upright_h, self.width, self.height);
         let dst = VARectangle {
             x: r.left as i16,
             y: r.top as i16,
@@ -126,6 +192,8 @@ impl Vpp {
         p.output_background_color = 0xff00_0000;
         p.output_color_standard = VAProcColorStandardBT709;
         p.filter_flags = VA_FILTER_SCALING_DEFAULT;
+        p.rotation_state = rotation;
+        p.mirror_state = mirror;
         p.input_color_properties.color_range = VA_SOURCE_RANGE_FULL as u8;
         p.output_color_properties = VAProcColorProperties {
             chroma_sample_location: (VA_CHROMA_SITING_HORIZONTAL_LEFT
@@ -201,6 +269,30 @@ impl Drop for Vpp {
     }
 }
 
+/// The rotations and mirrors the video processing pipeline on `context` supports.
+fn query_orientations(display: &Display, context: VAContextID) -> Orientations {
+    let none = Orientations {
+        rotations: 0,
+        mirrors: 0,
+    };
+    let Some(query) = display.lib().vaQueryVideoProcPipelineCaps else {
+        return none;
+    };
+    // SAFETY: plain data; zero and null are valid for every field.
+    let mut caps: PipelineCaps = unsafe { std::mem::zeroed() };
+    let status = unsafe { query(display.raw(), context, std::ptr::null_mut(), 0, &mut caps) };
+    if display
+        .check(status, "vaQueryVideoProcPipelineCaps")
+        .is_err()
+    {
+        return none;
+    }
+    Orientations {
+        rotations: caps.rotation_flags,
+        mirrors: caps.mirror_flags,
+    }
+}
+
 fn dmabuf_size(fd: i32) -> u32 {
     // SAFETY: lseek on a DMA-BUF reports its size and leaves nothing to undo for importers.
     let size = unsafe { libc::lseek(fd, 0, libc::SEEK_END) };
@@ -215,6 +307,7 @@ fn fourcc_str(code: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::linux::transform::{Affine, compose};
 
     #[test]
     fn scanout_formats_map_to_va() {
@@ -228,5 +321,66 @@ mod tests {
         );
         assert_eq!(va_format(u32::from_le_bytes(*b"NV12")), None);
         assert_eq!(fourcc_str(fourcc::XRGB8888), "XR24");
+    }
+
+    /// VA-API's clockwise rotation then mirror, on the unit square.
+    fn va_affine(rotation: u32, mirror: u32) -> Affine {
+        let cw: [Affine; 4] = [
+            [[1, 0, 0], [0, 1, 0]],
+            [[0, -1, 1], [1, 0, 0]],
+            [[-1, 0, 1], [0, -1, 1]],
+            [[0, 1, 0], [-1, 0, 1]],
+        ];
+        let flip: Affine = match mirror {
+            VA_MIRROR_HORIZONTAL => [[-1, 0, 1], [0, 1, 0]],
+            VA_MIRROR_VERTICAL => [[1, 0, 0], [0, -1, 1]],
+            _ => [[1, 0, 0], [0, 1, 0]],
+        };
+        compose(flip, cw[rotation as usize])
+    }
+
+    #[test]
+    fn va_rotation_and_mirror_apply_every_transform() {
+        let all = Orientations {
+            rotations: 0b1111,
+            mirrors: VA_MIRROR_HORIZONTAL | VA_MIRROR_VERTICAL,
+        };
+        for t in Transform::all() {
+            let (rotation, mirror) = va_state(t, all).expect("supported");
+            assert_eq!(va_affine(rotation, mirror), t.affine(), "{t:?}");
+            for mirrors in [VA_MIRROR_HORIZONTAL, VA_MIRROR_VERTICAL] {
+                let only = Orientations { mirrors, ..all };
+                let (rotation, mirror) = va_state(t, only).expect("one mirror is enough");
+                assert_eq!(va_affine(rotation, mirror), t.affine(), "{t:?}");
+            }
+        }
+        // VA_ROTATION_90 turns clockwise: the bottom-left corner lands top-left.
+        let (rotation, _) = va_state(Transform::new(3, false), all).unwrap();
+        assert_eq!(rotation, 1);
+    }
+
+    #[test]
+    fn unsupported_orientations_are_refused() {
+        let none = Orientations {
+            rotations: 0,
+            mirrors: 0,
+        };
+        assert_eq!(
+            va_state(Transform::IDENTITY, none),
+            Some((VA_ROTATION_NONE, VA_MIRROR_NONE))
+        );
+        for t in Transform::all().filter(|t| !t.is_identity()) {
+            assert_eq!(va_state(t, none), None, "{t:?}");
+        }
+        let half_turn_only = Orientations {
+            rotations: 1 << 2,
+            mirrors: 0,
+        };
+        assert_eq!(
+            va_state(Transform::new(2, false), half_turn_only),
+            Some((2, 0))
+        );
+        assert_eq!(va_state(Transform::new(1, false), half_turn_only), None);
+        assert_eq!(va_state(Transform::new(2, true), half_turn_only), None);
     }
 }

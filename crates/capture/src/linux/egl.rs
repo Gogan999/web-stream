@@ -1,12 +1,14 @@
 //! EGL on a DRM device and an OpenGL converter: imports the scanout DMA-BUF as a texture and
-//! renders it, cropped, scaled and letterboxed, into NV12 planes (BT.709 limited range).
+//! renders it, cropped, rotated, mirrored, scaled and letterboxed, into NV12 planes (BT.709
+//! limited range).
 
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::os::fd::AsRawFd;
 use std::path::Path;
 use std::sync::OnceLock;
 
-use super::kms::{Frame, FrameKey};
+use super::kms::{Crop, Frame, FrameKey};
+use super::transform::Transform;
 use crate::layout::letterbox;
 use crate::{CaptureError, Result};
 
@@ -164,6 +166,7 @@ struct Gl {
     glUseProgram: unsafe extern "C" fn(u32),
     glGetUniformLocation: unsafe extern "C" fn(u32, *const c_char) -> i32,
     glUniform1i: unsafe extern "C" fn(i32, i32),
+    glUniform3f: unsafe extern "C" fn(i32, f32, f32, f32),
     glUniform4f: unsafe extern "C" fn(i32, f32, f32, f32, f32),
     glGenVertexArrays: unsafe extern "C" fn(i32, *mut u32),
     glDeleteVertexArrays: unsafe extern "C" fn(i32, *const u32),
@@ -214,6 +217,7 @@ impl Gl {
             glUseProgram: gl!(glUseProgram),
             glGetUniformLocation: gl!(glGetUniformLocation),
             glUniform1i: gl!(glUniform1i),
+            glUniform3f: gl!(glUniform3f),
             glUniform4f: gl!(glUniform4f),
             glGenVertexArrays: gl!(glGenVertexArrays),
             glDeleteVertexArrays: gl!(glDeleteVertexArrays),
@@ -381,12 +385,13 @@ void main() {
 const FRAGMENT: &str = "#version 330 core
 uniform sampler2D tex;
 uniform vec4 dst;
-uniform vec4 src;
+uniform vec3 tx;
+uniform vec3 ty;
 uniform int chroma;
 out vec4 color;
 void main() {
-    vec2 p = (gl_FragCoord.xy - dst.xy) / dst.zw;
-    vec3 rgb = texture(tex, src.xy + p * src.zw).rgb;
+    vec3 p = vec3((gl_FragCoord.xy - dst.xy) / dst.zw, 1.0);
+    vec3 rgb = texture(tex, vec2(dot(tx, p), dot(ty, p))).rgb;
     if (chroma == 0) {
         color = vec4((16.0 + 219.0 * dot(rgb, vec3(0.2126, 0.7152, 0.0722))) / 255.0, 0.0, 0.0, 1.0);
     } else {
@@ -411,7 +416,8 @@ pub(crate) struct Converter {
     display: EglDisplay,
     program: u32,
     vao: u32,
-    uniforms: [i32; 4],
+    /// `tex`, `dst`, `tx`, `ty`, `chroma`.
+    uniforms: [i32; 5],
     pub width: u32,
     pub height: u32,
     /// Y and UV textures, and their framebuffers.
@@ -436,7 +442,8 @@ impl Converter {
         let uniforms = [
             uniform("tex"),
             uniform("dst"),
-            uniform("src"),
+            uniform("tx"),
+            uniform("ty"),
             uniform("chroma"),
         ];
         let mut c = Self {
@@ -493,21 +500,17 @@ impl Converter {
         let texture = self.import(frame)?;
         let gl = &self.gl;
         let c = frame.crop;
-        let (fw, fh) = (frame.width as f32, frame.height as f32);
-        let r = letterbox(c.width, c.height, self.width, self.height);
+        let (upright_w, upright_h) = frame.transform.size(c.width, c.height);
+        let r = letterbox(upright_w, upright_h, self.width, self.height);
+        let [tx, ty] = texture_map(c, frame.width, frame.height, frame.transform);
         unsafe {
             (gl.glUseProgram)(self.program);
             (gl.glBindVertexArray)(self.vao);
             (gl.glActiveTexture)(GL_TEXTURE0);
             (gl.glBindTexture)(GL_TEXTURE_2D, texture);
             (gl.glUniform1i)(self.uniforms[0], 0);
-            (gl.glUniform4f)(
-                self.uniforms[2],
-                c.x as f32 / fw,
-                c.y as f32 / fh,
-                c.width as f32 / fw,
-                c.height as f32 / fh,
-            );
+            (gl.glUniform3f)(self.uniforms[2], tx[0], tx[1], tx[2]);
+            (gl.glUniform3f)(self.uniforms[3], ty[0], ty[1], ty[2]);
             for (i, (div, clear)) in [(1u32, [16.0f32, 0.0]), (2, [128.0, 128.0])]
                 .into_iter()
                 .enumerate()
@@ -520,7 +523,7 @@ impl Converter {
                 let (w, h) = ((r.right - r.left) / div, (r.bottom - r.top) / div);
                 (gl.glViewport)(x as i32, y as i32, w as i32, h as i32);
                 (gl.glUniform4f)(self.uniforms[1], x as f32, y as f32, w as f32, h as f32);
-                (gl.glUniform1i)(self.uniforms[3], i as i32);
+                (gl.glUniform1i)(self.uniforms[4], i as i32);
                 (gl.glDrawArrays)(GL_TRIANGLES, 0, 3);
             }
             (gl.glBindFramebuffer)(GL_FRAMEBUFFER, 0);
@@ -602,6 +605,25 @@ impl Drop for Converter {
             (gl.glDeleteProgram)(self.program);
         }
     }
+}
+
+/// The texture coordinate of each point of the output picture (unit square, rows from the top),
+/// as `[tx, ty]` with `coord = (dot(tx, (x, y, 1)), dot(ty, (x, y, 1)))`: the inverse of
+/// `transform`, into `crop` of a `width` x `height` buffer.
+fn texture_map(crop: Crop, width: u32, height: u32, transform: Transform) -> [[f32; 3]; 2] {
+    let m = transform.inverse().affine();
+    let axis = |row: [i32; 3], offset: u32, extent: u32, size: u32| {
+        let (extent, size) = (extent as f32, size as f32);
+        [
+            row[0] as f32 * extent / size,
+            row[1] as f32 * extent / size,
+            (offset as f32 + row[2] as f32 * extent) / size,
+        ]
+    };
+    [
+        axis(m[0], crop.x, crop.width, width),
+        axis(m[1], crop.y, crop.height, height),
+    ]
 }
 
 /// `eglCreateImageKHR` attributes for a scanout DMA-BUF.
@@ -710,6 +732,38 @@ mod tests {
         assert!((u(0.0, 0.0, 1.0) - 240.0).abs() < 0.01);
         assert!((v(1.0, 0.0, 0.0) - 240.0).abs() < 0.01);
         assert!(FRAGMENT.contains("0.2126, 0.7152, 0.0722"));
+    }
+
+    #[test]
+    fn texture_coordinates_undo_every_transform() {
+        use crate::linux::transform::apply;
+        let crop = Crop {
+            x: 100,
+            y: 50,
+            width: 400,
+            height: 300,
+        };
+        let (w, h) = (1000.0, 500.0);
+        let texel = |(x, y): (f64, f64)| ((100.0 + x * 400.0) / w, (50.0 + y * 300.0) / h);
+        for t in Transform::all() {
+            let [tx, ty] = texture_map(crop, 1000, 500, t);
+            for q in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0), (0.3, 0.8)] {
+                let (px, py) = apply(t.affine(), q);
+                let got = (
+                    f64::from(tx[0]) * px + f64::from(tx[1]) * py + f64::from(tx[2]),
+                    f64::from(ty[0]) * px + f64::from(ty[1]) * py + f64::from(ty[2]),
+                );
+                let want = texel(q);
+                assert!(
+                    (got.0 - want.0).abs() < 1e-6 && (got.1 - want.1).abs() < 1e-6,
+                    "{t:?} at {q:?}: {got:?} != {want:?}"
+                );
+            }
+        }
+        assert_eq!(
+            texture_map(crop, 1000, 500, Transform::IDENTITY),
+            [[0.4, 0.0, 0.1], [0.0, 0.6, 0.1]]
+        );
     }
 
     #[test]

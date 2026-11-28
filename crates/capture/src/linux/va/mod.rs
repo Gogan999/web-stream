@@ -94,6 +94,15 @@ pub(crate) struct Lib {
     vaSyncSurface: unsafe extern "C" fn(VADisplay, VASurfaceID) -> VAStatus,
     /// libva 2.9 and later.
     vaSyncBuffer: Option<unsafe extern "C" fn(VADisplay, VABufferID, u64) -> VAStatus>,
+    vaQueryVideoProcPipelineCaps: Option<
+        unsafe extern "C" fn(
+            VADisplay,
+            VAContextID,
+            *mut VABufferID,
+            c_uint,
+            *mut vpp::PipelineCaps,
+        ) -> VAStatus,
+    >,
 }
 
 pub(crate) type VAConfigID = u32;
@@ -149,6 +158,10 @@ fn load() -> std::result::Result<Lib, String> {
         vaSyncSurface: sym!(va, vaSyncSurface),
         // SAFETY: as above.
         vaSyncBuffer: unsafe { va.get(b"vaSyncBuffer\0") }.ok().map(|s| *s),
+        // SAFETY: as above.
+        vaQueryVideoProcPipelineCaps: unsafe { va.get(b"vaQueryVideoProcPipelineCaps\0") }
+            .ok()
+            .map(|s| *s),
     };
     // Both stay loaded for the life of the process.
     std::mem::forget(va);

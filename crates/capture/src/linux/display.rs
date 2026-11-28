@@ -6,6 +6,8 @@ use ws_proto::{DisplayId, DisplayInfo};
 
 use super::drm::{self, Card};
 use super::edid;
+use super::kms;
+use super::transform::{self, Transform};
 use crate::{CaptureError, Result};
 
 /// A display and where its picture comes from.
@@ -21,6 +23,8 @@ pub(crate) struct Output {
     /// The CRTC's index on its card.
     pub pipe: u32,
     pub internal: bool,
+    /// How the panel is mounted (`panel orientation`).
+    pub panel: Transform,
 }
 
 pub(crate) fn enumerate() -> Result<Vec<Output>> {
@@ -99,6 +103,18 @@ fn card_outputs(path: &std::path::Path) -> std::io::Result<Vec<Output>> {
         let Some(mode) = crtc.mode else {
             continue;
         };
+        let panel = card
+            .find_property(&c.props, "panel orientation")
+            .map_or(Transform::IDENTITY, Transform::from_panel_orientation);
+        let rotation = kms::primary_plane(&card, crtc_id, pipe as u32)
+            .map_or(Transform::IDENTITY, |plane| {
+                kms::plane_rotation(&card, plane)
+            });
+        let (width, height) = transform::upright_size(
+            (u32::from(mode.hdisplay), u32::from(mode.vdisplay)),
+            rotation,
+            panel,
+        );
         let connector = c.name();
         let monitor = card
             .find_property(&c.props, "EDID")
@@ -115,8 +131,8 @@ fn card_outputs(path: &std::path::Path) -> std::io::Result<Vec<Output>> {
                 name,
                 x: i32::try_from(crtc.x).unwrap_or(0),
                 y: i32::try_from(crtc.y).unwrap_or(0),
-                width: u32::from(mode.hdisplay),
-                height: u32::from(mode.vdisplay),
+                width,
+                height,
                 refresh_mhz: mode.refresh_mhz(),
                 primary: false,
             },
@@ -129,6 +145,7 @@ fn card_outputs(path: &std::path::Path) -> std::io::Result<Vec<Output>> {
                 c.kind,
                 drm::CONNECTOR_EDP | drm::CONNECTOR_LVDS | drm::CONNECTOR_DSI
             ),
+            panel,
         });
     }
     Ok(out)

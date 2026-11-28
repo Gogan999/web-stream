@@ -7,8 +7,8 @@ use ws_proto::{DisplayId, DisplayInfo};
 use super::drm::{self, Card};
 use super::edid;
 use super::kms;
-use super::transform::{self, Transform};
 use crate::{CaptureError, Result};
+use ws_proto::orientation::{self as transform, Transform};
 
 /// A display and where its picture comes from.
 #[derive(Debug, Clone)]

@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 
 use super::display::Output;
 use super::drm::{self, Card};
-use super::transform::{self, Transform};
 use crate::{CaptureError, Result};
+use ws_proto::orientation::{self as transform, Transform};
 
 /// A scanout buffer shared with the GPU, never touched by the CPU.
 #[derive(Debug)]
@@ -664,13 +664,13 @@ mod tests {
         }
 
         fn unturn(&mut self) {
-            let _ = self.rotate(super::super::transform::drm_rotation::ROTATE_0);
+            let _ = self.rotate(ws_proto::orientation::drm_rotation::ROTATE_0);
             self.turned = false;
         }
 
         /// Turns the plane a quarter and shows the pattern on a portrait buffer.
         fn turn(&mut self) -> Option<()> {
-            self.rotate(super::super::transform::drm_rotation::ROTATE_90)?;
+            self.rotate(ws_proto::orientation::drm_rotation::ROTATE_90)?;
             self.turned = true;
             self.show(pattern)
         }

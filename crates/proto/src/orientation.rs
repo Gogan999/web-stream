@@ -1,7 +1,8 @@
-//! The eight ways a picture can be laid on a display: quarter turns and mirroring.
+//! The eight ways a picture can be laid on a display: quarter turns and mirroring, as KMS planes
+//! and panels describe them.
 
 /// `DRM_MODE_ROTATE_*` and `DRM_MODE_REFLECT_*` bits of a plane's `rotation` property.
-pub(crate) mod drm_rotation {
+pub mod drm_rotation {
     pub const ROTATE_0: u64 = 1 << 0;
     pub const ROTATE_90: u64 = 1 << 1;
     pub const ROTATE_180: u64 = 1 << 2;
@@ -11,7 +12,7 @@ pub(crate) mod drm_rotation {
 }
 
 /// `DRM_MODE_PANEL_ORIENTATION_*` values of a connector's `panel orientation` property.
-mod panel_orientation {
+pub mod panel_orientation {
     pub const BOTTOM_UP: u64 = 1;
     pub const LEFT_UP: u64 = 2;
     pub const RIGHT_UP: u64 = 3;
@@ -20,21 +21,21 @@ mod panel_orientation {
 /// A mirror in x (when `mirror`) followed by `quarter` turns counter-clockwise, in image space
 /// (y down), the order and direction DRM uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
-pub(crate) struct Transform {
+pub struct Transform {
     quarter: u8,
     mirror: bool,
 }
 
 /// An affine map on the unit square: `x' = m[0][0] x + m[0][1] y + m[0][2]`, same for `y'`.
-pub(crate) type Affine = [[i32; 3]; 2];
+pub type Affine = [[i32; 3]; 2];
 
 impl Transform {
-    pub(crate) const IDENTITY: Self = Self {
+    pub const IDENTITY: Self = Self {
         quarter: 0,
         mirror: false,
     };
 
-    pub(crate) const fn new(quarter: u8, mirror: bool) -> Self {
+    pub const fn new(quarter: u8, mirror: bool) -> Self {
         Self {
             quarter: quarter % 4,
             mirror,
@@ -42,13 +43,12 @@ impl Transform {
     }
 
     /// Every transform.
-    #[cfg(test)]
-    pub(crate) fn all() -> impl Iterator<Item = Self> {
+    pub fn all() -> impl Iterator<Item = Self> {
         (0..8).map(|i| Self::new(i % 4, i >= 4))
     }
 
     /// Decodes a plane's `rotation` property.
-    pub(crate) fn from_drm_rotation(bits: u64) -> Self {
+    pub fn from_drm_rotation(bits: u64) -> Self {
         use drm_rotation::*;
         let quarter = match bits & (ROTATE_0 | ROTATE_90 | ROTATE_180 | ROTATE_270) {
             ROTATE_90 => 1,
@@ -62,7 +62,7 @@ impl Transform {
 
     /// The plane rotation that shows an upright picture on a panel mounted as
     /// `panel orientation` says (as the kernel's `drm_client_rotation`).
-    pub(crate) fn from_panel_orientation(value: u64) -> Self {
+    pub fn from_panel_orientation(value: u64) -> Self {
         match value {
             panel_orientation::BOTTOM_UP => Self::new(2, false),
             panel_orientation::LEFT_UP => Self::new(1, false),
@@ -71,25 +71,25 @@ impl Transform {
         }
     }
 
-    pub(crate) fn quarter(self) -> u8 {
+    pub fn quarter(self) -> u8 {
         self.quarter
     }
 
-    pub(crate) fn mirror(self) -> bool {
+    pub fn mirror(self) -> bool {
         self.mirror
     }
 
-    pub(crate) fn is_identity(self) -> bool {
+    pub fn is_identity(self) -> bool {
         self == Self::IDENTITY
     }
 
     /// Whether width and height trade places.
-    pub(crate) fn swaps(self) -> bool {
+    pub fn swaps(self) -> bool {
         self.quarter % 2 == 1
     }
 
     /// The size of a `width` x `height` picture once transformed.
-    pub(crate) fn size(self, width: u32, height: u32) -> (u32, u32) {
+    pub fn size(self, width: u32, height: u32) -> (u32, u32) {
         if self.swaps() {
             (height, width)
         } else {
@@ -98,8 +98,7 @@ impl Transform {
     }
 
     /// `self`, then `next`.
-    #[cfg(test)]
-    pub(crate) fn then(self, next: Self) -> Self {
+    pub fn then(self, next: Self) -> Self {
         let turned = if next.mirror {
             4 - self.quarter
         } else {
@@ -108,7 +107,7 @@ impl Transform {
         Self::new(next.quarter + turned, self.mirror != next.mirror)
     }
 
-    pub(crate) fn inverse(self) -> Self {
+    pub fn inverse(self) -> Self {
         if self.mirror {
             self
         } else {
@@ -117,7 +116,7 @@ impl Transform {
     }
 
     /// Where the transform takes each point of the unit square.
-    pub(crate) fn affine(self) -> Affine {
+    pub fn affine(self) -> Affine {
         const MIRROR: Affine = [[-1, 0, 1], [0, 1, 0]];
         const TURNS: [Affine; 4] = [
             [[1, 0, 0], [0, 1, 0]],
@@ -132,10 +131,61 @@ impl Transform {
             turn
         }
     }
+
+    /// Where point `(x, y)` (pixel edges) of a `size` picture lands.
+    pub fn map_point(self, (x, y): (i64, i64), size: (u32, u32)) -> (i64, i64) {
+        let (w, h) = self.size(size.0, size.1);
+        self.map_with(x, y, i64::from(w), i64::from(h))
+    }
+
+    /// Where pixel `(x, y)` of a `size` picture lands.
+    pub fn map_pixel(self, (x, y): (u32, u32), size: (u32, u32)) -> (u32, u32) {
+        let (w, h) = self.size(size.0, size.1);
+        let (x, y) = self.map_with(
+            i64::from(x),
+            i64::from(y),
+            i64::from(w) - 1,
+            i64::from(h) - 1,
+        );
+        (x.max(0) as u32, y.max(0) as u32)
+    }
+
+    /// Where rectangle `(x, y, width, height)` inside a `size` picture lands.
+    pub fn map_rect(
+        self,
+        (x, y, w, h): (i64, i64, u32, u32),
+        size: (u32, u32),
+    ) -> (i64, i64, u32, u32) {
+        let a = self.map_point((x, y), size);
+        let b = self.map_point((x + i64::from(w), y + i64::from(h)), size);
+        let (w, h) = self.size(w, h);
+        (a.0.min(b.0), a.1.min(b.1), w, h)
+    }
+
+    /// The pixels (`width` x `height`, rows from the top) of a picture once transformed.
+    pub fn map_pixels<T: Copy + Default>(self, pixels: &[T], size: (u32, u32)) -> Vec<T> {
+        let (w, h) = self.size(size.0, size.1);
+        let mut out = vec![T::default(); pixels.len()];
+        for (i, &p) in pixels.iter().enumerate().take((size.0 * size.1) as usize) {
+            let (x, y) = self.map_pixel((i as u32 % size.0, i as u32 / size.0), size);
+            if x < w && y < h {
+                out[(y * w + x) as usize] = p;
+            }
+        }
+        out
+    }
+
+    fn map_with(self, x: i64, y: i64, w: i64, h: i64) -> (i64, i64) {
+        let m = self.affine();
+        let row = |r: [i32; 3], extent: i64| {
+            i64::from(r[0]) * x + i64::from(r[1]) * y + i64::from(r[2]) * extent
+        };
+        (row(m[0], w), row(m[1], h))
+    }
 }
 
 /// `outer` after `inner`.
-pub(crate) fn compose(outer: Affine, inner: Affine) -> Affine {
+pub fn compose(outer: Affine, inner: Affine) -> Affine {
     let mut m = [[0; 3]; 2];
     for (r, row) in m.iter_mut().enumerate() {
         for (c, v) in row.iter_mut().enumerate() {
@@ -146,8 +196,7 @@ pub(crate) fn compose(outer: Affine, inner: Affine) -> Affine {
     m
 }
 
-#[cfg(test)]
-pub(crate) fn apply(m: Affine, (x, y): (f64, f64)) -> (f64, f64) {
+pub fn apply(m: Affine, (x, y): (f64, f64)) -> (f64, f64) {
     (
         f64::from(m[0][0]) * x + f64::from(m[0][1]) * y + f64::from(m[0][2]),
         f64::from(m[1][0]) * x + f64::from(m[1][1]) * y + f64::from(m[1][2]),
@@ -156,7 +205,7 @@ pub(crate) fn apply(m: Affine, (x, y): (f64, f64)) -> (f64, f64) {
 
 /// The transform from the scanout buffer to the picture as seen: none for a rotated plane, the
 /// panel's mounting undone for an unrotated one.
-pub(crate) fn upright(plane: Transform, panel: Transform) -> Transform {
+pub fn upright(plane: Transform, panel: Transform) -> Transform {
     if plane.is_identity() {
         panel.inverse()
     } else {
@@ -165,7 +214,7 @@ pub(crate) fn upright(plane: Transform, panel: Transform) -> Transform {
 }
 
 /// The size of the picture as seen, from the CRTC's mode size.
-pub(crate) fn upright_size(mode: (u32, u32), plane: Transform, panel: Transform) -> (u32, u32) {
+pub fn upright_size(mode: (u32, u32), plane: Transform, panel: Transform) -> (u32, u32) {
     let (w, h) = plane.size(mode.0, mode.1);
     upright(plane, panel).size(w, h)
 }
@@ -274,6 +323,41 @@ mod tests {
                 .len(),
             8
         );
+    }
+
+    #[test]
+    fn integer_maps_follow_the_affine_map() {
+        let size = (6, 4);
+        for t in Transform::all() {
+            let (w, h) = t.size(size.0, size.1);
+            for p in [(0, 0), (6, 0), (0, 4), (6, 4), (2, 3), (-3, 5)] {
+                let n = apply(t.affine(), (p.0 as f64 / 6.0, p.1 as f64 / 4.0));
+                let want = (
+                    (n.0 * f64::from(w)).round() as i64,
+                    (n.1 * f64::from(h)).round() as i64,
+                );
+                assert_eq!(t.map_point(p, size), want, "{t:?} at {p:?}");
+            }
+            for x in 0..6 {
+                for y in 0..4 {
+                    let (cx, cy) = t.map_point((2 * x + 1, 2 * y + 1), (12, 8));
+                    let want = (((cx - 1) / 2) as u32, ((cy - 1) / 2) as u32);
+                    assert_eq!(t.map_pixel((x as u32, y as u32), size), want, "{t:?}");
+                }
+            }
+            let (x, y, rw, rh) = t.map_rect((1, -1, 2, 3), size);
+            let corners = [(1, -1), (3, -1), (1, 2), (3, 2)].map(|c| t.map_point(c, size));
+            assert_eq!(x, corners.iter().map(|c| c.0).min().unwrap(), "{t:?}");
+            assert_eq!(y, corners.iter().map(|c| c.1).min().unwrap(), "{t:?}");
+            assert_eq!((rw, rh), t.size(2, 3));
+            let pixels: Vec<u32> = (0..24).collect();
+            let out = t.map_pixels(&pixels, size);
+            for (i, &v) in pixels.iter().enumerate() {
+                let (x, y) = t.map_pixel((i as u32 % 6, i as u32 / 6), size);
+                assert_eq!(out[(y * w + x) as usize], v, "{t:?}");
+            }
+            assert_eq!(t.inverse().map_pixels(&out, (w, h)), pixels, "{t:?}");
+        }
     }
 
     #[test]

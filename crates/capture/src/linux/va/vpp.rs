@@ -9,8 +9,8 @@ use super::sys::*;
 use super::{Config, Display, VAContextID};
 use crate::layout::letterbox;
 use crate::linux::kms::{Frame, FrameKey, fourcc};
-use crate::linux::transform::Transform;
 use crate::{CaptureError, Result};
+use ws_proto::orientation::Transform;
 
 /// Scanout buffers kept imported: a compositor cycles through two to four.
 const IMPORT_CACHE: usize = 6;
@@ -307,7 +307,7 @@ fn fourcc_str(code: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::linux::transform::{Affine, compose};
+    use ws_proto::orientation::{Affine, compose};
 
     #[test]
     fn scanout_formats_map_to_va() {

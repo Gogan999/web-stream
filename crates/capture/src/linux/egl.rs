@@ -8,9 +8,9 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 use super::kms::{Crop, Frame, FrameKey};
-use super::transform::Transform;
 use crate::layout::letterbox;
 use crate::{CaptureError, Result};
+use ws_proto::orientation::Transform;
 
 type EglDisplay = *mut c_void;
 type EglContext = *mut c_void;
@@ -736,7 +736,7 @@ mod tests {
 
     #[test]
     fn texture_coordinates_undo_every_transform() {
-        use crate::linux::transform::apply;
+        use ws_proto::orientation::apply;
         let crop = Crop {
             x: 100,
             y: 50,

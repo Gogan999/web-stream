@@ -259,6 +259,16 @@ struct ObjGetProperties {
 #[cfg(test)]
 #[repr(C)]
 #[derive(Default)]
+struct ObjSetProperty {
+    value: u64,
+    prop_id: u32,
+    obj_id: u32,
+    obj_type: u32,
+}
+
+#[cfg(test)]
+#[repr(C)]
+#[derive(Default)]
 pub(crate) struct CreateDumb {
     pub height: u32,
     pub width: u32,
@@ -308,6 +318,8 @@ const IOCTL_MODE_GETPLANE: u64 = iowr(0xb6, size_of::<GetPlane>());
 #[cfg(test)]
 const IOCTL_MODE_ADDFB2: u64 = iowr(0xb8, size_of::<FbCmd2>());
 const IOCTL_MODE_OBJ_GETPROPERTIES: u64 = iowr(0xb9, size_of::<ObjGetProperties>());
+#[cfg(test)]
+const IOCTL_MODE_OBJ_SETPROPERTY: u64 = iowr(0xba, size_of::<ObjSetProperty>());
 const IOCTL_MODE_GETFB2: u64 = iowr(0xce, size_of::<FbCmd2>());
 
 pub(crate) const OBJECT_PLANE: u32 = 0xeeee_eeee;
@@ -786,6 +798,31 @@ impl Card {
         let _ = ioctl(self.raw(), IOCTL_MODE_RMFB, &mut id);
     }
 
+    /// Turns `crtc_id` off.
+    pub(crate) fn disable_crtc(&self, crtc_id: u32) -> io::Result<()> {
+        let mut c = ModeCrtc {
+            crtc_id,
+            ..Default::default()
+        };
+        ioctl(self.raw(), IOCTL_MODE_SETCRTC, &mut c)
+    }
+
+    pub(crate) fn set_property(
+        &self,
+        obj_id: u32,
+        obj_type: u32,
+        prop_id: u32,
+        value: u64,
+    ) -> io::Result<()> {
+        let mut p = ObjSetProperty {
+            value,
+            prop_id,
+            obj_id,
+            obj_type,
+        };
+        ioctl(self.raw(), IOCTL_MODE_OBJ_SETPROPERTY, &mut p)
+    }
+
     /// Shows `fb_id` on `crtc_id` through `connector_id` in `mode`.
     pub(crate) fn set_crtc(
         &self,
@@ -901,6 +938,7 @@ mod tests {
         assert_eq!(IOCTL_MODE_GETPLANE, 0xc020_64b6);
         assert_eq!(IOCTL_MODE_ADDFB2, 0xc068_64b8);
         assert_eq!(IOCTL_MODE_OBJ_GETPROPERTIES, 0xc020_64b9);
+        assert_eq!(IOCTL_MODE_OBJ_SETPROPERTY, 0xc018_64ba);
         assert_eq!(IOCTL_MODE_GETFB2, 0xc068_64ce);
         assert_eq!(size_of::<ModeInfo>(), 0x44);
     }

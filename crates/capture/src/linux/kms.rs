@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use super::display::Output;
 use super::drm::{self, Card};
+use super::transform::{self, Transform};
 use crate::{CaptureError, Result};
 
 /// A scanout buffer shared with the GPU, never touched by the CPU.
@@ -23,6 +24,8 @@ pub(crate) struct Frame {
     pub modifier: u64,
     /// The part of the buffer the CRTC shows.
     pub crop: Crop,
+    /// From the cropped buffer to the picture as seen.
+    pub transform: Transform,
     /// Identifies the buffer across exports.
     pub inode: u64,
 }
@@ -103,12 +106,17 @@ pub(crate) struct KmsSource {
     plane: u32,
     /// `SRC_X`, `SRC_Y`, `SRC_W`, `SRC_H` property ids of the plane.
     src_props: Option<[u32; 4]>,
+    /// `rotation` property id of the plane.
+    rotation_prop: Option<u32>,
+    /// How the panel is mounted.
+    panel: Transform,
     current: Option<(u32, Rc<Frame>)>,
     last_flip: Option<Instant>,
     vblank_pending: bool,
     /// When vblank events last failed.
     vblank_failed: Option<Instant>,
     last_poll: Option<Instant>,
+    /// The CRTC's position in the buffer and its mode size.
     fallback_crop: Crop,
 }
 
@@ -124,13 +132,15 @@ impl KmsSource {
             .ok_or(CaptureError::DisplayNotFound(output.info.id))?;
         let plane = primary_plane(&card, output.crtc_id, output.pipe)
             .ok_or(CaptureError::DisplayNotFound(output.info.id))?;
-        let src_props = plane_src_props(&card, plane);
+        let (src_props, rotation_prop) = plane_props(&card, plane);
         Ok(Self {
             card,
             crtc_id: output.crtc_id,
             pipe: output.pipe,
             plane,
             src_props,
+            rotation_prop,
+            panel: output.panel,
             current: None,
             last_flip: None,
             vblank_pending: false,
@@ -276,7 +286,7 @@ impl KmsSource {
         } else {
             drm::MOD_INVALID
         };
-        let crop = self.crop(fb.width, fb.height);
+        let (crop, transform) = self.placement(fb.width, fb.height);
         Ok(Frame {
             objects,
             planes,
@@ -285,20 +295,28 @@ impl KmsSource {
             fourcc: fb.pixel_format,
             modifier,
             crop,
+            transform,
             inode,
         })
     }
 
-    /// The source rectangle of the plane, clamped to the framebuffer.
-    fn crop(&self, width: u32, height: u32) -> Crop {
+    /// The source rectangle of the plane, clamped to the framebuffer, and the transform to the
+    /// picture as seen.
+    fn placement(&self, width: u32, height: u32) -> (Crop, Transform) {
+        let props = if self.src_props.is_some() || self.rotation_prop.is_some() {
+            self.card
+                .properties(self.plane, drm::OBJECT_PLANE)
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let get = |id: u32| props.iter().find(|(p, _)| *p == id).map(|(_, v)| *v);
+        let rotation = self
+            .rotation_prop
+            .and_then(get)
+            .map_or(Transform::IDENTITY, Transform::from_drm_rotation);
         let from_props = self.src_props.and_then(|ids| {
-            let props = self.card.properties(self.plane, drm::OBJECT_PLANE).ok()?;
-            let get = |id: u32| {
-                props
-                    .iter()
-                    .find(|(p, _)| *p == id)
-                    .map(|(_, v)| (*v >> 16) as u32)
-            };
+            let get = |id: u32| get(id).map(|v| (v >> 16) as u32);
             Some(Crop {
                 x: get(ids[0])?,
                 y: get(ids[1])?,
@@ -306,7 +324,15 @@ impl KmsSource {
                 height: get(ids[3])?,
             })
         });
-        clamp_crop(from_props.unwrap_or(self.fallback_crop), width, height)
+        let crop = from_props.unwrap_or_else(|| {
+            let f = self.fallback_crop;
+            let (width, height) = rotation.size(f.width, f.height);
+            Crop { width, height, ..f }
+        });
+        (
+            clamp_crop(crop, width, height),
+            transform::upright(rotation, self.panel),
+        )
     }
 }
 
@@ -333,7 +359,7 @@ fn inode(fd: &OwnedFd) -> io::Result<u64> {
 }
 
 /// The primary plane showing `crtc_id`, or the primary plane that can.
-fn primary_plane(card: &Card, crtc_id: u32, pipe: u32) -> Option<u32> {
+pub(crate) fn primary_plane(card: &Card, crtc_id: u32, pipe: u32) -> Option<u32> {
     let mut candidate = None;
     for id in card.planes().ok()? {
         let Ok(plane) = card.plane(id) else { continue };
@@ -353,15 +379,29 @@ fn primary_plane(card: &Card, crtc_id: u32, pipe: u32) -> Option<u32> {
     candidate
 }
 
-fn plane_src_props(card: &Card, plane: u32) -> Option<[u32; 4]> {
-    let props = card.properties(plane, drm::OBJECT_PLANE).ok()?;
-    let id = |name: &str| {
-        props
-            .iter()
-            .map(|(p, _)| *p)
-            .find(|p| card.property_name(*p).is_ok_and(|n| n == name))
+/// The plane's `SRC_*` and `rotation` property ids.
+fn plane_props(card: &Card, plane: u32) -> (Option<[u32; 4]>, Option<u32>) {
+    let Ok(props) = card.properties(plane, drm::OBJECT_PLANE) else {
+        return (None, None);
     };
-    Some([id("SRC_X")?, id("SRC_Y")?, id("SRC_W")?, id("SRC_H")?])
+    let names: Vec<(u32, String)> = props
+        .iter()
+        .filter_map(|(p, _)| Some((*p, card.property_name(*p).ok()?)))
+        .collect();
+    let id = |name: &str| names.iter().find(|(_, n)| n == name).map(|(p, _)| *p);
+    let src = match (id("SRC_X"), id("SRC_Y"), id("SRC_W"), id("SRC_H")) {
+        (Some(x), Some(y), Some(w), Some(h)) => Some([x, y, w, h]),
+        _ => None,
+    };
+    (src, id("rotation"))
+}
+
+/// The rotation of `plane`, identity without a `rotation` property.
+pub(crate) fn plane_rotation(card: &Card, plane: u32) -> Transform {
+    card.properties(plane, drm::OBJECT_PLANE)
+        .ok()
+        .and_then(|props| card.find_property(&props, "rotation"))
+        .map_or(Transform::IDENTITY, Transform::from_drm_rotation)
 }
 
 #[cfg(test)]
@@ -464,6 +504,46 @@ mod tests {
             u32::from_le_bytes(pixels[0..4].try_into().unwrap()) & 0x00ff_ffff,
             0x00ff_00ff
         );
+        drop(source);
+
+        // A plane turned a quarter scans out a portrait buffer as the landscape mode.
+        if screen.turn().is_none() {
+            eprintln!("rotation skipped: the primary plane cannot turn a quarter");
+            return;
+        }
+        let (w, h) = (screen.height, screen.width);
+        let output = super::super::display::enumerate()
+            .expect("enumerate")
+            .into_iter()
+            .find(|o| o.card == screen.path && o.crtc_id == screen.crtc_id)
+            .expect("the turned display is listed");
+        assert_eq!((output.info.width, output.info.height), (w, h));
+        let mut source = KmsSource::open(&output).expect("open source");
+        let frame = loop {
+            match source.acquire(Duration::from_millis(100)).expect("acquire") {
+                Acquired::Frame(f) => break f,
+                Acquired::Nothing => continue,
+                Acquired::Lost => panic!("display lost"),
+            }
+        };
+        assert_eq!((frame.width, frame.height), (w, h));
+        assert_eq!(
+            frame.crop,
+            Crop {
+                x: 0,
+                y: 0,
+                width: w,
+                height: h
+            }
+        );
+        assert_eq!(frame.transform, Transform::IDENTITY);
+        let pixels = read_back(&frame);
+        let pitch = frame.planes[0].pitch as usize;
+        for (x, y) in [(0, 0), (w - 1, 0), (w - 1, h - 1), (w / 3, h / 2)] {
+            let at = frame.planes[0].offset as usize + y as usize * pitch + x as usize * 4;
+            let px = u32::from_le_bytes(pixels[at..at + 4].try_into().unwrap());
+            assert_eq!(px & 0x00ff_ffff, pattern(x, y), "turned pixel {x},{y}");
+        }
     }
 
     fn pattern(x: u32, y: u32) -> u32 {
@@ -516,6 +596,10 @@ mod tests {
         width: u32,
         height: u32,
         buffers: Vec<Dumb>,
+        /// The primary plane and its `rotation` property id.
+        rotation: Option<(u32, u32)>,
+        /// The plane is turned a quarter: buffers are `height` x `width`.
+        turned: bool,
     }
 
     impl TestScreen {
@@ -532,12 +616,14 @@ mod tests {
                 if !c.connected || c.modes.is_empty() || c.kind == drm::CONNECTOR_WRITEBACK {
                     continue;
                 }
-                let crtc = c.encoders.iter().find_map(|&e| {
+                let (pipe, crtc) = c.encoders.iter().find_map(|&e| {
                     let (_, possible) = card.encoder(e).ok()?;
                     (0..res.crtcs.len())
                         .find(|i| possible & (1 << i) != 0)
-                        .map(|i| res.crtcs[i])
+                        .map(|i| (i as u32, res.crtcs[i]))
                 })?;
+                let rotation = primary_plane(&card, crtc, pipe)
+                    .and_then(|plane| Some((plane, plane_props(&card, plane).1?)));
                 let mode = c.modes[0];
                 let mut screen = Self {
                     width: u32::from(mode.hdisplay),
@@ -548,15 +634,54 @@ mod tests {
                     connector_id: id,
                     mode,
                     buffers: Vec::new(),
+                    rotation,
+                    turned: false,
                 };
+                screen.unturn();
                 screen.show(pattern)?;
                 return Some(screen);
             }
             None
         }
 
+        /// Sets the primary plane's rotation, with the CRTC off.
+        fn rotate(&self, bits: u64) -> Option<()> {
+            let (plane, prop) = self.rotation?;
+            let current = self
+                .card
+                .properties(plane, drm::OBJECT_PLANE)
+                .ok()?
+                .into_iter()
+                .find(|(p, _)| *p == prop)
+                .map(|(_, v)| v)?;
+            if current == bits {
+                return Some(());
+            }
+            let _ = self.card.disable_crtc(self.crtc_id);
+            self.card
+                .set_property(plane, drm::OBJECT_PLANE, prop, bits)
+                .ok()
+        }
+
+        fn unturn(&mut self) {
+            let _ = self.rotate(super::super::transform::drm_rotation::ROTATE_0);
+            self.turned = false;
+        }
+
+        /// Turns the plane a quarter and shows the pattern on a portrait buffer.
+        fn turn(&mut self) -> Option<()> {
+            self.rotate(super::super::transform::drm_rotation::ROTATE_90)?;
+            self.turned = true;
+            self.show(pattern)
+        }
+
         fn show(&mut self, fill: impl Fn(u32, u32) -> u32) -> Option<()> {
-            let d = self.card.create_dumb(self.width, self.height).ok()?;
+            let (width, height) = if self.turned {
+                (self.height, self.width)
+            } else {
+                (self.width, self.height)
+            };
+            let d = self.card.create_dumb(width, height).ok()?;
             let offset = self.card.map_dumb(d.handle).ok()?;
             // SAFETY: maps the dumb buffer just created, unmapped below.
             unsafe {
@@ -571,17 +696,17 @@ mod tests {
                 if p == libc::MAP_FAILED {
                     return None;
                 }
-                for y in 0..self.height {
+                for y in 0..height {
                     let row = p.cast::<u8>().add((y * d.pitch) as usize).cast::<u32>();
-                    for x in 0..self.width {
+                    for x in 0..width {
                         row.add(x as usize).write_unaligned(fill(x, y));
                     }
                 }
                 libc::munmap(p, d.size as usize);
             }
             let mut fb = drm::FbCmd2 {
-                width: self.width,
-                height: self.height,
+                width,
+                height,
                 pixel_format: fourcc::XRGB8888,
                 ..Default::default()
             };
@@ -604,10 +729,14 @@ mod tests {
 
     impl Drop for TestScreen {
         fn drop(&mut self) {
+            if self.turned {
+                let _ = self.card.disable_crtc(self.crtc_id);
+            }
             for b in &self.buffers {
                 self.card.remove_framebuffer(b.fb);
                 self.card.destroy_dumb(b.handle);
             }
+            self.unturn();
             let _ = self.card.drop_master();
         }
     }

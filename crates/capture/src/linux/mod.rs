@@ -8,6 +8,7 @@ mod egl;
 mod kms;
 mod nvenc;
 mod pipeline;
+mod transform;
 mod va;
 
 use std::collections::HashMap;

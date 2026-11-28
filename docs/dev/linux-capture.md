@@ -44,13 +44,29 @@ uses it depends on the compositor.
 
 The primary plane of the CRTC. Overlay planes (some compositors put a
 fullscreen video there) and the hardware cursor plane are not part of the
-picture; the browser draws its own cursor. Rotated outputs are captured
-unrotated.
+picture; the browser draws its own cursor.
+
+### Rotation
+
+- A primary plane with a `rotation` (the compositor lets the display
+  hardware turn or mirror the picture for the panel) holds the desktop
+  upright: it is captured as it is, and the display's size is the mode
+  turned back (a 1920x1080 mode on a plane turned 90 or 270 degrees is a
+  1080x1920 display).
+- An unrotated plane on a built-in panel mounted turned (the connector's
+  `panel orientation`, e.g. tablets and handhelds) holds a picture the
+  compositor turned for the panel; it is turned back in the same GPU pass
+  that scales and converts it (VA-API `rotation_state`/`mirror_state`, or
+  the texture coordinates of the NVENC path's shader), and the display's
+  size is the upright one. A VA-API driver that cannot rotate that way
+  streams the picture unturned (logged once).
+- A compositor that turns its picture itself on an external monitor
+  leaves no trace in KMS; that picture is streamed as the panel shows it.
 
 ## Encoding
 
-- VA-API: VPP imports the scanout DMA-BUF, crops, scales, letterboxes and
-  converts it to NV12 (BT.709, limited range) on the GPU; the encoder reads
+- VA-API: VPP imports the scanout DMA-BUF, crops, turns, scales,
+  letterboxes and converts it to NV12 (BT.709, limited range) on the GPU; the encoder reads
   that surface in place. CBR without B-frames, an infinite GOP, keyframes
   on demand, bitrate changes on the next frame, parameter sets on every
   keyframe. Lost frames are repaired with a keyframe.

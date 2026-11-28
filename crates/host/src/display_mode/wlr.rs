@@ -289,7 +289,11 @@ impl Backend for Wlr {
         let config = self.manager.create_configuration(serial, &qh, ());
         for info in &self.state.heads {
             let Some(i) = self.listed.iter().position(|p| *p == info.proxy) else {
-                config.disable_head(&info.proxy);
+                if info.enabled {
+                    config.enable_head(&info.proxy, &qh, ());
+                } else {
+                    config.disable_head(&info.proxy);
+                }
                 continue;
             };
             let (head, target) = (&heads[i], &targets[i]);

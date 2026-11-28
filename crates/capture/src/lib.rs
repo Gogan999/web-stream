@@ -9,8 +9,7 @@ mod encode;
 mod layout;
 #[cfg(target_os = "linux")]
 mod linux;
-#[cfg_attr(not(windows), allow(dead_code))]
-mod modes;
+pub mod modes;
 #[cfg(any(windows, target_os = "linux"))]
 mod nvenc;
 #[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
@@ -114,6 +113,25 @@ pub fn restore_display_mode(display: DisplayId) -> Result<()> {
         let _ = display;
         Err(CaptureError::Unsupported)
     }
+}
+
+/// The connector behind a display, for changing its mode through the desktop session.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Connector {
+    /// The kernel's name, e.g. `HDMI-A-1`.
+    pub name: String,
+    pub edid: Option<Vec<u8>>,
+}
+
+/// The connector that drives `display`.
+#[cfg(target_os = "linux")]
+pub fn connector(display: DisplayId) -> Result<Connector> {
+    let output = linux::display::find(display)?;
+    Ok(Connector {
+        name: output.connector,
+        edid: output.edid,
+    })
 }
 
 /// What [`set_display_mode`] did.

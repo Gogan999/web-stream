@@ -1,7 +1,7 @@
 //! Linux capture/encode pipeline: KMS scanout capture, VA-API or NVENC encode.
 
 mod cuda;
-mod display;
+pub(crate) mod display;
 mod drm;
 mod edid;
 mod egl;

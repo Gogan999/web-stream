@@ -76,3 +76,12 @@ On Linux the `web-stream` binary runs as the systemd unit `web-stream.service`.
 carrying the same bridge as the Windows service, and fd 3 a second socket for
 the settings page's requests, which the root side checks and saves before
 restarting both. See [Linux host](../guide/linux.md#security).
+
+What needs the signed-in user's session runs in helpers the root side starts
+as that user with the session's display and bus variables, talking in
+length-prefixed frames over stdin and stdout (`session_helper.rs`): the
+clipboard (`clipboard-helper`) and display mode changes (`display-helper`,
+`display_mode/`: X11 RandR, wlroots output management, GNOME Mutter's
+`DisplayConfig` or `kscreen-doctor`). The display helper starts on the first
+change, keeps each display's original mode and layout, restores them on
+request, on stdin EOF or SIGTERM, and exits once nothing is changed.

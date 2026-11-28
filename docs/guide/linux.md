@@ -111,6 +111,20 @@ Set the desktop to sign in automatically if you want to reach it after a
 reboot without a monitor: the host streams whatever is on the screen,
 including the login screen.
 
+## Matching the host resolution
+
+With **Let the browser change the resolution** on, the browser's **Match
+host resolution** switches the streamed display to the largest mode that
+fits its screen, as on Windows. The host asks the desktop, as the signed-in
+user, through whichever it offers: GNOME (Mutter, as a temporary
+configuration), KDE Plasma (`kscreen-doctor`), wlroots compositors such as
+sway, Hyprland or labwc (output management), or X11 RandR. Displays to the
+right of or below the changed one move with its edge. The original mode and
+layout come back when the browser asks, disconnects, or the host stops; a
+`HEADLESS-*` output of a wlroots compositor takes the browser's exact size.
+Without one of these (or with nobody signed in) the browser is told the
+resolution can't be changed.
+
 ## Running in the foreground
 
 ```
@@ -155,8 +169,8 @@ its keyboard can. The service keeps that power away from everyone else:
   NVIDIA, ALSA and uinput devices, and the capability bounding set
   `CAP_SYS_ADMIN` (reading the screen through KMS without being DRM master),
   `CAP_SYS_NICE` (capture thread priority), `CAP_SETUID`, `CAP_SETGID` and
-  `CAP_CHOWN` (starting the network side and the clipboard helper as their
-  users, writing received files as the signed-in user, handing the network
+  `CAP_CHOWN` (starting the network side and the clipboard and display
+  helpers as their users, writing received files as the signed-in user, handing the network
   side its folder) and `CAP_DAC_READ_SEARCH` (reaching the signed-in user's
   audio and display sockets). `systemd-analyze security web-stream` rates it about 3.7.
 - **Restarts:** a network side that crashes is started again after 1 s,

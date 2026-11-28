@@ -47,6 +47,18 @@ mod imp {
         capture.set_bitrate(bitrate);
         capture.set_frame_ms(frame_ms);
     }
+
+    pub fn set_display_mode(
+        display: ws_proto::DisplayId,
+        width: u32,
+        height: u32,
+    ) -> ws_capture::Result<ws_capture::ModeChange> {
+        ws_capture::set_display_mode(display, width, height)
+    }
+
+    pub fn restore_display_mode(display: ws_proto::DisplayId) -> ws_capture::Result<()> {
+        ws_capture::restore_display_mode(display)
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -170,6 +182,19 @@ mod imp {
     pub fn set_audio(capture: &Loopback, bitrate: u32, frame_ms: u32) {
         capture.set_bitrate(bitrate);
         capture.set_frame_ms(frame_ms);
+    }
+
+    /// Through the signed-in user's session (see `display_mode`).
+    pub fn set_display_mode(
+        display: ws_proto::DisplayId,
+        width: u32,
+        height: u32,
+    ) -> ws_capture::Result<ws_capture::ModeChange> {
+        crate::display_mode::set_display_mode(display, width, height)
+    }
+
+    pub fn restore_display_mode(display: ws_proto::DisplayId) -> ws_capture::Result<()> {
+        crate::display_mode::restore_display_mode(display)
     }
 
     #[cfg(test)]
@@ -301,6 +326,18 @@ mod imp {
 
     pub fn set_audio(capture: &Loopback, _: u32, _: u32) {
         match *capture {}
+    }
+
+    pub fn set_display_mode(
+        display: ws_proto::DisplayId,
+        width: u32,
+        height: u32,
+    ) -> ws_capture::Result<ws_capture::ModeChange> {
+        ws_capture::set_display_mode(display, width, height)
+    }
+
+    pub fn restore_display_mode(display: ws_proto::DisplayId) -> ws_capture::Result<()> {
+        ws_capture::restore_display_mode(display)
     }
 
     fn unsupported() -> ws_audio::AudioError {

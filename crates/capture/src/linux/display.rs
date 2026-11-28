@@ -20,6 +20,10 @@ pub(crate) struct Output {
     /// The kernel driver, e.g. `i915`.
     pub driver: String,
     pub crtc_id: u32,
+    /// The connector's name, e.g. `HDMI-A-1`.
+    pub connector: String,
+    /// The monitor's EDID, if it has one.
+    pub edid: Option<Vec<u8>>,
     /// The CRTC's index on its card.
     pub pipe: u32,
     pub internal: bool,
@@ -116,11 +120,11 @@ fn card_outputs(path: &std::path::Path) -> std::io::Result<Vec<Output>> {
             panel,
         );
         let connector = c.name();
-        let monitor = card
+        let edid = card
             .find_property(&c.props, "EDID")
             .filter(|&blob| blob != 0)
-            .and_then(|blob| card.blob(blob as u32).ok())
-            .and_then(|e| edid::monitor_name(&e));
+            .and_then(|blob| card.blob(blob as u32).ok());
+        let monitor = edid.as_deref().and_then(edid::monitor_name);
         let name = match monitor {
             Some(m) => format!("{m} ({connector})"),
             None => connector.clone(),
@@ -140,6 +144,8 @@ fn card_outputs(path: &std::path::Path) -> std::io::Result<Vec<Output>> {
             render: render.clone(),
             driver: driver.clone(),
             crtc_id,
+            connector,
+            edid,
             pipe: pipe as u32,
             internal: matches!(
                 c.kind,

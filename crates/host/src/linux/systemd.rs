@@ -46,7 +46,7 @@ RestartSec=2s
 RestartSteps=5
 RestartMaxDelaySec=60s
 TimeoutStopSec=15s
-KillMode=mixed
+KillMode=control-group
 Environment=RUST_LOG=info,str0m=warn
 StateDirectory=web-stream
 StateDirectoryMode=0755

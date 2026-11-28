@@ -44,7 +44,8 @@ jobs:
         env:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: sudo -E
           WS_REQUIRE_KMS: "1"
-        run: cargo test -p ws-capture --lib linux:: -- --nocapture
+        run: |
+          cargo test -p ws-capture --lib linux:: -- --nocapture
       - name: no GPU libraries
         run: |
           sudo apt-get remove -y --purge 'libva*' 'mesa-va-drivers' || true

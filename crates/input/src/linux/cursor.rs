@@ -1,5 +1,6 @@
 //! Reads the pointer from the KMS cursor planes: position from the plane's `CRTC_X`/`CRTC_Y`, image
-//! from its framebuffer (`GETFB2`, mapped and converted to RGBA).
+//! from its framebuffer (`GETFB2`, mapped and converted to RGBA), both turned into the picture as
+//! streamed when the primary plane or the panel is rotated.
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
@@ -10,6 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use libc::{_IOW, _IOWR};
+use ws_proto::orientation::{Transform, upright};
 use ws_proto::{CursorImage, CursorKind, MAX_CURSOR_SIDE};
 
 use crate::cursor::{CursorLook, ImageIds, fit};
@@ -97,6 +99,27 @@ struct GetConnector {
 #[repr(C)]
 struct ModeInfo([u8; 68]);
 
+impl ModeInfo {
+    /// `hdisplay` and `vdisplay`.
+    fn size(&self) -> (u32, u32) {
+        let at = |i: usize| u32::from(u16::from_ne_bytes([self.0[i], self.0[i + 1]]));
+        (at(4), at(14))
+    }
+}
+
+#[repr(C)]
+struct ModeCrtc {
+    set_connectors_ptr: u64,
+    count_connectors: u32,
+    crtc_id: u32,
+    fb_id: u32,
+    x: u32,
+    y: u32,
+    gamma_size: u32,
+    mode_valid: u32,
+    mode: ModeInfo,
+}
+
 #[repr(C)]
 #[derive(Default)]
 struct GetPlaneRes {
@@ -163,6 +186,7 @@ const SET_CLIENT_CAP: libc::Ioctl = _IOW::<SetClientCap>(D, 0x0d);
 const GEM_CLOSE: libc::Ioctl = _IOW::<GemClose>(D, 0x09);
 const PRIME_HANDLE_TO_FD: libc::Ioctl = _IOWR::<PrimeHandle>(D, 0x2d);
 const MODE_GETRESOURCES: libc::Ioctl = _IOWR::<CardRes>(D, 0xa0);
+const MODE_GETCRTC: libc::Ioctl = _IOWR::<ModeCrtc>(D, 0xa1);
 const MODE_GETENCODER: libc::Ioctl = _IOWR::<GetEncoder>(D, 0xa6);
 const MODE_GETCONNECTOR: libc::Ioctl = _IOWR::<GetConnector>(D, 0xa7);
 const MODE_GETPROPERTY: libc::Ioctl = _IOWR::<GetProperty>(D, 0xaa);
@@ -175,6 +199,8 @@ const MODE_GETFB2: libc::Ioctl = _IOWR::<FbCmd2>(D, 0xce);
 const CAP_UNIVERSAL_PLANES: u64 = 2;
 const CAP_ATOMIC: u64 = 3;
 const OBJECT_PLANE: u32 = 0xeeee_eeee;
+const OBJECT_CONNECTOR: u32 = 0xc0c0_c0c0;
+const PLANE_TYPE_PRIMARY: u64 = 1;
 const PLANE_TYPE_CURSOR: u64 = 2;
 const CONNECTED: u32 = 1;
 
@@ -255,11 +281,16 @@ fn ids(
     out
 }
 
-/// Property values of a plane, by name.
-fn plane_props(fd: RawFd, plane: u32, names: &mut HashMap<u32, String>) -> HashMap<String, u64> {
+/// Property values of a mode object, by name.
+fn obj_props(
+    fd: RawFd,
+    obj_id: u32,
+    obj_type: u32,
+    names: &mut HashMap<u32, String>,
+) -> HashMap<String, u64> {
     let mut q = ObjGetProperties {
-        obj_id: plane,
-        obj_type: OBJECT_PLANE,
+        obj_id,
+        obj_type,
         ..Default::default()
     };
     if ioctl(fd, MODE_OBJ_GETPROPERTIES, &mut q).is_err() {
@@ -313,13 +344,67 @@ struct Shown {
     hot: (u32, u32),
     /// The driver reported `hot`.
     reported: bool,
+    /// The plane's `rotation`.
+    rotation: Transform,
+    /// The plane's `CRTC_W`/`CRTC_H`.
+    size: Option<(u32, u32)>,
+}
+
+/// A connected output: its connector's name and how its panel is mounted.
+struct Output {
+    connector: Arc<str>,
+    panel: Transform,
+}
+
+/// What turns a CRTC's pixels into the picture as streamed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct View {
+    /// The mode size.
+    mode: Option<(u32, u32)>,
+    /// The primary plane's `rotation`.
+    plane: Transform,
+    panel: Transform,
+}
+
+impl View {
+    /// From CRTC pixels to the picture as streamed.
+    fn to_upright(self) -> Transform {
+        match self.mode {
+            Some(_) => self.plane.inverse().then(upright(self.plane, self.panel)),
+            None => Transform::IDENTITY,
+        }
+    }
+
+    /// The cursor plane's top-left in the picture as streamed, and the transform from its
+    /// framebuffer to the sprite as streamed; `rotation` and `size` are the plane's.
+    fn place(
+        self,
+        rotation: Transform,
+        at: (i32, i32),
+        size: (u32, u32),
+    ) -> ((i64, i64), Transform) {
+        let to_upright = self.to_upright();
+        let at = (i64::from(at.0), i64::from(at.1));
+        let top_left = match self.mode {
+            Some(mode) => {
+                let (x, y, _, _) = to_upright.map_rect((at.0, at.1, size.0, size.1), mode);
+                (x, y)
+            }
+            None => at,
+        };
+        (top_left, rotation.then(to_upright))
+    }
 }
 
 struct Card {
     file: File,
     planes: Vec<Plane>,
-    /// Connector name of each CRTC driving a connected output.
-    crtcs: HashMap<u32, Arc<str>>,
+    /// Primary plane ids.
+    primaries: Vec<u32>,
+    /// Each CRTC driving a connected output.
+    crtcs: HashMap<u32, Output>,
+    /// Each CRTC's view and when it was read.
+    views: HashMap<u32, (Instant, View)>,
     /// Property names by id.
     names: HashMap<u32, String>,
 }
@@ -347,27 +432,79 @@ impl Card {
         ioctl(fd, MODE_GETPLANERESOURCES, &mut res).ok()?;
         plane_ids.truncate(res.count_planes as usize);
         let mut names = HashMap::new();
-        let planes: Vec<Plane> = plane_ids
-            .into_iter()
-            .filter_map(|id| {
-                let props = plane_props(fd, id, &mut names);
-                let positioned = props.contains_key("CRTC_X") && props.contains_key("CRTC_Y");
-                (props.get("type") == Some(&PLANE_TYPE_CURSOR) && positioned).then(|| Plane {
+        let mut planes = Vec::new();
+        let mut primaries = Vec::new();
+        for id in plane_ids {
+            let props = obj_props(fd, id, OBJECT_PLANE, &mut names);
+            let positioned = props.contains_key("CRTC_X") && props.contains_key("CRTC_Y");
+            match props.get("type") {
+                Some(&PLANE_TYPE_CURSOR) if positioned => planes.push(Plane {
                     id,
                     hotspot: props.contains_key("HOTSPOT_X") && props.contains_key("HOTSPOT_Y"),
-                })
-            })
-            .collect();
+                }),
+                Some(&PLANE_TYPE_PRIMARY) => primaries.push(id),
+                _ => {}
+            }
+        }
         if planes.is_empty() {
             return None;
         }
-        let crtcs = crtc_connectors(fd);
+        let crtcs = crtc_outputs(fd, &mut names);
         Some(Self {
             file,
             planes,
+            primaries,
             crtcs,
+            views: HashMap::new(),
             names,
         })
+    }
+
+    /// The view of `crtc`, read again once older than [`REREAD`].
+    fn view(&mut self, crtc: u32) -> View {
+        if let Some((at, view)) = self.views.get(&crtc) {
+            if at.elapsed() < REREAD {
+                return *view;
+            }
+        }
+        let fd = self.file.as_raw_fd();
+        let mut c = ModeCrtc {
+            set_connectors_ptr: 0,
+            count_connectors: 0,
+            crtc_id: crtc,
+            fb_id: 0,
+            x: 0,
+            y: 0,
+            gamma_size: 0,
+            mode_valid: 0,
+            mode: ModeInfo([0; 68]),
+        };
+        let mode =
+            (ioctl(fd, MODE_GETCRTC, &mut c).is_ok() && c.mode_valid != 0).then(|| c.mode.size());
+        let primary = self.primaries.iter().copied().find(|&id| {
+            let mut p = GetPlane {
+                plane_id: id,
+                ..Default::default()
+            };
+            ioctl(fd, MODE_GETPLANE, &mut p).is_ok() && p.crtc_id == crtc
+        });
+        let plane = primary
+            .and_then(|id| {
+                obj_props(fd, id, OBJECT_PLANE, &mut self.names)
+                    .get("rotation")
+                    .copied()
+            })
+            .map_or(Transform::IDENTITY, Transform::from_drm_rotation);
+        let view = View {
+            mode,
+            plane,
+            panel: self
+                .crtcs
+                .get(&crtc)
+                .map_or(Transform::IDENTITY, |o| o.panel),
+        };
+        self.views.insert(crtc, (Instant::now(), view));
+        view
     }
 
     /// The first cursor plane in use.
@@ -381,7 +518,7 @@ impl Card {
             if ioctl(fd, MODE_GETPLANE, &mut p).is_err() || p.fb_id == 0 || p.crtc_id == 0 {
                 continue;
             }
-            let props = plane_props(fd, plane.id, &mut self.names);
+            let props = obj_props(fd, plane.id, OBJECT_PLANE, &mut self.names);
             let signed = |name: &str| props.get(name).map(|&v| v as i64 as i32);
             let (Some(x), Some(y)) = (signed("CRTC_X"), signed("CRTC_Y")) else {
                 continue;
@@ -395,6 +532,10 @@ impl Card {
             } else {
                 (0, 0)
             };
+            let size = match (props.get("CRTC_W"), props.get("CRTC_H")) {
+                (Some(&w), Some(&h)) if w > 0 && h > 0 => Some((w as u32, h as u32)),
+                _ => None,
+            };
             return Some(Shown {
                 fb: p.fb_id,
                 crtc: p.crtc_id,
@@ -402,13 +543,17 @@ impl Card {
                 y,
                 hot,
                 reported,
+                rotation: props
+                    .get("rotation")
+                    .map_or(Transform::IDENTITY, |&v| Transform::from_drm_rotation(v)),
+                size,
             });
         }
         None
     }
 }
 
-fn crtc_connectors(fd: RawFd) -> HashMap<u32, Arc<str>> {
+fn crtc_outputs(fd: RawFd, names: &mut HashMap<u32, String>) -> HashMap<u32, Output> {
     let mut out = HashMap::new();
     let connectors = ids(fd, MODE_GETRESOURCES, |r| {
         (&mut r.connector_id_ptr, &mut r.count_connectors)
@@ -431,9 +576,17 @@ fn crtc_connectors(fd: RawFd) -> HashMap<u32, Arc<str>> {
         if c.encoder_id == 0 || ioctl(fd, MODE_GETENCODER, &mut e).is_err() || e.crtc_id == 0 {
             continue;
         }
+        let panel = obj_props(fd, id, OBJECT_CONNECTOR, names)
+            .get("panel orientation")
+            .map_or(Transform::IDENTITY, |&v| {
+                Transform::from_panel_orientation(v)
+            });
         out.insert(
             e.crtc_id,
-            connector_name(c.connector_type, c.connector_type_id).into(),
+            Output {
+                connector: connector_name(c.connector_type, c.connector_type_id).into(),
+                panel,
+            },
         );
     }
     out
@@ -454,8 +607,9 @@ pub struct KmsCursorReader {
     cards: Vec<Card>,
     scanned: Option<Instant>,
     ids: ImageIds,
-    /// The framebuffer last read, what it looked like and its size.
-    last: Option<(u32, Instant, CursorLook, (u32, u32))>,
+    /// The framebuffer last read, the transform it was read with, what it looked like and its
+    /// size as streamed.
+    last: Option<(u32, Transform, Instant, CursorLook, (u32, u32))>,
     /// A cursor plane was seen in use.
     seen: bool,
     /// Hotspots the driver does not report, learned from where the pointer was moved to.
@@ -502,19 +656,28 @@ impl KmsCursorReader {
                 y,
                 hot,
                 reported,
+                rotation,
+                size: plane_size,
             }) = card.shown()
             else {
                 continue;
             };
+            let view = card.view(crtc);
+            let sprite = rotation.then(view.to_upright());
             let fd = card.file.as_raw_fd();
-            let connector = card.crtcs.get(&crtc).cloned().unwrap_or_else(|| "".into());
+            let connector = card
+                .crtcs
+                .get(&crtc)
+                .map_or_else(|| "".into(), |o| o.connector.clone());
             self.seen = true;
             let (look, size) = match &self.last {
-                Some((last, at, look, size)) if *last == fb && at.elapsed() < REREAD => {
+                Some((last, t, at, look, size))
+                    if *last == fb && *t == sprite && at.elapsed() < REREAD =>
+                {
                     (look.clone(), *size)
                 }
                 _ => {
-                    let read = read_image(fd, fb, hot);
+                    let read = read_image(fd, fb, hot, sprite);
                     let size = read.as_ref().map_or((0, 0), |(_, size)| *size);
                     let image = read.map(|(i, _)| self.ids.get(i));
                     let kind = if image.is_some() {
@@ -523,20 +686,30 @@ impl KmsCursorReader {
                         CursorKind::Default
                     };
                     let look = CursorLook { kind, image };
-                    self.last = Some((fb, Instant::now(), look.clone(), size));
+                    self.last = Some((fb, sprite, Instant::now(), look.clone(), size));
                     (look, size)
                 }
             };
+            let fb_size = sprite.size(size.0, size.1);
+            let plane_size = plane_size.unwrap_or_else(|| rotation.size(fb_size.0, fb_size.1));
+            let ((ux, uy), _) = view.place(rotation, (x, y), plane_size);
+            let clamp = |v: i64| v.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+            let (ux, uy) = (clamp(ux), clamp(uy));
             let (look, hot) = if reported {
+                let hot = if fb_size.0 > 0 && fb_size.1 > 0 {
+                    sprite.map_pixel(hot, fb_size)
+                } else {
+                    hot
+                };
                 (look, hot)
             } else {
                 let (ox, oy) = origin(&connector);
-                self.learned(look, size, (x.saturating_add(ox), y.saturating_add(oy)))
+                self.learned(look, size, (ux.saturating_add(ox), uy.saturating_add(oy)))
             };
             return Some(KmsCursor {
                 look,
-                x: x.saturating_add(hot.0 as i32),
-                y: y.saturating_add(hot.1 as i32),
+                x: ux.saturating_add(hot.0 as i32),
+                y: uy.saturating_add(hot.1 as i32),
                 connector,
             });
         }
@@ -550,8 +723,8 @@ impl KmsCursorReader {
 }
 
 impl KmsCursorReader {
-    /// `look` with the hotspot learned for its image, and that hotspot in framebuffer pixels;
-    /// `top_left` is the cursor plane's desktop position and `size` its framebuffer size.
+    /// `look` with the hotspot learned for its image, and that hotspot in sprite pixels;
+    /// `top_left` is the sprite's desktop position and `size` its size, both as streamed.
     fn learned(
         &mut self,
         look: CursorLook,
@@ -711,7 +884,14 @@ fn map(fd: RawFd, handle: u32, len: usize) -> io::Result<Mapping> {
     Mapping::new(buf.as_raw_fd(), len, 0)
 }
 
-fn read_image(fd: RawFd, fb_id: u32, hot: (u32, u32)) -> Option<(CursorImage, (u32, u32))> {
+/// The cursor framebuffer turned by `sprite`, with `hot` (framebuffer pixels), and its size once
+/// turned.
+fn read_image(
+    fd: RawFd,
+    fb_id: u32,
+    hot: (u32, u32),
+    sprite: Transform,
+) -> Option<(CursorImage, (u32, u32))> {
     let mut fb = FbCmd2 {
         fb_id,
         ..Default::default()
@@ -736,19 +916,40 @@ fn read_image(fd: RawFd, fb_id: u32, hot: (u32, u32)) -> Option<(CursorImage, (u
         pitch as usize,
         fb.pixel_format,
     );
-    Some((
-        fit(
-            CursorImage {
-                width: w,
-                height: h,
-                hot_x: hot.0.min(w - 1),
-                hot_y: hot.1.min(h - 1),
-                rgba,
-            },
-            MAX_CURSOR_SIDE,
-        ),
-        (w, h),
-    ))
+    let image = turn(
+        CursorImage {
+            width: w,
+            height: h,
+            hot_x: hot.0.min(w - 1),
+            hot_y: hot.1.min(h - 1),
+            rgba,
+        },
+        sprite,
+    );
+    let size = (image.width, image.height);
+    Some((fit(image, MAX_CURSOR_SIDE), size))
+}
+
+/// `image` and its hotspot turned by `t`.
+fn turn(image: CursorImage, t: Transform) -> CursorImage {
+    if t.is_identity() {
+        return image;
+    }
+    let size = (image.width, image.height);
+    let pixels: Vec<[u8; 4]> = image
+        .rgba
+        .chunks_exact(4)
+        .map(|p| [p[0], p[1], p[2], p[3]])
+        .collect();
+    let (width, height) = t.size(size.0, size.1);
+    let (hot_x, hot_y) = t.map_pixel((image.hot_x, image.hot_y), size);
+    CursorImage {
+        width,
+        height,
+        hot_x,
+        hot_y,
+        rgba: t.map_pixels(&pixels, size).concat(),
+    }
 }
 
 /// Straight-alpha RGBA from premultiplied 32-bit little-endian ARGB, XRGB or ABGR rows.
@@ -888,5 +1089,113 @@ mod tests {
             super::super::desktop_pixel(65535, 65535, d),
             (1920 + 2559, 1439)
         );
+    }
+
+    /// A 3x2 sprite with distinct pixels, its hotspot on the right edge.
+    fn sprite() -> CursorImage {
+        CursorImage {
+            width: 3,
+            height: 2,
+            hot_x: 2,
+            hot_y: 1,
+            rgba: (0..24).collect(),
+        }
+    }
+
+    #[test]
+    fn the_cursor_lands_where_the_streamed_picture_shows_it() {
+        let streamed = (640, 480);
+        let image = sprite();
+        let at = (100i64, 50i64);
+        let pointer = (at.0 + 2, at.1 + 1);
+        // `to_panel` takes the streamed picture to the CRTC's pixels.
+        let check =
+            |view: View, to_panel: Transform, rotation: Transform, fb: &CursorImage, case: &str| {
+                let (x, y, w, h) = to_panel.map_rect((at.0, at.1, 3, 2), streamed);
+                let ((ux, uy), t) = view.place(rotation, (x as i32, y as i32), (w, h));
+                assert_eq!((ux, uy), at, "{case}: top-left");
+                assert_eq!(turn(fb.clone(), t), image, "{case}: sprite and hotspot");
+                let hot = t.map_pixel((fb.hot_x, fb.hot_y), (fb.width, fb.height));
+                assert_eq!(
+                    (ux + i64::from(hot.0), uy + i64::from(hot.1)),
+                    pointer,
+                    "{case}: reported hotspot"
+                );
+                let t0 = Instant::now();
+                let mut learned = Hotspots::default();
+                let size = t.size(fb.width, fb.height);
+                learned.observe(
+                    1,
+                    size,
+                    (ux as i32 + 1920, uy as i32),
+                    Some(((pointer.0 as i32 + 1920, pointer.1 as i32), t0)),
+                    t0 + REST,
+                );
+                assert_eq!(learned.get(1), Some((2, 1)), "{case}: learned hotspot");
+            };
+        for t in Transform::all() {
+            let mode = Some(t.size(streamed.0, streamed.1));
+            let plane = View {
+                mode,
+                plane: t,
+                panel: Transform::IDENTITY,
+            };
+            check(plane, t, t, &image, &format!("{t:?} on both planes"));
+            check(
+                plane,
+                t,
+                Transform::IDENTITY,
+                &turn(image.clone(), t),
+                &format!("{t:?} on the primary plane, sprite turned in software"),
+            );
+            let panel = View {
+                mode,
+                plane: Transform::IDENTITY,
+                panel: t,
+            };
+            check(
+                panel,
+                t,
+                Transform::IDENTITY,
+                &turn(image.clone(), t),
+                &format!("{t:?} panel"),
+            );
+        }
+        let unknown = View {
+            mode: None,
+            plane: Transform::new(1, false),
+            panel: Transform::IDENTITY,
+        };
+        assert_eq!(
+            unknown.place(Transform::IDENTITY, (7, 8), (64, 64)),
+            ((7, 8), Transform::IDENTITY)
+        );
+    }
+
+    #[test]
+    fn turned_sprites_move_every_pixel() {
+        let image = sprite();
+        let r90 = turn(image.clone(), Transform::new(1, false));
+        assert_eq!((r90.width, r90.height), (2, 3));
+        // Counter-clockwise: the top-right pixel lands top-left, the hotspot bottom-right.
+        assert_eq!(&r90.rgba[0..4], &image.rgba[8..12]);
+        assert_eq!((r90.hot_x, r90.hot_y), (1, 0));
+        for t in Transform::all() {
+            let turned = turn(image.clone(), t);
+            let mut sorted: Vec<&[u8]> = turned.rgba.chunks(4).collect();
+            sorted.sort();
+            assert_eq!(sorted, image.rgba.chunks(4).collect::<Vec<_>>(), "{t:?}");
+            assert_eq!(turn(turned, t.inverse()), image, "{t:?}");
+        }
+    }
+
+    #[test]
+    fn mode_size_comes_from_the_mode_info() {
+        let mut m = ModeInfo([0; 68]);
+        m.0[4..6].copy_from_slice(&1920u16.to_ne_bytes());
+        m.0[14..16].copy_from_slice(&1080u16.to_ne_bytes());
+        assert_eq!(m.size(), (1920, 1080));
+        assert_eq!(MODE_GETCRTC as u32, 0xc06864a1);
+        assert_eq!(size_of::<ModeCrtc>(), 104);
     }
 }

@@ -29,18 +29,18 @@ fn err(e: impl std::fmt::Display) -> String {
 
 /// A mode's refresh rate in millihertz; 0 when unknown.
 fn refresh_mhz(m: &ModeInfo) -> u32 {
-    let mut vtotal = u64::from(m.vtotal);
+    let mut clock = u64::from(m.dot_clock) * 1000;
+    let mut total = u64::from(m.htotal) * u64::from(m.vtotal);
     if m.mode_flags.contains(ModeFlag::DOUBLE_SCAN) {
-        vtotal *= 2;
+        total *= 2;
     }
     if m.mode_flags.contains(ModeFlag::INTERLACE) {
-        vtotal /= 2;
+        clock *= 2;
     }
-    let total = u64::from(m.htotal) * vtotal;
     if total == 0 {
         return 0;
     }
-    ((u64::from(m.dot_clock) * 1000 + total / 2) / total) as u32
+    ((clock + total / 2) / total) as u32
 }
 
 /// The screen size that holds every `(x, y, width, height)`, within `min` and `max`.
@@ -60,7 +60,7 @@ fn screen_size(
     Ok(((w.max(0) as u16).max(min.0), (h.max(0) as u16).max(min.1)))
 }
 
-/// Millimetres for `px` pixels at the density of `cur_px` over `cur_mm`, else 96 dpi.
+/// Millimetres for `px` pixels at the density of `cur_px` pixels over `cur_mm`, else 96 dpi.
 fn millimetres(px: u16, cur_px: u16, cur_mm: u16) -> u32 {
     if cur_px > 0 && cur_mm > 0 {
         (u32::from(px) * u32::from(cur_mm) + u32::from(cur_px) / 2) / u32::from(cur_px)
@@ -275,17 +275,24 @@ impl Backend for RandR {
             (range.min_width, range.min_height),
             (range.max_width, range.max_height),
         )?;
-        let info = self
+        let geometry = self
             .conn
-            .randr_get_screen_info(self.root)
+            .get_geometry(self.root)
             .map_err(err)?
             .reply()
             .map_err(err)?;
-        let cur = info
-            .sizes
-            .get(usize::from(info.size_id))
-            .copied()
-            .unwrap_or_default();
+        let (cur_w, cur_h) = (geometry.width, geometry.height);
+        let setup = self
+            .conn
+            .setup()
+            .roots
+            .iter()
+            .find(|s| s.root == self.root)
+            .ok_or("no X screen")?;
+        let density = (
+            (setup.width_in_pixels, setup.width_in_millimeters),
+            (setup.height_in_pixels, setup.height_in_millimeters),
+        );
         let fits = |x: i16, y: i16, w: u32, h: u32, sw: u16, sh: u16| {
             i32::from(x) + w as i32 <= i32::from(sw) && i32::from(y) + h as i32 <= i32::from(sh)
         };
@@ -300,7 +307,7 @@ impl Backend for RandR {
         let result = (|| -> Result<(), String> {
             let (now, later): (Vec<&&Change>, Vec<&&Change>) = changes
                 .iter()
-                .partition(|c| fits(c.x, c.y, c.width, c.height, cur.width, cur.height));
+                .partition(|c| fits(c.x, c.y, c.width, c.height, cur_w, cur_h));
             for c in &now {
                 let i = &c.listed.info;
                 self.set_crtc(c.listed.crtc, c.x, c.y, c.mode, i.rotation, &i.outputs)?;
@@ -311,14 +318,14 @@ impl Backend for RandR {
                     self.set_crtc(c.listed.crtc, 0, 0, 0, Rotation::ROTATE0, &[])?;
                 }
             }
-            if (sw, sh) != (cur.width, cur.height) {
+            if (sw, sh) != (cur_w, cur_h) {
                 self.conn
                     .randr_set_screen_size(
                         self.root,
                         sw,
                         sh,
-                        millimetres(sw, cur.width, cur.mwidth),
-                        millimetres(sh, cur.height, cur.mheight),
+                        millimetres(sw, density.0.0, density.0.1),
+                        millimetres(sh, density.1.0, density.1.1),
                     )
                     .map_err(err)?
                     .check()

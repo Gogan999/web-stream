@@ -103,4 +103,7 @@ stop when it leaves. Ending a session releases every held key and unplugs
 the virtual gamepads. A resolution changed with `--allow-resolution-change`
 is restored on disconnect, when the host quits, and after a crash in the
 media code; if the process is killed, Windows should revert it too (not
-documented by Microsoft), and a reboot always does.
+documented by Microsoft), and a reboot always does. On Linux a helper in
+the signed-in user's session makes the change and puts it back when told,
+when the host closes its stdin (the host quit or crashed) or on SIGTERM
+(see [Linux host](../guide/linux.md#matching-the-host-resolution)).

@@ -17,6 +17,7 @@ on:
       - crates/host/src/files.rs
       - .github/workflows/linux-io.yml
       - .github/scripts/mutter-modes.py
+      - .github/scripts/kde-modes.py
 
 permissions:
   contents: read
@@ -39,7 +40,8 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             pipewire pipewire-pulse wireplumber pulseaudio-utils dbus \
             xvfb xclip sway wl-clipboard \
-            xserver-xorg-core xserver-xorg-video-dummy x11-xserver-utils mutter
+            xserver-xorg-core xserver-xorg-video-dummy x11-xserver-utils mutter \
+            kwin-wayland libkf5screen-bin qtwayland5
 
       - name: virtual devices through uinput and evdev
         run: |
@@ -261,3 +263,14 @@ jobs:
             mutter --nested --wayland --no-x11 & sleep 5
           WAYLAND_DISPLAY=wayland-0 XDG_SESSION_TYPE=wayland \
             timeout 120 python3 .github/scripts/mutter-modes.py target/debug/examples/test-host
+
+      - name: display mode helper on KDE (KWin, kscreen-doctor)
+        run: |
+          export XDG_RUNTIME_DIR="$RUNNER_TEMP/xdgk"
+          mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
+          dbus-daemon --session --fork --address="unix:path=$XDG_RUNTIME_DIR/bus"
+          export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+          QT_QPA_PLATFORM=offscreen kwin_wayland --virtual --output-count 2 \
+            --width 1920 --height 1080 --socket wayland-k & sleep 6
+          WAYLAND_DISPLAY=wayland-k XDG_SESSION_TYPE=wayland \
+            timeout 120 python3 .github/scripts/kde-modes.py target/debug/examples/test-host

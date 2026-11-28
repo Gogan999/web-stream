@@ -158,7 +158,7 @@ its keyboard can. The service keeps that power away from everyone else:
   `CAP_CHOWN` (starting the network side and the clipboard helper as their
   users, writing received files as the signed-in user, handing the network
   side its folder) and `CAP_DAC_READ_SEARCH` (reaching the signed-in user's
-  audio and display sockets). `systemd-analyze security web-stream` rates it about 3.4.
+  audio and display sockets). `systemd-analyze security web-stream` rates it about 3.7.
 - **Restarts:** a network side that crashes is started again after 1 s,
   doubling to a minute while it keeps failing; systemd restarts the service
   the same way.

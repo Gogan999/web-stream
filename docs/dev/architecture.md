@@ -24,13 +24,13 @@ STUN or TURN server is needed.
 | Path | Crate | What it does |
 |---|---|---|
 | `crates/proto` | `ws-proto` | Shared interface types: frames, displays, input events, control, pairing and signaling messages. The source of truth for the wire contract |
-| `crates/capture` | `ws-capture` | DXGI Desktop Duplication and hardware encoding (NVENC, Media Foundation hardware encoders) |
+| `crates/capture` | `ws-capture` | Screen capture (DXGI Desktop Duplication on Windows, KMS on Linux) and hardware encoding (NVENC, Media Foundation, VA-API) |
 | `crates/nvenc-sys` | `ws-nvenc-sys` | Raw NVENC (NVIDIA Video Codec SDK 12.1) bindings, loaded at runtime |
 | `crates/desktop` | `ws-desktop` | Following the input desktop (lock screen, UAC) so capture and input work there |
 | `crates/transport` | `ws-transport` | WebRTC peer connection (str0m), media tracks, data channels, pacing and frame dropping |
 | `crates/signaling` | `ws-signaling` | HTTPS server in the host: web client, device pairing, `/ws` signaling, certificates |
-| `crates/input` | `ws-input` | Keyboard, mouse and virtual gamepad injection |
-| `crates/audio` | `ws-audio` | Loopback capture and Opus encoding; browser mic to a virtual microphone |
+| `crates/input` | `ws-input` | Keyboard, mouse and virtual gamepad injection (SendInput and ViGEm on Windows, uinput on Linux) |
+| `crates/audio` | `ws-audio` | Loopback capture and Opus encoding (WASAPI, PulseAudio/PipeWire); browser mic to a virtual microphone |
 | `crates/host` | `ws-host` (lib, and the `web-stream` bin) | Wires the crates together; the Windows service and its process split; the headless Linux host (`src/linux/`: systemd service, settings page in `admin/`). `examples/` has a headless test host and a capture test |
 | `crates/gui` | `ws-host-gui` (bin) | The host program: tray app with the status and settings window, which also runs the Windows service |
 | `crates/diag` | `ws-diag` | Optional diagnostic logging (see [diagnostics.md](diagnostics.md)) |

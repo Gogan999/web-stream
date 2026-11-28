@@ -2,6 +2,7 @@
 
 use ws_proto::VideoCodec;
 
+#[cfg(test)]
 /// The NAL units of an Annex-B stream, without their start codes.
 pub(crate) fn nal_units(data: &[u8]) -> impl Iterator<Item = &[u8]> {
     let mut rest = match find_start_code(data) {

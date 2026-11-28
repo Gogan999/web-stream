@@ -265,4 +265,35 @@ mod tests {
             nvidia
         );
     }
+
+    #[test]
+    #[ignore = "timing; run with --ignored --nocapture"]
+    fn choose_codec_cost() {
+        let e = [
+            enc(
+                EncoderBackend::Nvenc,
+                &[(H264, 4096, 4096), (H265, 8192, 8192), (Av1, 8192, 8192)],
+            ),
+            enc(
+                EncoderBackend::MediaFoundation,
+                &[(H264, 4096, 4096), (H265, 8192, 8192)],
+            ),
+        ];
+        let d = [
+            dec(H264, true, true),
+            dec(H265, true, false),
+            dec(Av1, false, false),
+        ];
+        let runs = 100_000u32;
+        let t = std::time::Instant::now();
+        for _ in 0..runs {
+            std::hint::black_box(choose_codec(
+                std::hint::black_box(&e),
+                std::hint::black_box(&d),
+                3840,
+                2160,
+            ));
+        }
+        eprintln!("choose_codec: {:?} per call", t.elapsed() / runs);
+    }
 }

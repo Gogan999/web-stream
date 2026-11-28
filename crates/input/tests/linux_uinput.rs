@@ -266,4 +266,20 @@ fn virtual_devices_deliver_what_the_sink_injects() {
             );
         }
     }
+
+    let runs = 2000u32;
+    let t = std::time::Instant::now();
+    for i in 0..runs {
+        sink.mouse_move_abs((i * 31 % 65535) as u16, (i * 17 % 65535) as u16)
+            .unwrap();
+    }
+    let abs = t.elapsed() / runs;
+    let t = std::time::Instant::now();
+    for i in 0..runs {
+        sink.mouse_move(if i % 2 == 0 { 1 } else { -1 }, 0).unwrap();
+    }
+    eprintln!(
+        "uinput: {abs:?} per absolute move, {:?} per relative move (one write each)",
+        t.elapsed() / runs
+    );
 }

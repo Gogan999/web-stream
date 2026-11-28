@@ -491,6 +491,23 @@ mod tests {
                 .expect("grab again"),
         );
         assert_eq!(again.key(), frame.key());
+        let fb = source.current.as_ref().unwrap().0;
+        let runs = 200u32;
+        let (mut total, mut worst) = (Duration::ZERO, Duration::ZERO);
+        for _ in 0..runs {
+            let t = std::time::Instant::now();
+            drop(std::hint::black_box(source.grab(fb).expect("grab")));
+            let took = t.elapsed();
+            total += took;
+            worst = worst.max(took);
+        }
+        eprintln!(
+            "KMS grab (GETFB2 + PRIME export) of a {}x{} scanout: {:?} average, {:?} worst over {runs}",
+            screen.width,
+            screen.height,
+            total / runs,
+            worst
+        );
         screen.show_second();
         let next = loop {
             match source.acquire(Duration::from_millis(100)).expect("acquire") {

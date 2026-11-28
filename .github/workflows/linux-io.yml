@@ -38,6 +38,8 @@ jobs:
 
       - name: virtual devices through uinput and evdev
         run: |
+          # The runner sits at a text console, where Ctrl+Alt+Del would restart it.
+          sudo systemctl mask ctrl-alt-del.target
           sudo modprobe uinput
           test -c /dev/uinput
           # The test creates devices and reads /dev/input/event*, so it runs as root.

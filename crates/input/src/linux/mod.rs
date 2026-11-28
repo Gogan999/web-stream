@@ -49,6 +49,39 @@ fn desktop_pixel(x: u16, y: u16, display: DisplayRect) -> (i32, i32) {
     )
 }
 
+/// The right-hand modifiers and SysRq (Print Screen).
+const KEY_RIGHTCTRL: u16 = 97;
+const KEY_RIGHTALT: u16 = 100;
+const KEY_SYSRQ: u16 = 99;
+
+/// Whether the foreground virtual terminal is a text console, where the kernel turns
+/// Ctrl+Alt+Del into a restart and Alt+SysRq into system requests. A console it cannot check
+/// counts as text; no virtual terminals at all does not.
+fn text_console() -> bool {
+    const KDGKBMODE: libc::c_ulong = 0x4B44;
+    const K_XLATE: libc::c_int = 1;
+    const K_UNICODE: libc::c_int = 3;
+    if !std::path::Path::new("/dev/tty0").exists() {
+        return false;
+    }
+    // SAFETY: a plain open of a fixed path; the fd is closed below.
+    let fd = unsafe {
+        libc::open(
+            c"/dev/tty0".as_ptr(),
+            libc::O_RDONLY | libc::O_NOCTTY | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return true;
+    }
+    let mut mode: libc::c_int = 0;
+    // SAFETY: KDGKBMODE writes one int.
+    let ok = unsafe { libc::ioctl(fd, KDGKBMODE, &mut mode) } == 0;
+    // SAFETY: fd is ours.
+    unsafe { libc::close(fd) };
+    !ok || matches!(mode, K_XLATE | K_UNICODE)
+}
+
 /// The keyboard that Ctrl+Alt+Del is typed on.
 static SAS_KEYBOARD: Mutex<Weak<Device>> = Mutex::new(Weak::new());
 
@@ -145,6 +178,8 @@ pub struct LinuxInput {
     error: Option<(Instant, String)>,
     /// Wheel units not yet worth a notch, per axis.
     wheel: (i32, i32),
+    /// Ctrl and Alt held down.
+    held: (bool, bool),
     pads: [Option<Pad>; MAX_GAMEPADS as usize],
     rumble: RumbleFn,
     buf: Vec<input_event>,
@@ -216,6 +251,9 @@ fn text_strokes(text: &str) -> Vec<Stroke> {
 
 /// Types Ctrl+Alt+Del on the session's virtual keyboard.
 pub fn send_ctrl_alt_del() -> Result<(), String> {
+    if text_console() {
+        return Err("this PC shows a text console, where Ctrl+Alt+Del restarts it".into());
+    }
     let keyboard = SAS_KEYBOARD
         .lock()
         .map_err(|_| "keyboard lock poisoned".to_string())?
@@ -242,6 +280,7 @@ impl LinuxInput {
             devices: None,
             error: None,
             wheel: (0, 0),
+            held: (false, false),
             pads: Default::default(),
             rumble: Arc::new(rumble),
             buf: Vec::with_capacity(64),
@@ -328,6 +367,17 @@ impl InputSink for LinuxInput {
             debug!(?key, "no Linux key for this target");
             return Ok(());
         };
+        match code {
+            KEY_LEFTCTRL | KEY_RIGHTCTRL => self.held.0 = down,
+            KEY_LEFTALT | KEY_RIGHTALT => self.held.1 = down,
+            _ => {}
+        }
+        let (ctrl, alt) = self.held;
+        let console_command = (code == KEY_DELETE && ctrl && alt) || (code == KEY_SYSRQ && alt);
+        if down && console_command && text_console() {
+            warn!("key dropped: the text console would restart or act on it");
+            return Ok(());
+        }
         key_events(&mut self.buf, code, down);
         self.flush(|d| &d.keyboard)
     }

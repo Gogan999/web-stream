@@ -77,6 +77,7 @@ DeviceAllow=/dev/uinput rw
 DeviceAllow=char-drm rw
 DeviceAllow=char-nvidia* rw
 DeviceAllow=char-alsa rw
+DeviceAllow=/dev/tty0 r
 
 [Install]
 WantedBy=multi-user.target

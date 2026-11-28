@@ -235,6 +235,36 @@ fn virtual_devices_deliver_what_the_sink_injects() {
 
     sink.gamepad_disconnect(0).unwrap();
     sink.gamepad_disconnect(1).unwrap();
-    ws_input::send_ctrl_alt_del().unwrap();
-    assert_eq!(read_events(&mut keyboard, 6).len(), 6);
+    match ws_input::send_ctrl_alt_del() {
+        Ok(()) => assert_eq!(read_events(&mut keyboard, 6).len(), 6),
+        Err(e) => {
+            assert!(e.contains("text console"), "{e}");
+            let (ctrl, alt, del) = (
+                keymap::lookup(0xe0).unwrap(),
+                keymap::lookup(0xe2).unwrap(),
+                keymap::lookup(0x4c).unwrap(),
+            );
+            for (k, down) in [
+                (ctrl, true),
+                (alt, true),
+                (del, true),
+                (del, false),
+                (alt, false),
+                (ctrl, false),
+            ] {
+                sink.key(k, down).unwrap();
+            }
+            assert_eq!(
+                read_events(&mut keyboard, 5),
+                [
+                    (EV_KEY, 29, 1),
+                    (EV_KEY, 56, 1),
+                    (EV_KEY, 111, 0),
+                    (EV_KEY, 56, 0),
+                    (EV_KEY, 29, 0)
+                ],
+                "Delete is held back on a text console"
+            );
+        }
+    }
 }

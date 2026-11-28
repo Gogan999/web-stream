@@ -175,6 +175,10 @@ its keyboard can. The service keeps that power away from everyone else:
   Plug in a monitor or a dummy plug and check the desktop is on it.
 - **Keyboard, mouse or gamepads do nothing:** `ls -l /dev/uinput` must exist;
   `sudo modprobe uinput` loads it (the installer sets it to load at boot).
+- **Ctrl+Alt+Del is refused:** the PC shows a text console (no graphical
+  login), where the kernel would restart the PC on Ctrl+Alt+Del. The host
+  also holds back Delete while Ctrl and Alt are down, and SysRq while Alt is
+  down, until a graphical login or desktop owns the screen.
 - **Something needs more access than the unit allows:** add it with
   `sudo systemctl edit web-stream`, for example
   `CapabilityBoundingSet=CAP_DAC_OVERRIDE` or `DeviceAllow=/dev/… rw`

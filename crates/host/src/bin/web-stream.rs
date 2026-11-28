@@ -9,6 +9,12 @@ fn main() {
     {
         std::process::exit(ws_host::clipboard::helper_main());
     }
+    if args
+        .first()
+        .is_some_and(|a| a == ws_host::display_mode::HELPER_ARG)
+    {
+        std::process::exit(ws_host::display_mode::helper_main());
+    }
     if let Err(e) = ws_host::linux::main(args) {
         eprintln!("web-stream: {e:#}");
         std::process::exit(1);

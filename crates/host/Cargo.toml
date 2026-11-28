@@ -35,7 +35,8 @@ subtle = "2.6"
 wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "staging"] }
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
-x11rb = { version = "0.13", features = ["xfixes"] }
+x11rb = { version = "0.13", features = ["randr", "xfixes"] }
+zbus = { version = "5", default-features = false, features = ["blocking-api", "tokio"] }
 
 [dev-dependencies]
 tempfile = "3"

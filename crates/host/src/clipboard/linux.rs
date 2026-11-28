@@ -3,8 +3,7 @@
 
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
-use std::os::unix::process::CommandExt;
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
@@ -28,31 +27,11 @@ const CHECK: Duration = Duration::from_millis(250);
 /// Wait before starting a helper again after it failed.
 const RESPAWN: Duration = Duration::from_secs(5);
 
-/// Writes one frame: kind, little-endian length, payload.
-pub fn write_frame(w: &mut impl Write, kind: u8, payload: &[u8]) -> io::Result<()> {
-    let len = u32::try_from(payload.len()).map_err(|_| io::ErrorKind::InvalidInput)?;
-    let mut head = [0u8; 5];
-    head[0] = kind;
-    head[1..].copy_from_slice(&len.to_le_bytes());
-    w.write_all(&head)?;
-    w.write_all(payload)?;
-    w.flush()
-}
+pub use crate::session_helper::write_frame;
 
 /// Reads one frame; payloads over [`MAX_BYTES`] plus a little are refused.
 pub fn read_frame(r: &mut impl Read) -> io::Result<(u8, Vec<u8>)> {
-    let mut head = [0u8; 5];
-    r.read_exact(&mut head)?;
-    let len = u32::from_le_bytes([head[1], head[2], head[3], head[4]]) as usize;
-    if len > MAX_BYTES + 64 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "frame too large",
-        ));
-    }
-    let mut payload = vec![0u8; len];
-    r.read_exact(&mut payload)?;
-    Ok((head[0], payload))
+    crate::session_helper::read_frame(r, MAX_BYTES + 64)
 }
 
 type Done = Box<dyn FnOnce(bool) + Send>;
@@ -196,24 +175,7 @@ impl Manager {
     }
 
     fn spawn(&mut self, session: Session) -> Result<Helper, String> {
-        let mut cmd = Command::new(&self.exe);
-        cmd.arg(HELPER_ARG)
-            .env_clear()
-            .env("PATH", "/usr/local/bin:/usr/bin:/bin")
-            .env("XDG_RUNTIME_DIR", &session.runtime_dir)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        for (k, v) in session::display_env(&session) {
-            cmd.env(k, v);
-        }
-        if let Some(user) = session::user(session.uid) {
-            cmd.env("HOME", &user.home).env("USER", &user.name);
-            // SAFETY: getuid has no preconditions.
-            if unsafe { libc::getuid() } == 0 {
-                cmd.uid(user.uid).gid(user.gid);
-            }
-        }
+        let mut cmd = crate::session_helper::command(&self.exe, HELPER_ARG, &session);
         let mut child = cmd.spawn().map_err(|e| format!("start: {e}"))?;
         let stdin = child.stdin.take().ok_or("no stdin")?;
         let mut stdout = child.stdout.take().ok_or("no stdout")?;

@@ -35,6 +35,13 @@ fn main() {
     {
         std::process::exit(ws_host::clipboard::helper_main());
     }
+    #[cfg(target_os = "linux")]
+    if args
+        .first()
+        .is_some_and(|a| a == ws_host::display_mode::HELPER_ARG)
+    {
+        std::process::exit(ws_host::display_mode::helper_main());
+    }
     if args.first().is_some_and(|a| a == "service") {
         std::process::exit(service(&args[1..]));
     }

@@ -298,7 +298,7 @@ impl Drop for ChangedModes {
 
 fn restore_modes(ids: Vec<DisplayId>) {
     for id in ids {
-        if let Err(e) = ws_capture::restore_display_mode(id) {
+        if let Err(e) = platform::restore_display_mode(id) {
             tracing::warn!(display = id.0, "restore resolution: {e}");
         }
     }
@@ -1391,11 +1391,10 @@ impl Media {
         self.mode_busy = true;
         let (tx, session) = (self.later_tx.clone(), self.session);
         tokio::spawn(async move {
-            let result = tokio::task::spawn_blocking(move || {
-                ws_capture::set_display_mode(id, width, height)
-            })
-            .await
-            .unwrap_or_else(|e| Err(ws_capture::CaptureError::Platform(e.to_string())));
+            let result =
+                tokio::task::spawn_blocking(move || platform::set_display_mode(id, width, height))
+                    .await
+                    .unwrap_or_else(|e| Err(ws_capture::CaptureError::Platform(e.to_string())));
             let _ = tx
                 .send(Later::ModeSet {
                     session,

@@ -6051,6 +6051,8 @@ name = "ws-audio"
 version = "1.0.0-rc.1"
 dependencies = [
  "bytes",
+ "libc",
+ "libloading 0.8.9",
  "opus",
  "thiserror 2.0.21",
  "tokio",
@@ -6110,6 +6112,9 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "wayland-client",
+ "wayland-protocols",
+ "wayland-protocols-wlr",
  "windows",
  "windows-service",
  "ws-audio",
@@ -6120,6 +6125,7 @@ dependencies = [
  "ws-proto",
  "ws-signaling",
  "ws-transport",
+ "x11rb",
 ]
 
 [[package]]
@@ -6153,6 +6159,7 @@ dependencies = [
 name = "ws-input"
 version = "1.0.0-rc.1"
 dependencies = [
+ "libc",
  "thiserror 2.0.21",
  "tracing",
  "vigem-client",

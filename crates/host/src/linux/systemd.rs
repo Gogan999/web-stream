@@ -57,8 +57,7 @@ CapabilityBoundingSet=CAP_SYS_ADMIN CAP_SYS_NICE CAP_SETUID CAP_SETGID CAP_CHOWN
 NoNewPrivileges=yes
 ProtectSystem=strict
 ReadWritePaths={data}
-PrivateTmp=yes
-ProtectHome=read-only
+ReadWritePaths=-/home
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectKernelLogs=yes
@@ -284,11 +283,12 @@ mod tests {
         for line in [
             "NoNewPrivileges=yes",
             "ProtectSystem=strict",
-            "PrivateTmp=yes",
+            "ReadWritePaths=-/home",
             "Restart=on-failure",
         ] {
             assert!(u.lines().any(|l| l == line), "{line}");
         }
+        assert!(!u.contains("PrivateTmp") && !u.contains("ProtectHome"));
         let caps = u
             .lines()
             .find_map(|l| l.strip_prefix("CapabilityBoundingSet="))

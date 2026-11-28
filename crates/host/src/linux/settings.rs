@@ -52,7 +52,7 @@ pub struct Settings {
     pub gamepad: String,
     pub allow_resolution_change: bool,
     pub clipboard: bool,
-    /// Let the browser send files to this PC, into the data dir's `uploads` folder.
+    /// Let the browser send files to this PC: the signed-in user's Downloads, else the data dir's `uploads`.
     pub allow_upload: bool,
     /// Ask the router to forward the ports (UPnP).
     pub upnp: bool,
@@ -153,7 +153,7 @@ impl Settings {
         Ok(())
     }
 
-    /// The host options these settings stand for; files from the browser go to `dir`'s `uploads`.
+    /// The host options these settings stand for; with nobody signed in, files go to `dir`'s `uploads`.
     pub fn to_args(&self, dir: &Path) -> Vec<String> {
         let mut args = vec!["--port".to_string(), self.port.to_string()];
         if !self.ice_tcp {

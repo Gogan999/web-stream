@@ -5,6 +5,8 @@ use std::sync::Arc;
 
 use ws_proto::{CursorImage, CursorKind};
 
+#[cfg(target_os = "linux")]
+pub use crate::linux::cursor::{KmsCursor, KmsCursorReader, connector_name};
 #[cfg(windows)]
 pub use crate::win_cursor::CursorReader;
 

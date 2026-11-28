@@ -117,6 +117,7 @@ struct Incoming {
     file: Option<File>,
     part: PathBuf,
     path: PathBuf,
+    owner: Owner,
     done: bool,
 }
 
@@ -179,10 +180,17 @@ impl Receiver {
             });
             return;
         }
+        let (dir, owner) = match block_in_place(|| target(&dir)) {
+            Ok(t) => t,
+            Err(message) => {
+                self.reply(HostControl::UploadFailed { id, message });
+                return;
+            }
+        };
         self.files += 1;
         self.bytes += size;
         let name = safe_name(name);
-        let reserved = block_in_place(|| reserve(&dir, &name));
+        let reserved = block_in_place(|| as_owner(owner, || reserve(&dir, &name)));
         let (path, part, file) = match reserved {
             Ok(r) => r,
             Err(e) => {
@@ -205,6 +213,7 @@ impl Receiver {
             file: Some(file),
             part,
             path,
+            owner,
             done: false,
         });
         self.reply(HostControl::UploadAccepted { id });
@@ -260,7 +269,7 @@ impl Receiver {
             drop(file);
             mark_downloaded(&cur.part);
             // Replaces the empty file that held the name.
-            std::fs::rename(&cur.part, &cur.path)?;
+            as_owner(cur.owner, || std::fs::rename(&cur.part, &cur.path))?;
             Ok(())
         });
         if let Err(e) = saved {
@@ -395,6 +404,61 @@ fn file_name(path: &Path) -> String {
     path.file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default()
+}
+
+/// The user and group files are created and opened as; `None` for this process's own.
+pub(crate) type Owner = Option<(u32, u32)>;
+
+/// The signed-in user, when this process runs as root on Linux and someone is signed in.
+#[cfg(target_os = "linux")]
+pub(crate) fn session_owner() -> Result<Option<ws_audio::session::User>, String> {
+    // SAFETY: geteuid has no preconditions.
+    if unsafe { libc::geteuid() } != 0 {
+        return Ok(None);
+    }
+    let Some(session) = ws_audio::session::active() else {
+        return Ok(None);
+    };
+    ws_audio::session::user(session.uid)
+        .map(Some)
+        .ok_or_else(|| format!("user {} is not in the password database", session.uid))
+}
+
+/// Where received files go and who owns them: as root on Linux, written as the signed-in user,
+/// into `dir` when that user owns it, else into their `~/Downloads/web-stream`.
+fn target(dir: &Path) -> Result<(PathBuf, Owner), String> {
+    #[cfg(target_os = "linux")]
+    if let Some(user) = session_owner()? {
+        use std::os::unix::fs::MetadataExt;
+        let theirs = dir != crate::options::default_upload_dir()
+            && std::fs::metadata(dir).is_ok_and(|m| m.is_dir() && m.uid() == user.uid);
+        let dir = if theirs {
+            dir.to_path_buf()
+        } else {
+            user.home.join("Downloads").join("web-stream")
+        };
+        return Ok((dir, Some((user.uid, user.gid))));
+    }
+    Ok((dir.to_path_buf(), None))
+}
+
+/// Runs `f` with this thread's file system identity set to `owner`.
+pub(crate) fn as_owner<T>(owner: Owner, f: impl FnOnce() -> T) -> T {
+    #[cfg(target_os = "linux")]
+    if let Some((uid, gid)) = owner {
+        // SAFETY: setfsuid and setfsgid change only this thread's file system identity, and are
+        // set back before returning.
+        unsafe {
+            let old_gid = libc::setfsgid(gid);
+            let old_uid = libc::setfsuid(uid);
+            let out = f();
+            libc::setfsuid(old_uid as u32);
+            libc::setfsgid(old_gid as u32);
+            return out;
+        }
+    }
+    let _ = owner;
+    f()
 }
 
 /// The Mark of the Web: Windows treats the file as downloaded from the internet.
@@ -589,6 +653,42 @@ mod tests {
             Some(HostControl::UploadSaved { .. })
         ));
         assert_eq!(h.files(), vec!["empty.txt"]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn files_are_created_as_the_owner() {
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(as_owner(None, || 7), 7);
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } != 0 {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("ws-owner-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o777))
+            .unwrap();
+        let nobody = Some((65534, 65534));
+        let (path, part, _file) = as_owner(nobody, || reserve(&dir.join("in"), "a.txt")).unwrap();
+        for p in [&path, &part, &dir.join("in")] {
+            assert_eq!(
+                std::fs::metadata(p).unwrap().uid(),
+                65534,
+                "{}",
+                p.display()
+            );
+        }
+        let root_only = dir.join("root-only");
+        std::fs::create_dir(&root_only).unwrap();
+        std::fs::set_permissions(
+            &root_only,
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )
+        .unwrap();
+        assert!(as_owner(nobody, || reserve(&root_only, "b.txt")).is_err());
+        assert!(reserve(&root_only, "b.txt").is_ok(), "identity is restored");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

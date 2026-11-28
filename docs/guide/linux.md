@@ -140,22 +140,25 @@ its keyboard can. The service keeps that power away from everyone else:
 - **The root side accepts only what a browser could send**: input, control
   messages, files it asked for, size-limited and checked, and settings that
   it checks itself. The settings cannot name a web root, a data folder, a
-  certificate file, another cloudflared or an upload folder; received files
-  go to `/var/lib/web-stream/uploads`, which only root can write.
+  certificate file, another cloudflared or an upload folder. Received files
+  go to the signed-in user's `~/Downloads/web-stream`, written as that user
+  (never as root), or to `/var/lib/web-stream/uploads` when nobody is signed
+  in.
 - **Pairing needs root.** `web-stream pair` talks to the service over
   `/run/web-stream/control.sock`, which only root can open. The settings page
   opens either with the key from `web-stream settings` (also root only),
   which works only from the PC itself and never through the Cloudflare
   Tunnel, or for a paired device that confirms.
 - **The unit is hardened:** `NoNewPrivileges`, `ProtectSystem=strict` with
-  only `/var/lib/web-stream` writable, `PrivateTmp`, read-only home folders,
-  no kernel tunables, modules or logs, a system call filter, only the DRM,
+  only `/var/lib/web-stream` and `/home` writable (received files, written
+  as the signed-in user), no kernel tunables, modules or logs, a system call filter, only the DRM,
   NVIDIA, ALSA and uinput devices, and the capability bounding set
   `CAP_SYS_ADMIN` (reading the screen through KMS without being DRM master),
   `CAP_SYS_NICE` (capture thread priority), `CAP_SETUID`, `CAP_SETGID` and
-  `CAP_CHOWN` (starting the network side as its user and handing it its
-  folder) and `CAP_DAC_READ_SEARCH` (reaching the signed-in user's audio
-  socket). `systemd-analyze security web-stream` rates it about 3.4.
+  `CAP_CHOWN` (starting the network side and the clipboard helper as their
+  users, writing received files as the signed-in user, handing the network
+  side its folder) and `CAP_DAC_READ_SEARCH` (reaching the signed-in user's
+  audio and display sockets). `systemd-analyze security web-stream` rates it about 3.4.
 - **Restarts:** a network side that crashes is started again after 1 s,
   doubling to a minute while it keeps failing; systemd restarts the service
   the same way.

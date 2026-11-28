@@ -28,6 +28,13 @@ const SETUP_LOG_FILE: &str = "setup.log";
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    #[cfg(target_os = "linux")]
+    if args
+        .first()
+        .is_some_and(|a| a == ws_host::clipboard::HELPER_ARG)
+    {
+        std::process::exit(ws_host::clipboard::helper_main());
+    }
     if args.first().is_some_and(|a| a == "service") {
         std::process::exit(service(&args[1..]));
     }

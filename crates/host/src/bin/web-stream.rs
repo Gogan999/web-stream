@@ -2,7 +2,14 @@
 
 #[cfg(target_os = "linux")]
 fn main() {
-    if let Err(e) = ws_host::linux::main(std::env::args().skip(1).collect()) {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args
+        .first()
+        .is_some_and(|a| a == ws_host::clipboard::HELPER_ARG)
+    {
+        std::process::exit(ws_host::clipboard::helper_main());
+    }
+    if let Err(e) = ws_host::linux::main(args) {
         eprintln!("web-stream: {e:#}");
         std::process::exit(1);
     }

@@ -45,7 +45,7 @@ const FIELDS = [
   ['Input and sharing', [
     ['gamepad', 'Virtual gamepad', 'select', { options: [['xbox360', 'Xbox 360'], ['ds4', 'DualShock 4']] }],
     ['clipboard', 'Share the clipboard (text)', 'check'],
-    ['allow_upload', 'Receive files from the browser', 'check', { help: 'Saved in the uploads folder of the data directory.' }],
+    ['allow_upload', 'Receive files from the browser', 'check', { help: 'Saved in the signed-in user\'s Downloads/web-stream folder.' }],
   ]],
 ];
 

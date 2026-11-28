@@ -62,6 +62,10 @@ picture; the browser draws its own cursor.
   streams the picture unturned (logged once).
 - A compositor that turns its picture itself on an external monitor
   leaves no trace in KMS; that picture is streamed as the panel shows it.
+- The pointer the browser draws follows: the cursor plane's position, its
+  image and its hotspot are turned the same way, whether the cursor plane
+  is rotated along with the primary plane or the compositor turned the
+  image itself.
 
 ## Encoding
 

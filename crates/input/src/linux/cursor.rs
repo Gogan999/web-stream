@@ -602,14 +602,23 @@ pub struct KmsCursor {
     pub connector: Arc<str>,
 }
 
+/// A cursor framebuffer as read: its id, the transform it was read with, when, what it looked like
+/// and its size as streamed.
+struct LastRead {
+    fb: u32,
+    sprite: Transform,
+    at: Instant,
+    look: CursorLook,
+    size: (u32, u32),
+}
+
 /// Reads the pointer from whichever card shows one; polled from one thread.
 pub struct KmsCursorReader {
     cards: Vec<Card>,
     scanned: Option<Instant>,
     ids: ImageIds,
-    /// The framebuffer last read, the transform it was read with, what it looked like and its
-    /// size as streamed.
-    last: Option<(u32, Transform, Instant, CursorLook, (u32, u32))>,
+    /// The framebuffer last read.
+    last: Option<LastRead>,
     /// A cursor plane was seen in use.
     seen: bool,
     /// Hotspots the driver does not report, learned from where the pointer was moved to.
@@ -671,10 +680,10 @@ impl KmsCursorReader {
                 .map_or_else(|| "".into(), |o| o.connector.clone());
             self.seen = true;
             let (look, size) = match &self.last {
-                Some((last, t, at, look, size))
-                    if *last == fb && *t == sprite && at.elapsed() < REREAD =>
+                Some(last)
+                    if last.fb == fb && last.sprite == sprite && last.at.elapsed() < REREAD =>
                 {
-                    (look.clone(), *size)
+                    (last.look.clone(), last.size)
                 }
                 _ => {
                     let read = read_image(fd, fb, hot, sprite);
@@ -686,7 +695,13 @@ impl KmsCursorReader {
                         CursorKind::Default
                     };
                     let look = CursorLook { kind, image };
-                    self.last = Some((fb, sprite, Instant::now(), look.clone(), size));
+                    self.last = Some(LastRead {
+                        fb,
+                        sprite,
+                        at: Instant::now(),
+                        look: look.clone(),
+                        size,
+                    });
                     (look, size)
                 }
             };

@@ -16,6 +16,7 @@ on:
       - crates/host/src/uploads.rs
       - crates/host/src/files.rs
       - .github/workflows/linux-io.yml
+      - .github/scripts/mutter-modes.py
 
 permissions:
   contents: read
@@ -38,7 +39,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             pipewire pipewire-pulse wireplumber pulseaudio-utils dbus \
             xvfb xclip sway wl-clipboard \
-            xserver-xorg-core xserver-xorg-video-dummy x11-xserver-utils
+            xserver-xorg-core xserver-xorg-video-dummy x11-xserver-utils mutter
 
       - name: virtual devices through uinput and evdev
         run: |
@@ -247,3 +248,16 @@ jobs:
           swaymsg create_output
           WAYLAND_DISPLAY=$(basename "$(ls "$XDG_RUNTIME_DIR"/wayland-* | grep -v lock | head -1)") \
             timeout 120 python3 "$RUNNER_TEMP/mode.py" target/debug/examples/test-host wayland HEADLESS-1 HEADLESS-2
+
+      - name: display mode helper on GNOME (Mutter)
+        run: |
+          export XDG_RUNTIME_DIR="$RUNNER_TEMP/xdgg"
+          mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
+          dbus-daemon --session --fork --address="unix:path=$XDG_RUNTIME_DIR/bus"
+          export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+          Xvfb :77 -screen 0 3840x2160x24 & sleep 2
+          DISPLAY=:77 MUTTER_DEBUG_NUM_DUMMY_MONITORS=2 \
+            MUTTER_DEBUG_DUMMY_MODE_SPECS="1920x1080:1280x720:1024x768" \
+            mutter --nested --wayland --no-x11 & sleep 5
+          WAYLAND_DISPLAY=wayland-0 XDG_SESSION_TYPE=wayland \
+            timeout 120 python3 .github/scripts/mutter-modes.py target/debug/examples/test-host

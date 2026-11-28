@@ -5,6 +5,8 @@
 
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use opus::{Channels, Decoder, Encoder};
@@ -76,7 +78,11 @@ fn loopback_and_virtual_microphone() {
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(1024);
     let capture = ws_audio::LoopbackCapture::start(LoopbackConfig::default(), tx).unwrap();
-    std::thread::sleep(Duration::from_millis(500));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while rx.try_recv().is_err() {
+        assert!(Instant::now() < deadline, "loopback capture never started");
+        std::thread::sleep(Duration::from_millis(10));
+    }
     let mut play = Command::new("pacat")
         .args([
             "--playback",
@@ -128,25 +134,43 @@ fn loopback_and_virtual_microphone() {
         .stdout(Stdio::piped())
         .spawn()
         .expect("parec");
+    let mut stdout = record.stdout.take().unwrap();
+    let loudest_heard = Arc::new(AtomicU32::new(0));
+    let reader = {
+        let loudest_heard = loudest_heard.clone();
+        std::thread::spawn(move || {
+            let mut chunk = [0u8; 4096];
+            while let Ok(n) = stdout.read(&mut chunk) {
+                if n == 0 {
+                    break;
+                }
+                let samples: Vec<f32> = chunk[..n - n % 4]
+                    .chunks_exact(4)
+                    .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                    .collect();
+                loudest_heard.fetch_max(peak(&samples).to_bits(), Ordering::Relaxed);
+            }
+        })
+    };
+    let heard = || f32::from_bits(loudest_heard.load(Ordering::Relaxed));
     let mut encoder = Encoder::new(48_000, Channels::Mono, opus::Application::Voip).unwrap();
     let mono: Vec<f32> = tone(960, 0.5).iter().step_by(2).copied().collect();
     let mut buf = [0u8; 1500];
-    for seq in 0..100u16 {
+    let deadline = Instant::now() + Duration::from_secs(6);
+    let mut seq = 0u16;
+    while heard() <= 0.2 && Instant::now() < deadline {
         let n = encoder.encode_float(&mono, &mut buf).unwrap();
         receiver.push(seq, &buf[..n]);
+        seq = seq.wrapping_add(1);
         std::thread::sleep(Duration::from_millis(20));
     }
     record.kill().unwrap();
-    let mut raw = Vec::new();
-    record.stdout.take().unwrap().read_to_end(&mut raw).unwrap();
     let _ = record.wait();
-    let heard: Vec<f32> = raw
-        .chunks_exact(4)
-        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-        .collect();
+    let _ = reader.join();
     assert!(
-        peak(&heard) > 0.2,
-        "the mic did not reach the virtual source"
+        heard() > 0.2,
+        "the mic did not reach the virtual source in {seq} packets: peak {}",
+        heard()
     );
 
     drop(mic);

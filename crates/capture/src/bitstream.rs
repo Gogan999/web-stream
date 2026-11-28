@@ -46,28 +46,46 @@ fn nal_type(codec: VideoCodec, unit: &[u8]) -> Option<u8> {
     }
 }
 
-/// Whether an H.264 or HEVC access unit is an IDR picture.
-pub(crate) fn is_idr(codec: VideoCodec, data: &[u8]) -> bool {
-    for unit in nal_units(data) {
-        match (codec, nal_type(codec, unit)) {
-            (VideoCodec::H264, Some(5)) | (VideoCodec::H265, Some(19 | 20)) => return true,
-            (VideoCodec::H264, Some(1..=4)) | (VideoCodec::H265, Some(0..=18 | 21..=31)) => {
-                return false;
-            }
-            _ => {}
-        }
-    }
-    false
+/// The NAL unit types of an Annex-B stream in order, read without scanning to each unit's end.
+fn nal_types(codec: VideoCodec, data: &[u8]) -> impl Iterator<Item = u8> + '_ {
+    let mut at = 0;
+    std::iter::from_fn(move || {
+        let (start, len) = find_start_code(&data[at..])?;
+        let header = at + start + len;
+        at = header;
+        nal_type(codec, &data[header..])
+    })
 }
 
-/// Whether an H.264 or HEVC access unit carries a sequence parameter set.
+/// Whether `kind` is a coded slice (a VCL NAL unit).
+fn is_slice(codec: VideoCodec, kind: u8) -> bool {
+    match codec {
+        VideoCodec::H264 => matches!(kind, 1..=5),
+        VideoCodec::H265 => kind <= 31,
+        VideoCodec::Av1 => false,
+    }
+}
+
+/// Whether an H.264 or HEVC access unit is an IDR picture.
+pub(crate) fn is_idr(codec: VideoCodec, data: &[u8]) -> bool {
+    nal_types(codec, data)
+        .find(|&kind| is_slice(codec, kind))
+        .is_some_and(|kind| match codec {
+            VideoCodec::H264 => kind == 5,
+            VideoCodec::H265 => matches!(kind, 19 | 20),
+            VideoCodec::Av1 => false,
+        })
+}
+
+/// Whether an H.264 or HEVC access unit carries a sequence parameter set before its first slice.
 fn has_parameter_sets(codec: VideoCodec, data: &[u8]) -> bool {
-    nal_units(data).any(|unit| {
-        matches!(
-            (codec, nal_type(codec, unit)),
-            (VideoCodec::H264, Some(7)) | (VideoCodec::H265, Some(33))
-        )
-    })
+    nal_types(codec, data)
+        .take_while(|&kind| !is_slice(codec, kind))
+        .any(|kind| match codec {
+            VideoCodec::H264 => kind == 7,
+            VideoCodec::H265 => kind == 33,
+            VideoCodec::Av1 => false,
+        })
 }
 
 /// AV1 OBU types used here.
@@ -254,5 +272,20 @@ mod tests {
         assert_eq!(leb128(&[0x05]), Some((5, 1)));
         assert_eq!(leb128(&[0x80, 0x01]), Some((128, 2)));
         assert_eq!(leb128(&[0x80]), None);
+    }
+
+    #[test]
+    #[ignore = "timing; run with --ignored --nocapture"]
+    fn idr_scan_cost() {
+        let mut frame = vec![0, 0, 0, 1, 0x09, 0xf0, 0, 0, 1, 0x41];
+        frame.extend((0..200_000u32).map(|i| (i % 251) as u8 | 1));
+        let runs = 2000;
+        let t = std::time::Instant::now();
+        let mut n = 0;
+        for _ in 0..runs {
+            n += usize::from(std::hint::black_box(is_idr(VideoCodec::H264, &frame)));
+        }
+        let per = t.elapsed() / runs;
+        eprintln!("is_idr on a 200 KB P-frame: {per:?} per frame ({n})");
     }
 }

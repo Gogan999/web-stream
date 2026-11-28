@@ -126,7 +126,6 @@ mod imp {
         let mut reader = ws_input::cursor::KmsCursorReader::new();
         let mut displays: Option<(Instant, Vec<ws_proto::DisplayInfo>)> = None;
         Some(move || {
-            let c = reader.read()?;
             if displays
                 .as_ref()
                 .is_none_or(|(at, _)| at.elapsed() >= DESKTOP_TTL)
@@ -137,6 +136,7 @@ mod imp {
                 ));
             }
             let list = displays.as_ref().map_or(&[][..], |(_, d)| d.as_slice());
+            let c = reader.read(|connector| origin_of(list, connector))?;
             let (ox, oy) = origin_of(list, &c.connector);
             Some(CursorState {
                 look: c.look,

@@ -1200,22 +1200,25 @@ mod tests {
     const FRAMES: u32 = 12;
     const FORCED: u32 = 6;
 
-    /// Microsoft's software H.264 encoder, when this Windows has it.
+    /// Microsoft's software H.264 encoder, when this Windows has it; with `WS_REQUIRE_MF` set, a
+    /// missing one fails the test.
     fn software_h264() -> Option<(&'static Api, IMFTransform)> {
+        let skip = |why: String| {
+            assert!(
+                std::env::var_os("WS_REQUIRE_MF").is_none(),
+                "Media Foundation required: {why}"
+            );
+            eprintln!("skipped: {why}");
+            None
+        };
         let api = match api() {
             Ok(api) => api,
-            Err(e) => {
-                eprintln!("skipped: {e}");
-                return None;
-            }
+            Err(e) => return skip(e.to_string()),
         };
         init_com();
         match unsafe { CoCreateInstance(&CLSID_MSH264EncoderMFT, None, CLSCTX_INPROC_SERVER) } {
             Ok(t) => Some((api, t)),
-            Err(e) => {
-                eprintln!("skipped: no software H.264 encoder ({e})");
-                None
-            }
+            Err(e) => skip(format!("no software H.264 encoder ({e})")),
         }
     }
 

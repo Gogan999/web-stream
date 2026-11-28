@@ -30,6 +30,25 @@ const TEXT_CHUNK: usize = 32;
 /// Pause between text chunks so the compositor drains its buffer.
 const TEXT_PAUSE: Duration = Duration::from_millis(4);
 
+/// The desktop pixel the absolute pointer was last moved to, and when.
+static LAST_ABSOLUTE: Mutex<Option<((i32, i32), Instant)>> = Mutex::new(None);
+
+/// Where and when the absolute pointer was last moved.
+pub(crate) fn last_absolute() -> Option<((i32, i32), Instant)> {
+    *LAST_ABSOLUTE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The desktop pixel `x`, `y` (0..=65535 across `display`) lands on.
+fn desktop_pixel(x: u16, y: u16, display: DisplayRect) -> (i32, i32) {
+    let axis = |n: u16, origin: i32, size: i32| {
+        (origin as i64 + (n as i64 * (size.max(1) as i64 - 1)) / 65535) as i32
+    };
+    (
+        axis(x, display.left, display.width),
+        axis(y, display.top, display.height),
+    )
+}
+
 /// The keyboard that Ctrl+Alt+Del is typed on.
 static SAS_KEYBOARD: Mutex<Weak<Device>> = Mutex::new(Weak::new());
 
@@ -332,7 +351,12 @@ impl InputSink for LinuxInput {
         self.buf.push(ev(EV_ABS, ABS_X, nx));
         self.buf.push(ev(EV_ABS, ABS_Y, ny));
         self.buf.push(syn());
-        self.flush(|d| &d.pointer)
+        self.flush(|d| &d.pointer)?;
+        if self.display != UNKNOWN {
+            *LAST_ABSOLUTE.lock().unwrap_or_else(|e| e.into_inner()) =
+                Some((desktop_pixel(x, y, self.display), Instant::now()));
+        }
+        Ok(())
     }
 
     fn mouse_button(&mut self, button: MouseButton, down: bool) -> Result<(), SinkError> {

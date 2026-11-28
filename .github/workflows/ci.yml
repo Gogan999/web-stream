@@ -30,6 +30,14 @@ jobs:
         run: cargo fmt --all --check
       - name: clippy
         run: cargo clippy --workspace --all-targets
+      - name: Media Foundation
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $r = Install-WindowsFeature Server-Media-Foundation
+          $r | Format-List | Out-String | Write-Host
+          if ($r.Success -and "$($r.RestartNeeded)" -ne 'Yes') { "WS_REQUIRE_MF=1" >> $env:GITHUB_ENV }
+          else { Write-Host "::warning::Media Foundation not available without a restart; its encoder test is skipped" }
       - name: test
         run: cargo test --workspace
       - uses: actions/setup-node@v4

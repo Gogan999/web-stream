@@ -311,6 +311,8 @@ struct Shown {
     x: i32,
     y: i32,
     hot: (u32, u32),
+    /// The driver reported `hot`.
+    reported: bool,
 }
 
 struct Card {
@@ -384,7 +386,8 @@ impl Card {
             let (Some(x), Some(y)) = (signed("CRTC_X"), signed("CRTC_Y")) else {
                 continue;
             };
-            let hot = if plane.hotspot {
+            let reported = plane.hotspot;
+            let hot = if reported {
                 (
                     signed("HOTSPOT_X").unwrap_or(0).max(0) as u32,
                     signed("HOTSPOT_Y").unwrap_or(0).max(0) as u32,
@@ -398,6 +401,7 @@ impl Card {
                 x,
                 y,
                 hot,
+                reported,
             });
         }
         None
@@ -450,10 +454,14 @@ pub struct KmsCursorReader {
     cards: Vec<Card>,
     scanned: Option<Instant>,
     ids: ImageIds,
-    /// The framebuffer last read and what it looked like.
-    last: Option<(u32, Instant, CursorLook)>,
+    /// The framebuffer last read, what it looked like and its size.
+    last: Option<(u32, Instant, CursorLook, (u32, u32))>,
     /// A cursor plane was seen in use.
     seen: bool,
+    /// Hotspots the driver does not report, learned from where the pointer was moved to.
+    hotspots: Hotspots,
+    /// The last look with a learned hotspot: the image id it came from, the hotspot and the look.
+    hot_look: Option<(u32, (u32, u32), CursorLook)>,
 }
 
 impl Default for KmsCursorReader {
@@ -470,11 +478,14 @@ impl KmsCursorReader {
             ids: ImageIds::default(),
             last: None,
             seen: false,
+            hotspots: Hotspots::default(),
+            hot_look: None,
         }
     }
 
-    /// The pointer now; `None` while no cursor plane has been seen in use.
-    pub fn read(&mut self) -> Option<KmsCursor> {
+    /// The pointer now; `None` while no cursor plane has been seen in use. `origin` gives the
+    /// desktop position of the output a connector names.
+    pub fn read(&mut self, origin: impl Fn(&str) -> (i32, i32)) -> Option<KmsCursor> {
         let rescan = self.cards.is_empty() || !self.seen;
         if rescan && self.scanned.is_none_or(|t| t.elapsed() >= RESCAN) {
             self.scanned = Some(Instant::now());
@@ -482,37 +493,51 @@ impl KmsCursorReader {
                 .filter_map(|i| Card::open(&format!("/dev/dri/card{i}")))
                 .collect();
         }
-        for card in &mut self.cards {
+        for i in 0..self.cards.len() {
+            let card = &mut self.cards[i];
             let Some(Shown {
                 fb,
                 crtc,
                 x,
                 y,
                 hot,
+                reported,
             }) = card.shown()
             else {
                 continue;
             };
+            let fd = card.file.as_raw_fd();
+            let connector = card.crtcs.get(&crtc).cloned().unwrap_or_else(|| "".into());
             self.seen = true;
-            let look = match &self.last {
-                Some((last, at, look)) if *last == fb && at.elapsed() < REREAD => look.clone(),
+            let (look, size) = match &self.last {
+                Some((last, at, look, size)) if *last == fb && at.elapsed() < REREAD => {
+                    (look.clone(), *size)
+                }
                 _ => {
-                    let image = read_image(card.file.as_raw_fd(), fb, hot).map(|i| self.ids.get(i));
+                    let read = read_image(fd, fb, hot);
+                    let size = read.as_ref().map_or((0, 0), |(_, size)| *size);
+                    let image = read.map(|(i, _)| self.ids.get(i));
                     let kind = if image.is_some() {
                         CursorKind::Custom
                     } else {
                         CursorKind::Default
                     };
                     let look = CursorLook { kind, image };
-                    self.last = Some((fb, Instant::now(), look.clone()));
-                    look
+                    self.last = Some((fb, Instant::now(), look.clone(), size));
+                    (look, size)
                 }
+            };
+            let (look, hot) = if reported {
+                (look, hot)
+            } else {
+                let (ox, oy) = origin(&connector);
+                self.learned(look, size, (x.saturating_add(ox), y.saturating_add(oy)))
             };
             return Some(KmsCursor {
                 look,
                 x: x.saturating_add(hot.0 as i32),
                 y: y.saturating_add(hot.1 as i32),
-                connector: card.crtcs.get(&crtc).cloned().unwrap_or_else(|| "".into()),
+                connector,
             });
         }
         self.seen.then(|| KmsCursor {
@@ -521,6 +546,93 @@ impl KmsCursorReader {
             y: 0,
             connector: "".into(),
         })
+    }
+}
+
+impl KmsCursorReader {
+    /// `look` with the hotspot learned for its image, and that hotspot in framebuffer pixels;
+    /// `top_left` is the cursor plane's desktop position and `size` its framebuffer size.
+    fn learned(
+        &mut self,
+        look: CursorLook,
+        size: (u32, u32),
+        top_left: (i32, i32),
+    ) -> (CursorLook, (u32, u32)) {
+        let Some((id, image)) = look.image.clone() else {
+            return (look, (0, 0));
+        };
+        self.hotspots
+            .observe(id, size, top_left, super::last_absolute(), Instant::now());
+        let Some(hot) = self.hotspots.get(id) else {
+            return (look, (0, 0));
+        };
+        if let Some((from, h, cached)) = &self.hot_look {
+            if *from == id && *h == hot {
+                return (cached.clone(), hot);
+            }
+        }
+        let scale = |v: u32, image_side: u32, fb_side: u32| {
+            (u64::from(v) * u64::from(image_side) / u64::from(fb_side.max(1))) as u32
+        };
+        let with_hot = CursorImage {
+            hot_x: scale(hot.0, image.width, size.0).min(image.width.saturating_sub(1)),
+            hot_y: scale(hot.1, image.height, size.1).min(image.height.saturating_sub(1)),
+            ..(*image).clone()
+        };
+        let out = CursorLook {
+            kind: look.kind,
+            image: Some(self.ids.get(with_hot)),
+        };
+        self.hot_look = Some((id, hot, out.clone()));
+        (out, hot)
+    }
+}
+
+/// How long the pointer must rest after a move before the cursor plane is sure to show it there.
+const REST: Duration = Duration::from_millis(40);
+/// Learned hotspots kept; past this the table starts over.
+const MAX_HOTSPOTS: usize = 256;
+
+/// Hotspots learned per cursor image: once the absolute pointer has rested at a desktop pixel,
+/// the hotspot is that pixel less the cursor plane's top-left.
+#[derive(Default)]
+struct Hotspots {
+    by_image: HashMap<u32, (u32, u32)>,
+    /// The move and image last learned from.
+    used: Option<(Instant, u32)>,
+}
+
+impl Hotspots {
+    fn observe(
+        &mut self,
+        image: u32,
+        size: (u32, u32),
+        top_left: (i32, i32),
+        moved: Option<((i32, i32), Instant)>,
+        now: Instant,
+    ) {
+        let Some((pointer, at)) = moved else {
+            return;
+        };
+        if now.saturating_duration_since(at) < REST || self.used == Some((at, image)) {
+            return;
+        }
+        self.used = Some((at, image));
+        let (hx, hy) = (
+            i64::from(pointer.0) - i64::from(top_left.0),
+            i64::from(pointer.1) - i64::from(top_left.1),
+        );
+        if hx < 0 || hy < 0 || hx >= i64::from(size.0) || hy >= i64::from(size.1) {
+            return;
+        }
+        if self.by_image.len() >= MAX_HOTSPOTS {
+            self.by_image.clear();
+        }
+        self.by_image.insert(image, (hx as u32, hy as u32));
+    }
+
+    fn get(&self, image: u32) -> Option<(u32, u32)> {
+        self.by_image.get(&image).copied()
     }
 }
 
@@ -599,7 +711,7 @@ fn map(fd: RawFd, handle: u32, len: usize) -> io::Result<Mapping> {
     Mapping::new(buf.as_raw_fd(), len, 0)
 }
 
-fn read_image(fd: RawFd, fb_id: u32, hot: (u32, u32)) -> Option<CursorImage> {
+fn read_image(fd: RawFd, fb_id: u32, hot: (u32, u32)) -> Option<(CursorImage, (u32, u32))> {
     let mut fb = FbCmd2 {
         fb_id,
         ..Default::default()
@@ -624,15 +736,18 @@ fn read_image(fd: RawFd, fb_id: u32, hot: (u32, u32)) -> Option<CursorImage> {
         pitch as usize,
         fb.pixel_format,
     );
-    Some(fit(
-        CursorImage {
-            width: w,
-            height: h,
-            hot_x: hot.0.min(w - 1),
-            hot_y: hot.1.min(h - 1),
-            rgba,
-        },
-        MAX_CURSOR_SIDE,
+    Some((
+        fit(
+            CursorImage {
+                width: w,
+                height: h,
+                hot_x: hot.0.min(w - 1),
+                hot_y: hot.1.min(h - 1),
+                rgba,
+            },
+            MAX_CURSOR_SIDE,
+        ),
+        (w, h),
     ))
 }
 
@@ -673,6 +788,7 @@ const _: () = assert!(size_of::<CardRes>() == 64);
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mouse::DisplayRect;
 
     #[test]
     fn ioctl_numbers_match_the_kernel_headers() {
@@ -709,5 +825,68 @@ mod tests {
         assert_eq!(connector_name(10, 2), "DP-2");
         assert_eq!(connector_name(14, 1), "eDP-1");
         assert_eq!(connector_name(99, 1), "Unknown-1");
+    }
+
+    #[test]
+    fn hotspots_are_learned_once_the_pointer_rests() {
+        let t0 = Instant::now();
+        let moved = Some(((105, 204), t0));
+        let mut h = Hotspots::default();
+        h.observe(
+            1,
+            (64, 64),
+            (100, 200),
+            moved,
+            t0 + Duration::from_millis(10),
+        );
+        assert_eq!(h.get(1), None);
+        h.observe(1, (64, 64), (100, 200), moved, t0 + REST);
+        assert_eq!(h.get(1), Some((5, 4)));
+        // A later read of the same move and image does not learn again.
+        h.observe(1, (64, 64), (90, 190), moved, t0 + REST * 2);
+        assert_eq!(h.get(1), Some((5, 4)));
+        // Another image under the resting pointer is learned from the same move.
+        h.observe(2, (64, 64), (89, 188), moved, t0 + REST * 2);
+        assert_eq!(h.get(2), Some((16, 16)));
+    }
+
+    #[test]
+    fn a_pointer_outside_the_cursor_image_teaches_nothing() {
+        let t0 = Instant::now();
+        let mut h = Hotspots::default();
+        let late = t0 + REST;
+        h.observe(1, (64, 64), (100, 200), Some(((99, 204), t0)), late);
+        h.observe(
+            1,
+            (64, 64),
+            (100, 200),
+            Some(((164, 204), t0 + REST)),
+            late + REST,
+        );
+        h.observe(1, (64, 64), (100, 200), None, late);
+        assert_eq!(h.get(1), None);
+        h.observe(
+            1,
+            (64, 64),
+            (100, 200),
+            Some(((163, 263), late + Duration::from_millis(1))),
+            late + REST * 2,
+        );
+        assert_eq!(h.get(1), Some((63, 63)));
+    }
+
+    #[test]
+    fn desktop_pixels_span_the_display() {
+        let d = DisplayRect {
+            left: 1920,
+            top: 0,
+            width: 2560,
+            height: 1440,
+        };
+        assert_eq!(super::super::desktop_pixel(0, 0, d), (1920, 0));
+        assert_eq!(
+            super::super::desktop_pixel(65535, 65535, d),
+            (1920 + 2559, 1439)
+        );
     }
 }

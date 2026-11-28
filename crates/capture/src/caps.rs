@@ -103,7 +103,7 @@ pub fn backends_for(
 
 /// Backends to try on the GPU named `adapter`, in order of preference: those the probe found there
 /// for `codec` at this size, and each of `fallback` the probe did not find there at all.
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
 pub(crate) fn backends_on(
     encoders: &[EncoderInfo],
     adapter: &str,

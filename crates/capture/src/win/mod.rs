@@ -25,7 +25,7 @@ use windows::core::Interface;
 use ws_proto::DisplayInfo;
 
 pub(crate) use mode::{restore_display_mode, set_display_mode};
-pub(crate) use pipeline::{Control, PipelineHandle};
+pub(crate) use pipeline::start;
 
 use crate::{CaptureError, Result};
 
@@ -86,7 +86,7 @@ fn probe_adapters() -> Vec<crate::caps::EncoderInfo> {
         }
         let name = display::adapter_name(&desc.Description);
         if desc.VendorId == NVIDIA {
-            match Gpu::new(&adapter).and_then(|gpu| nvenc::probe(&gpu)) {
+            match Gpu::new(&adapter).and_then(|gpu| crate::nvenc::probe(&nvenc::D3d::new(&gpu))) {
                 Ok(codecs) if !codecs.is_empty() => found.push(EncoderInfo {
                     backend: EncoderBackend::Nvenc,
                     adapter: name.clone(),

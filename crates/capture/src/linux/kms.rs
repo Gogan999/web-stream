@@ -504,6 +504,46 @@ mod tests {
             u32::from_le_bytes(pixels[0..4].try_into().unwrap()) & 0x00ff_ffff,
             0x00ff_00ff
         );
+        drop(source);
+
+        // A plane turned a quarter scans out a portrait buffer as the landscape mode.
+        if screen.turn().is_none() {
+            eprintln!("rotation skipped: the primary plane cannot turn a quarter");
+            return;
+        }
+        let (w, h) = (screen.height, screen.width);
+        let output = super::super::display::enumerate()
+            .expect("enumerate")
+            .into_iter()
+            .find(|o| o.card == screen.path && o.crtc_id == screen.crtc_id)
+            .expect("the turned display is listed");
+        assert_eq!((output.info.width, output.info.height), (w, h));
+        let mut source = KmsSource::open(&output).expect("open source");
+        let frame = loop {
+            match source.acquire(Duration::from_millis(100)).expect("acquire") {
+                Acquired::Frame(f) => break f,
+                Acquired::Nothing => continue,
+                Acquired::Lost => panic!("display lost"),
+            }
+        };
+        assert_eq!((frame.width, frame.height), (w, h));
+        assert_eq!(
+            frame.crop,
+            Crop {
+                x: 0,
+                y: 0,
+                width: w,
+                height: h
+            }
+        );
+        assert_eq!(frame.transform, Transform::IDENTITY);
+        let pixels = read_back(&frame);
+        let pitch = frame.planes[0].pitch as usize;
+        for (x, y) in [(0, 0), (w - 1, 0), (w - 1, h - 1), (w / 3, h / 2)] {
+            let at = frame.planes[0].offset as usize + y as usize * pitch + x as usize * 4;
+            let px = u32::from_le_bytes(pixels[at..at + 4].try_into().unwrap());
+            assert_eq!(px & 0x00ff_ffff, pattern(x, y), "turned pixel {x},{y}");
+        }
     }
 
     fn pattern(x: u32, y: u32) -> u32 {
@@ -556,6 +596,10 @@ mod tests {
         width: u32,
         height: u32,
         buffers: Vec<Dumb>,
+        /// The primary plane and its `rotation` property id.
+        rotation: Option<(u32, u32)>,
+        /// The plane is turned a quarter: buffers are `height` x `width`.
+        turned: bool,
     }
 
     impl TestScreen {
@@ -572,12 +616,14 @@ mod tests {
                 if !c.connected || c.modes.is_empty() || c.kind == drm::CONNECTOR_WRITEBACK {
                     continue;
                 }
-                let crtc = c.encoders.iter().find_map(|&e| {
+                let (pipe, crtc) = c.encoders.iter().find_map(|&e| {
                     let (_, possible) = card.encoder(e).ok()?;
                     (0..res.crtcs.len())
                         .find(|i| possible & (1 << i) != 0)
-                        .map(|i| res.crtcs[i])
+                        .map(|i| (i as u32, res.crtcs[i]))
                 })?;
+                let rotation = primary_plane(&card, crtc, pipe)
+                    .and_then(|plane| Some((plane, plane_props(&card, plane).1?)));
                 let mode = c.modes[0];
                 let mut screen = Self {
                     width: u32::from(mode.hdisplay),
@@ -588,15 +634,54 @@ mod tests {
                     connector_id: id,
                     mode,
                     buffers: Vec::new(),
+                    rotation,
+                    turned: false,
                 };
+                screen.unturn();
                 screen.show(pattern)?;
                 return Some(screen);
             }
             None
         }
 
+        /// Sets the primary plane's rotation, with the CRTC off.
+        fn rotate(&self, bits: u64) -> Option<()> {
+            let (plane, prop) = self.rotation?;
+            let current = self
+                .card
+                .properties(plane, drm::OBJECT_PLANE)
+                .ok()?
+                .into_iter()
+                .find(|(p, _)| *p == prop)
+                .map(|(_, v)| v)?;
+            if current == bits {
+                return Some(());
+            }
+            let _ = self.card.disable_crtc(self.crtc_id);
+            self.card
+                .set_property(plane, drm::OBJECT_PLANE, prop, bits)
+                .ok()
+        }
+
+        fn unturn(&mut self) {
+            let _ = self.rotate(super::super::transform::drm_rotation::ROTATE_0);
+            self.turned = false;
+        }
+
+        /// Turns the plane a quarter and shows the pattern on a portrait buffer.
+        fn turn(&mut self) -> Option<()> {
+            self.rotate(super::super::transform::drm_rotation::ROTATE_90)?;
+            self.turned = true;
+            self.show(pattern)
+        }
+
         fn show(&mut self, fill: impl Fn(u32, u32) -> u32) -> Option<()> {
-            let d = self.card.create_dumb(self.width, self.height).ok()?;
+            let (width, height) = if self.turned {
+                (self.height, self.width)
+            } else {
+                (self.width, self.height)
+            };
+            let d = self.card.create_dumb(width, height).ok()?;
             let offset = self.card.map_dumb(d.handle).ok()?;
             // SAFETY: maps the dumb buffer just created, unmapped below.
             unsafe {
@@ -611,17 +696,17 @@ mod tests {
                 if p == libc::MAP_FAILED {
                     return None;
                 }
-                for y in 0..self.height {
+                for y in 0..height {
                     let row = p.cast::<u8>().add((y * d.pitch) as usize).cast::<u32>();
-                    for x in 0..self.width {
+                    for x in 0..width {
                         row.add(x as usize).write_unaligned(fill(x, y));
                     }
                 }
                 libc::munmap(p, d.size as usize);
             }
             let mut fb = drm::FbCmd2 {
-                width: self.width,
-                height: self.height,
+                width,
+                height,
                 pixel_format: fourcc::XRGB8888,
                 ..Default::default()
             };
@@ -644,10 +729,14 @@ mod tests {
 
     impl Drop for TestScreen {
         fn drop(&mut self) {
+            if self.turned {
+                let _ = self.card.disable_crtc(self.crtc_id);
+            }
             for b in &self.buffers {
                 self.card.remove_framebuffer(b.fb);
                 self.card.destroy_dumb(b.handle);
             }
+            self.unturn();
             let _ = self.card.drop_master();
         }
     }

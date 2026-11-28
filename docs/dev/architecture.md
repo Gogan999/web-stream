@@ -24,18 +24,18 @@ STUN or TURN server is needed.
 | Path | Crate | What it does |
 |---|---|---|
 | `crates/proto` | `ws-proto` | Shared interface types: frames, displays, input events, control, pairing and signaling messages. The source of truth for the wire contract |
-| `crates/capture` | `ws-capture` | DXGI Desktop Duplication and hardware encoding (NVENC; AMF and QSV planned) |
+| `crates/capture` | `ws-capture` | Screen capture (DXGI Desktop Duplication on Windows, KMS on Linux) and hardware encoding (NVENC, Media Foundation, VA-API) |
 | `crates/nvenc-sys` | `ws-nvenc-sys` | Raw NVENC (NVIDIA Video Codec SDK 12.1) bindings, loaded at runtime |
 | `crates/desktop` | `ws-desktop` | Following the input desktop (lock screen, UAC) so capture and input work there |
 | `crates/transport` | `ws-transport` | WebRTC peer connection (str0m), media tracks, data channels, pacing and frame dropping |
 | `crates/signaling` | `ws-signaling` | HTTPS server in the host: web client, device pairing, `/ws` signaling, certificates |
-| `crates/input` | `ws-input` | Keyboard, mouse and virtual gamepad injection |
-| `crates/audio` | `ws-audio` | Loopback capture and Opus encoding; browser mic to a virtual microphone |
-| `crates/host` | `ws-host` (lib) | Wires the crates together; the Windows service and its process split. `examples/` has a headless test host and a capture test |
+| `crates/input` | `ws-input` | Keyboard, mouse and virtual gamepad injection (SendInput and ViGEm on Windows, uinput on Linux) |
+| `crates/audio` | `ws-audio` | Loopback capture and Opus encoding (WASAPI, PulseAudio/PipeWire); browser mic to a virtual microphone |
+| `crates/host` | `ws-host` (lib, and the `web-stream` bin) | Wires the crates together; the Windows service and its process split; the headless Linux host (`src/linux/`: systemd service, settings page in `admin/`). `examples/` has a headless test host and a capture test |
 | `crates/gui` | `ws-host-gui` (bin) | The host program: tray app with the status and settings window, which also runs the Windows service |
 | `crates/diag` | `ws-diag` | Optional diagnostic logging (see [diagnostics.md](diagnostics.md)) |
 | `web/` | | Browser client: HTML, CSS and ES modules, no build step |
-| `installer/` | | Inno Setup installer |
+| `installer/` | | Inno Setup installer, the one-line installers (`web-stream-install.ps1`, `web-stream-install.sh`) and their tests |
 | `scripts/` | | Source install and update scripts for Windows |
 
 ## Data flow
@@ -67,3 +67,21 @@ Installed as a service, the host runs as two processes: the screen side
 signaling, the peer connection) as LocalService with no privileges. The
 screen side accepts only what a browser could send. See
 [Security](../guide/windows-service.md#security).
+
+## Linux service
+
+On Linux the `web-stream` binary runs as the systemd unit `web-stream.service`.
+`service run` (root) is the media side; it starts `service network` as the
+`web-stream` user with no capabilities, its stdin one end of a socket pair
+carrying the same bridge as the Windows service, and fd 3 a second socket for
+the settings page's requests, which the root side checks and saves before
+restarting both. See [Linux host](../guide/linux.md#security).
+
+What needs the signed-in user's session runs in helpers the root side starts
+as that user with the session's display and bus variables, talking in
+length-prefixed frames over stdin and stdout (`session_helper.rs`): the
+clipboard (`clipboard-helper`) and display mode changes (`display-helper`,
+`display_mode/`: X11 RandR, wlroots output management, GNOME Mutter's
+`DisplayConfig` or `kscreen-doctor`). The display helper starts on the first
+change, keeps each display's original mode and layout, restores them on
+request, on stdin EOF or SIGTERM, and exits once nothing is changed.

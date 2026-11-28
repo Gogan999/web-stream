@@ -3,6 +3,8 @@
 mod convert;
 mod display;
 mod duplication;
+mod encode;
+mod mf;
 mod mode;
 mod nvenc;
 mod pipeline;
@@ -23,7 +25,7 @@ use windows::core::Interface;
 use ws_proto::DisplayInfo;
 
 pub(crate) use mode::{restore_display_mode, set_display_mode};
-pub(crate) use pipeline::{Control, PipelineHandle};
+pub(crate) use pipeline::start;
 
 use crate::{CaptureError, Result};
 
@@ -31,6 +33,84 @@ pub(crate) fn list_displays() -> Result<Vec<DisplayInfo>> {
     init_process();
     Ok(display::enumerate()?.into_iter().map(|o| o.info).collect())
 }
+
+/// The hardware encoders on each adapter, probed on a thread of its own so the caller's COM state
+/// is left alone.
+pub(crate) fn probe_encoders() -> Vec<crate::caps::EncoderInfo> {
+    let probe = std::thread::Builder::new()
+        .name("ws-encoder-probe".into())
+        .spawn(|| {
+            mf::init_com();
+            probe_adapters()
+        });
+    let found = match probe.map(|t| t.join()) {
+        Ok(Ok(found)) => found,
+        Ok(Err(_)) => {
+            tracing::debug!("encoder probe panicked");
+            Vec::new()
+        }
+        Err(e) => {
+            tracing::debug!("encoder probe thread: {e}");
+            Vec::new()
+        }
+    };
+    for e in &found {
+        let codecs: Vec<_> = e.codecs.iter().map(|c| c.codec).collect();
+        tracing::info!(backend = e.backend.name(), adapter = %e.adapter, ?codecs, "hardware encoder");
+    }
+    found
+}
+
+fn probe_adapters() -> Vec<crate::caps::EncoderInfo> {
+    use crate::caps::{EncoderBackend, EncoderInfo};
+    use windows::Win32::Graphics::Dxgi::{
+        CreateDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE, IDXGIFactory1,
+    };
+    let factory: IDXGIFactory1 = match unsafe { CreateDXGIFactory1() } {
+        Ok(f) => f,
+        Err(e) => {
+            tracing::debug!("encoder probe: CreateDXGIFactory1: {e}");
+            return Vec::new();
+        }
+    };
+    let mut found = Vec::new();
+    for index in 0.. {
+        let Ok(adapter) = (unsafe { factory.EnumAdapters1(index) }) else {
+            break;
+        };
+        let Ok(desc) = (unsafe { adapter.GetDesc1() }) else {
+            continue;
+        };
+        if desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 != 0 {
+            continue;
+        }
+        let name = display::adapter_name(&desc.Description);
+        if desc.VendorId == NVIDIA {
+            match Gpu::new(&adapter).and_then(|gpu| crate::nvenc::probe(&nvenc::D3d::new(&gpu))) {
+                Ok(codecs) if !codecs.is_empty() => found.push(EncoderInfo {
+                    backend: EncoderBackend::Nvenc,
+                    adapter: name.clone(),
+                    codecs,
+                }),
+                Ok(_) => {}
+                Err(e) => tracing::debug!(adapter = %name, "NVENC probe: {e}"),
+            }
+        }
+        match mf::probe(desc.AdapterLuid) {
+            Ok(codecs) if !codecs.is_empty() => found.push(EncoderInfo {
+                backend: EncoderBackend::MediaFoundation,
+                adapter: name,
+                codecs,
+            }),
+            Ok(_) => {}
+            Err(e) => tracing::debug!(adapter = %name, "Media Foundation probe: {e}"),
+        }
+    }
+    found
+}
+
+/// The PCI vendor ID of NVIDIA adapters.
+pub(crate) const NVIDIA: u32 = 0x10de;
 
 /// Opts the process into per-monitor DPI awareness, once, before DXGI is used.
 fn init_process() {

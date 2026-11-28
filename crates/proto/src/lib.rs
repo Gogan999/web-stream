@@ -7,6 +7,7 @@ pub mod cursor;
 pub mod display;
 pub mod input;
 pub mod names;
+pub mod orientation;
 pub mod signaling;
 pub mod video;
 

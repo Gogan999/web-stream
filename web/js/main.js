@@ -18,6 +18,7 @@ import { DiagLog, diagEnabled } from './diag.js';
 import { ZoomView } from './zoom.js';
 import { StallWatchdog } from './watchdog.js';
 import { ClientReporter } from './telemetry.js';
+import { detectDecoders } from './decoders.js';
 
 const $ = (id) => document.getElementById(id);
 // First thing: the pairing link's secret leaves the address bar (and history) before anything else
@@ -152,6 +153,10 @@ async function connect(next = target) {
     uploads.clear();
     if (diag && session.pc) diag.start(session.pc, ui.video);
     session.sendControl({ type: 'listDisplays' });
+    if (host) {
+      host.decodersSent = null;
+      reportDecoders();
+    }
     reporter.start();
     sendCursorMode();
     session.sendControl({ type: 'setMicEnabled', enabled: settings.mic });
@@ -171,7 +176,10 @@ async function connect(next = target) {
     uploads.clear();
   });
   clearTuned();
-  host = { displays: [], active: null, second: null, config: null, stats: null, matched: false, awaitingMatch: false };
+  host = {
+    displays: [], active: null, second: null, config: null, autoCodec: false, stats: null, matched: false, awaitingMatch: false,
+    decoderKey: null, decoderList: null, decodersSent: null,
+  };
   lastSent = null;
   session.addEventListener('status', (e) => { if (/unpaired/.test(e.detail.text)) recheck(target); });
   input = new InputCapture({
@@ -270,6 +278,7 @@ function onControl(msg) {
     if (host) {
       host.active = msg.id;
       if (msg.config) host.config = msg.config;
+      host.autoCodec = msg.autoCodec === true;
       showCodec();
       applySettings();
     }
@@ -308,7 +317,9 @@ function onControl(msg) {
 
 // Asks the host for the stream the settings describe, once the host has said what it streams now.
 function applySettings() {
-  if (!session || !host?.config || tuning) return;
+  if (!session || !host) return;
+  reportDecoders();
+  if (!host.config || tuning) return;
   if (settings.matchHost && !host.matched) {
     host.matched = true;
     host.awaitingMatch = true;
@@ -323,6 +334,39 @@ function currentConfig() {
   const display = host.displays.find((d) => d.id === host.active) ?? null;
   const config = settingsStore.videoConfig(settings, { screen: settingsStore.screenPixels(), display, codec: host.config.codec, rotate: isTouch() });
   return tuned ? { ...config, ...tuned } : config;
+}
+
+// The stream size and rate the settings ask for, to rate the browser's decoders at.
+function decoderStream() {
+  const display = host.displays.find((d) => d.id === host.active) ?? null;
+  const c = settingsStore.videoConfig(settings, { screen: settingsStore.screenPixels(), display, rotate: isTouch() });
+  return { width: c.width, height: c.height, fps: c.fps, bitrateKbps: c.bitrateKbps };
+}
+
+// Tells the host what this browser decodes, rated again whenever the stream size or rate changes.
+function reportDecoders() {
+  const stream = decoderStream();
+  const key = `${stream.width}x${stream.height}@${stream.fps}`;
+  if (key !== host.decoderKey) {
+    const h = host;
+    h.decoderKey = key;
+    detectDecoders(stream).then((list) => {
+      if (h !== host || h.decoderKey !== key) return;
+      h.decoderList = list;
+      sendDecoders();
+    }, () => {});
+  }
+  sendDecoders();
+}
+
+// Sends the decoders and the Auto codec flag when they changed.
+function sendDecoders() {
+  if (!session || !host?.decoderList) return;
+  const msg = { type: 'decoders', decoders: host.decoderList, auto: settings.codec == null };
+  const json = JSON.stringify(msg);
+  if (json === host.decodersSent) return;
+  host.decodersSent = json;
+  session.sendControl(msg);
 }
 
 function clearTuned() {
@@ -351,7 +395,7 @@ fillSelect(ui.bitrate, ['auto', ...settingsStore.BITRATES_KBPS], (v) => (v === '
 fillSelect(ui.fps, settingsStore.FRAME_RATES, (v) => String(v));
 const CODEC_LABELS = { h264: 'H.264', h265: 'H.265 (HEVC)', av1: 'AV1' };
 const decodable = settingsStore.decodableCodecs();
-fillSelect(ui.codec, decodable, (v) => CODEC_LABELS[v]);
+fillSelect(ui.codec, ['auto', ...decodable], (v) => (v === 'auto' ? 'Auto' : CODEC_LABELS[v]));
 if (settings.codec && !decodable.includes(settings.codec)) settings.codec = null;
 fillSelect(ui.priority, settingsStore.PRIORITIES, (v) => v[0].toUpperCase() + v.slice(1));
 fillSelect(ui.keyframeScale, settingsStore.KEYFRAME_SCALES, (v) => (v === 1 ? '1x (fastest)' : v === 4 ? '4x (sharpest)' : `${v}x`));
@@ -390,9 +434,12 @@ function showSettings() {
   ui.audioFrame.value = settings.audioFrame;
   ui.statsLevel.value = settings.statsLevel;
 }
-// The chosen codec, else what the host streams.
+// The chosen codec, or Auto with what the host streams and whether it picked it for this browser.
 function showCodec() {
-  ui.codec.value = settings.codec ?? host?.config?.codec ?? '';
+  ui.codec.value = settings.codec ?? 'auto';
+  const now = settings.codec == null ? host?.config?.codec : null;
+  const picked = host?.autoCodec ? ', picked for this browser' : '';
+  ui.codec.options[0].textContent = now ? `Auto (${CODEC_LABELS[now] ?? now}${picked})` : 'Auto';
 }
 
 // The Mic checkbox in Settings and the toolbar's Mic toggle show one setting.
@@ -421,6 +468,7 @@ showSettings();
 for (const [el, key] of [[ui.resolution, 'resolution'], [ui.codec, 'codec'], [ui.bitrate, 'bitrate'], [ui.fps, 'fps'], [ui.priority, 'priority'], [ui.keyframeScale, 'keyframeScale'], [ui.minScale, 'minScale']]) {
   el.addEventListener('change', () => {
     settings[key] = ['fps', 'keyframeScale', 'minScale'].includes(key) ? Number(el.value) : el.value;
+    if (key === 'codec' && el.value === 'auto') settings.codec = null;
     if (key === 'priority' && settings.priority === 'source') Object.assign(settings, settingsStore.SOURCE_PRESET);
     clearTuned();
     settingsStore.save(settings);

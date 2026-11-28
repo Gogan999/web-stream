@@ -1,15 +1,30 @@
 //! Display capture and hardware video encode for the host.
 
 #[cfg_attr(not(windows), allow(dead_code))]
+mod bitstream;
+pub mod caps;
+#[cfg(any(windows, target_os = "linux"))]
+mod encode;
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
 mod layout;
-#[cfg_attr(not(windows), allow(dead_code))]
-mod modes;
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg(target_os = "linux")]
+mod linux;
+pub mod modes;
+#[cfg(any(windows, target_os = "linux"))]
+mod nvenc;
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
 mod pacing;
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg(any(windows, target_os = "linux"))]
+mod session;
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
 mod tuning;
 #[cfg(windows)]
 mod win;
+
+#[cfg(target_os = "linux")]
+use linux as platform;
+#[cfg(windows)]
+use win as platform;
 
 use thiserror::Error;
 use tokio::sync::mpsc;
@@ -44,13 +59,29 @@ pub enum CaptureError {
 
 pub type Result<T> = std::result::Result<T, CaptureError>;
 
+/// The hardware encoders on this PC, probed once per process. Empty when none were found or the
+/// platform has no probe.
+pub fn encoders() -> &'static [caps::EncoderInfo] {
+    static PROBED: std::sync::OnceLock<Vec<caps::EncoderInfo>> = std::sync::OnceLock::new();
+    PROBED.get_or_init(|| {
+        #[cfg(any(windows, target_os = "linux"))]
+        {
+            platform::probe_encoders()
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
+        {
+            Vec::new()
+        }
+    })
+}
+
 /// Lists every display the host can capture.
 pub fn list_displays() -> Result<Vec<DisplayInfo>> {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     {
-        win::list_displays()
+        platform::list_displays()
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         Err(CaptureError::Unsupported)
     }
@@ -60,11 +91,11 @@ pub fn list_displays() -> Result<Vec<DisplayInfo>> {
 /// `height`, keeping the refresh rate where it can, and returns the size chosen and whether the
 /// mode actually changed.
 pub fn set_display_mode(display: DisplayId, width: u32, height: u32) -> Result<ModeChange> {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     {
-        win::set_display_mode(display, width, height)
+        platform::set_display_mode(display, width, height)
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = (display, width, height);
         Err(CaptureError::Unsupported)
@@ -73,15 +104,34 @@ pub fn set_display_mode(display: DisplayId, width: u32, height: u32) -> Result<M
 
 /// Puts `display` back to its saved resolution.
 pub fn restore_display_mode(display: DisplayId) -> Result<()> {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     {
-        win::restore_display_mode(display)
+        platform::restore_display_mode(display)
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = display;
         Err(CaptureError::Unsupported)
     }
+}
+
+/// The connector behind a display, for changing its mode through the desktop session.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Connector {
+    /// The kernel's name, e.g. `HDMI-A-1`.
+    pub name: String,
+    pub edid: Option<Vec<u8>>,
+}
+
+/// The connector that drives `display`.
+#[cfg(target_os = "linux")]
+pub fn connector(display: DisplayId) -> Result<Connector> {
+    let output = linux::display::find(display)?;
+    Ok(Connector {
+        name: output.connector,
+        edid: output.edid,
+    })
 }
 
 /// What [`set_display_mode`] did.
@@ -112,8 +162,8 @@ fn validate(config: &VideoConfig) -> Result<()> {
 
 /// Handle to a running capture + encode pipeline.
 pub struct VideoPipeline {
-    #[cfg(windows)]
-    inner: win::PipelineHandle,
+    #[cfg(any(windows, target_os = "linux"))]
+    inner: session::PipelineHandle,
 }
 
 impl VideoPipeline {
@@ -126,13 +176,13 @@ impl VideoPipeline {
         backlog: SendBacklog,
     ) -> Result<Self> {
         validate(&config)?;
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "linux"))]
         {
             Ok(Self {
-                inner: win::PipelineHandle::start(display, config, max, frames, backlog)?,
+                inner: platform::start(display, config, max, frames, backlog)?,
             })
         }
-        #[cfg(not(windows))]
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             let _ = (display, max, frames, backlog);
             Err(CaptureError::Unsupported)
@@ -147,11 +197,11 @@ impl VideoPipeline {
             height,
             ..Default::default()
         })?;
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "linux"))]
         {
             self.inner.resize(width, height)
         }
-        #[cfg(not(windows))]
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             Err(CaptureError::Unsupported)
         }
@@ -160,18 +210,18 @@ impl VideoPipeline {
     /// A handle for keyframe and repair requests that any thread can hold.
     pub fn control(&self) -> VideoControl {
         VideoControl {
-            #[cfg(windows)]
+            #[cfg(any(windows, target_os = "linux"))]
             inner: self.inner.control(),
         }
     }
 
     /// Switches capture to another display without changing the stream's size or codec.
     pub fn select_display(&self, display: DisplayId) -> Result<()> {
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "linux"))]
         {
             self.inner.select_display(display)
         }
-        #[cfg(not(windows))]
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             let _ = display;
             Err(CaptureError::Unsupported)
@@ -180,24 +230,24 @@ impl VideoPipeline {
 
     /// Forces the next frame to be an IDR.
     pub fn request_keyframe(&self) {
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "linux"))]
         self.inner.request_keyframe();
     }
 
     /// Frames from `index` on never reached the browser: the next frame must build only on frames
     /// before it.
     pub fn recover_from(&self, index: u64) {
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "linux"))]
         self.inner.recover_from(index);
-        #[cfg(not(windows))]
+        #[cfg(not(any(windows, target_os = "linux")))]
         let _ = index;
     }
 
     /// Changes the target bitrate without restarting the encoder.
     pub fn set_bitrate(&self, kbps: u32) {
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "linux"))]
         self.inner.set_bitrate(kbps.clamp(100, 500_000));
-        #[cfg(not(windows))]
+        #[cfg(not(any(windows, target_os = "linux")))]
         let _ = kbps;
     }
 }
@@ -205,22 +255,22 @@ impl VideoPipeline {
 /// See [`VideoPipeline::control`].
 #[derive(Clone)]
 pub struct VideoControl {
-    #[cfg(windows)]
-    inner: win::Control,
+    #[cfg(any(windows, target_os = "linux"))]
+    inner: session::Control,
 }
 
 impl VideoControl {
     /// Forces the next frame to be an IDR.
     pub fn request_keyframe(&self) {
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "linux"))]
         self.inner.request_keyframe();
     }
 
     /// See [`VideoPipeline::recover_from`].
     pub fn recover_from(&self, index: u64) {
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "linux"))]
         self.inner.recover_from(index);
-        #[cfg(not(windows))]
+        #[cfg(not(any(windows, target_os = "linux")))]
         let _ = index;
     }
 }

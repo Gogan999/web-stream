@@ -23,7 +23,23 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 ws-desktop.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+axum = { version = "0.8", default-features = false, features = ["json", "query"] }
+base64.workspace = true
+hmac = "0.12"
+igd-next = "0.16"
+libc = "0.2"
+qrcode = { version = "0.14", default-features = false }
+sha2 = "0.10"
+subtle = "2.6"
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+x11rb = { version = "0.13", features = ["randr", "xfixes"] }
+zbus = { version = "5", default-features = false, features = ["blocking-api", "tokio"] }
+
 [dev-dependencies]
+tempfile = "3"
 
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.8"
@@ -46,6 +62,10 @@ windows = { workspace = true, features = [
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+[[bin]]
+name = "web-stream"
+path = "src/bin/web-stream.rs"
 
 [lints]
 workspace = true

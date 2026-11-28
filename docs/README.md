@@ -11,6 +11,7 @@
 | [The host app](guide/host-app.md) | The tray app's window and settings, sharing files, where data is kept |
 | [Microphone, game audio and controllers](guide/audio-and-gamepads.md) | Drivers for the virtual mic and gamepads, audio quality |
 | [Sign-in screen and administrator programs](guide/windows-service.md) | The Windows service, Ctrl+Alt+Del, its security model |
+| [Linux host](guide/linux.md) | The one-line install, the systemd service, pairing and the settings page, headless PCs, its security model |
 | [Troubleshooting](guide/troubleshooting.md) | Common problems and fixes |
 
 ## Developing web-stream

@@ -2,10 +2,15 @@
 
 mod bottleneck;
 pub mod clipboard;
+mod codec;
 pub mod console;
 mod cursor;
+#[cfg(target_os = "linux")]
+pub mod display_mode;
 mod files;
 mod input;
+#[cfg(target_os = "linux")]
+pub mod linux;
 mod media;
 pub mod options;
 mod platform;
@@ -13,6 +18,8 @@ pub mod sas;
 mod scale;
 pub mod serve;
 pub mod service;
+#[cfg(target_os = "linux")]
+mod session_helper;
 pub mod split;
 mod tunnel;
 pub mod update;

@@ -10,6 +10,20 @@ use ws_host::serve::{self, Command, Event};
 
 fn main() -> anyhow::Result<()> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
+    #[cfg(target_os = "linux")]
+    if args
+        .first()
+        .is_some_and(|a| a == ws_host::clipboard::HELPER_ARG)
+    {
+        std::process::exit(ws_host::clipboard::helper_main());
+    }
+    #[cfg(target_os = "linux")]
+    if args
+        .first()
+        .is_some_and(|a| a == ws_host::display_mode::HELPER_ARG)
+    {
+        std::process::exit(ws_host::display_mode::helper_main());
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

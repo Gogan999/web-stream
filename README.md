@@ -1,6 +1,6 @@
 # web-stream
 
-Low-latency remote access to a Windows PC from a web browser. Stream the
+Low-latency remote access to a Windows or Linux PC from a web browser. Stream the
 desktop to a phone, tablet or another computer and use it with mouse,
 keyboard, touch and game controllers, with nothing to install on the device
 you connect from.
@@ -26,12 +26,14 @@ signaling itself, so there is no separate server to run.
   and switches between them.
 - **Security.** Devices pair with a one-time code or QR code shown on the
   PC; nothing on the network can start pairing unattended. An optional
-  Windows service reaches the sign-in screen and UAC prompts, with the
-  network-facing part running unprivileged.
+  Windows service reaches the sign-in screen and UAC prompts, and the Linux
+  host runs as a systemd service, both with the network-facing part running
+  unprivileged.
 
 ## Requirements
 
-- **Host:** Windows 10 or 11 with an NVIDIA GPU.
+- **Host:** Windows 10 or 11 with an NVIDIA GPU, or Linux with systemd
+  (x86_64 or aarch64, glibc 2.35 or newer; see [Linux host](docs/guide/linux.md)).
 - **Client:** a recent Chrome or Edge (desktop or Android), or Safari on
   iPhone and iPad.
 
@@ -47,6 +49,15 @@ The same line updates an installed host. Or download **web-stream-setup-X.Y.Z.ex
 [latest release](https://github.com/Gogan999/web-stream/releases/latest)
 and follow [Getting started](docs/guide/getting-started.md).
 
+On Linux, in a terminal:
+
+```
+curl -fsSL https://github.com/Gogan999/web-stream/releases/latest/download/web-stream-install.sh | sh
+```
+
+then `sudo web-stream pair` to pair a device and `sudo web-stream settings`
+for the settings page. See [Linux host](docs/guide/linux.md).
+
 ## Documentation
 
 **Using web-stream**
@@ -59,6 +70,8 @@ and follow [Getting started](docs/guide/getting-started.md).
 - [The host app](docs/guide/host-app.md)
 - [Microphone, game audio and controllers](docs/guide/audio-and-gamepads.md)
 - [Sign-in screen and administrator programs](docs/guide/windows-service.md)
+- [Linux host](docs/guide/linux.md): the one-line install, the service, the
+  settings page
 - [Troubleshooting](docs/guide/troubleshooting.md)
 
 **Developing web-stream**
@@ -79,5 +92,6 @@ cargo build --workspace
 cargo test --workspace
 ```
 
-The workspace builds on any OS; capture and encoding need Windows. See
+The workspace builds on Windows and Linux; `cargo build -p ws-host --bin web-stream`
+builds the headless Linux host. See
 [Building from source](docs/dev/building.md).

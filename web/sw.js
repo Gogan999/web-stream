@@ -4,7 +4,7 @@ const CACHE = 'web-stream-shell-v1';
 const NETWORK_TIMEOUT_MS = 4000;
 const SHELL = [
   './', 'index.html', 'style.css', 'manifest.webmanifest', 'icons/icon-192.png', 'icons/apple-touch-icon.png',
-  'js/autotune.js', 'js/capabilities.js', 'js/clipboard.js', 'js/cursor.js', 'js/diag.js', 'js/files.js',
+  'js/autotune.js', 'js/capabilities.js', 'js/clipboard.js', 'js/cursor.js', 'js/decoders.js', 'js/diag.js', 'js/files.js',
   'js/gamepad.js', 'js/health.js', 'js/hosts.js', 'js/input.js', 'js/keymap.js', 'js/main.js', 'js/pairing.js',
   'js/picture.js', 'js/popout.js', 'js/protocol.js', 'js/session.js', 'js/settings.js', 'js/signaling.js',
   'js/softkeys.js', 'js/stats.js', 'js/telemetry.js', 'js/touch.js', 'js/watchdog.js', 'js/zoom.js',

@@ -21,7 +21,7 @@ sha2 = "0.10"
 subtle = "2.6"
 thiserror.workspace = true
 tokio = { workspace = true, features = ["fs"] }
-tower-http = { version = "0.6", features = ["fs", "set-header", "timeout"] }
+tower-http = { version = "0.6", features = ["add-extension", "fs", "set-header", "timeout"] }
 tracing.workspace = true
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio", "server", "service", "http1"] }

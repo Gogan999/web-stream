@@ -97,9 +97,10 @@ test('client streams from mock host, sends input and switches display', { timeou
   await host.waitForFunction(() => window.mockLog.some((e) => e.ev === 'control' && e.type === 'setVideoConfig'));
   const asked = (await hostLog()).find((e) => e.type === 'setVideoConfig').config;
   assert.deepEqual(
-    [asked.width, asked.height, asked.fps, asked.quality, asked.codec],
-    [1280, 720, 60, 'balanced', 'h264'],
+    [asked.width, asked.height, asked.fps, asked.quality],
+    [1280, 720, 60, 'balanced'],
   );
+  assert.ok(['h264', 'h265', 'av1'].includes(asked.codec), asked.codec);
   assert.ok(asked.bitrateKbps > 5000 && asked.bitrateKbps < 20000, String(asked.bitrateKbps));
   assert.equal(await client.isVisible('#bitrate'), false);
   await client.click('#more-toggle');
@@ -108,6 +109,32 @@ test('client streams from mock host, sends input and switches display', { timeou
   await client.click('#set-advanced > summary');
   await client.selectOption('#bitrate', '30000');
   await host.waitForFunction(() => window.mockLog.some((e) => e.type === 'setVideoConfig' && e.config.bitrateKbps === 30000));
+
+  // Decoders go to the host once control opens; Auto, the default, lets it pick and shows the pick.
+  await host.waitForFunction(() => window.mockLog.some((e) => e.type === 'decoders'));
+  const reported = (await hostLog()).find((e) => e.type === 'decoders');
+  const offered = await client.$$eval('#codec option', (os) => os.map((o) => o.value));
+  assert.equal(reported.auto, true);
+  assert.equal(offered[0], 'auto');
+  assert.deepEqual(reported.decoders.map((d) => d.codec), offered.slice(1));
+  assert.ok(reported.decoders.every((d) => typeof d.smooth === 'boolean' && typeof d.powerEfficient === 'boolean'));
+  assert.equal(await client.inputValue('#codec'), 'auto');
+  if (reported.decoders.length) {
+    await client.waitForFunction(() => /^Auto \(.+, picked for this browser\)$/.test(document.querySelector('#codec option').textContent));
+    // Choosing a codec turns Auto off first, then asks for it.
+    const pick = offered.at(-1);
+    const start = (await hostLog()).length;
+    await client.selectOption('#codec', pick);
+    await host.waitForFunction(() => window.mockLog.some((e) => e.type === 'decoders' && e.auto === false));
+    await client.waitForFunction(() => document.querySelector('#codec option').textContent === 'Auto');
+    const after = (await hostLog()).slice(start);
+    const off = after.findIndex((e) => e.type === 'decoders' && e.auto === false);
+    const ask = after.findIndex((e) => e.type === 'setVideoConfig' && e.config.codec === pick);
+    assert.ok(ask === -1 || ask > off, JSON.stringify(after));
+    await client.selectOption('#codec', 'auto');
+    await host.waitForFunction(() => window.mockLog.filter((e) => e.type === 'decoders' && e.auto === true).length === 2);
+    await client.waitForFunction(() => /picked for this browser/.test(document.querySelector('#codec option').textContent));
+  }
   await client.check('#match-host');
   await host.waitForFunction(() => window.mockLog.some((e) => e.type === 'setHostResolution'));
   await client.waitForFunction(() => /allow-resolution-change/.test(document.getElementById('status').textContent));

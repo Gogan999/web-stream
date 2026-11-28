@@ -5,12 +5,18 @@ pub mod convert;
 pub mod encode;
 pub mod mic;
 
+#[cfg(target_os = "linux")]
+mod linux;
 #[cfg(windows)]
 mod win;
 
 pub use encode::{DEFAULT_BITRATE, FRAME_MS, FRAME_SAMPLES};
 pub use mic::{JitterConfig, JitterStats, MicReceiver};
 
+#[cfg(target_os = "linux")]
+pub use linux::{
+    LoopbackCapture, MIC_NAME, MIC_SINK, MIC_SOURCE, MicPlayback, list_render_devices, session,
+};
 #[cfg(windows)]
 pub use win::{LoopbackCapture, MicPlayback, list_render_devices};
 

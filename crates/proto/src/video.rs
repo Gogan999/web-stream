@@ -24,6 +24,17 @@ pub enum VideoCodec {
     Av1,
 }
 
+/// How well the browser decodes one codec, from its MediaCapabilities.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DecoderSupport {
+    pub codec: VideoCodec,
+    /// Keeps up at the stream's size and frame rate.
+    pub smooth: bool,
+    /// Decoded in hardware.
+    pub power_efficient: bool,
+}
+
 /// How the encoder trades picture quality against encode time.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>web-stream host settings</title>
+<link rel="stylesheet" href="/admin/admin.css">
+<script type="module" src="/admin/admin.js"></script>
+</head>
+<body>
+<header>
+  <h1>web-stream host</h1>
+  <span id="version"></span>
+  <button id="logout" type="button" hidden>Sign out</button>
+</header>
+
+<main>
+  <section id="gate" hidden>
+    <p id="gate-text"></p>
+    <button id="confirm" type="button" hidden>Open the settings on this device</button>
+  </section>
+
+  <div id="admin" hidden>
+    <section>
+      <h2>Status</h2>
+      <dl id="status"></dl>
+    </section>
+
+    <section>
+      <h2>Pair a device</h2>
+      <p>Open pairing, then scan the code with the device, or open one of the addresses on it.
+        A device that opens the address without the link can choose <b>Pair</b> and type the
+        code shown here.</p>
+      <button id="pair" type="button">Open pairing</button>
+      <p id="pair-state" class="note"></p>
+      <p id="pair-code" class="code" hidden></p>
+      <div id="codes"></div>
+    </section>
+
+    <section>
+      <h2>Paired devices</h2>
+      <table id="devices">
+        <thead><tr><th>Name</th><th>Paired</th><th>Last used</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <button id="unpair-all" type="button" class="danger">Unpair every device</button>
+    </section>
+
+    <section>
+      <h2>Settings</h2>
+      <form id="settings" novalidate></form>
+      <p class="note">Saving restarts the host: a connected browser reconnects by itself.</p>
+      <button id="save" type="button">Save and restart</button>
+      <p id="save-state" class="note"></p>
+    </section>
+  </div>
+</main>
+</body>
+</html>

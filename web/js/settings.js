@@ -31,7 +31,7 @@ export const AUDIO_FRAMES = Object.freeze(['host', '10', '20']);
 // How much the stats overlay shows; see stats.js.
 export const STATS_LEVELS = Object.freeze(['essential', 'detailed', 'debug']);
 
-// codec null: stream whatever the host streams now.
+// codec null: Auto, the host picks from what this browser decodes (else streams its own codec).
 export const DEFAULTS = Object.freeze({
   codec: null, mouseMode: 'relative',
   bitrate: 'auto', resolution: 'screen', fps: 60, priority: 'balanced', keyframeScale: 2, recoverDrops: true, minScale: 0,

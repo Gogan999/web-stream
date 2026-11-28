@@ -1,197 +1,62 @@
 //! The capture thread: duplicate -> convert -> queue for encoding, newest image wins.
 
 use std::sync::mpsc as std_mpsc;
-use std::sync::{Arc, Weak};
-use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use tokio::sync::mpsc::{self, error::TrySendError};
+use tokio::sync::mpsc;
 use windows::Win32::Foundation::LUID;
 use windows::Win32::System::Threading::{
     GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_HIGHEST,
 };
 use ws_diag::diag;
-use ws_proto::{
-    DisplayId, EncodedFrame, SendBacklog, VideoCodec, VideoConfig, VideoQuality, mono_micros,
-    mono_now,
-};
+use ws_proto::{DisplayId, EncodedFrame, SendBacklog, VideoConfig, VideoQuality, mono_now};
 
 use super::convert::Converter;
 use super::display::{self, Output};
 use super::duplication::{Acquired, Duplicator};
-use super::nvenc::{DPB_FRAMES, Finished, NvEncoder};
+use super::encode::Encoder;
+use super::nvenc::DPB_FRAMES;
 use super::{Gpu, init_process};
+use crate::caps::EncoderBackend;
 use crate::pacing::{Backpressure, BitrateGate, EncodeJob, Scheduler};
+use crate::session::{
+    Command, FrameMeta, HOLD_POLL_MS, MAX_INVALIDATE, PipelineHandle, Report, deliver,
+};
 use crate::{CaptureError, Result};
 
-enum Command {
-    Select(DisplayId, std_mpsc::Sender<Result<()>>),
-    Resize(u32, u32, std_mpsc::Sender<Result<()>>),
-    Keyframe,
-    Recover(u64),
-    Bitrate(u32),
-}
-
-/// Frames further back than this are not invalidated one by one; a keyframe is sent instead.
-const MAX_INVALIDATE: u64 = 16;
-/// While a due frame is held back for the send queue, how often the queue is looked at again.
-const HOLD_POLL_MS: u32 = 2;
-
-pub(crate) struct PipelineHandle {
-    /// The only strong reference: dropping it closes the channel.
-    commands: Option<Arc<std_mpsc::Sender<Command>>>,
-    thread: Option<JoinHandle<()>>,
-}
-
-impl PipelineHandle {
-    pub(crate) fn start(
-        display: DisplayId,
-        config: VideoConfig,
-        max: (u32, u32),
-        frames: mpsc::Sender<EncodedFrame>,
-        backlog: SendBacklog,
-    ) -> Result<Self> {
-        init_process();
-        let _ = mono_now();
-        let (cmd_tx, cmd_rx) = std_mpsc::channel();
-        let (ready_tx, ready_rx) = std_mpsc::channel();
-        let thread = std::thread::Builder::new()
-            .name("ws-capture".into())
-            .spawn(move || {
-                let _ = unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST) };
-                super::enter_mmcss();
-                ws_desktop::follow_input_desktop();
-                let mut session = match Session::open(display, config, max, frames, backlog) {
-                    Ok(s) => {
-                        let _ = ready_tx.send(Ok(()));
-                        s
-                    }
-                    Err(e) => {
-                        let _ = ready_tx.send(Err(e));
-                        return;
-                    }
-                };
-                if let Err(e) = session.run(&cmd_rx) {
-                    tracing::error!("capture pipeline stopped: {e}");
-                }
-            })
-            .map_err(|e| CaptureError::Platform(format!("spawn capture thread: {e}")))?;
-        let handle = Self {
-            commands: Some(Arc::new(cmd_tx)),
-            thread: Some(thread),
-        };
-        ready_rx.recv().map_err(|_| CaptureError::Stopped)??;
-        Ok(handle)
-    }
-
-    fn send(&self, cmd: Command) {
-        if let Some(tx) = &self.commands {
-            let _ = tx.send(cmd);
-        }
-    }
-
-    pub(crate) fn select_display(&self, display: DisplayId) -> Result<()> {
-        let (tx, rx) = std_mpsc::channel();
-        self.send(Command::Select(display, tx));
-        rx.recv().map_err(|_| CaptureError::Stopped)?
-    }
-
-    pub(crate) fn resize(&self, width: u32, height: u32) -> Result<()> {
-        let (tx, rx) = std_mpsc::channel();
-        self.send(Command::Resize(width, height, tx));
-        rx.recv().map_err(|_| CaptureError::Stopped)?
-    }
-
-    pub(crate) fn control(&self) -> Control {
-        Control(
-            self.commands
-                .as_ref()
-                .map(Arc::downgrade)
-                .unwrap_or_default(),
-        )
-    }
-
-    pub(crate) fn request_keyframe(&self) {
-        self.send(Command::Keyframe);
-    }
-
-    pub(crate) fn recover_from(&self, index: u64) {
-        self.send(Command::Recover(index));
-    }
-
-    pub(crate) fn set_bitrate(&self, kbps: u32) {
-        self.send(Command::Bitrate(kbps));
-    }
-}
-
-/// Keyframe and repair requests for the capture thread, from any thread.
-#[derive(Clone)]
-pub(crate) struct Control(Weak<std_mpsc::Sender<Command>>);
-
-impl Control {
-    fn send(&self, cmd: Command) {
-        if let Some(tx) = self.0.upgrade() {
-            let _ = tx.send(cmd);
-        }
-    }
-
-    pub(crate) fn request_keyframe(&self) {
-        self.send(Command::Keyframe);
-    }
-
-    pub(crate) fn recover_from(&self, index: u64) {
-        self.send(Command::Recover(index));
-    }
-}
-
-impl Drop for PipelineHandle {
-    fn drop(&mut self) {
-        self.commands.take();
-        if let Some(t) = self.thread.take() {
-            let _ = t.join();
-        }
-    }
-}
-
-/// What the capture thread tags a frame with when it goes into the encoder, for [`deliver`] when it
-/// comes out.
-struct FrameMeta {
-    index: u64,
+/// Starts capturing `display` on a new capture thread.
+pub(crate) fn start(
     display: DisplayId,
-    codec: VideoCodec,
-    width: u32,
-    height: u32,
-    captured: Instant,
-    /// The frame skips frames from this index on.
-    recovers_from: Option<u64>,
-    // For diagnostics.
-    idr: bool,
-    intra: bool,
-    repair: bool,
-    why: Option<&'static str>,
-    /// Re-encodes the last image.
-    repeat: bool,
-    /// Captured -> the start of `encode`.
-    held: Duration,
-    /// Where `held` ends.
-    started: Instant,
-    kbps: u32,
-}
-
-/// From the encoder's output thread back to the capture thread.
-enum Report {
-    /// The frame `index` was not handed off, nor anything after it still in the encoder that built
-    /// on it; frames from `from` on are missing.
-    Lost { from: u64, keyframe: bool },
-    /// A frame left the encoder, `bytes` long: what it cost, for pacing by bitrate.
-    Done { bytes: usize },
-    /// The consumer has gone away.
-    Closed,
+    config: VideoConfig,
+    max: (u32, u32),
+    frames: mpsc::Sender<EncodedFrame>,
+    backlog: SendBacklog,
+) -> Result<PipelineHandle> {
+    init_process();
+    let _ = mono_now();
+    PipelineHandle::spawn(move |cmd_rx, ready_tx| {
+        let _ = unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST) };
+        super::enter_mmcss();
+        ws_desktop::follow_input_desktop();
+        let mut session = match Session::open(display, config, max, frames, backlog) {
+            Ok(s) => {
+                let _ = ready_tx.send(Ok(()));
+                s
+            }
+            Err(e) => {
+                let _ = ready_tx.send(Err(e));
+                return;
+            }
+        };
+        if let Err(e) = session.run(&cmd_rx) {
+            tracing::error!("capture pipeline stopped: {e}");
+        }
+    })
 }
 
 /// GPU objects for one adapter.
 struct Encode {
-    encoder: NvEncoder<FrameMeta>,
+    encoder: Encoder<FrameMeta>,
     converter: Converter,
     gpu: Gpu,
     luid: LUID,
@@ -207,29 +72,57 @@ impl Encode {
     ) -> Result<Self> {
         let gpu = Gpu::new(&output.adapter)?;
         let converter = Converter::new(&gpu, config.width, config.height, config.fps)?;
-        let on_output = deliver(frames.clone(), reports.clone());
-        let encoder = NvEncoder::new(&gpu, config, max, on_output).map_err(|e| match e {
-            CaptureError::NoEncoder(msg) if output.adapter_vendor != 0x10de => CaptureError::NoEncoder(format!(
-                "{msg}; display {:?} is driven by a non-NVIDIA adapter (AMF/QSV not supported yet)",
-                output.info.id
-            )),
-            e => e,
-        })?;
-        Ok(Self {
-            encoder,
-            converter,
-            gpu,
-            luid: output.adapter_luid,
+        let backends = crate::caps::backends_on(
+            crate::encoders(),
+            &output.adapter_name,
+            config.codec,
+            config.width,
+            config.height,
+            if output.adapter_vendor == super::NVIDIA {
+                &[EncoderBackend::Nvenc, EncoderBackend::MediaFoundation]
+            } else {
+                &[EncoderBackend::MediaFoundation]
+            },
+        );
+        let mut errors = Vec::new();
+        let mut transient = false;
+        for backend in backends {
+            let on_output = deliver(frames.clone(), reports.clone());
+            match Encoder::open(backend, &gpu, config, max, on_output) {
+                Ok(encoder) => {
+                    return Ok(Self {
+                        encoder,
+                        converter,
+                        gpu,
+                        luid: output.adapter_luid,
+                    });
+                }
+                Err(e) => {
+                    tracing::debug!(backend = backend.name(), "encoder did not open: {e}");
+                    transient |= !matches!(e, CaptureError::NoEncoder(_));
+                    errors.push(format!("{}: {e}", backend.name()));
+                }
+            }
+        }
+        let message = if errors.is_empty() {
+            format!(
+                "no hardware encoder on {} produces {:?} at {}x{}",
+                output.adapter_name, config.codec, config.width, config.height
+            )
+        } else {
+            format!(
+                "display {:?} on {}: {}",
+                output.info.id,
+                output.adapter_name,
+                errors.join("; ")
+            )
+        };
+        Err(if transient {
+            CaptureError::Platform(message)
+        } else {
+            CaptureError::NoEncoder(message)
         })
     }
-}
-
-#[derive(Default)]
-struct Stats {
-    since: Option<Instant>,
-    encoded: u32,
-    dropped: u32,
-    encode_time: Duration,
 }
 
 struct Session {
@@ -628,7 +521,6 @@ impl Session {
             kbps: kbps.unwrap_or(self.config.bitrate_kbps),
         };
         self.enc.encoder.submit(
-            &self.enc.gpu.context,
             self.enc.converter.output(),
             self.frame_index,
             job.idr,
@@ -650,109 +542,6 @@ impl Session {
         // A frame lost on the way out comes back as a report.
         self.sched.encoded(now, job, true);
         Ok(true)
-    }
-}
-
-/// Hands each frame out of the encoder to the consumer, on the encoder's output thread, and tells
-/// the capture thread about any that didn't go.
-fn deliver(
-    frames: mpsc::Sender<EncodedFrame>,
-    reports: std_mpsc::Sender<Report>,
-) -> impl FnMut(Finished<FrameMeta>) + Send + 'static {
-    let mut stats = Stats::default();
-    move |out| {
-        let encoded = match out {
-            Ok(encoded) => encoded,
-            Err((meta, e)) => {
-                // The capture thread rebuilds the encoder on its next frame.
-                tracing::warn!(index = meta.index, "encoding failed: {e}");
-                let _ = reports.send(Report::Done { bytes: 0 });
-                let _ = reports.send(Report::Lost {
-                    from: meta.recovers_from.unwrap_or(meta.index),
-                    keyframe: true,
-                });
-                return;
-            }
-        };
-        let meta = encoded.meta;
-        let keyframe = encoded.keyframe;
-        let bytes = encoded.data.len();
-        let _ = reports.send(Report::Done { bytes });
-        let frame = EncodedFrame {
-            // The host numbers the stream this pipeline feeds.
-            lane: 0,
-            display: meta.display,
-            codec: meta.codec,
-            frame_index: meta.index,
-            keyframe,
-            recovers_from: meta.recovers_from.filter(|_| !keyframe),
-            capture_time: mono_micros(meta.captured),
-            encode_start_time: mono_micros(meta.started),
-            encode_done_time: mono_now(),
-            width: meta.width,
-            height: meta.height,
-            data: encoded.data,
-        };
-        let out = match frames.try_send(frame) {
-            Ok(()) => {
-                stats.encoded += 1;
-                "sent"
-            }
-            Err(TrySendError::Full(frame)) => {
-                stats.dropped += 1;
-                let _ = reports.send(Report::Lost {
-                    from: frame.recovers_from.unwrap_or(frame.frame_index),
-                    keyframe: frame.keyframe,
-                });
-                "full"
-            }
-            Err(TrySendError::Closed(_)) => {
-                let _ = reports.send(Report::Closed);
-                return;
-            }
-        };
-        stats.encode_time += encoded.encode_time;
-        let t = encoded.timing;
-        let ms =
-            |from: Instant, to: Instant| to.saturating_duration_since(from).as_secs_f64() * 1000.0;
-        diag!(
-            "frame",
-            "idx={} idr={} intra={} repair={} why={} repeat={} bytes={bytes} held_ms={:.2} enc_ms={:.2} kbps={} out={out} pre_ms={:.2} slot_ms={:.2} submit_ms={:.2} event_ms={:.2} bits_ms={:.2} inenc_ms={:.2} submit_at_us={} wait_at_us={} completed_at_us={} lock_retries={}",
-            meta.index,
-            meta.idr,
-            meta.intra,
-            meta.repair,
-            meta.why.unwrap_or("-"),
-            meta.repeat,
-            meta.held.as_secs_f64() * 1000.0,
-            encoded.encode_time.as_secs_f64() * 1000.0,
-            meta.kbps,
-            ms(meta.started, t.before_slot),
-            ms(t.before_slot, t.slot_taken),
-            ms(t.slot_taken, t.submitted),
-            ms(t.submitted, t.completed),
-            ms(t.completed, t.done),
-            ms(t.slot_taken, t.done),
-            mono_micros(t.submitted),
-            mono_micros(t.wait_at),
-            mono_micros(t.completed),
-            t.lock_retries,
-        );
-        let done = Instant::now();
-        let since = *stats.since.get_or_insert(done);
-        if done - since >= Duration::from_secs(5) {
-            let n = (stats.encoded + stats.dropped).max(1);
-            tracing::debug!(
-                fps = f64::from(stats.encoded) / (done - since).as_secs_f64(),
-                dropped = stats.dropped,
-                avg_encode_ms = stats.encode_time.as_secs_f64() * 1000.0 / f64::from(n),
-                "video stats"
-            );
-            stats = Stats {
-                since: Some(done),
-                ..Default::default()
-            };
-        }
     }
 }
 

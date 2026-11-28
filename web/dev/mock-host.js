@@ -162,7 +162,15 @@ async function offer() {
           channel.send(JSON.stringify({ type: 'secondDisplay', id: second }));
         }
         if (c.type === 'setVideoConfig') {
-          config = { ...config, ...c.config };
+          config = { ...config, ...c.config, codec: autoCodec ? config.codec : c.config.codec };
+          sendConfig(channel);
+        }
+        // Like the real host with an encoder for every codec: Auto picks hardware, then smooth, then fewest bits.
+        if (c.type === 'decoders') {
+          const rank = (d) => (d.powerEfficient ? 4 : 0) + (d.smooth ? 2 : 0) + ['h264', 'h265', 'av1'].indexOf(d.codec) / 4;
+          const best = c.auto ? [...c.decoders].sort((a, b) => rank(b) - rank(a))[0] : null;
+          if (best) config = { ...config, codec: best.codec };
+          autoCodec = !!best;
           sendConfig(channel);
         }
         if (c.type === 'setMicEnabled' && c.enabled && window.mockNoMic) {
@@ -200,9 +208,10 @@ window.mockMicPackets = async () => {
 };
 
 let config = { codec: 'h264', width: 1920, height: 1080, fps: 60, bitrateKbps: 20000, quality: 'balanced' };
+let autoCodec = false;
 
 function sendConfig(channel) {
-  channel.send(JSON.stringify({ type: 'displayChanged', id: active.id, config }));
+  channel.send(JSON.stringify({ type: 'displayChanged', id: active.id, config, autoCodec }));
 }
 
 setInterval(() => {

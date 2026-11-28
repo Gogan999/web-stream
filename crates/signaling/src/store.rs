@@ -16,7 +16,7 @@ const TOUCH_INTERVAL_SECS: u64 = 3600;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Device {
     pub name: String,
-    token_sha256: String,
+    pub(crate) token_sha256: String,
     pub paired_at: u64,
     pub last_used: u64,
 }
@@ -101,6 +101,21 @@ impl DeviceStore {
             self.save()?;
         }
         Ok(removed)
+    }
+
+    /// Revokes the device whose token hashes to `hash`.
+    pub fn revoke_hash(&mut self, hash: &str) -> Result<bool, Error> {
+        let before = self.devices.len();
+        self.devices.retain(|d| d.token_sha256 != hash);
+        let removed = self.devices.len() != before;
+        if removed {
+            self.save()?;
+        }
+        Ok(removed)
+    }
+
+    pub fn list(&self) -> &[Device] {
+        &self.devices
     }
 
     pub fn revoke_all(&mut self) -> Result<(), Error> {

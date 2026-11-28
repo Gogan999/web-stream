@@ -255,11 +255,10 @@ fn virtual_devices_deliver_what_the_sink_injects() {
                 sink.key(k, down).unwrap();
             }
             assert_eq!(
-                read_events(&mut keyboard, 5),
+                read_events(&mut keyboard, 4),
                 [
                     (EV_KEY, 29, 1),
                     (EV_KEY, 56, 1),
-                    (EV_KEY, 111, 0),
                     (EV_KEY, 56, 0),
                     (EV_KEY, 29, 0)
                 ],

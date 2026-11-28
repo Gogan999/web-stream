@@ -117,18 +117,38 @@ const DISPLAY_VARS: [&str; 4] = [
     "DBUS_SESSION_BUS_ADDRESS",
 ];
 
+/// Reads `path` with this thread's file system identity set to `uid` when running as root, so
+/// another user's `/proc/<pid>/environ` opens without CAP_SYS_PTRACE.
+fn read_as(uid: u32, gid: u32, path: &Path) -> std::io::Result<Vec<u8>> {
+    // SAFETY: geteuid has no preconditions.
+    if unsafe { libc::geteuid() } != 0 {
+        return std::fs::read(path);
+    }
+    // SAFETY: setfsuid and setfsgid change only this thread's file system identity, and are set
+    // back before returning.
+    unsafe {
+        let old_gid = libc::setfsgid(gid);
+        let old_uid = libc::setfsuid(uid);
+        let out = std::fs::read(path);
+        libc::setfsuid(old_uid as u32);
+        libc::setfsgid(old_gid as u32);
+        out
+    }
+}
+
 /// `WAYLAND_DISPLAY`, `DISPLAY`, `XAUTHORITY` and the session bus of `session`, from the
 /// environment of a process of its user that has a display.
 pub fn display_env(session: &Session) -> Vec<(String, String)> {
     let mut best: Vec<(String, String)> = Vec::new();
     let mut best_score = 0;
+    let gid = user(session.uid).map_or(session.uid, |u| u.gid);
     if let Ok(dir) = std::fs::read_dir("/proc") {
         for entry in dir.flatten() {
             let path = entry.path();
             if entry.metadata().map(|m| m.uid()).ok() != Some(session.uid) {
                 continue;
             }
-            let Ok(raw) = std::fs::read(path.join("environ")) else {
+            let Ok(raw) = read_as(session.uid, gid, &path.join("environ")) else {
                 continue;
             };
             let env: HashMap<&str, &str> = raw
@@ -235,6 +255,20 @@ mod tests {
             active_in(&d.0, "seat0").unwrap().display.as_deref(),
             Some(":1")
         );
+    }
+
+    #[test]
+    fn environ_is_read_as_its_owner() {
+        // SAFETY: geteuid has no preconditions.
+        let me = unsafe { libc::geteuid() };
+        assert!(read_as(me, me, Path::new("/proc/self/environ")).is_ok());
+        if me == 0 {
+            assert!(read_as(65534, 65534, Path::new("/proc/1/environ")).is_err());
+            assert!(
+                std::fs::read("/proc/self/environ").is_ok(),
+                "identity is restored"
+            );
+        }
     }
 
     #[test]
